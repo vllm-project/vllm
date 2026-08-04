@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Thin Mooncake Store client for hidden-state objects."""
+"""Thin Mooncake Store client for embedding objects."""
 
 from __future__ import annotations
 
@@ -13,15 +13,15 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.data import (
-    HIDDEN_PROTOCOL_VERSION,
-    HIDDEN_TENSOR_LAYOUT,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    EMBEDDING_PROTOCOL_VERSION,
+    EMBEDDING_TENSOR_LAYOUT,
     MOONCAKE_TENSOR_METADATA_NBYTES,
-    HiddenPoolKey,
+    EmbeddingPoolKey,
     TensorMeta,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.keys import (
-    make_hidden_data_key,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.keys import (
+    make_embedding_data_key,
 )
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
@@ -69,7 +69,7 @@ _TORCH_DTYPE_TO_MOONCAKE_DTYPE = {
     "torch.float8_e4m3fn": 13,
     "torch.float8_e5m2": 14,
 }
-_SUPPORTED_HIDDEN_TORCH_DTYPES = {
+_SUPPORTED_EMBEDDING_TORCH_DTYPES = {
     "torch.float16",
     "torch.bfloat16",
     "torch.float32",
@@ -77,7 +77,7 @@ _SUPPORTED_HIDDEN_TORCH_DTYPES = {
 
 
 @dataclass
-class MooncakeHiddenStoreConfig:
+class MooncakeEmbeddingStoreConfig:
     metadata_server: str
     master_server_address: str
     protocol: str
@@ -87,11 +87,11 @@ class MooncakeHiddenStoreConfig:
     local_buffer_size: int = DEFAULT_LOCAL_BUFFER_SIZE
 
     @staticmethod
-    def from_file(file_path: str) -> MooncakeHiddenStoreConfig:
+    def from_file(file_path: str) -> MooncakeEmbeddingStoreConfig:
         with open(file_path, encoding="utf-8") as file:
             config = json.load(file)
         mode = config.get("mode", "embedded")
-        return MooncakeHiddenStoreConfig(
+        return MooncakeEmbeddingStoreConfig(
             metadata_server=config.get("metadata_server", ""),
             master_server_address=config.get("master_server_address", ""),
             protocol=config.get("protocol", "rdma"),
@@ -109,13 +109,13 @@ class MooncakeHiddenStoreConfig:
         )
 
     @staticmethod
-    def load_from_env() -> MooncakeHiddenStoreConfig:
+    def load_from_env() -> MooncakeEmbeddingStoreConfig:
         config_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if not config_path:
             raise ValueError(
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
             )
-        return MooncakeHiddenStoreConfig.from_file(config_path)
+        return MooncakeEmbeddingStoreConfig.from_file(config_path)
 
 
 def _parse_size(value: Any) -> int:
@@ -139,7 +139,7 @@ def _parse_size(value: Any) -> int:
     return int(float(match.group(1)) * multipliers[match.group(2)])
 
 
-def create_mooncake_hidden_store_client() -> MooncakeHiddenStoreClient:
+def create_mooncake_embedding_store_client() -> MooncakeEmbeddingStoreClient:
     try:
         from mooncake.store import (  # type: ignore
             MooncakeDistributedStore,
@@ -152,7 +152,7 @@ def create_mooncake_hidden_store_client() -> MooncakeHiddenStoreClient:
 
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 
-    config = MooncakeHiddenStoreConfig.load_from_env()
+    config = MooncakeEmbeddingStoreConfig.load_from_env()
     config.device_name = rdma_utils.get_configured_worker_rnic(
         protocol=config.protocol,
         configured_device=config.device_name,
@@ -174,29 +174,29 @@ def create_mooncake_hidden_store_client() -> MooncakeHiddenStoreClient:
         raise RuntimeError("Initialize MooncakeDistributedStore failed.")
 
     logger.info(
-        "Initialized hidden Mooncake store mode=%s global_segment_size=%d "
+        "Initialized embedding Mooncake store mode=%s global_segment_size=%d "
         "local_buffer_size=%d",
         config.mode,
         config.global_segment_size,
         config.local_buffer_size,
     )
-    return MooncakeHiddenStoreClient(store, replicate_config=ReplicateConfig())
+    return MooncakeEmbeddingStoreClient(store, replicate_config=ReplicateConfig())
 
 
-class HiddenStoreError(RuntimeError):
+class EmbeddingStoreError(RuntimeError):
     pass
 
 
-class HiddenStoreLoadError(HiddenStoreError):
+class EmbeddingStoreLoadError(EmbeddingStoreError):
     pass
 
 
-class HiddenStoreSaveError(HiddenStoreError):
+class EmbeddingStoreSaveError(EmbeddingStoreError):
     pass
 
 
-class MooncakeHiddenStoreClient:
-    """Wraps Mooncake object and buffer APIs used by hidden transfer."""
+class MooncakeEmbeddingStoreClient:
+    """Wraps Mooncake object and buffer APIs used by embedding transfer."""
 
     def __init__(self, store: Any, replicate_config: Any | None = None):
         self.store = store
@@ -212,26 +212,26 @@ class MooncakeHiddenStoreClient:
                 close_fn()
             except Exception:
                 logger.warning(
-                    "failed to close hidden Mooncake store with %s()",
+                    "failed to close embedding Mooncake store with %s()",
                     method_name,
                     exc_info=True,
                 )
             return
 
-    def exists(self, pool_key: HiddenPoolKey) -> bool:
-        data_key = make_hidden_data_key(pool_key)
+    def exists(self, pool_key: EmbeddingPoolKey) -> bool:
+        data_key = make_embedding_data_key(pool_key)
         states = self.store.batch_is_exist([data_key])
         return len(states) == 1 and states[0] == 1
 
-    def batch_exists(self, pool_keys: list[HiddenPoolKey]) -> list[bool]:
+    def batch_exists(self, pool_keys: list[EmbeddingPoolKey]) -> list[bool]:
         if not pool_keys:
             return []
 
-        keys = [make_hidden_data_key(pool_key) for pool_key in pool_keys]
+        keys = [make_embedding_data_key(pool_key) for pool_key in pool_keys]
         states = self.store.batch_is_exist(keys)
         return [state == 1 for state in states]
 
-    def get_tensor_meta(self, pool_key: HiddenPoolKey) -> TensorMeta | None:
+    def get_tensor_meta(self, pool_key: EmbeddingPoolKey) -> TensorMeta | None:
         metadata = self._read_range(
             pool_key,
             src_offset=0,
@@ -241,23 +241,23 @@ class MooncakeHiddenStoreClient:
             return None
         try:
             return _decode_mooncake_tensor_metadata(pool_key, metadata)
-        except HiddenStoreLoadError:
+        except EmbeddingStoreLoadError:
             logger.exception(
-                "failed to decode hidden Mooncake tensor metadata for %s",
+                "failed to decode embedding Mooncake tensor metadata for %s",
                 pool_key.to_string(),
             )
             return None
 
     def put_tensor(
         self,
-        pool_key: HiddenPoolKey,
+        pool_key: EmbeddingPoolKey,
         tensor: Any,
         *,
         with_soft_pin: bool = False,
     ) -> None:
-        _validate_supported_hidden_tensor_dtype(tensor)
-        key = make_hidden_data_key(pool_key)
-        replicate_config = _make_hidden_replicate_config(
+        _validate_supported_embedding_tensor_dtype(tensor)
+        key = make_embedding_data_key(pool_key)
+        replicate_config = _make_embedding_replicate_config(
             self.replicate_config,
             with_soft_pin=with_soft_pin,
         )
@@ -277,34 +277,34 @@ class MooncakeHiddenStoreClient:
         if replicate_config is None:
             put_fn = getattr(self.store, "put_tensor", None)
             if put_fn is None:
-                raise HiddenStoreSaveError(
-                    "Mooncake Hidden Store requires put_tensor or pub_tensor "
-                    "support for single-object hidden tensors."
+                raise EmbeddingStoreSaveError(
+                    "Mooncake Embedding Store requires put_tensor or pub_tensor "
+                    "support for single-object embedding tensors."
                 )
             ret = put_fn(key, tensor)
         else:
             put_fn = getattr(self.store, "pub_tensor", None)
             if put_fn is None:
-                raise HiddenStoreSaveError(
-                    "Mooncake Hidden Store requires pub_tensor support when "
+                raise EmbeddingStoreSaveError(
+                    "Mooncake Embedding Store requires pub_tensor support when "
                     "a ReplicateConfig is configured."
                 )
             ret = put_fn(key, tensor, replicate_config)
         if ret != 0:
-            raise HiddenStoreSaveError(
-                f"failed to put hidden tensor for {pool_key.to_string()}: {ret}"
+            raise EmbeddingStoreSaveError(
+                f"failed to put embedding tensor for {pool_key.to_string()}: {ret}"
             )
 
     def _put_tensor_from_buffers(
         self,
-        pool_key: HiddenPoolKey,
+        pool_key: EmbeddingPoolKey,
         tensor: Any,
         *,
         replicate_config: Any | None,
     ) -> None:
         if not tensor.is_contiguous():
-            raise HiddenStoreSaveError(
-                "hidden tensor must be contiguous before batch buffer put"
+            raise EmbeddingStoreSaveError(
+                "embedding tensor must be contiguous before batch buffer put"
             )
         data_size = tensor.numel() * tensor.element_size()
         metadata = _encode_mooncake_tensor_metadata(tensor)
@@ -318,7 +318,7 @@ class MooncakeHiddenStoreClient:
             self.register_tensor(metadata_ptr, len(metadata))
             registered_addrs.append(metadata_ptr)
 
-            key = make_hidden_data_key(pool_key)
+            key = make_embedding_data_key(pool_key)
             results = self.store.batch_put_from_multi_buffers(
                 [key],
                 [[metadata_ptr, payload_ptr]],
@@ -327,8 +327,8 @@ class MooncakeHiddenStoreClient:
             )
             failed = [result for result in results if result < 0]
             if failed:
-                raise HiddenStoreSaveError(
-                    "failed to put hidden tensor for "
+                raise EmbeddingStoreSaveError(
+                    "failed to put embedding tensor for "
                     f"{pool_key.to_string()}: {failed}"
                 )
         finally:
@@ -338,8 +338,8 @@ class MooncakeHiddenStoreClient:
     def register_tensor(self, addr: int, size: int) -> None:
         ret = self.store.register_buffer(addr, size)
         if ret != 0:
-            raise HiddenStoreError(
-                f"failed to register hidden buffer addr={addr:#x} size={size}: {ret}"
+            raise EmbeddingStoreError(
+                f"failed to register embedding buffer addr={addr:#x} size={size}: {ret}"
             )
 
     def unregister_tensor(self, addr: int) -> None:
@@ -350,28 +350,28 @@ class MooncakeHiddenStoreClient:
             ret = unregister_fn(addr)
         except Exception:
             logger.warning(
-                "failed to unregister hidden buffer addr=%#x",
+                "failed to unregister embedding buffer addr=%#x",
                 addr,
                 exc_info=True,
             )
             return
         if ret != 0:
             logger.warning(
-                "unregister hidden buffer failed addr=%#x ret=%s",
+                "unregister embedding buffer failed addr=%#x ret=%s",
                 addr,
                 ret,
             )
 
     def get_tensor_payload(
         self,
-        pool_key: HiddenPoolKey,
+        pool_key: EmbeddingPoolKey,
         addr: int,
         size: int,
         src_offset: int,
     ) -> int:
         self.register_tensor(addr, size)
         try:
-            key = make_hidden_data_key(pool_key)
+            key = make_embedding_data_key(pool_key)
             results = self.store.get_into_ranges(
                 [addr],
                 [[key]],
@@ -381,8 +381,8 @@ class MooncakeHiddenStoreClient:
             )
             result = _single_range_result(results)
             if result != size:
-                raise HiddenStoreLoadError(
-                    "failed to get hidden tensor payload for "
+                raise EmbeddingStoreLoadError(
+                    "failed to get embedding tensor payload for "
                     f"{pool_key.to_string()}: {result}"
                 )
             return result
@@ -391,7 +391,7 @@ class MooncakeHiddenStoreClient:
 
     def _read_range(
         self,
-        pool_key: HiddenPoolKey,
+        pool_key: EmbeddingPoolKey,
         *,
         src_offset: int,
         size: int,
@@ -399,7 +399,7 @@ class MooncakeHiddenStoreClient:
         buffer = (ctypes.c_ubyte * size)()
         buffer_ptr = ctypes.addressof(buffer)
         self.register_tensor(buffer_ptr, size)
-        key = make_hidden_data_key(pool_key)
+        key = make_embedding_data_key(pool_key)
         try:
             results = self.store.get_into_ranges(
                 [buffer_ptr],
@@ -423,12 +423,12 @@ def _single_range_result(results: Any) -> int:
 
 
 def _decode_mooncake_tensor_metadata(
-    pool_key: HiddenPoolKey,
+    pool_key: EmbeddingPoolKey,
     metadata: bytes,
 ) -> TensorMeta:
     if len(metadata) < MOONCAKE_TENSOR_METADATA_NBYTES:
-        raise HiddenStoreLoadError(
-            f"hidden tensor metadata is too small: {len(metadata)}"
+        raise EmbeddingStoreLoadError(
+            f"embedding tensor metadata is too small: {len(metadata)}"
         )
     (
         magic,
@@ -446,15 +446,15 @@ def _decode_mooncake_tensor_metadata(
         or version != _MOONCAKE_TENSOR_OBJECT_VERSION
         or header_size != MOONCAKE_TENSOR_METADATA_NBYTES
     ):
-        raise HiddenStoreLoadError(
+        raise EmbeddingStoreLoadError(
             "invalid Mooncake tensor metadata header for " f"{pool_key.to_string()}"
         )
     if ndim < 0 or ndim > 8:
-        raise HiddenStoreLoadError(
-            f"invalid hidden tensor ndim for {pool_key.to_string()}: {ndim}"
+        raise EmbeddingStoreLoadError(
+            f"invalid embedding tensor ndim for {pool_key.to_string()}: {ndim}"
         )
     if dtype not in _MOONCAKE_DTYPE_TO_TORCH_DTYPE:
-        raise HiddenStoreLoadError(
+        raise EmbeddingStoreLoadError(
             f"unsupported Mooncake tensor dtype for {pool_key.to_string()}: {dtype}"
         )
     local_shape = struct.unpack_from(
@@ -464,13 +464,13 @@ def _decode_mooncake_tensor_metadata(
     )
     shape = tuple(int(dim) for dim in local_shape[:ndim])
     if any(dim < 0 for dim in shape):
-        raise HiddenStoreLoadError(
-            f"invalid hidden tensor shape for {pool_key.to_string()}: {shape}"
+        raise EmbeddingStoreLoadError(
+            f"invalid embedding tensor shape for {pool_key.to_string()}: {shape}"
         )
     return TensorMeta(
         pool_key=pool_key,
-        protocol_version=HIDDEN_PROTOCOL_VERSION,
-        layout=HIDDEN_TENSOR_LAYOUT,
+        protocol_version=EMBEDDING_PROTOCOL_VERSION,
+        layout=EMBEDDING_TENSOR_LAYOUT,
         shape=shape,
         dtype=_MOONCAKE_DTYPE_TO_TORCH_DTYPE[dtype],
         nbytes=int(data_bytes),
@@ -481,11 +481,11 @@ def _decode_mooncake_tensor_metadata(
 
 def _encode_mooncake_tensor_metadata(tensor: Any) -> bytes:
     dtype = str(tensor.dtype)
-    _validate_supported_hidden_tensor_dtype(tensor)
+    _validate_supported_embedding_tensor_dtype(tensor)
     shape = tuple(int(dim) for dim in tensor.shape)
     if len(shape) > 8:
-        raise HiddenStoreSaveError(
-            f"hidden tensor has too many dimensions: {len(shape)}"
+        raise EmbeddingStoreSaveError(
+            f"embedding tensor has too many dimensions: {len(shape)}"
         )
     nbytes = tensor.numel() * tensor.element_size()
     header = struct.pack(
@@ -505,19 +505,19 @@ def _encode_mooncake_tensor_metadata(tensor: Any) -> bytes:
     axes = b"\0" * (32 * 4)
     metadata = header + tensor_shape + tensor_shape + struct.pack("<II", 0, 0) + axes
     if len(metadata) != MOONCAKE_TENSOR_METADATA_NBYTES:
-        raise HiddenStoreSaveError(
+        raise EmbeddingStoreSaveError(
             f"invalid Mooncake tensor metadata size: {len(metadata)}"
         )
     return metadata
 
 
-def _validate_supported_hidden_tensor_dtype(tensor: Any) -> None:
+def _validate_supported_embedding_tensor_dtype(tensor: Any) -> None:
     dtype = str(tensor.dtype)
-    if dtype not in _SUPPORTED_HIDDEN_TORCH_DTYPES:
-        raise HiddenStoreSaveError(f"unsupported hidden tensor dtype: {dtype}")
+    if dtype not in _SUPPORTED_EMBEDDING_TORCH_DTYPES:
+        raise EmbeddingStoreSaveError(f"unsupported embedding tensor dtype: {dtype}")
 
 
-def _make_hidden_replicate_config(
+def _make_embedding_replicate_config(
     replicate_config: Any | None,
     *,
     with_soft_pin: bool,
@@ -526,9 +526,9 @@ def _make_hidden_replicate_config(
         return None
 
     config = _clone_replicate_config(replicate_config)
-    hidden_state_data_type = _get_hidden_state_object_data_type()
-    if hidden_state_data_type is not None and hasattr(config, "data_type"):
-        config.data_type = hidden_state_data_type
+    embedding_data_type = _get_embedding_object_data_type()
+    if embedding_data_type is not None and hasattr(config, "data_type"):
+        config.data_type = embedding_data_type
     if hasattr(config, "with_soft_pin"):
         config.with_soft_pin = bool(config.with_soft_pin) or with_soft_pin
     return config
@@ -556,12 +556,12 @@ def _clone_replicate_config(replicate_config: Any) -> Any:
         return config
 
 
-def _get_hidden_state_object_data_type() -> Any | None:
+def _get_embedding_object_data_type() -> Any | None:
     try:
         from mooncake.store import ObjectDataType  # type: ignore
     except Exception:
         return None
-    hidden_state_type = getattr(ObjectDataType, "HIDDEN_STATE", None)
-    if hidden_state_type is not None:
-        return hidden_state_type
+    embedding_type = getattr(ObjectDataType, "EMBEDDING", None)
+    if embedding_type is not None:
+        return embedding_type
     return getattr(ObjectDataType, "TENSOR", None)

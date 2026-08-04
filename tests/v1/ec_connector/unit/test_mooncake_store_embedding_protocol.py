@@ -3,17 +3,17 @@
 
 import torch
 
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.data import (
-    HIDDEN_TENSOR_LAYOUT,
-    HiddenKeyMetadata,
-    HiddenPoolKey,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    EMBEDDING_TENSOR_LAYOUT,
+    EmbeddingKeyMetadata,
+    EmbeddingPoolKey,
     LoadSpec,
     MMMeta,
     MooncakeStoreConnectorMetadata,
     build_tensor_meta,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.keys import (
-    make_hidden_data_key,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.keys import (
+    make_embedding_data_key,
 )
 
 
@@ -26,10 +26,10 @@ def make_pool_key(
     encoder: str = "encoder-config-a",
     storage: str = "replicated_object",
     parallel: str = "tp:1@pp:1@pcp:1@dcp:1@mm_tp:weights",
-    tensor_layout: str = HIDDEN_TENSOR_LAYOUT,
-) -> HiddenPoolKey:
-    return HiddenPoolKey(
-        key_metadata=HiddenKeyMetadata(
+    tensor_layout: str = EMBEDDING_TENSOR_LAYOUT,
+) -> EmbeddingPoolKey:
+    return EmbeddingPoolKey(
+        key_metadata=EmbeddingKeyMetadata(
             cache_prefix=cache_prefix,
             kind=kind,
             model_name=model_name,
@@ -42,13 +42,13 @@ def make_pool_key(
     )
 
 
-def test_hidden_pool_key_is_the_single_tensor_object_key():
+def test_embedding_pool_key_is_the_single_tensor_object_key():
     pool_key = make_pool_key()
 
-    data_key = make_hidden_data_key(pool_key)
+    data_key = make_embedding_data_key(pool_key)
 
     assert data_key == pool_key.to_string()
-    assert data_key.startswith("hidden@")
+    assert data_key.startswith("embedding@")
     assert "kind:encoder_output" in data_key
     assert "model:qwen" in data_key
     assert "encoder:encoder-config-a" in data_key
@@ -69,31 +69,31 @@ def test_same_identifier_with_different_encoder_config_uses_different_keys():
     pool_key_a = make_pool_key(encoder="encoder-config-a")
     pool_key_b = make_pool_key(encoder="encoder-config-b")
 
-    assert make_hidden_data_key(pool_key_a) != make_hidden_data_key(pool_key_b)
+    assert make_embedding_data_key(pool_key_a) != make_embedding_data_key(pool_key_b)
 
 
-def test_cache_prefix_namespaces_hidden_pool_key():
+def test_cache_prefix_namespaces_embedding_pool_key():
     pool_key_a = make_pool_key(cache_prefix="deployment-a")
     pool_key_b = make_pool_key(cache_prefix="deployment-b")
 
-    data_key_a = make_hidden_data_key(pool_key_a)
-    data_key_b = make_hidden_data_key(pool_key_b)
+    data_key_a = make_embedding_data_key(pool_key_a)
+    data_key_b = make_embedding_data_key(pool_key_b)
 
-    assert data_key_a.startswith("deployment-a@hidden@")
-    assert data_key_b.startswith("deployment-b@hidden@")
+    assert data_key_a.startswith("deployment-a@embedding@")
+    assert data_key_b.startswith("deployment-b@embedding@")
     assert data_key_a != data_key_b
 
 
-def test_request_id_and_modality_are_not_part_of_hidden_pool_key():
+def test_request_id_and_modality_are_not_part_of_embedding_pool_key():
     pool_key = make_pool_key(identifier="image-hash")
 
-    assert "req-1" not in make_hidden_data_key(pool_key)
-    assert "request" not in make_hidden_data_key(pool_key)
-    assert "image@" not in make_hidden_data_key(pool_key)
-    assert "modality" not in make_hidden_data_key(pool_key)
+    assert "req-1" not in make_embedding_data_key(pool_key)
+    assert "request" not in make_embedding_data_key(pool_key)
+    assert "image@" not in make_embedding_data_key(pool_key)
+    assert "modality" not in make_embedding_data_key(pool_key)
 
 
-def test_mm_meta_carries_hidden_item_plan():
+def test_mm_meta_carries_embedding_item_plan():
     item = MMMeta(
         identifier="image-hash",
         modality="video",
@@ -117,7 +117,7 @@ def test_tensor_meta_describes_canonical_contiguous_tensor():
     tensor_meta = build_tensor_meta(pool_key, stored)
 
     assert tensor_meta.pool_key == pool_key
-    assert tensor_meta.layout == HIDDEN_TENSOR_LAYOUT
+    assert tensor_meta.layout == EMBEDDING_TENSOR_LAYOUT
     assert tensor_meta.shape == tuple(stored.shape)
     assert tensor_meta.dtype == "torch.float16"
     assert tensor_meta.nbytes == stored.numel() * stored.element_size()
@@ -140,4 +140,4 @@ def test_pool_key_namespace_carries_reuse_compatibility():
     pool_key_b = make_pool_key(encoder="encoder-config-b")
 
     assert pool_key_a != pool_key_b
-    assert make_hidden_data_key(pool_key_a) != make_hidden_data_key(pool_key_b)
+    assert make_embedding_data_key(pool_key_a) != make_embedding_data_key(pool_key_b)

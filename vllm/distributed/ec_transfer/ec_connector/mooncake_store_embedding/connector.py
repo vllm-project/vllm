@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""EC connector backed by Mooncake Store for hidden-state tensors."""
+"""EC connector backed by Mooncake Store for embedding tensors."""
 
 from __future__ import annotations
 
@@ -18,24 +18,24 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.data import (
-    HIDDEN_OBJECT_KIND,
-    HIDDEN_STORAGE_LAYOUT,
-    HIDDEN_TENSOR_LAYOUT,
-    HiddenKeyMetadata,
-    HiddenSaveRequest,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    EMBEDDING_OBJECT_KIND,
+    EMBEDDING_STORAGE_LAYOUT,
+    EMBEDDING_TENSOR_LAYOUT,
+    EmbeddingKeyMetadata,
+    EmbeddingSaveRequest,
     LoadSpec,
     MMMeta,
     MooncakeStoreConnectorMetadata,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.store_client import (
-    MooncakeHiddenStoreClient,
-    create_mooncake_hidden_store_client,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (
+    MooncakeEmbeddingStoreClient,
+    create_mooncake_embedding_store_client,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.worker import (
-    HiddenLookupClient,
-    HiddenLookupServer,
-    HiddenStoreWorker,
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.worker import (
+    EmbeddingLookupClient,
+    EmbeddingLookupServer,
+    EmbeddingStoreWorker,
 )
 from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
@@ -49,42 +49,42 @@ logger = init_logger(__name__)
 
 
 class MooncakeStoreECConnector(ECConnectorBase):
-    """Hidden-state EC connector that stores tensors in Mooncake Store."""
+    """Embedding EC connector that stores tensors in Mooncake Store."""
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         role: ECConnectorRole,
-        store_client: MooncakeHiddenStoreClient | None = None,
+        store_client: MooncakeEmbeddingStoreClient | None = None,
     ):
         super().__init__(vllm_config=vllm_config, role=role)
-        self.lookup_client: HiddenLookupClient | None = None
-        self.lookup_server: HiddenLookupServer | None = None
-        self.store_client: MooncakeHiddenStoreClient | None = None
-        self.worker: HiddenStoreWorker | None = None
+        self.lookup_client: EmbeddingLookupClient | None = None
+        self.lookup_server: EmbeddingLookupServer | None = None
+        self.store_client: MooncakeEmbeddingStoreClient | None = None
+        self.worker: EmbeddingStoreWorker | None = None
         assert vllm_config.ec_transfer_config is not None
         extra_config = vllm_config.ec_transfer_config.ec_connector_extra_config
-        self.soft_pin_video_hidden = bool(
-            extra_config.get("soft_pin_video_hidden", False)
+        self.soft_pin_video_embedding = bool(
+            extra_config.get("soft_pin_video_embedding", False)
         )
         self.lookup_async = bool(extra_config.get("lookup_async", True))
 
         if role == ECConnectorRole.SCHEDULER:
             if self.is_consumer:
-                self.lookup_client = HiddenLookupClient(vllm_config)
+                self.lookup_client = EmbeddingLookupClient(vllm_config)
         else:
             if not (self.is_producer or self.is_consumer):
                 return
-            hidden_key_metadata = build_hidden_key_metadata(vllm_config)
-            self.store_client = store_client or create_mooncake_hidden_store_client()
-            self.worker = HiddenStoreWorker(
+            embedding_key_metadata = build_embedding_key_metadata(vllm_config)
+            self.store_client = store_client or create_mooncake_embedding_store_client()
+            self.worker = EmbeddingStoreWorker(
                 store_client=self.store_client,
-                key_metadata=hidden_key_metadata,
+                key_metadata=embedding_key_metadata,
             )
             if self.is_producer:
                 self.worker.start_sending_thread()
             if self.is_consumer and vllm_config.parallel_config.rank == 0:
-                self.lookup_server = HiddenLookupServer(self.worker, vllm_config)
+                self.lookup_server = EmbeddingLookupServer(self.worker, vllm_config)
 
         self.load_specs: dict[str, LoadSpec] = {}
         self.lookup_result_cache: dict[str, bool] = {}
@@ -110,7 +110,7 @@ class MooncakeStoreECConnector(ECConnectorBase):
         if not self.lookup_result_cache.get(identifier, False):
             self.load_specs.pop(identifier, None)
             logger.info(
-                "hidden_store_scheduler_miss identifier=%s "
+                "embedding_store_scheduler_miss identifier=%s "
                 "reason=local_lookup_result_miss",
                 identifier,
             )
@@ -118,7 +118,7 @@ class MooncakeStoreECConnector(ECConnectorBase):
 
         self.load_specs.setdefault(identifier, LoadSpec(can_load=False))
         logger.info(
-            "hidden_store_scheduler_hit identifier=%s",
+            "embedding_store_scheduler_hit identifier=%s",
             identifier,
         )
         return True
@@ -285,20 +285,20 @@ class MooncakeStoreECConnector(ECConnectorBase):
         identifier = mm_hash
         if identifier not in encoder_cache:
             logger.warning(
-                "Skip hidden store save; identifier %s is missing",
+                "Skip embedding store save; identifier %s is missing",
                 identifier,
             )
             return
         item = self._find_metadata_item(identifier)
         if item is None or not item.can_save:
             logger.debug(
-                "Skip hidden store save; identifier %s has no save plan",
+                "Skip embedding store save; identifier %s has no save plan",
                 identifier,
             )
             return
         pool_key = self.worker.make_pool_key(identifier)
         self.worker.enqueue_save(
-            HiddenSaveRequest(
+            EmbeddingSaveRequest(
                 pool_key=pool_key,
                 tensor=encoder_cache[identifier],
                 with_soft_pin=self._should_soft_pin(item),
@@ -314,7 +314,7 @@ class MooncakeStoreECConnector(ECConnectorBase):
         failed_sending = self.worker.get_failed_sending()
         for identifier, reason in failed_sending.items():
             logger.error(
-                "hidden_store_save_failed identifier=%s reason=%s",
+                "embedding_store_save_failed identifier=%s reason=%s",
                 identifier,
                 reason,
             )
@@ -329,10 +329,10 @@ class MooncakeStoreECConnector(ECConnectorBase):
         return None
 
     def _should_soft_pin(self, item: MMMeta) -> bool:
-        return self.soft_pin_video_hidden and item.modality == "video"
+        return self.soft_pin_video_embedding and item.modality == "video"
 
 
-def build_hidden_key_metadata(vllm_config: VllmConfig) -> HiddenKeyMetadata:
+def build_embedding_key_metadata(vllm_config: VllmConfig) -> EmbeddingKeyMetadata:
     model_config = vllm_config.model_config
     parallel_config = vllm_config.parallel_config
     assert vllm_config.ec_transfer_config is not None
@@ -361,17 +361,17 @@ def build_hidden_key_metadata(vllm_config: VllmConfig) -> HiddenKeyMetadata:
         f"@mm_tp:{mm_encoder_tp_mode}"
     )
 
-    return HiddenKeyMetadata(
+    return EmbeddingKeyMetadata(
         cache_prefix=str(
             extra_config.get(
-                "hidden_cache_prefix",
+                "embedding_cache_prefix",
                 extra_config.get("cache_prefix", ""),
             )
         ),
-        kind=HIDDEN_OBJECT_KIND,
+        kind=EMBEDDING_OBJECT_KIND,
         model_name=model_config.model.rstrip("/").split("/")[-1],
         encoder=str(mm_encoder_config_hash),
-        storage=HIDDEN_STORAGE_LAYOUT,
+        storage=EMBEDDING_STORAGE_LAYOUT,
         parallel=parallel,
-        tensor_layout=HIDDEN_TENSOR_LAYOUT,
+        tensor_layout=EMBEDDING_TENSOR_LAYOUT,
     )
