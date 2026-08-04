@@ -142,15 +142,6 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
 
-    # Drop an on-disk activation input_scale on weight-only NVFP4 (W4A16), where
-    # resolve() sets activation=None and registers no such param. Covers the
-    # simple linears (down_proj, o_proj) via the loader's unexpected-key check;
-    # merged linears (qkv_proj, gate_up_proj) also rely on the LinearBase
-    # `param is self` skip.
-    _ignore_unexpected_suffixes = QuantizationConfig._ignore_unexpected_suffixes + (
-        ".input_scale",
-    )
-
     def __init__(
         self,
         exclude_modules: list[str],
@@ -2350,9 +2341,7 @@ def resolve(algo: str, subcfg, prefix: str):
         return QuantSpec(weight=kNvfp4Static, activation=kNvfp4Dynamic), ctx, None
     if algo == "W4A16_NVFP4":
         # W4A16: same fp4 weight, no activation quant. activation=None drives
-        # use_a16=True in select_linear_kernel (-> Marlin) and skips alpha. Any
-        # on-disk activation input_scale is dropped on load (see
-        # _ignore_unexpected_suffixes + the LinearBase `param is self` skip).
+        # use_a16=True in select_linear_kernel (-> Marlin) and skips alpha.
         return QuantSpec(weight=kNvfp4Static, activation=None), ctx, None
     raise NotImplementedError(f"resolve: unsupported ModelOpt linear algo {algo!r}")
 

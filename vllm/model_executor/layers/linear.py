@@ -946,13 +946,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param = getattr(self.get_submodule(submodule), attr, self)
             else:
                 param = getattr(self, name, self)
-            if param is self:
-                # `name` is not a real parameter on this layer (the getattr
-                # above fell back to the module itself) — e.g. an on-disk
-                # activation input_scale for a weight-only quantized layer that
-                # registers no such param. Skip it instead of crashing in
-                # self.weight_loader(self, ...).
-                continue
             if param is None and name == "bias":
                 continue
             param.weight_loader(param, loaded_weight, shard_id)
@@ -1307,13 +1300,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 param = getattr(self.get_submodule(submodule), attr, self)
             else:
                 param = getattr(self, name, self)
-            if param is self:
-                # `name` is not a real parameter on this layer (the getattr
-                # above fell back to the module itself) — e.g. an on-disk
-                # activation input_scale for a weight-only quantized layer that
-                # registers no such param. Skip it instead of crashing in
-                # self.weight_loader(self, ...).
-                continue
             if param is None and name == "bias":
                 continue
             param.weight_loader(param, loaded_weight, shard_id)
