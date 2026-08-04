@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_BAKE = REPO_ROOT / ".buildkite/scripts/ci-bake-rocm.sh"
 BUILD_CI_BASE = REPO_ROOT / ".buildkite/scripts/rocm/build-ci-base.sh"
 BUILD_TEST_IMAGE = REPO_ROOT / ".buildkite/scripts/rocm/build-test-image.sh"
+PROMOTE_STABLE = REPO_ROOT / ".buildkite/scripts/rocm/promote-stable-images.sh"
 ROCM_BASE_REFRESH = REPO_ROOT / ".buildkite/scripts/rocm/refresh-base-image.sh"
 ROCM_BASE_DOCKERFILE = REPO_ROOT / "docker/Dockerfile.rocm_base"
 ROCM_DOCKERFILE = REPO_ROOT / "docker/Dockerfile.rocm"
@@ -44,7 +45,10 @@ def run_bash(
         [
             "bash",
             "-c",
-            "buildkite-agent() { return 127; }\n" + command,
+            "buildkite-agent() {\n"
+            "  [[ \"$1 $2\" == 'meta-data set' ]] && return 0\n"
+            "  return 127\n"
+            "}\n" + command,
             "rocm-ci-cache-test",
             *(str(arg) for arg in args),
         ],
@@ -227,7 +231,7 @@ printf 'identity=%s calls=%s\n' "$?" "$(wc -l < "$CALLS")"
     lines = set(fail_closed.stdout.splitlines())
     assert "metadata=42" in lines
     assert f"recovered=0 calls=2 ref=example/base:content@{DIGEST_A}" in lines
-    assert "identity=2 calls=2" in lines
+    assert "identity=2 calls=3" in lines
 
     change_detection = run_sourced(
         ROCM_BASE_REFRESH,
@@ -285,6 +289,11 @@ resolve_image_digest() {
   esac
 }
 docker() {
+  if [[ "$*" == *"imagetools inspect"* && "$*" != *"--format"* \
+    && "$REUSE" != 1 && ! -f "$BUILT" ]]; then
+    printf 'manifest unknown\n'
+    return 1
+  fi
   if [[ "$*" == *"imagetools inspect"* && "$*" == *"--format"* ]]; then
     printf '%s %s\n' "$base_hash" "$metadata_version"
     return
@@ -316,7 +325,7 @@ build_base_image
     if builds:
         assert "-t example/base:base-v2-pr-48646-" in builds[0]
         assert "vllm.rocm_base.content_hash=" in builds[0]
-        assert "BASE_IMAGE=" in builds[0] and f"@{DIGEST_A}" in builds[0]
+        assert f"BASE_IMAGE=rocm/dev-ubuntu-22.04@{DIGEST_A}" in builds[0]
         assert (
             "cache-from type=registry,ref=rocm/vllm-ci-cache:rocm-base-main"
             in (builds[0])
@@ -324,16 +333,31 @@ build_base_image
         assert "deadbeef" not in builds[0]
         assert "_bk_123" not in builds[0]
         assert "vllm.rocm_base.image.content" not in builds[0]
-    alias = next(event for event in events if "imagetools create" in event)
-    assert "-t example/base:base " not in alias
+    assert not any("-t example/base:base " in event for event in events)
     handoff = next(
         event for event in events if event.startswith("metadata:rocm-base-image=")
     )
     assert handoff.endswith(f"@{DIGEST_B}")
-    assert events[-1] == "metadata:rocm-base-refresh=1"
+    required = "0" if reuse else "1"
+    assert f"metadata:rocm-base-build-required={required}" in events
+    assert events[-1] == f"metadata:rocm-base-cache-hit={int(reuse)}"
 
 
 def test_ci_base_and_native_cache_identities(tmp_path: Path) -> None:
+    base_hashes = run_sourced(
+        ROCM_BASE_REFRESH,
+        """
+for values in "alias-a $DIGEST_A" "alias-b $DIGEST_A" "alias-c $DIGEST_B"; do
+  read -r alias digest <<< "$values"
+  BASE_IMAGE="rocm/example:$alias"
+  pinned=$(canonical_pinned_image_ref "$BASE_IMAGE" "$digest")
+  compute_base_content_hash 0 "$pinned"
+done
+""",
+        env={"DIGEST_A": DIGEST_A, "DIGEST_B": DIGEST_B},
+    ).stdout.splitlines()
+    assert base_hashes[0] == base_hashes[1] != base_hashes[2]
+
     files, stages, csrc_files, rust_files = run_sourced(
         CI_BAKE,
         'printf "%s\\n%s\\n%s\\n%s\\n" "$DEFAULT_CI_BASE_CONTENT_FILES" '
@@ -357,12 +381,14 @@ def test_ci_base_and_native_cache_identities(tmp_path: Path) -> None:
     hcl = (REPO_ROOT / "docker/ci-rocm.hcl").read_text()
     target = hcl.split('target "ci-base-rocm-ci" {', 1)[1].split("\n}", 1)[0]
     cache_from = target.split("cache-from =", 1)[1].split("cache-to =", 1)[0]
-    tags = next(line for line in target.splitlines() if "tags" in line)
+    tags = target.split("tags", 1)[1].split("attest", 1)[0]
     assert "CI_BASE_STABLE_CACHE_REF" in cache_from
     assert "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" not in cache_from
+    assert "CI_BASE_IMAGE_TAG_BUILD_EXTRA" not in cache_from
     assert "CI_BASE_IMAGE_TAG_STABLE" not in cache_from
     assert "CI_BASE_IMAGE_TAG_STABLE" not in tags
     assert "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" in tags
+    assert "CI_BASE_IMAGE_TAG_BUILD_EXTRA" in tags
     assert "CI_BASE_STABLE_CACHE_REF" not in tags
     assert '"_ci-rocm"' not in target and '"_labels"' not in target
     assert "max_jobs = CI_MAX_JOBS" in target
@@ -466,6 +492,7 @@ ci_base_output_refs
     trusted_env = {
         "BUILDKITE": "true",
         "BUILDKITE_BRANCH": "main",
+        "BUILDKITE_BUILD_ID": "trusted-build",
         "BUILDKITE_COMMIT": "a" * 40,
         "BUILDKITE_PULL_REQUEST": "false",
         "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
@@ -473,6 +500,7 @@ ci_base_output_refs
     pr_env = {
         "BUILDKITE": "true",
         "BUILDKITE_BRANCH": "feature",
+        "BUILDKITE_BUILD_ID": "pr-build",
         "BUILDKITE_COMMIT": "b" * 40,
         "BUILDKITE_PULL_REQUEST": "48646",
         "BUILDKITE_PULL_REQUEST_REPO": "https://github.com/example/vllm.git",
@@ -498,6 +526,8 @@ ci_base_output_refs
     assert pr_values["trusted"] in pr_candidates
     assert pr_values["content"] in pr_outputs
     assert f"example/base:ci_base-{pr_env['BUILDKITE_COMMIT']}" in pr_outputs
+    assert "example/base:ci_base-build-pr-build" in pr_outputs
+    assert "example/base:ci_base-build-pr-build" not in pr_candidates
     assert pr_values["trusted"] not in pr_outputs
     assert trusted_values["content"] in trusted_outputs
     for name in ("csrc", "rust", "dependency"):
@@ -537,22 +567,6 @@ printf 'invalid=%s\n' "$?"
     lengths = [int(line.removeprefix("length=")) for line in tag_limits[:-1]]
     assert lengths and max(lengths) <= 128
     assert tag_limits[-1] != "invalid=0"
-
-    policy_command = """
-git() { printf '%s\trefs/heads/main\n' "$REMOTE_TIP"; }
-should_push_stable_ci_base_tag
-"""
-
-    def stable_policy(env: Mapping[str, str]) -> int:
-        return run_sourced(CI_BAKE, policy_command, env=env, check=False).returncode
-
-    promotion_env = trusted_env | {
-        "CI_BASE_PUSH_STABLE_TAG": "1",
-        "REMOTE_TIP": trusted_env["BUILDKITE_COMMIT"],
-    }
-    assert stable_policy(promotion_env) == 0
-    assert stable_policy(promotion_env | {"REMOTE_TIP": "b" * 40}) != 0
-    assert stable_policy(pr_env | {"CI_BASE_PUSH_STABLE_TAG": "1"}) != 0
 
     version_refs = run_sourced(
         CI_BAKE,
@@ -751,13 +765,15 @@ resolve_image_digest example/image:tag
             """
 docker() {
   printf 'call\n' >> "$CALLS"
+  local version="$DEFAULT_CI_BASE_METADATA_VERSION"
   if [[ "$(wc -l < "$CALLS")" == 1 ]]; then
-    printf 'stale|%s|%064d|%s\n' "$DEFAULT_CI_BASE_METADATA_VERSION" 0 "$DIGEST_A"
+    printf '%s|%s|%064d|%s\n' "$CONTENT_A" "$version" 0 "$DIGEST_B"
   else
-    printf 'content|%s|%064d|%s\n' "$DEFAULT_CI_BASE_METADATA_VERSION" 0 "$DIGEST_A"
+    printf '%s|%s|%064d|%s\n' "$CONTENT_A" "$version" 0 "$DIGEST_A"
   fi
 }
-CI_BASE_CONTENT_HASH=content
+CI_BASE_CONTENT_HASH="$CONTENT_A"
+BASE_IMAGE="example/base@$DIGEST_A"
 remote_ci_base_identity_is_current_with_retry example/base:content
 printf 'calls=%s\n' "$(wc -l < "$CALLS")"
 """,
@@ -765,10 +781,28 @@ printf 'calls=%s\n' "$(wc -l < "$CALLS")"
                 "CALLS": str(identity_calls),
                 "CI_BASE_LABEL_ATTEMPTS": "2",
                 "CI_BASE_LABEL_RETRY_DELAY": "0",
+                "CONTENT_A": "a" * 64,
                 "DIGEST_A": DIGEST_A,
+                "DIGEST_B": DIGEST_B,
             },
         )
         assert "calls=2" in identity.stdout.splitlines()
+
+        incomplete = run_sourced(
+            CI_BAKE,
+            """
+docker() { printf '|||' ; }
+set +e
+unset BASE_IMAGE
+remote_ci_base_identity_is_current_with_retry example/base:content
+printf 'unpinned=%s\n' "$?"
+BASE_IMAGE="example/base@$DIGEST_A"
+remote_ci_base_identity_is_current_with_retry example/base:content
+printf 'incomplete=%s\n' "$?"
+""",
+            env={"CI_BASE_LABEL_ATTEMPTS": "1", "DIGEST_A": DIGEST_A},
+        )
+        assert {"unpinned=2", "incomplete=2"} <= set(incomplete.stdout.splitlines())
 
         probe_calls = tmp_path / "probe-calls"
         probe = run_sourced(
@@ -792,6 +826,7 @@ printf 'calls=%s\n' "$(wc -l < "$CALLS")"
 
 def test_pr_reuses_matching_stable_ci_base(tmp_path: Path) -> None:
     trace = tmp_path / "trace"
+    updated = tmp_path / "updated"
     stable = "rocm/example:ci_base"
     run_sourced(
         CI_BAKE,
@@ -801,30 +836,46 @@ CI_BASE_CONTENT_HASH=content
 CI_BASE_IMAGE_TAG="$STABLE"
 configure_cache_write_scope >/dev/null
 configure_ci_base_image_refs >/dev/null
-resolve_image_digest() { printf '%s\n' "$DIGEST_A"; }
+resolve_image_digest() {
+  if [[ "$1" == *@sha256:* || "$1" == "$CI_BASE_TRUSTED_CONTENT_REF" ]] \
+    || grep -Fqx -- "$1" "$UPDATED" 2>/dev/null; then
+    printf '%s\n' "$DIGEST_A"
+  else
+    printf '%s\n' "$DIGEST_B"
+  fi
+}
 remote_ci_base_identity_is_current_with_retry() {
   [[ "$1" == "$CI_BASE_TRUSTED_CONTENT_REF@$DIGEST_A" ]]
 }
 docker() {
   printf 'docker:%s\n' "$*" >> "$TRACE"
+  local arg previous=""
+  for arg in "$@"; do
+    [[ "$previous" != -t ]] || printf '%s\n' "$arg" >> "$UPDATED"
+    previous="$arg"
+  done
 }
 confirm_remote_image_push() { return 0; }
 buildkite-agent() { printf 'metadata:%s=%s\n' "$3" "$4" >> "$TRACE"; }
-printf 'source:%s@%s\ncontent:%s\ncommit:%s\n' \
+printf 'source:%s@%s\ncontent:%s\ncommit:%s\nbuild:%s\n' \
   "$CI_BASE_TRUSTED_CONTENT_REF" "$DIGEST_A" \
-  "$CI_BASE_IMAGE_TAG_CONTENT_REF" "$CI_BASE_IMAGE_TAG_COMMIT_REF" >> "$TRACE"
+  "$CI_BASE_IMAGE_TAG_CONTENT_REF" "$CI_BASE_IMAGE_TAG_COMMIT_REF" \
+  "$CI_BASE_IMAGE_TAG_BUILD_REF" >> "$TRACE"
 maybe_reuse_matching_ci_base_ref || printf 'rebuild\n' >> "$TRACE"
 """,
         env={
             "BUILDKITE_COMMIT": "d" * 40,
             "BUILDKITE_BRANCH": "feature",
+            "BUILDKITE_BUILD_ID": "reuse-build",
             "BUILDKITE_PULL_REQUEST": "48646",
             "BUILDKITE_PULL_REQUEST_REPO": "https://github.com/example/vllm.git",
             "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
             "BUILDKITE": "true",
             "DIGEST_A": DIGEST_A,
+            "DIGEST_B": DIGEST_B,
             "STABLE": stable,
             "TRACE": str(trace),
+            "UPDATED": str(updated),
         },
     )
     events = trace.read_text().splitlines()
@@ -834,12 +885,13 @@ maybe_reuse_matching_ci_base_ref || printf 'rebuild\n' >> "$TRACE"
             for event in events
             if event.startswith(f"{key}:")
         )
-        for key in ("source", "content", "commit")
+        for key in ("source", "content", "commit", "build")
     }
     retags = "\n".join(event for event in events if event.startswith("docker:"))
     assert "--prefer-index=false" in retags
     assert f"-t {refs['content']} {refs['source']}" in retags
     assert f"-t {refs['commit']} {refs['source']}" in retags
+    assert f"-t {refs['build']} {refs['source']}" in retags
     assert f"-t {stable} " not in retags
     assert f"metadata:rocm-ci-base-image={refs['content']}@{DIGEST_A}" in events
     assert "rebuild" not in events
@@ -857,19 +909,15 @@ publish_ci_base_handoff_ref() {
   buildkite-agent meta-data set rocm-ci-base-image "$1"
 }
 buildkite-agent() { printf 'metadata:%s=%s\n' "$3" "$4" >> "$TRACE"; }
-for MODE in retag promotion handoff; do
-  if ! maybe_reuse_matching_ci_base_ref; then
-    printf 'rebuild:%s\n' "$MODE"
-  fi
+set +e
+for MODE in retag handoff; do
+  maybe_reuse_matching_ci_base_ref
+  printf 'failed:%s=%s\n' "$MODE" "$?"
 done
 """,
         env={"DIGEST_A": DIGEST_A, "TRACE": str(failure_trace)},
     )
-    assert set(failures.stdout.splitlines()) >= {
-        "rebuild:retag",
-        "rebuild:promotion",
-        "rebuild:handoff",
-    }
+    assert {"failed:retag=2", "failed:handoff=2"} <= set(failures.stdout.splitlines())
     assert not failure_trace.exists()
 
     bake_validation = run_sourced(
@@ -880,8 +928,11 @@ TARGET=ci-base-rocm-ci
 IMAGE_TAG=example/base:content
 CI_BASE_IMAGE_TAG=example/base:content
 CI_BASE_IMAGE_TAG_COMMIT_EXTRA=example/base:commit
+CI_BASE_IMAGE_TAG_BUILD_REF=example/base:build
+CI_BASE_IMAGE_TAG_BUILD_EXTRA=example/base:build
 BAKE_FILES=()
 BAKE_TARGETS=(ci-base-rocm-ci)
+resolve_image_digest() { printf 'sha256:%064d\n' 0; }
 docker() { return 41; }
 refresh_ci_base_tags_from_ref() { return 0; }
 confirm_remote_image_push() {
@@ -902,24 +953,33 @@ def wrapper_result(
     ci_handoff: str = "",
     parent_handoff: str = "",
     base_handoff: str = "",
+    legacy_config: bool = False,
     refreshed: str = "0",
 ) -> subprocess.CompletedProcess[str]:
+    build_id = "wrapper-build"
+    commit = "a" * 40
+    build_image = f"rocm/vllm-ci:build-{build_id}"
+    commit_image = f"rocm/vllm-ci:{commit}"
     return run_bash(
         """
 buildkite-agent() {
+  if [[ "$1 $2" == 'meta-data set' ]]; then
+    return 0
+  fi
   [[ "$1 $2" == 'meta-data get' ]] || return 1
   case "$3" in
     rocm-ci-base-image) printf '%s\n' "$CI_HANDOFF" ;;
     rocm-ci-base-parent-image) printf '%s\n' "$PARENT_HANDOFF" ;;
     rocm-base-refresh) printf '%s\n' "$REFRESHED" ;;
     rocm-base-image) printf '%s\n' "$BASE_HANDOFF" ;;
-    rocm-base-push-stable-tag) printf '0\n' ;;
+    rocm-base-build-required|rocm-ci-base-build-required) printf '1\n' ;;
   esac
 }
 bash() {
-  printf 'bake:%s base=%s ci=%s remote=%s branch=%s\n' \
+  printf 'bake:%s base=%s ci=%s remote=%s branch=%s image=%s latest=%s\n' \
     "$*" "${BASE_IMAGE:-}" "${CI_BASE_IMAGE:-}" \
-    "${REMOTE_VLLM:-}" "${VLLM_BRANCH-unset}"
+    "${REMOTE_VLLM:-}" "${VLLM_BRANCH-unset}" \
+    "${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}"
 }
 source "$1"
 """,
@@ -927,10 +987,16 @@ source "$1"
         env={
             "BASE_HANDOFF": base_handoff,
             "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "feature",
+            "BUILDKITE_BUILD_ID": build_id,
+            "BUILDKITE_COMMIT": commit,
+            "BUILDKITE_PULL_REQUEST": "50800",
             "CI_HANDOFF": ci_handoff,
+            "IMAGE_TAG": commit_image if legacy_config else build_image,
             "PARENT_HANDOFF": parent_handoff,
             "REFRESHED": refreshed,
             "REMOTE_VLLM": "1",
+            "VLLM_CI_SMOKE_IMAGE": "" if legacy_config else build_image,
             "VLLM_BRANCH": "hostile-remote-branch",
         },
         check=False,
@@ -944,6 +1010,13 @@ def test_amd_pipeline_and_immutable_handoffs() -> None:
     for key in ("ensure-ci-base-amd", "image-build-amd"):
         assert steps[key]["env"]["REMOTE_VLLM"] == "0"
         assert "VLLM_BRANCH" not in steps[key]["env"]
+    image_env = steps["image-build-amd"]["env"]
+    assert image_env["IMAGE_TAG"].endswith("build-$BUILDKITE_BUILD_ID")
+    assert image_env["VLLM_CI_SMOKE_IMAGE"] == image_env["IMAGE_TAG"]
+    promotion = steps["promote-stable-rocm-images-amd"]
+    assert promotion["depends_on"] == ["image-build-amd"]
+    assert promotion["concurrency"] == 1
+    assert "pipeline.default_branch" in promotion["if_condition"]
 
     pinned_base = f"rocm/example:base@{DIGEST_A}"
     pinned_ci = f"rocm/example:ci_base@{DIGEST_B}"
@@ -966,10 +1039,21 @@ def test_amd_pipeline_and_immutable_handoffs() -> None:
     assert image_build.returncode == 0
     assert f"base={pinned_base} ci={pinned_ci}" in image_build.stdout
     assert "remote=0 branch=unset" in image_build.stdout
+    legacy_build = wrapper_result(
+        BUILD_TEST_IMAGE,
+        ci_handoff=pinned_ci,
+        parent_handoff=pinned_base,
+        base_handoff=pinned_base,
+        legacy_config=True,
+    )
+    assert legacy_build.returncode == 0
+    assert "image=rocm/vllm-ci:build-wrapper-build" in legacy_build.stdout
+    assert f"latest=rocm/vllm-ci:{'a' * 40}" in legacy_build.stdout
     no_refresh = wrapper_result(
         BUILD_TEST_IMAGE,
         ci_handoff=pinned_ci,
         parent_handoff=pinned_base,
+        base_handoff=pinned_base,
     )
     assert no_refresh.returncode == 0
     assert f"base={pinned_base} ci={pinned_ci}" in no_refresh.stdout
@@ -1009,6 +1093,100 @@ compute_ci_base_hash_if_needed
     assert f"rocm-ci-base-parent-image={pinned_base}" in parent_publish.stdout
 
 
+@pytest.mark.parametrize("mode", ["success", "stale", "failure", "noop"])
+def test_stable_promotion_state_machine(tmp_path: Path, mode: str) -> None:
+    trace = tmp_path / mode
+    digest_c = "sha256:" + "c" * 64
+    digest_d = "sha256:" + "d" * 64
+    result = run_sourced(
+        PROMOTE_STABLE,
+        """
+is_trusted_main() { return 0; }
+git() { return 0; }
+metadata_required() {
+  case "$1" in
+    rocm-base-image) printf '%s\n' "$BASE_CANDIDATE" ;;
+    rocm-ci-base-image) printf '%s\n' "$CI_CANDIDATE" ;;
+    *) printf 'required\n' ;;
+  esac
+}
+validate_candidates() { return 0; }
+validate_smoke() { return 0; }
+validate_checked_in_parent() { return 0; }
+lookup_digest() {
+  case "$1" in
+    *@sha256:*) printf '%s\n' "${1##*@}" ;;
+    *:base) [[ "$MODE" == noop || -e "$PROMOTED" ]] \
+      && printf '%s\n' "$DIGEST_A" || printf '%s\n' "$DIGEST_C" ;;
+    *:ci_base) [[ "$MODE" == noop || -e "$PROMOTED" ]] \
+      && printf '%s\n' "$DIGEST_B" || printf '%s\n' "$DIGEST_D" ;;
+    *:ci_base-v3) [[ "$MODE" == noop || -e "$PROMOTED" ]] \
+      && printf '%s\n' "$DIGEST_B" || return 1 ;;
+  esac
+}
+recheck_main() { [[ "$MODE" != stale ]] || return 2; }
+docker() {
+  printf '%s\n' "$*" >> "$TRACE"
+  [[ "$MODE" != failure || "$*" != *"-t rocm/vllm-dev:ci_base "* ]] \
+    || return 1
+  touch "$PROMOTED"
+}
+rollback_aliases() { printf 'rollback\n' >> "$TRACE"; }
+set +e
+main
+printf 'rc=%s\n' "$?"
+""",
+        env={
+            "BASE_CANDIDATE": f"rocm/vllm-dev:base-v2-content@{DIGEST_A}",
+            "BUILDKITE": "true",
+            "BUILDKITE_BRANCH": "main",
+            "BUILDKITE_BUILD_ID": "123",
+            "BUILDKITE_COMMIT": "a" * 40,
+            "BUILDKITE_PULL_REQUEST": "false",
+            "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+            "CI_CANDIDATE": f"rocm/vllm-dev:ci_base-v3-content@{DIGEST_B}",
+            "DIGEST_A": DIGEST_A,
+            "DIGEST_B": DIGEST_B,
+            "DIGEST_C": digest_c,
+            "DIGEST_D": digest_d,
+            "MODE": mode,
+            "PROMOTED": str(tmp_path / f"{mode}-promoted"),
+            "TRACE": str(trace),
+        },
+    )
+    calls = trace.read_text().splitlines() if trace.exists() else []
+    if mode == "success":
+        assert "rc=0" in result.stdout.splitlines()
+        assert len(calls) == 2
+    elif mode == "failure":
+        assert "rc=1" in result.stdout.splitlines()
+        assert calls[-1] == "rollback"
+    else:
+        assert "rc=0" in result.stdout.splitlines()
+        assert not calls
+
+
+def test_stable_promotion_validates_checked_in_parent() -> None:
+    result = run_sourced(
+        PROMOTE_STABLE,
+        """
+inspect_labels() { printf '%s|docker/Dockerfile.rocm_base\n' "$DIGEST_A"; }
+git() { printf 'ARG BASE_IMAGE=rocm/example:parent\n'; }
+lookup_digest() { printf '%s\n' "$RESOLVED_DIGEST"; }
+validate_checked_in_parent candidate
+RESOLVED_DIGEST="$DIGEST_B"
+! validate_checked_in_parent candidate
+""",
+        env={
+            "BUILDKITE_COMMIT": "a" * 40,
+            "DIGEST_A": DIGEST_A,
+            "DIGEST_B": DIGEST_B,
+            "RESOLVED_DIGEST": DIGEST_A,
+        },
+    )
+    assert "does not match the checked-in Dockerfile" in result.stderr
+
+
 def test_rocm_wheel_artifact_records_native_and_build_bases(
     tmp_path: Path,
 ) -> None:
@@ -1017,6 +1195,7 @@ def test_rocm_wheel_artifact_records_native_and_build_bases(
     (wheel_dir / "vllm-test.whl").write_text("wheel")
     immutable_base = f"rocm/example:ci_base-content@{DIGEST_A}"
     commit = "d" * 40
+    build_id = "artifact-build"
     run_sourced(
         CI_BAKE,
         """
@@ -1029,6 +1208,7 @@ upload_wheel_artifacts_if_present >/dev/null
         cwd=tmp_path,
         env={
             "BUILDKITE": "true",
+            "BUILDKITE_BUILD_ID": build_id,
             "BUILDKITE_COMMIT": commit,
             "CI_BASE_IMAGE": immutable_base,
             "CI_BASE_IMAGE_TAG": "rocm/example:ci_base",
@@ -1040,6 +1220,10 @@ upload_wheel_artifacts_if_present >/dev/null
     assert (metadata / "native-base-image.txt").read_text().strip() == (
         f"rocm/example:ci_base-{commit}"
     )
+    assert (metadata / "native-base-images.txt").read_text().splitlines() == [
+        f"rocm/example:ci_base-{commit}",
+        f"rocm/example:ci_base-build-{build_id}",
+    ]
     assert (metadata / "ci-base-image.txt").read_text().strip() == immutable_base
 
     dockerfile = ROCM_DOCKERFILE.read_text()
