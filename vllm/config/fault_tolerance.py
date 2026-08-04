@@ -21,6 +21,12 @@ class FaultToleranceConfig:
     If vLLM does not recover during this time, the original error is raised.
     """
 
+    enable_nan_fault_tolerance: bool = False
+    """When enabled, requests producing NaN logits are immediately aborted and
+    KV cache blocks are zeroed on reuse to prevent corruption from propagating
+    into prefix cache, CPU/disk offloading tiers, or disaggregated decode
+    instances. Implies --enable-detect-nans-in-logits."""
+
 
 def ft_tp_barrier_required(parallel_config: "ParallelConfig") -> bool:
     """Whether the per-step FT barrier over the TP cpu group is armed.
