@@ -94,6 +94,20 @@ class HpcAttnMetadata(AttentionMetadata):
     # Set by HpcRopeNorm._forward_impl(); consumed & reset by
     # HpcAttentionImpl.forward().  Defaults are safe for the standard
     # (non-RopeNorm) path and for profiling runs (attn_metadata=None).
+    hpc_kv_written: bool = False
+    """True when HpcRopeNorm has already written K/V into the paged cache.
+
+    Set by ``HpcRopeNorm._forward_impl`` after ``rope_norm_store_kv[_fp8]``
+    runs; ``HpcAttentionImpl.forward`` uses it to decide whether to run a
+    standard ``reshape_and_cache_flash`` write itself. This is the sole
+    contract between the backend and the (optional) upstream fused op:
+    - False (default): the backend writes K/V via ``reshape_and_cache_flash``
+      (e.g. any model whose attention layer forwards standard bf16 K/V
+      through ``self.attn(q, k, v, ...)``, without wiring HpcRopeNorm).
+    - True: skip the write (e.g. HunYuan V3 with the fused rope_norm path).
+    Note: fp8_e4m3 KV cache always requires HpcRopeNorm — the backend errors
+    out if this is still False in fp8 mode when forward() runs.
+    """
     hpc_prefill_q_scale: torch.Tensor | None = None
     """FP8 per-token-per-head Q scale for prefill (from RopeNorm)."""
     hpc_decode_q_scale: torch.Tensor | None = None
@@ -266,6 +280,7 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
             qo_indptr=qo_indptr,
+            hpc_kv_written=False,
             hpc_prefill_q_scale=None,
             hpc_decode_q_scale=None,
             hpc_split_k_flag=None,
@@ -335,7 +350,7 @@ class HpcAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability >= DeviceCapability(9, 0)
+        return capability == DeviceCapability(9, 0)
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
@@ -455,6 +470,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         if attn_metadata is None:
             return output.fill_(0)
 
+        hpc_kv_written = attn_metadata.hpc_kv_written
         hpc_prefill_q_scale = attn_metadata.hpc_prefill_q_scale
         hpc_decode_q_scale = attn_metadata.hpc_decode_q_scale
         hpc_split_k_flag = attn_metadata.hpc_split_k_flag
@@ -464,7 +480,38 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         num_decode_reqs = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
 
+        # Standard-path KV write: when no upstream fused op wrote KV cache
+        # (i.e. the model didn't wire HpcRopeNorm), fall back to the generic
+        # reshape_and_cache_flash. This is what lets non-HunYuan-V3 models use
+        # the HPC attention backend with bf16 KV cache without any model-side
+        # changes. FP8 KV cache always needs HpcRopeNorm (see check below), so
+        # we never take this path in fp8 mode.
+        if (
+            not self.use_fp8
+            and self.kv_sharing_target_layer_name is None
+            and not hpc_kv_written
+        ):
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                kv_cache[:, 0],
+                kv_cache[:, 1],
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
+
         if self.use_fp8:
+            if not hpc_kv_written:
+                raise RuntimeError(
+                    "HpcAttentionImpl: FP8 KV cache mode requires HpcRopeNorm "
+                    "(the fused rope_norm_store_kv_fp8 op produces the "
+                    "per-token-per-head Q scales the FP8 attention kernel "
+                    "needs). Ensure the model wires hpc_rope_norm, or switch "
+                    "to --kv-cache-dtype auto / bfloat16."
+                    f" (layer={getattr(layer, 'layer_name', '?')})"
+                )
             torch_dtype = _get_fp8_dtype_for_kv_cache(self.kv_cache_dtype)
             kv_cache = kv_cache.view(torch_dtype)
             k_scale = layer._k_scale.reshape(1)
