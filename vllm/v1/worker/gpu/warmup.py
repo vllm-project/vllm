@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 
 def _reserved_block_count(
     num_tokens: int,
-    spec: KVCacheSpec,
+    kvcache_spec: KVCacheSpec,
     *,
     num_lookahead_tokens: int,
     max_model_len: int,
@@ -35,41 +35,22 @@ def _reserved_block_count(
 ) -> int:
     """Number of blocks the scheduler would hold for a request of `num_tokens`.
 
-    Warmup feeds the model runner hand-built `SchedulerOutput`s, so it has to
-    reserve what `KVCacheManager.allocate_slots` reserves: the token range plus
-    `num_lookahead_tokens`, which is where the speculator writes the KV of the
-    tokens it drafts. Without that margin the drafter's slot mapping indexes a
-    block-table column the request never got, which reads back as the null
-    block instead of a block the request owns.
-
-    Args:
-        num_tokens: Computed plus scheduled tokens of the request.
-        spec: KV cache spec of the group being sized.
-        num_lookahead_tokens: `VllmConfig.num_lookahead_tokens`.
-        max_model_len: Cap on the reserved token range.
-        max_encoder_len: Encoder length, used by cross-attention groups.
-
-    Returns:
-        Blocks of `spec`'s group that the request must hold.
+    Warmup hand-builds its `SchedulerOutput`s, so it must reserve what
+    `KVCacheManager.allocate_slots` reserves: the token range plus
+    `num_lookahead_tokens`, where the speculator writes the KV of its drafts.
     """
-    if isinstance(spec, CrossAttentionSpec):
-        # Cross-attention blocks cover the encoder sequence, which the drafter
-        # does not extend.
-        return cdiv(max_encoder_len, spec.block_size)
+    if isinstance(kvcache_spec, CrossAttentionSpec):
+        # Cross-attention blocks cover the encoder sequence only.
+        return cdiv(max_encoder_len, kvcache_spec.block_size)
     num_speculative_blocks = 0
-    if isinstance(spec, MambaSpec):
-        # Extra blocks beyond the token range hold the speculative-decode
-        # running-state snapshots; MambaManager appends them in every cache
-        # mode, and drops the lookahead tokens in align mode to keep the
-        # allocation block-aligned.
-        num_speculative_blocks = spec.num_speculative_blocks
-        if spec.mamba_cache_mode == "align":
-            # Align mode sizes from the uncapped main-model range:
-            # `allocate_slots` caps `num_tokens_need_slot`, the
-            # lookahead-extended range, and not `num_tokens_main_model`.
-            return cdiv(num_tokens, spec.block_size) + num_speculative_blocks
+    if isinstance(kvcache_spec, MambaSpec):
+        # MambaManager appends speculative running-state blocks in every cache
+        # mode; align mode sizes from the uncapped, lookahead-free token range.
+        num_speculative_blocks = kvcache_spec.num_speculative_blocks
+        if kvcache_spec.mamba_cache_mode == "align":
+            return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
-    return cdiv(num_tokens, spec.block_size) + num_speculative_blocks
+    return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
 
 
 def _warmup_block_counter(
@@ -80,10 +61,10 @@ def _warmup_block_counter(
     max_model_len = model_runner.max_model_len
     max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
 
-    def block_count(num_tokens: int, spec: KVCacheSpec) -> int:
+    def block_count(num_tokens: int, kvcache_spec: KVCacheSpec) -> int:
         return _reserved_block_count(
             num_tokens,
-            spec,
+            kvcache_spec,
             num_lookahead_tokens=num_lookahead_tokens,
             max_model_len=max_model_len,
             max_encoder_len=max_encoder_len,
