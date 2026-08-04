@@ -318,6 +318,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
     supports_quant_query_input: bool = False
 
+    # Lazily populated before cudagraph capture (FlyDSL decode path only).
+    _arange_cache: torch.Tensor
+    _cu_2: torch.Tensor
+
     def __init__(
         self,
         num_heads: int,
@@ -841,8 +845,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     if self._soa_store:
                         # The cache was written in SoA layout (always, for FlyDSL),
                         # so it MUST be read with the SoA-aware decode. The
-                        # default AoS decode mis-addresses k_norm/v_scale/v_zero
-                        # in a SoA cache -> garbage cached-prefix output ->
+                        # default AoS decode reads k_norm/v_scale/v_zero from
+                        # the wrong offsets in a SoA cache -> garbage
+                        # cached-prefix output ->
                         # accuracy collapse on every multi-turn / prefix-cached
                         # (APC) request. Continuation stays on the Triton SoA
                         # path even when FlyDSL is the main decode kernel

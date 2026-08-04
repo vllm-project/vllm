@@ -228,9 +228,7 @@ def _reference_attention(q_bf16, k_ref, v_ref, seq_lens, scale):
     ],
 )
 @pytest.mark.parametrize("kv_block_size", [16, 32])
-def test_flydsl_matches_reference(
-    num_seqs, seq_len, num_kv_heads, qg, kv_block_size
-):
+def test_flydsl_matches_reference(num_seqs, seq_len, num_kv_heads, qg, kv_block_size):
     """FlyDSL decode must match fp32 attention on dequantized KV."""
     centroids, q_bf16, kv_cache, block_table, seq_lens, k_ref, v_ref = _build_cache(
         num_seqs, num_kv_heads, seq_len, qg, kv_block_size

@@ -31,10 +31,9 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
@@ -45,13 +44,13 @@ logger = init_logger(__name__)
 
 
 _FLYDSL_AVAILABLE: bool | None = None
-_TQ_MOD = None  # kernels.tq_decode module (Qwen GQA-{8,16})
-_TQ_MOD_GQA6 = None  # kernels.tq_decode_gqa6 module (MiniMax GQA-6, optional)
-_FLYC = None  # flydsl.compiler
-_FX = None  # flydsl.expr
-_TYPING_T = None
-_CC = None  # CompilationContext
-_IR = None
+_TQ_MOD: Any = None  # kernels.tq_decode module (Qwen GQA-{8,16})
+_TQ_MOD_GQA6: Any = None  # kernels.tq_decode_gqa6 module (MiniMax GQA-6, optional)
+_FLYC: Any = None  # flydsl.compiler
+_FX: Any = None  # flydsl.expr
+_TYPING_T: Any = None
+_CC: Any = None  # CompilationContext
+_IR: Any = None
 
 
 def is_flydsl_available() -> bool:
@@ -457,10 +456,10 @@ def _get_kernel(
         cents,
         bt,
         sl,
-        gx: fx.Int32,
-        gy: fx.Int32,
-        gz: fx.Int32,
-        stream: fx.Stream,
+        gx: fx.Int32,  # type: ignore[name-defined]
+        gy: fx.Int32,  # type: ignore[name-defined]
+        gz: fx.Int32,  # type: ignore[name-defined]
+        stream: fx.Stream,  # type: ignore[name-defined]
     ):
         # Re-finalize the LDS allocator for this launch (idempotent per build).
         al.finalized = False

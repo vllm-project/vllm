@@ -541,13 +541,13 @@ class RocmPlatform(Platform):
         if selected_backend is not None:
             try:
                 backend_class = selected_backend.get_class()
-                invalid_reasons = backend_class.validate_configuration(
+                sel_invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
-                invalid_reasons = ["ImportError"]
-            if not invalid_reasons:
+                sel_invalid_reasons = ["ImportError"]
+            if not sel_invalid_reasons:
                 logger.info_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
@@ -562,7 +562,7 @@ class RocmPlatform(Platform):
             if not (kv_dtype is not None and str(kv_dtype).startswith("turboquant")):
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
-                    f"this configuration. Reason: {invalid_reasons}"
+                    f"this configuration. Reason: {sel_invalid_reasons}"
                 )
             # NOTE: pass a str (not the list) -- info_once hashes its args.
             logger.info_once(
@@ -571,7 +571,7 @@ class RocmPlatform(Platform):
                 "Reason: %s",
                 selected_backend.name,
                 attn_selector_config.attn_type,
-                str(invalid_reasons),
+                str(sel_invalid_reasons),
             )
 
         # No selected backend or the selected backend is invalid,
