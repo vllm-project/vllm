@@ -60,6 +60,17 @@ class ExpectedPrepareStoreOutput:
     evicted_keys: list[int]
 
 
+class _CountingOrderedDict(OrderedDict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.items_yielded = 0
+
+    def items(self):
+        for item in super().items():
+            self.items_yielded += 1
+            yield item
+
+
 def to_key(int_hash: int) -> OffloadKey:
     return make_offload_key(str(int_hash).encode(), 0)
 
@@ -689,17 +700,6 @@ class TestARCPolicy:
 
     def test_batch_eviction_scans_t1_and_t2_once(self):
         """ARC batch eviction must preserve order without restarting scans."""
-
-        class CountingOrderedDict(OrderedDict):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self.items_yielded = 0
-
-            def items(self):
-                for item in super().items():
-                    self.items_yielded += 1
-                    yield item
-
         cpu_manager, arc_policy = self._make_manager(
             num_blocks=256, enable_events=False
         )
@@ -732,8 +732,8 @@ class TestARCPolicy:
         expected_t1_scans = t1_order.index(expected_t1[-1]) + 1
         expected_t2_scans = t2_order.index(expected_t2[-1]) + 1
 
-        counting_t1 = CountingOrderedDict(arc_policy.t1)
-        counting_t2 = CountingOrderedDict(arc_policy.t2)
+        counting_t1 = _CountingOrderedDict(arc_policy.t1)
+        counting_t2 = _CountingOrderedDict(arc_policy.t2)
         arc_policy.t1 = counting_t1
         arc_policy.t2 = counting_t2
 
@@ -743,6 +743,44 @@ class TestARCPolicy:
         assert [key for key, _ in evicted] == expected_t1 + expected_t2
         assert counting_t1.items_yielded == expected_t1_scans
         assert counting_t2.items_yielded == expected_t2_scans
+
+    def test_batch_eviction_falls_back_after_t1_iterator_exhausted(self):
+        """An exhausted T1 scan must keep falling back to T2."""
+        cpu_manager, arc_policy = self._make_manager(num_blocks=8, enable_events=False)
+        keys = to_keys(list(range(8)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        cpu_manager.touch(keys[6:], _EMPTY_REQ_CTX)
+        arc_policy.target_t1_size = 4
+
+        t1_order = list(arc_policy.t1)
+        t2_order = list(arc_policy.t2)
+        protected = set(t1_order[1:3])
+        for key in t1_order[3:]:
+            arc_policy.t1[key].ref_cnt = 1
+
+        # Selecting the sole eligible T1 entry leaves virtual_t1_size above
+        # the target, so each remaining selection must retry T1 then use T2.
+        eligible_t1 = [
+            key
+            for key, block in arc_policy.t1.items()
+            if block.ref_cnt == 0 and key not in protected
+        ]
+        assert eligible_t1 == t1_order[:1]
+        assert len(t1_order) - 1 >= int(arc_policy.target_t1_size)
+
+        counting_t1 = _CountingOrderedDict(arc_policy.t1)
+        counting_t2 = _CountingOrderedDict(arc_policy.t2)
+        arc_policy.t1 = counting_t1
+        arc_policy.t2 = counting_t2
+
+        evicted = arc_policy.evict(3, protected)
+
+        assert evicted is not None
+        assert [key for key, _ in evicted] == [t1_order[0], *t2_order]
+        assert counting_t1.items_yielded == len(t1_order)
+        assert counting_t2.items_yielded == len(t2_order)
 
     def test_batch_eviction_failure_is_atomic(self):
         """Finding only some candidates must not partially evict the cache."""
