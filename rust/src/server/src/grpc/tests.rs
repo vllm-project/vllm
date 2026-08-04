@@ -338,7 +338,8 @@ where
     let chat = ChatLlm::from_shared_backend(Llm::new(client), backend);
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
-        InferenceServer::new(InferenceServiceImpl::new(state.clone())),
+        InferenceServer::new(InferenceServiceImpl::new(state.clone()))
+            .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
         ControlServer::new(ControlServiceImpl::new(state)),
         engine_health,
         engine_task,
@@ -739,6 +740,38 @@ async fn streaming_generate_rejects_text_prompt_with_media() {
         })
         .await
         .expect_err("text prompts with media must be rejected");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        status.message(),
+        "multimodal gRPC requests must provide token_ids input"
+    );
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_accepts_request_larger_than_tonic_default() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-large-media", default_stream_output_specs()).await;
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-large-media".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text(
+                "describe this".to_string(),
+            )),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::RawBytes(vec![0; 5 * 1024 * 1024])),
+                mime_type: "image/png".to_string(),
+                uuid: "image-1".to_string(),
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("text prompts with media must be rejected after decoding");
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     assert_eq!(
