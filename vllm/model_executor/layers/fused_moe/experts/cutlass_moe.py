@@ -824,6 +824,9 @@ def run_cutlass_moe_mxfp4(
     e: int,
     device: torch.device,
     apply_router_weight_on_input: bool = False,
+    clamp_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ) -> None:
     """MXFP4 x MXFP4 MoE implementation using CUTLASS grouped GEMM."""
     is_gated = activation.is_gated
@@ -910,7 +913,9 @@ def run_cutlass_moe_mxfp4(
             c1, expert_offsets, blockscale_offsets, e, num_topk
         )
     else:
-        apply_moe_activation(activation, c2, c1)
+        apply_moe_activation(
+            activation, c2, c1, clamp_limit=clamp_limit, alpha=alpha, beta=beta
+        )
         int_fp4, int_blockscale = ops.mxfp4_experts_quant(
             c2, expert_offsets, blockscale_offsets, e, num_topk
         )
@@ -1021,6 +1026,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
@@ -1080,6 +1086,10 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
         e, m, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
         n = w2.shape[2] * 2
 
+        # Gated-activation params (used by SWIGLUOAI_UNINTERLEAVE on packed
+        # w13); configs that don't set them (plain silu) fall back to the
+        # silu identity (alpha=1, beta=0).
+        quant_config = self.quant_config
         run_cutlass_moe_mxfp4(
             output=output,
             a=hidden_states,
@@ -1098,6 +1108,9 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
             e=e,
             device=hidden_states.device,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            clamp_limit=quant_config.gemm1_clamp_limit,
+            alpha=1.0 if quant_config.gemm1_alpha is None else quant_config.gemm1_alpha,
+            beta=0.0 if quant_config.gemm1_beta is None else quant_config.gemm1_beta,
         )
 
 

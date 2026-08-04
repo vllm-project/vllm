@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
@@ -34,6 +35,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+    CompressedTensorsW4A4Mxfp4MoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
@@ -343,6 +347,32 @@ def test_compressed_tensors_fp8(vllm_runner):
 
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+def test_compressed_tensors_w4a4_mxfp4_moe_forwards_swiglu_params():
+    quant_method = object.__new__(CompressedTensorsW4A4Mxfp4MoEMethod)
+    quant_method.mxfp4_backend = Mxfp4MoeBackend.MARLIN
+
+    layer = Mock()
+    layer.w13_weight_scale = torch.ones(2, 8, 4)
+    layer.w2_weight_scale = torch.ones(2, 4, 8)
+    layer.swiglu_alpha = 1.702
+    layer.swiglu_beta = 1.0
+    layer.swiglu_limit = 7.0
+
+    # CUTLASS W4A4 branch.
+    quant_method.use_cutlass_mxfp4 = True
+    quant_config = quant_method.get_fused_moe_quant_config(layer)
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta == 1.0
+    assert quant_config.gemm1_clamp_limit == 7.0
+
+    # Marlin W4A16 branch.
+    quant_method.use_cutlass_mxfp4 = False
+    quant_config = quant_method.get_fused_moe_quant_config(layer)
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta == 1.0
+    assert quant_config.gemm1_clamp_limit == 7.0
 
 
 @pytest.mark.skipif(
