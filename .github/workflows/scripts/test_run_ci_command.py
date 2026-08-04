@@ -12,6 +12,8 @@ from run_ci_command import (
     CI_AUTHORIZED_COMMENT_MARKER,
     COMMAND_RETRY_FAILED,
     COMMAND_RUN_CI,
+    COMMAND_RUN_CI_ALL,
+    COMMAND_RUN_CI_NIGHTLY,
     RETRY_STATES,
     BuildkiteClient,
     HttpTransport,
@@ -269,11 +271,17 @@ class RunCiCommandTest(unittest.TestCase):
 
     def test_only_exact_ci_commands_are_accepted(self) -> None:
         self.assertEqual(parse_command(COMMAND_RUN_CI), COMMAND_RUN_CI)
+        self.assertEqual(parse_command(COMMAND_RUN_CI_ALL), COMMAND_RUN_CI_ALL)
+        self.assertEqual(
+            parse_command(COMMAND_RUN_CI_NIGHTLY),
+            COMMAND_RUN_CI_NIGHTLY,
+        )
         self.assertEqual(
             parse_command(COMMAND_RETRY_FAILED),
             COMMAND_RETRY_FAILED,
         )
         self.assertIsNone(parse_command("/ci run please"))
+        self.assertIsNone(parse_command("/ci run all please"))
         self.assertIsNone(parse_command(" /ci run"))
 
     def test_write_access_authorizes_reviewers_and_authors(self) -> None:
@@ -435,6 +443,28 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
 
+    def test_run_all_sets_buildkite_environment(self) -> None:
+        github = FakeGitHub()
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI_ALL), github, buildkite)
+
+        payload = buildkite.created_builds[0]
+        self.assertEqual(payload["message"], "PR #42 /ci run all by @reviewer")
+        self.assertEqual(payload["env"]["RUN_ALL"], "1")
+        self.assertNotIn("NIGHTLY", payload["env"])
+
+    def test_run_nightly_sets_buildkite_environment(self) -> None:
+        github = FakeGitHub()
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI_NIGHTLY), github, buildkite)
+
+        payload = buildkite.created_builds[0]
+        self.assertEqual(payload["message"], "PR #42 /ci run nightly by @reviewer")
+        self.assertEqual(payload["env"]["RUN_ALL"], "1")
+        self.assertEqual(payload["env"]["NIGHTLY"], "1")
+
     def test_unapproved_authors_are_denied_without_buildkite(self) -> None:
         github = FakeGitHub(
             permission="read",
@@ -488,6 +518,8 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(github.comments[0].startswith("✅ @author"))
         self.assertIn("`/ci run`", github.comments[0])
         self.assertIn("`/ci retry`", github.comments[0])
+        self.assertNotIn(COMMAND_RUN_CI_ALL, github.comments[0])
+        self.assertNotIn(COMMAND_RUN_CI_NIGHTLY, github.comments[0])
         self.assertIn(CI_AUTHORIZED_COMMENT_MARKER, github.comments[0])
 
     def test_ready_label_does_not_notify_after_trusted_approval(self) -> None:

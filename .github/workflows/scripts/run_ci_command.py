@@ -13,7 +13,14 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 COMMAND_RUN_CI = "/ci run"
+COMMAND_RUN_CI_ALL = "/ci run all"
+COMMAND_RUN_CI_NIGHTLY = "/ci run nightly"
 COMMAND_RETRY_FAILED = "/ci retry"
+RUN_CI_COMMAND_ENV = {
+    COMMAND_RUN_CI: {},
+    COMMAND_RUN_CI_ALL: {"RUN_ALL": "1"},
+    COMMAND_RUN_CI_NIGHTLY: {"RUN_ALL": "1", "NIGHTLY": "1"},
+}
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
@@ -383,7 +390,7 @@ class BuildkiteClient:
 
 
 def parse_command(body: str) -> str | None:
-    if body in {COMMAND_RUN_CI, COMMAND_RETRY_FAILED}:
+    if body in {*RUN_CI_COMMAND_ENV, COMMAND_RETRY_FAILED}:
         return body
     return None
 
@@ -486,21 +493,27 @@ def create_build_payload(
     *,
     actor: str,
     comment_id: int,
+    command: str = COMMAND_RUN_CI,
     pr: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if command not in RUN_CI_COMMAND_ENV:
+        raise ValueError(f"Unsupported run command: {command}")
+
+    env = {
+        "VLLM_CI_GITHUB_COMMENT_ID": str(comment_id),
+        "VLLM_CI_TRIGGERED_BY": actor,
+        **RUN_CI_COMMAND_ENV[command],
+    }
     return {
         "commit": pr["head"]["sha"],
         "branch": pr["head"]["ref"],
-        "message": f"PR #{pr['number']} {COMMAND_RUN_CI} by @{actor}",
+        "message": f"PR #{pr['number']} {command} by @{actor}",
         "pull_request_id": pr["number"],
         "pull_request_base_branch": pr["base"]["ref"],
         "pull_request_repository": pr["head"]["repo"]["clone_url"],
         "pull_request_labels": [label["name"] for label in pr["labels"]],
         "ignore_pipeline_branch_filters": True,
-        "env": {
-            "VLLM_CI_GITHUB_COMMENT_ID": str(comment_id),
-            "VLLM_CI_TRIGGERED_BY": actor,
-        },
+        "env": env,
         "meta_data": {
             "github-comment-id": str(comment_id),
             "github-pr-number": str(pr["number"]),
@@ -627,7 +640,7 @@ def notify_authorized(
         pr["number"],
         (
             f"✅ @{author}, CI is now available for this PR. Comment `/ci run` "
-            "to run full CI or `/ci retry` to retry failed jobs.\n\n"
+            "to run CI or `/ci retry` to retry failed jobs.\n\n"
             f"{CI_AUTHORIZED_COMMENT_MARKER}"
         ),
     )
@@ -638,6 +651,7 @@ def handle_run_ci(
     actor: str,
     buildkite: BuildkiteClient,
     comment_id: int,
+    command: str,
     github: GitHubClient,
     pr: Mapping[str, Any],
 ) -> str:
@@ -664,13 +678,15 @@ def handle_run_ci(
     current_pr = github.get_pr(pr["number"])
     if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
         return (
-            "The PR head changed while processing the command. Comment `/ci run` again."
+            "The PR head changed while processing the command. "
+            f"Comment `{command}` again."
         )
 
     build = buildkite.create_build(
         create_build_payload(
             actor=actor,
             comment_id=comment_id,
+            command=command,
             pr=current_pr,
         )
     )
@@ -835,11 +851,12 @@ def run(
             return
 
         print(f"Authorized @{actor}: {reason}")
-        if command == COMMAND_RUN_CI:
+        if command in RUN_CI_COMMAND_ENV:
             message = handle_run_ci(
                 actor=actor,
                 buildkite=buildkite,
                 comment_id=comment_id,
+                command=command,
                 github=github,
                 pr=pr,
             )
