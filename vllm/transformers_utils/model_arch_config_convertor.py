@@ -172,7 +172,7 @@ class ModelArchConfigConvertorBase:
             "moe_topk",
             "moe_top_k",
         ]
-        return getattr_iter(self.hf_text_config, names, 0)
+        return getattr_iter(self.hf_text_config, names, 0) or 0
 
     @final
     @classmethod

@@ -158,6 +158,13 @@ def test_num_experts_per_tok_aliases(attribute: str):
     assert ModelConfig.get_num_experts_per_tok(model_config) == 4
 
 
+def test_num_experts_per_tok_none_is_normalized():
+    hf_config = PretrainedConfig(top_k_experts=None)
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    assert convertor.get_num_experts_per_token() == 0
+
+
 def test_legacy_modelopt_config_without_producer_is_normalized():
     quantization_config = {
         "quantization": {
