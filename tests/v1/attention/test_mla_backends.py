@@ -827,13 +827,25 @@ def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
     )
 
 
-def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
+def test_tokenspeed_mla_noncausal_capability():
+    builder = tokenspeed_mla_module.TokenspeedMLAMetadataBuilder
+    assert builder.supports_non_causal_multi_token_decode
+    assert tokenspeed_mla_module.TokenspeedMLABackend.supports_non_causal()
+
+
+@pytest.mark.parametrize(
+    ("causal", "tokens_per_decode", "dcp_world_size", "dcp_rank"),
+    [
+        pytest.param(True, 1, 2, 1, id="causal-dcp"),
+        pytest.param(False, 3, 1, 0, id="noncausal-multi-token"),
+    ],
+)
+def test_tokenspeed_mla_decode_contract(
+    monkeypatch, causal, tokens_per_decode, dcp_world_size, dcp_rank
+):
     decode_call = None
     num_decodes = 2
-    tokens_per_decode = 1
     num_decode_tokens = num_decodes * tokens_per_decode
-    dcp_world_size = 2
-    dcp_rank = 1
     num_heads = 128
     kv_lora_rank = 512
     qk_rope_head_dim = 64
@@ -879,6 +891,7 @@ def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
         num_decodes=num_decodes,
         num_decode_tokens=num_decode_tokens,
         max_seq_len=max_seq_len,
+        causal=causal,
         decode=SimpleNamespace(
             block_table=torch.empty((num_decodes, 1), dtype=torch.int32),
             seq_lens=torch.tensor([16, max_seq_len], dtype=torch.int32),
@@ -913,9 +926,13 @@ def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
     )
     torch.testing.assert_close(decode_call["seq_lens"], metadata.decode.seq_lens)
     torch.testing.assert_close(decode_call["block_tables"], metadata.decode.block_table)
-    torch.testing.assert_close(
-        decode_call["causal_seqs"], metadata.decode.dcp_tot_seq_lens
-    )
+    if dcp_world_size > 1:
+        torch.testing.assert_close(
+            decode_call["causal_seqs"], metadata.decode.dcp_tot_seq_lens
+        )
+    else:
+        assert decode_call["causal_seqs"] is None
+    assert decode_call["causal_mask"] is causal
     assert decode_call["return_lse"] is True
     assert decode_call["cp_world"] == dcp_world_size
     assert decode_call["cp_rank"] == dcp_rank
