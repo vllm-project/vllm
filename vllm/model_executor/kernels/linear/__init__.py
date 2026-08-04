@@ -335,6 +335,7 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
         HummingInt8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [AiterInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel],
+    PlatformEnum.XPU: [TritonInt8ScaledMMLinearKernel],
 }
 
 # in priority/performance order (when available)
