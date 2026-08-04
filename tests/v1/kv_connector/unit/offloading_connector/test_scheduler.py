@@ -129,10 +129,7 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     scheduler.manager.lookup.return_value = LookupResult.HIT
     assert scheduler._lookup(req_status) == 28
 
-    plan = req_status.external_load_plan
-    assert plan is not None
-    assert plan.boundary_tokens == 28
-    assert [len(group.keys) for group in plan.groups] == [2, 1]
+    assert req_status.partial_tail_boundary == 28
 
     scheduler.update_state_after_alloc(
         request,
@@ -150,7 +147,7 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.block_ids.tolist() == [31, 32, 41]
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
-    assert req_status.external_load_plan is None
+    assert req_status.partial_tail_boundary is None
 
 
 def test_partial_lookup_requires_every_cache_group():
@@ -166,7 +163,7 @@ def test_partial_lookup_requires_every_cache_group():
 
     scheduler.manager.lookup.side_effect = lookup
     assert scheduler._lookup(req_status) == 16
-    assert req_status.external_load_plan is None
+    assert req_status.partial_tail_boundary is None
 
 
 def test_scheduler_reports_allocation_failure(request_runner):
