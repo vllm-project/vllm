@@ -29,7 +29,6 @@ def create_vllm_config(
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     max_model_len: int = 256,
-    gpu_memory_utilization: float = 0.3,
     placement_group=None,
 ) -> VllmConfig:
     engine_args = EngineArgs(
@@ -37,7 +36,6 @@ def create_vllm_config(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         max_model_len=max_model_len,
-        gpu_memory_utilization=gpu_memory_utilization,
         distributed_executor_backend="ray",
         enforce_eager=True,
     )
@@ -287,7 +285,6 @@ def test_ray_v2_single_node_generation(tp_size, pp_size):
         distributed_executor_backend="ray",
         enforce_eager=True,
         max_model_len=256,
-        gpu_memory_utilization=0.3,
     )
     try:
         prompts = [
@@ -370,7 +367,6 @@ def test_ray_v2_single_node_generation_with_pg(tp_size, pp_size):
                 distributed_executor_backend="ray",
                 enforce_eager=True,
                 max_model_len=256,
-                gpu_memory_utilization=0.3,
             )
         prompts = [
             "Hello, my name is",

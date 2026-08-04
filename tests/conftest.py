@@ -994,9 +994,11 @@ class VllmRunner:
         from vllm.platforms import current_platform
 
         if current_platform.is_rocm():
-            gpu_memory_utilization = kwargs.get(
-                "gpu_memory_utilization",
-                CacheConfig.gpu_memory_utilization,
+            # The field default is a sentinel resolved during validation, so
+            # take the concrete default the engine would land on.
+            gpu_memory_utilization = (
+                kwargs.get("gpu_memory_utilization")
+                or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
             )
             # V1 startup requires free_memory >= total * gpu_memory_utilization.
             # ROCm CI can hand a test a device that is still lazily releasing

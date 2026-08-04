@@ -133,7 +133,6 @@ def test_sequence_embed_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> 
         max_model_len=64,
         max_num_batched_tokens=chunk_size,
         max_num_seqs=2,
-        gpu_memory_utilization=0.25,
         enforce_eager=True,
         enable_chunked_prefill=True,
     ) as vllm_model:

@@ -85,7 +85,6 @@ def test_oot_registration_multimodal(
             load_format="dummy",
             max_num_seqs=1,
             trust_remote_code=True,
-            gpu_memory_utilization=0.98,
             max_model_len=4096,
             enforce_eager=True,
             limit_mm_per_prompt={"image": 1},

@@ -45,7 +45,6 @@ def _run_generation(
             compilation_config=compilation_config,
             max_model_len=256,
             max_num_seqs=len(PROMPTS),
-            gpu_memory_utilization=0.7,
         ) as llm:
             llm.get_llm().collective_rpc(
                 assert_rocm_custom_allreduce_backend_state_on_worker,

@@ -104,8 +104,6 @@ def default_server_args(
         "4096",
         "--reasoning-parser",
         "openai_gptoss",
-        "--gpu-memory-utilization",
-        "0.85",
     ]
     if with_tool_parser:
         args.extend(

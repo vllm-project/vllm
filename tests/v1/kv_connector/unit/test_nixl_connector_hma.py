@@ -553,7 +553,6 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     llm_kwargs = {
         "model": model_name,
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.3,
         "kv_transfer_config": kv_transfer_config,
         "max_model_len": 2048,
         "max_num_seqs": 1,

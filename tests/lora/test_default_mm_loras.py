@@ -36,7 +36,6 @@ VLLM_RUNNER_BASE_KWARGS = {
     "max_lora_rank": 320,
     # Keep these LoRA tests on short-RoPE for determinism post-LongRoPE change.
     "max_model_len": 4096,
-    "gpu_memory_utilization": 0.8,
     "limit_mm_per_prompt": {"audio": 1},
     "enforce_eager": True,
 }

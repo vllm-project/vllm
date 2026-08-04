@@ -221,8 +221,6 @@ def server_with_chunked_processing():
             '{"pooling_type": "MEAN", "use_activation": true, '
             '"enable_chunked_processing": true, "max_embed_len": 10000}'
         ),
-        "--gpu-memory-utilization",
-        "0.8",
     ]
 
     # ROCm: Use Flex Attention to support encoder-only self-attention.

@@ -44,9 +44,7 @@ async def engine():
     """
     from vllm.engine.arg_utils import AsyncEngineArgs
 
-    engine_args = AsyncEngineArgs(
-        model=MODEL, enforce_eager=True, gpu_memory_utilization=0.7
-    )
+    engine_args = AsyncEngineArgs(model=MODEL, enforce_eager=True)
     with set_default_torch_num_threads(1):
         engine = AsyncLLM.from_engine_args(engine_args)
     try:

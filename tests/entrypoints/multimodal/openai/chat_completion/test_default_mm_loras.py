@@ -42,8 +42,6 @@ def multimodal_server():
         "--max-num-seqs",
         "2",
         "--trust-remote-code",
-        "--gpu-memory-utilization",
-        "0.8",
         "--default-mm-loras",
         f'{{"audio": "{AUDIO_LORA_PATH}"}}',
     ]

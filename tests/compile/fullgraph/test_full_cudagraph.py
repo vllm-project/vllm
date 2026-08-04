@@ -83,20 +83,20 @@ def llm_pair(request):
     with temporary_environ(env_vars):
         full = LLM(
             model=model,
-            gpu_memory_utilization=0.43,
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
+            gpu_memory_utilization=0.43,  # both engines alive concurrently
             compilation_config=CompilationConfig(**backend_config.comp_config),
             generation_config="vllm",
             seed=42,
         )
         piecewise = LLM(
             model=model,
-            gpu_memory_utilization=0.43,
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
+            gpu_memory_utilization=0.43,  # both engines alive concurrently
             compilation_config=CompilationConfig(
                 cudagraph_mode=CUDAGraphMode.PIECEWISE
             ),

@@ -74,7 +74,6 @@ def test_multi_loras_with_tp_sync():
         max_loras=2,  # ensure max_loras < max_cpu_loras
         max_lora_rank=LORA_RANK,
         max_model_len=512,
-        gpu_memory_utilization=0.5,
         tensor_parallel_size=2,  # ensure tp >= 2
         max_cpu_loras=4,  # ensure max_cpu_loras >= 2
     )
@@ -179,7 +178,6 @@ def test_multiple_lora_requests():
         max_loras=4,
         max_lora_rank=LORA_RANK,
         max_model_len=512,
-        gpu_memory_utilization=0.5,
     )
     PROMPTS = ["Hello, my name is"] * 2
     LORA_NAME = "Alice"
@@ -214,7 +212,6 @@ def test_load_inplace_offline_reload(
         max_loras=2,
         max_lora_rank=LORA_RANK,
         max_model_len=512,
-        gpu_memory_utilization=0.5,
     )
     adapter_id = 1
     messages = format_chatml_messages(
@@ -264,7 +261,6 @@ def test_load_inplace_false_no_reload(
         max_loras=2,
         max_lora_rank=LORA_RANK,
         max_model_len=512,
-        gpu_memory_utilization=0.5,
     )
     adapter_id = 2
     messages = format_chatml_messages(

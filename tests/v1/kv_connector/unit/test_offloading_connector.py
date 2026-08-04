@@ -274,7 +274,6 @@ def test_cpu_offloading(
     llm = LLM(
         model=model,
         max_model_len=4096,
-        gpu_memory_utilization=0.5,
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
         **({"attention_config": {"backend": attn_backend}} if attn_backend else {}),
@@ -314,7 +313,6 @@ def test_cpu_offloading_metrics() -> None:
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
         max_model_len=4096,
-        gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
         disable_log_stats=False,
     )
@@ -471,7 +469,6 @@ def test_tiering_offloading() -> None:
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
         max_model_len=4096,
-        gpu_memory_utilization=0.5,
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
     )
@@ -517,7 +514,6 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
         max_model_len=4096,
-        gpu_memory_utilization=0.5,
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
     )
@@ -557,7 +553,6 @@ def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
     llm = LLM(
         model=model,
         max_model_len=block_size * 10,
-        gpu_memory_utilization=0.85,
         tensor_parallel_size=tp_size,
         kv_transfer_config=kv_transfer_config,
         language_model_only=True,

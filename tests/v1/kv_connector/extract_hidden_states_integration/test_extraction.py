@@ -271,7 +271,6 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
         },
         max_model_len=256,
         enforce_eager=True,
-        gpu_memory_utilization=0.4,
         load_format="dummy",
     )
 
@@ -323,7 +322,6 @@ def test_extract_hidden_states_tp2():
         },
         max_model_len=256,
         enforce_eager=True,
-        gpu_memory_utilization=0.4,
         load_format="dummy",
     )
 

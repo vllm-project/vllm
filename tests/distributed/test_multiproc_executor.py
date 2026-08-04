@@ -24,7 +24,6 @@ def create_vllm_config(
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     max_model_len: int = 256,
-    gpu_memory_utilization: float = 0.3,
     distributed_executor_backend: str = "mp",
     nnodes: int = 1,
     node_rank: int = 0,
@@ -36,7 +35,6 @@ def create_vllm_config(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         max_model_len=max_model_len,
-        gpu_memory_utilization=gpu_memory_utilization,
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=True,
     )

@@ -108,12 +108,10 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     "INCModel/Qwen3-30B-A3B-12L-MXFP4-test": {"enforce_eager": True},
     "Intel/Qwen3-8B-w2g64-for-ut": {
         "block_size": 64,
-        "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
     "INC4AI/Qwen3-8B-MXFP8-AR": {
         "block_size": 64,
-        "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
 }

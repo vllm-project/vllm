@@ -26,8 +26,6 @@ def server():
         "--enforce-eager",
         "--max-model-len",
         "512",
-        "--gpu-memory-utilization",
-        "0.02",
     ] + ROCM_EXTRA_ARGS
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

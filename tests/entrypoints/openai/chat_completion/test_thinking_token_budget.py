@@ -68,8 +68,6 @@ def server():
         "--max-model-len",
         "2048",
         "--enforce-eager",
-        "--gpu-memory-utilization",
-        "0.4",
         "--no-async-scheduling",
     ]
     # thinking_token_budget is not yet supported by the V2 model runner.
@@ -86,8 +84,6 @@ def server_with_auto_reasoning_config():
         "--max-model-len",
         "2048",
         "--enforce-eager",
-        "--gpu-memory-utilization",
-        "0.4",
         "--no-async-scheduling",
     ]
     # thinking_token_budget is not yet supported by the V2 model runner.

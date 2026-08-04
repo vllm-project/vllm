@@ -172,7 +172,6 @@ def can_initialize(
             max_model_len=model_info.max_model_len,
             max_num_batched_tokens=model_info.max_num_batched_tokens,
             # these tests seem to produce leftover memory
-            gpu_memory_utilization=0.80,
             load_format="dummy",
             model_impl="transformers"
             if model_arch in _TRANSFORMERS_BACKEND_MODELS

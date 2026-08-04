@@ -23,7 +23,6 @@ class TestConfig:
     max_lora_rank: int = 32
     enable_tower_connector_lora: bool = False
     max_model_len: int = 8192
-    gpu_memory_utilization: float = 0.85
     mm_processor_kwargs: dict[str, object] | None = None
     mm_processor_cache_gb: float = 4
 
@@ -64,7 +63,6 @@ class Qwen2VLTester:
             max_loras=config.max_loras,
             max_lora_rank=config.max_lora_rank,
             enable_tower_connector_lora=config.enable_tower_connector_lora,
-            gpu_memory_utilization=config.gpu_memory_utilization,
             mm_processor_kwargs=config.mm_processor_kwargs,
             mm_processor_cache_gb=config.mm_processor_cache_gb,
             max_model_len=config.max_model_len,

@@ -133,8 +133,6 @@ def test_load_pp_4bit_bnb_model(model_name, description) -> None:
         "--enable-prefix-caching",
         "--quantization",
         "bitsandbytes",
-        "--gpu-memory-utilization",
-        "0.7",
     ]
     pp_args = [
         *common_args,
@@ -220,7 +218,6 @@ def test_4bit_bnb_embedding_model(
         model_name,
         runner="pooling",
         dtype=dtype,
-        gpu_memory_utilization=0.5,
         quantization="bitsandbytes",
         default_torch_num_threads=1,
     ) as vllm_model:

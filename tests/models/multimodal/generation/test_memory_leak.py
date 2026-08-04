@@ -108,7 +108,6 @@ def llm(monkeypatch):
         limit_mm_per_prompt={"image": 1},
         seed=0,
         disable_log_stats=True,
-        gpu_memory_utilization=0.8,
     )
     if current_platform.is_rocm():
         llm_kwargs["attention_backend"] = "TRITON_ATTN"

@@ -31,7 +31,6 @@ def _vllm_model(
         max_model_len=128,
         enforce_eager=True,
         enable_prefix_caching=apc,
-        gpu_memory_utilization=0.5,
         skip_tokenizer_init=skip_tokenizer_init,
     )
 

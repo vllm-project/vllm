@@ -41,7 +41,6 @@ TEXT_DOCUMENTS = [
 ]
 
 DTYPE = "half"
-GPU_MEMORY_UTILIZATION = 0.7
 
 
 def _make_base64_image(
@@ -86,7 +85,6 @@ def _run_token_embed_test(
         dtype=dtype,
         max_model_len=4096,
         enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
     ) as vllm_model:
         outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
 
@@ -122,7 +120,6 @@ def _run_late_interaction_test(
         dtype=dtype,
         max_model_len=4096,
         enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
     ) as vllm_model:
         q_outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
         d_outputs = vllm_model.token_embed([TEXT_DOCUMENTS[0]])
@@ -158,7 +155,6 @@ def _run_relevance_test(
         dtype=dtype,
         max_model_len=4096,
         enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
     ) as vllm_model:
         scores = vllm_model.score(query, documents)
 
@@ -222,7 +218,6 @@ def _run_multimodal_text_query_image_docs_test(
         dtype=dtype,
         max_model_len=4096,
         enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
     ) as vllm_model:
         scores = vllm_model.llm.score(query, image_docs)
 
@@ -252,7 +247,6 @@ def _run_multimodal_mixed_docs_test(
         dtype=dtype,
         max_model_len=4096,
         enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
     ) as vllm_model:
         scores = vllm_model.llm.score(query, documents)
 
@@ -284,7 +278,6 @@ def _run_multimodal_image_query_text_docs_test(
         dtype=dtype,
         max_model_len=4096,
         enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
     ) as vllm_model:
         scores = vllm_model.llm.score(image_query, documents)
 

@@ -18,7 +18,6 @@ def llm():
         model=MODEL_NAME,
         max_num_seqs=2,  # small to trigger tiling
         tensor_parallel_size=1,
-        gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
     )

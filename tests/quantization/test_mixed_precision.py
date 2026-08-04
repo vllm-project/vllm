@@ -37,7 +37,7 @@ class EvaluationConfig:
     def get_model_args(self) -> str:
         return (
             f"pretrained={self.model_name},"
-            "tensor_parallel_size=4,dtype=auto,gpu_memory_utilization=0.8,trust_remote_code=False"
+            "tensor_parallel_size=4,dtype=auto,trust_remote_code=False"
         )
 
 

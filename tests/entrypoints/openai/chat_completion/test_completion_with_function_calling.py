@@ -139,8 +139,6 @@ def server():
         "hermes",
         "--reasoning-parser",
         "qwen3",
-        "--gpu-memory-utilization",
-        "0.4",
         "--enforce-eager",
     ] + ROCM_EXTRA_ARGS
 

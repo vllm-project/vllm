@@ -34,7 +34,6 @@ def test_lora_functions_sync():
         max_loras=max_loras,
         max_lora_rank=LORA_RANK,
         max_model_len=128,
-        gpu_memory_utilization=0.8,
         enforce_eager=True,
     )
 
@@ -80,7 +79,6 @@ async def test_lora_functions_async():
         max_loras=max_loras,
         max_lora_rank=LORA_RANK,
         max_model_len=128,
-        gpu_memory_utilization=0.8,
         enforce_eager=True,
     )
 

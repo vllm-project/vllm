@@ -338,7 +338,7 @@ def run_test(
         # max_model_len from 4096 to 512 doesn't change generation behavior.)
         dict(num_gpu_blocks_override=32, max_model_len=512)
         if test_preemption
-        else dict(gpu_memory_utilization=0.9, max_model_len=4096)
+        else dict(max_model_len=4096)
     )
     spec_mml = (spec_config or {}).get("max_model_len")
     spec_method = (spec_config or {}).get("method", "none")

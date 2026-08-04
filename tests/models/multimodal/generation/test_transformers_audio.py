@@ -36,9 +36,7 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
             "<sound>Transcribe the input speech.<|im_end|>\n"
             "<|im_start|>assistant\n"
         ),
-        "vllm_runner_kwargs": {
-            "gpu_memory_utilization": 0.85,
-        },
+        "vllm_runner_kwargs": {},
     },
     "microsoft/VibeVoice-ASR-HF": {
         "prompt": (
@@ -55,7 +53,6 @@ AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
         "sampling_rate": 24000,
         "vllm_runner_kwargs": {
             "max_num_batched_tokens": 2048,
-            "gpu_memory_utilization": 0.85,
         },
     },
     "zai-org/GLM-ASR-Nano-2512": {

@@ -39,8 +39,6 @@ def server_args() -> list[str]:
         "--max-num-seqs",
         "4",
         "--enforce-eager",
-        "--gpu-memory-utilization",
-        "0.4",
         "--limit-mm-per-prompt",
         json.dumps({"image": 1}),
         "--enable-prompt-embeds",

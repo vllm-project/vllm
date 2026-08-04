@@ -393,7 +393,6 @@ def test_fp32_cache_state(
     with vllm_runner(
         model,
         max_num_seqs=MAX_NUM_SEQS,
-        gpu_memory_utilization=0.9,
         enable_chunked_prefill=True,
         **{cache_dtype_param: "float32"},
     ) as vllm_model:
@@ -421,7 +420,6 @@ def _get_vllm_runner_params(
         "enable_prefix_caching": False,
         "max_model_len": max_model_len,
         "tensor_parallel_size": tensor_parallel_size,
-        "gpu_memory_utilization": 0.4,
         "attention_backend": ATTN_BACKEND,
     }
 
@@ -858,9 +856,7 @@ def test_same_mamba_output_apc_on_vs_off(
     max_model_len = max(len(p) for p in prompts) + max_tokens + 64
 
     base_kwargs = _get_vllm_runner_params(model, max_model_len)
-    base_kwargs.update(
-        enforce_eager=True, block_size=16, seed=42, gpu_memory_utilization=0.8
-    )
+    base_kwargs.update(enforce_eager=True, block_size=16, seed=42)
 
     # No prefix caching
     kwargs_no_apc = {**base_kwargs, "enable_prefix_caching": False}

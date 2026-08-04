@@ -128,7 +128,6 @@ def test_encoder_only_model_runner_v2_attention(
         dtype="float",
         max_model_len=64,
         max_num_seqs=2,
-        gpu_memory_utilization=0.25,
         pooler_config=PoolerConfig(
             task="embed", seq_pooling_type="LAST", use_activation=True
         ),
@@ -194,7 +193,6 @@ def test_matryoshka_dimensions_model_runner_v2(
         model,
         runner="pooling",
         max_model_len=64,
-        gpu_memory_utilization=0.25,
     ) as vllm_model:
         assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.embed(

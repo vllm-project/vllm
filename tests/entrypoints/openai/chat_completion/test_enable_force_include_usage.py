@@ -21,8 +21,6 @@ def chat_server_with_force_include_usage(request):
         "--enable-force-include-usage",
         "--port",
         "55857",
-        "--gpu-memory-utilization",
-        "0.2",
     ]
 
     with RemoteOpenAIServer("Qwen/Qwen3-0.6B", args, auto_port=False) as remote_server:

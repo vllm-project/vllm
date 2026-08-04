@@ -266,7 +266,6 @@ def _run_cudagraph_replay_test(*, world_size: int, quant_level: str):
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 E2E_PREFILL_TOKENS = 1024
 E2E_MAX_MODEL_LEN = 1536
-E2E_GPU_MEMORY_UTILIZATION = 0.3
 E2E_KV_CACHE_MEMORY_BYTES = 2 << 30
 
 _BACKGROUND_LINE = (
@@ -481,7 +480,6 @@ def _run_generation(
         model_path = _get_model_path()
         _log(
             f"starting generation: backend={backend} quant={quant_mode} "
-            f"gpu_memory_utilization={E2E_GPU_MEMORY_UTILIZATION} "
             f"kv_cache_bytes={E2E_KV_CACHE_MEMORY_BYTES} model={model_path}"
         )
 
@@ -495,7 +493,6 @@ def _run_generation(
                 enforce_eager=True,
                 max_model_len=E2E_MAX_MODEL_LEN,
                 max_num_seqs=len(E2E_PROMPTS),
-                gpu_memory_utilization=E2E_GPU_MEMORY_UTILIZATION,
                 kv_cache_memory_bytes=E2E_KV_CACHE_MEMORY_BYTES,
                 seed=0,
             )
