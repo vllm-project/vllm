@@ -263,6 +263,7 @@ prepare_native_workspace() {
   local checksum=""
   local download_dir=""
   local metadata_dir=""
+  local recorded_bases_file=""
   local recorded_base=""
   local recorded_commit=""
   local recorded_wheel=""
@@ -345,13 +346,27 @@ prepare_native_workspace() {
 
   recorded_commit=$(tr -d '\r\n' < "${metadata_dir}/commit.txt")
   recorded_base=$(tr -d '\r\n' < "${metadata_dir}/native-base-image.txt")
+  recorded_bases_file="${metadata_dir}/native-base-images.txt"
   recorded_wheel=$(tr -d '\r\n' < "${metadata_dir}/wheel-filename.txt")
   if [[ -z "${BUILDKITE_COMMIT:-}" || "${recorded_commit}" != "${BUILDKITE_COMMIT}" ]]; then
     echo "ROCm artifact commit ${recorded_commit} does not match ${BUILDKITE_COMMIT:-unset}" >&2
     return 1
   fi
-  if [[ -z "${VLLM_CI_BASE_IMAGE:-}" || "${recorded_base}" != "${VLLM_CI_BASE_IMAGE}" ]]; then
-    echo "ROCm artifact base ${recorded_base} does not match ${VLLM_CI_BASE_IMAGE:-unset}" >&2
+  if [[ -z "${VLLM_CI_BASE_IMAGE:-}" ]]; then
+    echo "VLLM_CI_BASE_IMAGE is required for native ROCm artifacts" >&2
+    return 1
+  fi
+  if [[ -s "${recorded_bases_file}" ]]; then
+    if ! grep -Fqx -- "${recorded_base}" "${recorded_bases_file}"; then
+      echo "ROCm artifact legacy base is absent from its allowed-base manifest" >&2
+      return 1
+    fi
+    if ! grep -Fqx -- "${VLLM_CI_BASE_IMAGE}" "${recorded_bases_file}"; then
+      echo "ROCm artifact bases do not include ${VLLM_CI_BASE_IMAGE}" >&2
+      return 1
+    fi
+  elif [[ "${recorded_base}" != "${VLLM_CI_BASE_IMAGE}" ]]; then
+    echo "ROCm artifact base ${recorded_base} does not match ${VLLM_CI_BASE_IMAGE}" >&2
     return 1
   fi
   if [[ "${recorded_wheel}" != "$(basename "${wheels[0]}")" ]]; then

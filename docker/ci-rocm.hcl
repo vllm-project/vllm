@@ -371,9 +371,9 @@ group "test-rocm-ci-with-wheel" {
 }
 
 # Image tags for the ci_base build. ci-bake-rocm.sh publishes a versioned,
-# content-scoped primary tag plus a commit alias. After validating both outputs,
-# a trusted current-main build separately promotes the legacy stable runtime tag
-# and the versioned stable cache tag.
+# content-scoped primary tag plus commit- and build-scoped handoff aliases.
+# Stable runtime/discovery aliases are promoted only after the build-scoped
+# test image passes smoke validation.
 variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
 }
@@ -381,6 +381,10 @@ variable "CI_BASE_IMAGE_TAG" {
 # Supplemental tags only. ci-bake-rocm.sh leaves these empty when the same ref
 # is already the primary CI_BASE_IMAGE_TAG.
 variable "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" {
+  default = ""
+}
+
+variable "CI_BASE_IMAGE_TAG_BUILD_EXTRA" {
   default = ""
 }
 
@@ -447,7 +451,11 @@ target "ci-base-rocm-ci" {
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT_EXTRA])
+  tags     = compact([
+    CI_BASE_IMAGE_TAG,
+    CI_BASE_IMAGE_TAG_COMMIT_EXTRA,
+    CI_BASE_IMAGE_TAG_BUILD_EXTRA,
+  ])
   attest   = ["type=provenance,disabled=true"]
   output   = ["type=registry"]
 }
