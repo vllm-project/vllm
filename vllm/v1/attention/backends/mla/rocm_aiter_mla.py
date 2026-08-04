@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import os
 from dataclasses import dataclass
 from typing import ClassVar, Final
 
@@ -75,6 +76,20 @@ def _fp8_mla_prefill_supported() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return True
+
+# Opt-in env var to force small-head (<16)
+# MLA decode through the padded PS ASM kernel instead of Gluon (upstream
+# default for num_heads<16). Needed for Kimi-K3 (12 heads/rank at TP=8);
+# pairs with the zero-pad handling below. Default off.
+VLLM_ROCM_MLA_FORCE_PS: Final[bool] = os.environ.get(
+    "VLLM_ROCM_MLA_FORCE_PS", "0"
+) == "1"
+if VLLM_ROCM_MLA_FORCE_PS:
+    logger.warning_once(
+        "LOCAL PATCH: VLLM_ROCM_MLA_FORCE_PS=1 -- forcing small-head AITER "
+        "MLA decode through the padded persistent-scheduling ASM kernel "
+        "instead of Gluon."
+    )
 
 
 class AiterMLABackend(MLACommonBackend):
@@ -581,7 +596,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
         use_gluon_decode = AiterMLAHelper.use_gluon_decode(
             self.num_heads, int(max_qo_len)
-        )
+        ) and not VLLM_ROCM_MLA_FORCE_PS
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indices.fill_(-1)
@@ -655,8 +670,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # Small-head (<16) decode takes the Gluon paths and never consumes it.
         has_persistent_metadata = False
         use_persistent_metadata = (
-            self.num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-            and max_qo_len >= 1
+            (
+                self.num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+                or (VLLM_ROCM_MLA_FORCE_PS and not use_gluon_decode)
+            )
             and max_qo_len <= self._mtp_decode_qlen
         )
         if use_persistent_metadata:
@@ -809,21 +826,31 @@ class AiterMLAHelper:
 
     @staticmethod
     def get_mla_padded_q(num_heads: int, q: torch.Tensor) -> torch.Tensor:
-        return (
-            q
-            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-            else q.repeat_interleave(
+        if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS:
+            return q
+        if AiterMLAHelper._AITER_MIN_MLA_HEADS % num_heads == 0:
+            return q.repeat_interleave(
                 AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, dim=1
             )
         )
 
+        # Zero-pad if num_heads doesn't evenly divide 16.
+        # Safe since MLA computes each head independently against shared KV.
+        pad_shape = list(q.shape)
+        pad_shape[1] = AiterMLAHelper._AITER_MIN_MLA_HEADS - num_heads
+        padding = q.new_zeros(pad_shape)
+        return torch.cat([q, padding], dim=1)
+
     @staticmethod
     def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
-        return (
-            o
-            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-            else o[:, :: AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, :]
-        )
+        if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS:
+            return o
+        if AiterMLAHelper._AITER_MIN_MLA_HEADS % num_heads == 0:
+            return o[:, :: AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, :]
+        # Mirror of the zero-pad case above --
+        # the real heads occupy the first `num_heads` contiguous slots (the
+        # rest is the discarded zero-pad garbage), so slice instead of stride.
+        return o[:, :num_heads, :]
 
     @staticmethod
     def use_gluon_decode(num_heads: int, max_qo_len: int) -> bool:
