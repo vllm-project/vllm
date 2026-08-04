@@ -256,6 +256,7 @@ class TestGetSeqPoolingMethod:
 @dataclass
 class _FakeSchedulerConfig:
     enable_chunked_prefill: bool = False
+    async_scheduling: bool = False
 
 
 @dataclass
@@ -265,10 +266,13 @@ class _FakeVllmConfig:
 
 class TestAllPool:
     @staticmethod
-    def _make_all_pool(*, chunked: bool = False) -> AllPool:
+    def _make_all_pool(
+        *, chunked: bool = False, async_scheduling: bool = False
+    ) -> AllPool:
         fake_config = _FakeVllmConfig(
             scheduler_config=_FakeSchedulerConfig(
                 enable_chunked_prefill=chunked,
+                async_scheduling=async_scheduling,
             ),
         )
         with patch(
@@ -334,13 +338,29 @@ class TestAllPool:
         expected = torch.cat([expected_chunk1, chunk2], dim=0)
         assert torch.equal(out2[0], expected)
 
-    def test_chunked_prefill_single_shot_matches_non_chunked(self):
-        pooler = self._make_all_pool(chunked=True)
+    @pytest.mark.parametrize("async_scheduling", [False, True])
+    def test_chunked_prefill_single_shot_matches_non_chunked(
+        self, async_scheduling: bool
+    ):
+        pooler = self._make_all_pool(chunked=True, async_scheduling=async_scheduling)
         hidden = torch.tensor(
             [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]]
         )
         expected = [hidden[:2].clone(), hidden[2:].clone()]
         metadata = _make_metadata([2, 3])
+        out = pooler(hidden, metadata)
+        if async_scheduling:
+            # Finished outputs must own their storage under async scheduling.
+            hidden.zero_()
+        assert len(out) == 2
+        assert torch.equal(out[0], expected[0])
+        assert torch.equal(out[1], expected[1])
+
+    def test_non_chunked_owns_output_under_async_scheduling(self):
+        pooler = self._make_all_pool(async_scheduling=True)
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        expected = [hidden[:2].clone(), hidden[2:].clone()]
+        metadata = _make_metadata([2, 1])
         out = pooler(hidden, metadata)
         hidden.zero_()
         assert len(out) == 2

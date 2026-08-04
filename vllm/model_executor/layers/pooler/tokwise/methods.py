@@ -40,9 +40,15 @@ class AllPool(TokenPoolingMethod):
         scheduler_config = vllm_config.scheduler_config
 
         self.enable_chunked_prefill = scheduler_config.enable_chunked_prefill
+        # With async scheduling, the next step may overwrite the hidden states
+        # buffer before outputs are copied to CPU, so they must own their storage.
+        self.clone_finished = bool(scheduler_config.async_scheduling)
 
     def extra_repr(self) -> str:
-        return f"enable_chunked_prefill={self.enable_chunked_prefill}"
+        return (
+            f"enable_chunked_prefill={self.enable_chunked_prefill}, "
+            f"clone_finished={self.clone_finished}"
+        )
 
     def forward(
         self,
@@ -58,10 +64,12 @@ class AllPool(TokenPoolingMethod):
         )
 
         if not self.enable_chunked_prefill:
+            if self.clone_finished:
+                return [hs.clone() for hs in hidden_states_lst]
             return hidden_states_lst
 
         pooling_states = pooling_metadata.pooling_states
-        finished_mask = pooling_cursor.is_finished()
+        finished_mask = pooling_cursor.is_finished().tolist()
 
         # If chunked_prefill is enabled
         # 1. first store the chunked hidden_states in pooling_states.hidden_states_cache
@@ -69,7 +77,9 @@ class AllPool(TokenPoolingMethod):
             pooling_states, hidden_states_lst, finished_mask
         ):
             # Own data retained across steps or returned without concatenation.
-            needs_owned_storage = not finished or not p.hidden_states_cache
+            needs_owned_storage = not finished or (
+                self.clone_finished and not p.hidden_states_cache
+            )
             p.hidden_states_cache.append(
                 hs_chunk.clone() if needs_owned_storage else hs_chunk
             )
