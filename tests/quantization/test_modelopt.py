@@ -540,7 +540,7 @@ def test_modelopt_nvfp4_config_dispatches_w4a4_method():
         kv_cache_quant_algo=None,
         exclude_modules=[],
     )
-    assert config.linear_algo() == "NVFP4"
+    assert config.quant_method == "NVFP4"
 
     method = config.get_quant_method(
         MagicMock(spec=LinearBase), "model.layers.0.fake_proj"
@@ -566,7 +566,7 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
         kv_cache_quant_algo=None,
         exclude_modules=[],
     )
-    assert config.linear_algo() == "W4A16_NVFP4"
+    assert config.quant_method == "W4A16_NVFP4"
 
     method = config.get_quant_method(
         MagicMock(spec=LinearBase), "model.layers.0.fake_proj"
@@ -758,6 +758,4 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
 
     assert config.nvfp4_config.quant_method == "NVFP4"
-    assert config.nvfp4_config.linear_algo() == "NVFP4"
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
-    assert config.w4a16_nvfp4_config.linear_algo() == "W4A16_NVFP4"
