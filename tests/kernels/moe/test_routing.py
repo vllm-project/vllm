@@ -9,8 +9,14 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.router import (
+    routing_backend as routing_backend_module,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
+)
+from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
+    CustomRoutingRouter,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     FusedTopKBiasRouter,
@@ -24,8 +30,12 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.layers.fused_moe.router.routing_backend import (
+    FusedMoERoutingBackend,
+)
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform, PlatformEnum
 
 
 def _is_aiter_capable() -> bool:
@@ -44,6 +54,152 @@ def _is_aiter_capable() -> bool:
 MK_S = [(32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
+
+
+class FakeFusedTopKRouter(FusedTopKRouter):
+    pass
+
+
+class FakeGroupedTopKRouter(GroupedTopKRouter):
+    pass
+
+
+class FakeFusedTopKBiasRouter(FusedTopKBiasRouter):
+    pass
+
+
+class FakeRoutingBackend(FusedMoERoutingBackend):
+    resolution_count = 0
+
+    @classmethod
+    def resolve_router_cls(cls, router_cls):
+        cls.resolution_count += 1
+        return {
+            FusedTopKRouter: FakeFusedTopKRouter,
+            GroupedTopKRouter: FakeGroupedTopKRouter,
+            FusedTopKBiasRouter: FakeFusedTopKBiasRouter,
+        }.get(router_cls, router_cls)
+
+
+class InvalidRouterBackend(FusedMoERoutingBackend):
+    @classmethod
+    def resolve_router_cls(cls, router_cls):
+        del router_cls
+        return object
+
+
+class FakeRoutingPlatform(Platform):
+    _enum = PlatformEnum.OOT
+    device_name = "fake-routing"
+    device_type = "fake-routing"
+    backend_resolution_count = 0
+
+    @classmethod
+    def get_fused_moe_routing_backend_cls(cls) -> str:
+        cls.backend_resolution_count += 1
+        return f"{__name__}.FakeRoutingBackend"
+
+
+class InvalidRouterPlatform(FakeRoutingPlatform):
+    @classmethod
+    def get_fused_moe_routing_backend_cls(cls) -> str:
+        return f"{__name__}.InvalidRouterBackend"
+
+
+class InvalidBackendPlatform(FakeRoutingPlatform):
+    @classmethod
+    def get_fused_moe_routing_backend_cls(cls) -> str:
+        return "builtins.object"
+
+
+@pytest.fixture
+def fake_routing_platform(monkeypatch: pytest.MonkeyPatch):
+    routing_backend_module.resolve_fused_moe_routing_backend_cls.cache_clear()
+    routing_backend_module.resolve_fused_moe_router_cls.cache_clear()
+    FakeRoutingBackend.resolution_count = 0
+    FakeRoutingPlatform.backend_resolution_count = 0
+    monkeypatch.setattr(
+        routing_backend_module,
+        "current_platform",
+        FakeRoutingPlatform(),
+    )
+    yield
+    routing_backend_module.resolve_fused_moe_routing_backend_cls.cache_clear()
+    routing_backend_module.resolve_fused_moe_router_cls.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("router_kwargs", "expected_cls"),
+    [
+        ({}, FakeFusedTopKRouter),
+        (
+            {
+                "use_grouped_topk": True,
+                "num_expert_group": 2,
+                "topk_group": 1,
+            },
+            FakeGroupedTopKRouter,
+        ),
+        (
+            {"e_score_correction_bias": torch.zeros(8)},
+            FakeFusedTopKBiasRouter,
+        ),
+        (
+            {"custom_routing_function": Llama4MoE.custom_routing_function},
+            CustomRoutingRouter,
+        ),
+    ],
+)
+def test_platform_routing_backend_preserves_factory_selection(
+    fake_routing_platform,
+    router_kwargs,
+    expected_cls,
+) -> None:
+    router = create_fused_moe_router(
+        top_k=2,
+        global_num_experts=8,
+        **router_kwargs,
+    )
+
+    assert type(router) is expected_cls
+
+
+def test_platform_routing_backend_caches_resolution(fake_routing_platform) -> None:
+    for _ in range(2):
+        create_fused_moe_router(top_k=2, global_num_experts=8)
+
+    assert FakeRoutingPlatform.backend_resolution_count == 1
+    assert FakeRoutingBackend.resolution_count == 1
+
+
+def test_platform_routing_backend_rejects_unrelated_router_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routing_backend_module.resolve_fused_moe_routing_backend_cls.cache_clear()
+    routing_backend_module.resolve_fused_moe_router_cls.cache_clear()
+    monkeypatch.setattr(
+        routing_backend_module,
+        "current_platform",
+        InvalidRouterPlatform(),
+    )
+
+    with pytest.raises(TypeError, match="must resolve FusedTopKRouter"):
+        create_fused_moe_router(top_k=2, global_num_experts=8)
+
+
+def test_platform_routing_backend_rejects_unrelated_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routing_backend_module.resolve_fused_moe_routing_backend_cls.cache_clear()
+    routing_backend_module.resolve_fused_moe_router_cls.cache_clear()
+    monkeypatch.setattr(
+        routing_backend_module,
+        "current_platform",
+        InvalidBackendPlatform(),
+    )
+
+    with pytest.raises(TypeError, match="must subclass FusedMoERoutingBackend"):
+        create_fused_moe_router(top_k=2, global_num_experts=8)
 
 
 def test_degenerate_grouped_config_uses_standard_topk() -> None:
