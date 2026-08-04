@@ -402,6 +402,37 @@ class ConversationMessage(TypedDict, total=False):
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
 
+def make_reasoning_parser_chat_template_kwargs(
+    chat_template_kwargs: dict[str, Any],
+    continue_final_message: bool,
+    final_message: ChatCompletionMessageParam | None,
+) -> dict[str, Any]:
+    kwargs = {
+        **chat_template_kwargs,
+        "_vllm_continue_final_message": continue_final_message,
+    }
+    if not continue_final_message or final_message is None:
+        return kwargs
+
+    content = final_message.get("content")
+    if isinstance(content, str):
+        final_content = content
+    elif isinstance(content, list):
+        final_content = "\n".join(
+            text
+            for part in content
+            if isinstance(part, dict) and isinstance((text := part.get("text")), str)
+        )
+    else:
+        final_content = ""
+
+    kwargs["_vllm_continue_final_message_content"] = final_content
+    reasoning = final_message.get("reasoning")
+    if isinstance(reasoning, str):
+        kwargs["_vllm_continue_final_message_reasoning"] = reasoning
+    return kwargs
+
+
 # Passed in by user
 ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 

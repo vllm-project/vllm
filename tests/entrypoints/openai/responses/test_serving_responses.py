@@ -17,6 +17,7 @@ from openai.types.responses import (
 from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
 )
+from openai.types.responses.response_reasoning_item import Content
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
     LocalShell,
@@ -49,6 +50,7 @@ from vllm.entrypoints.openai.responses.serving import (
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
 )
+from vllm.entrypoints.openai.responses.utils import construct_input_messages
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
@@ -94,6 +96,33 @@ def test_serialize_message_pydantic_model_returns_dict() -> None:
     assert isinstance(serialized, dict)
     assert serialized["type"] == "raw_message_tokens"
     assert serialized["message"] == "hello"
+
+
+def test_reasoning_continuation_context_is_forwarded_to_parser() -> None:
+    reasoning_item = ResponseReasoningItem(
+        id="reasoning_1",
+        summary=[],
+        type="reasoning",
+        content=[Content(text="partial plan", type="reasoning_text")],
+        encrypted_content=None,
+        status="in_progress",
+    )
+    request = ResponsesRequest(
+        input=[reasoning_item],
+        tools=[],
+        chat_template_kwargs={"thinking_mode": "adaptive"},
+    )
+    messages = construct_input_messages(request_input=request.input)
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    serving.chat_template_kwargs = {}
+
+    kwargs = serving._reasoning_parser_chat_template_kwargs(request, messages)
+
+    assert kwargs["_vllm_continue_final_message"] is True
+    assert kwargs["_vllm_continue_final_message_content"] == ""
+    assert kwargs["_vllm_continue_final_message_reasoning"] == "partial plan"
 
 
 @pytest.fixture

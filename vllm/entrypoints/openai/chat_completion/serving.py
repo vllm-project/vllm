@@ -17,6 +17,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    make_reasoning_parser_chat_template_kwargs,
     make_tool_call_id,
 )
 from vllm.entrypoints.generate.base.serving import (
@@ -192,32 +193,11 @@ class OpenAIServingChat(GenerateBaseServing):
     def _reasoning_parser_chat_template_kwargs(
         self, request: ChatCompletionRequest
     ) -> dict[str, Any]:
-        kwargs = {
-            **self._effective_chat_template_kwargs(request),
-            "_vllm_continue_final_message": request.continue_final_message,
-        }
-        if not request.continue_final_message:
-            return kwargs
-
-        final_message = request.messages[-1]
-        content = final_message.get("content")
-        if isinstance(content, str):
-            final_content = content
-        elif isinstance(content, list):
-            final_content = "\n".join(
-                text
-                for part in content
-                if isinstance(part, dict)
-                and isinstance((text := part.get("text")), str)
-            )
-        else:
-            final_content = ""
-
-        kwargs["_vllm_continue_final_message_content"] = final_content
-        reasoning = final_message.get("reasoning")
-        if isinstance(reasoning, str):
-            kwargs["_vllm_continue_final_message_reasoning"] = reasoning
-        return kwargs
+        return make_reasoning_parser_chat_template_kwargs(
+            self._effective_chat_template_kwargs(request),
+            request.continue_final_message,
+            request.messages[-1] if request.messages else None,
+        )
 
     async def render_chat_request(
         self,
