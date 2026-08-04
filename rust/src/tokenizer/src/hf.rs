@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use fastokens::Tokenizer as FastokensTokenizer;
 use fastokens::decoders::Decoder as FastokensDecoder;
-use fastokens::pre_tokenized::{
-    PreTokenizedString as FastokensPreTokenizedString, Split as FastokensSplit,
-};
-use fastokens::{PreTokenizer as FastokensPreTokenizer, Split as FastokensSplitPreTokenizer};
 use thiserror_ext::AsReport as _;
 use tokenizers::{
     AddedVocabulary, Model as _, OffsetType, PreTokenizer as _, Tokenizer as HfTokenizer,
@@ -33,17 +28,20 @@ enum Backend {
     FastokensByteLevel(Box<FastokensTokenizer>),
 }
 
-/// True if `dec` is effectively a single `ByteLevel` stage — one `ByteLevel`
-/// leaf in a tree of `Sequence`s (fastokens represents `Fuse` as an empty
-/// `Sequence`, which is a no-op for our purposes).
+/// True if `dec` is effectively a single `ByteLevel` stage, optionally wrapped
+/// in `Sequence`s or followed by `Fuse`.
 fn is_byte_level_only(dec: &FastokensDecoder) -> bool {
-    fn count_byte_level(dec: &FastokensDecoder) -> usize {
+    fn count_byte_level(dec: &FastokensDecoder) -> Option<usize> {
         match dec {
-            FastokensDecoder::ByteLevel(_) => 1,
-            FastokensDecoder::Sequence(steps) => steps.iter().map(count_byte_level).sum(),
+            FastokensDecoder::ByteLevel(_) => Some(1),
+            FastokensDecoder::Fuse => Some(0),
+            FastokensDecoder::Sequence(steps) => {
+                steps.iter().try_fold(0, |count, step| Some(count + count_byte_level(step)?))
+            }
+            _ => None,
         }
     }
-    count_byte_level(dec) == 1
+    count_byte_level(dec) == Some(1)
 }
 
 fn decode_fastokens_byte_level(
@@ -73,72 +71,6 @@ fn encode_hf_ordinary(tokenizer: &HfTokenizer, text: &str) -> tokenizers::Result
     let encoding = pretokenized.into_encoding(None, 0, OffsetType::Byte)?;
     let encoding = tokenizer.post_process(encoding, None, false)?;
     Ok(encoding.get_ids().to_vec())
-}
-
-fn fastokens_fused_split(tokenizer: &FastokensTokenizer) -> Option<&FastokensSplitPreTokenizer> {
-    // Keep this predicate aligned with fastokens::Tokenizer::detect_fused_byte_level.
-    let FastokensPreTokenizer::Sequence(steps) = tokenizer.pre_tokenizer()? else {
-        return None;
-    };
-    let [
-        FastokensPreTokenizer::Split(split),
-        FastokensPreTokenizer::ByteLevel(byte_level),
-    ] = steps.as_slice()
-    else {
-        return None;
-    };
-    byte_level.is_bulk_only().then_some(split)
-}
-
-fn fastokens_pre_tokenized_ordinary(
-    tokenizer: &FastokensTokenizer,
-    text: &str,
-) -> FastokensPreTokenizedString {
-    // This is fastokens::Tokenizer::build_pre_tokenized with added_tokens = None.
-    let normalized = tokenizer
-        .normalizer()
-        .map_or(Cow::Borrowed(text), |normalizer| normalizer.normalize(text));
-    match normalized {
-        Cow::Borrowed(_) => FastokensPreTokenizedString::from_text(text),
-        Cow::Owned(text) => {
-            let len = text.len();
-            FastokensPreTokenizedString::new(
-                text,
-                vec![FastokensSplit {
-                    range: 0..len,
-                    token_id: None,
-                }],
-            )
-        }
-    }
-}
-
-fn encode_fastokens_ordinary(
-    tokenizer: &FastokensTokenizer,
-    text: &str,
-) -> std::result::Result<Vec<u32>, fastokens::Error> {
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut pretokenized = fastokens_pre_tokenized_ordinary(tokenizer, text);
-    let ids = if let Some(split) = fastokens_fused_split(tokenizer) {
-        split.pre_tokenize(&mut pretokenized)?;
-        pretokenized
-            .tokenize_batched(|buffer, splits, output| {
-                tokenizer.model().tokenize_batch_fused(buffer, splits, output)
-            })
-            .map_err(fastokens::Error::Model)?
-    } else {
-        if let Some(pre_tokenizer) = tokenizer.pre_tokenizer() {
-            pre_tokenizer.pre_tokenize(&mut pretokenized)?;
-        }
-        pretokenized
-            .tokenize(|text, output| tokenizer.model().tokenize_into(text, output))
-            .map_err(fastokens::Error::Model)?
-    };
-
-    Ok(tokenizer.post_process(ids, false))
 }
 
 /// Tokenizer from `tokenizer.json` in HuggingFace format.
@@ -248,10 +180,9 @@ impl Tokenizer for HuggingFaceTokenizer {
         match &self.backend {
             Backend::Hf(tokenizer) => encode_hf_ordinary(tokenizer, text)
                 .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
-            Backend::Fastokens(tokenizer) | Backend::FastokensByteLevel(tokenizer) => {
-                encode_fastokens_ordinary(tokenizer, text)
-                    .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report()))
-            }
+            Backend::Fastokens(tokenizer) | Backend::FastokensByteLevel(tokenizer) => tokenizer
+                .encode_ordinary(text)
+                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
         }
     }
 
@@ -462,12 +393,6 @@ mod tests {
         );
         let tokenizer = constructor(&added_path).expect("load tokenizer with added tokens");
         let added_empty = constructor(&empty_path).expect("load tokenizer with empty added tokens");
-
-        if let super::Backend::Fastokens(inner) | super::Backend::FastokensByteLevel(inner) =
-            &tokenizer.backend
-        {
-            assert_eq!(super::fastokens_fused_split(inner).is_some(), fused);
-        }
 
         assert_eq!(
             tokenizer.encode(REGULAR_TOKEN, false).unwrap(),
