@@ -615,16 +615,21 @@ def make_input_norm(processor: type[BaseImageProcessor]) -> nn.BatchNorm1d:
 
 
 def maybe_do_input_norm(
-    grid_thw: torch.Tensor, input_norm: nn.Module | None, channel: int = 3
+    grid_thw: torch.Tensor,
+    input_norm: nn.Module | None,
+    visual_dtype: torch.dtype,
+    channel: int = 3,
 ) -> torch.Tensor:
+    # "grid_thw" is very likely a torch.uint8 tensor
+    # when mm_device_do_normalize is enabled.
+
     if input_norm is None or isinstance(input_norm, nn.Identity):
-        return grid_thw
+        return grid_thw.to(visual_dtype)
 
     assert grid_thw.ndim == 2
     patches, size = grid_thw.shape
     patch_size = size // channel
-    dtype = grid_thw.dtype
 
     grid_thw = grid_thw.view(patches, channel, patch_size)
     grid_thw = input_norm(grid_thw.to(torch.float32))
-    return grid_thw.view(patches, size).to(dtype)
+    return grid_thw.view(patches, size).to(visual_dtype)
