@@ -36,11 +36,6 @@ class TileGemmVSX {
   static void gemm_micro(DEFINE_CPU_MICRO_GEMM_PARAMS) {
     static_assert(0 < M && M <= 8);
 
-    union VecBF16 {
-        uint16_t u16[8];
-        __vector unsigned char vec;
-    };
-
     // Calculate how many 4x4 tiles we need in M dimension
     constexpr int tiles_m = (M + 3) / 4; 
     constexpr int tiles_n = 4; // Since NSize=16, we always process 4 tiles in N dimension
