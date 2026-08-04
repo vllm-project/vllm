@@ -51,6 +51,8 @@ class EncoderRunner:
                 mm_feature = mm_features[mm_input_id]
                 if mm_feature.data is None:
                     continue
+                if mm_feature.identifier in self.encoder_cache.encoder_outputs:
+                    continue
                 mm_hashes.append(mm_feature.identifier)
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
 
