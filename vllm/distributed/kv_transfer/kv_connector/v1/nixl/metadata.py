@@ -42,8 +42,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
+#   7: Add dcp_size to NixlAgentMetadata/kv_transfer_params for PD+DCP (MLA)
 #
-NIXL_CONNECTOR_VERSION: int = 6
+NIXL_CONNECTOR_VERSION: int = 7
 
 
 @dataclass
@@ -59,6 +60,7 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    dcp_size: int = 1
 
 
 @dataclass
@@ -195,6 +197,7 @@ class HeartbeatInfo:
     host: str
     port: int
     tp_size: int
+    dcp_size: int = 1
     pp_size: int = 1
 
 
@@ -214,6 +217,12 @@ class ReqMeta:
     # To be used when logical block size does not match the kernel block size
     local_physical_block_ids: BlockIds
     tp_size: int
+    dcp_size: int = 1
+    # Per-KV-cache-group logical blocks this rank already holds, i.e. its
+    # prefix-cache hit. Fixes where this rank's DCP slice starts relative to
+    # the remote's; kept per-group since hybrid models (e.g. SWA+FA) can have
+    # different cache-hit counts per group.
+    local_num_computed_blocks: tuple[int, ...] = ()
     remote: RemoteMeta | None = None
     # Remote block size, discovered during NIXL handshake (push mode).
     remote_block_size: int | None = None
@@ -247,14 +256,17 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        local_num_computed_blocks: tuple[int, ...] = (),
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
             local_physical_block_ids=local_block_ids,
-            # P workers don't need to receive tp_size from proxy here.
+            # P workers don't need to receive these from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            dcp_size=kv_transfer_params.get("dcp_size", 1),
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             pp_size=kv_transfer_params.get("pp_size", 1),
+            local_num_computed_blocks=local_num_computed_blocks,
         )
 
     def add_new_req_to_save(
@@ -272,8 +284,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        local_num_computed_blocks: tuple[int, ...] = (),
     ):
-        req = self._add_new_req(local_block_ids, kv_transfer_params)
+        req = self._add_new_req(
+            local_block_ids, kv_transfer_params, local_num_computed_blocks
+        )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
             engine_id=kv_transfer_params["remote_engine_id"],

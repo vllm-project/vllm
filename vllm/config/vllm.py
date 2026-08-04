@@ -1010,6 +1010,30 @@ class VllmConfig:
                     "connectors (PD disaggregation, KV cache offload)."
                 )
 
+        # DCP+PD invariants:a side is either fully replicated or fully sharded; MLA only
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("NixlConnector")
+        ):
+            assert self.parallel_config.prefill_context_parallel_size == 1, (
+                "NIXL does not support prefill context parallelism."
+            )
+            dcp_size = self.parallel_config.decode_context_parallel_size
+            tp_size = self.parallel_config.tensor_parallel_size
+            assert dcp_size in (1, tp_size), (
+                f"decode_context_parallel_size={dcp_size} must be 1 or equal "
+                f"to tensor_parallel_size={tp_size} when using NixlConnector."
+            )
+            if self.model_config is not None:
+                assert self.model_config.use_mla or dcp_size == 1, (
+                    "PD with decode_context_parallel_size > 1 is only "
+                    "supported for MLA models."
+                )
+                assert not (self.model_config.is_hybrid and dcp_size > 1), (
+                    "PD with decode_context_parallel_size > 1 is not "
+                    "supported for hybrid Mamba/SSM models."
+                )
+
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
