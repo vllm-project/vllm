@@ -47,7 +47,6 @@ def _get_draft_hf_config(vllm_config: VllmConfig) -> PretrainedConfig:
 
 
 class BailingMoeV3MTPSharedHead(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -67,7 +66,6 @@ class BailingMoeV3MTPSharedHead(nn.Module):
 
 
 class BailingMoeV3MultiTokenPredictorLayer(nn.Module):
-
     def __init__(
         self,
         *,
@@ -136,7 +134,6 @@ class BailingMoeV3MultiTokenPredictorLayer(nn.Module):
 
 
 class BailingMoeV3MultiTokenPredictor(nn.Module):
-
     def __init__(
         self,
         *,

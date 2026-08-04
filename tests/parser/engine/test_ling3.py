@@ -27,7 +27,7 @@ def test_ling3_registered():
     assert ToolParserManager.get_tool_parser("ling3") is not None
 
 
-def test_ling3_defaults_thinking_off():
+def test_ling3_defaults_thinking_on():
     parser_cls = ReasoningParserManager.get_reasoning_parser("ling3")
     parser = parser_cls(_tokenizer())
 
@@ -38,23 +38,23 @@ def test_ling3_defaults_thinking_off():
         "<think>reason</think>answer", _test_request()
     )
 
-    assert reasoning is None
-    assert content == "<think>reason</think>answer"
+    assert reasoning == "reason"
+    assert content == "answer"
 
 
-def test_ling3_enable_thinking_extracts_reasoning():
+def test_ling3_disable_thinking_keeps_reasoning_as_content():
     parser_cls = ReasoningParserManager.get_reasoning_parser("ling3")
     parser = parser_cls(
         _tokenizer(),
-        chat_template_kwargs={"enable_thinking": True},
+        chat_template_kwargs={"enable_thinking": False},
     )
 
     reasoning, content = parser.extract_reasoning(
         "<think>reason</think>answer", _test_request()
     )
 
-    assert reasoning == "reason"
-    assert content == "answer"
+    assert reasoning is None
+    assert content == "<think>reason</think>answer"
 
 
 def test_ling3_enable_thinking_keeps_open_reasoning_as_content():

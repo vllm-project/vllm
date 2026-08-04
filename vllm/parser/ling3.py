@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ling3 parser for reasoning and tool calls.
 
-Ling3 uses the same XML tool-call format as GLM-4.7, but its chat template
-defaults thinking off.  When thinking is enabled, Ling3 follows the GLM-style
-``<think>`` / ``</think>`` reasoning format and treats ``<tool_call>`` as an
-implicit reasoning terminator.
+Ling3 uses the same XML tool-call format as GLM-4.7 and defaults thinking on.
+It follows the GLM-style ``<think>`` / ``</think>`` reasoning format and
+treats ``<tool_call>`` as an implicit reasoning terminator.
 """
 
 from __future__ import annotations
@@ -41,7 +40,11 @@ class Ling3Parser(Glm47MoeParser):
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         thinking = chat_kwargs.get("thinking", None)
         enable_thinking = chat_kwargs.get("enable_thinking", None)
-        self.thinking_enabled = bool(thinking) or bool(enable_thinking)
+        self.thinking_enabled = (
+            True
+            if thinking is None and enable_thinking is None
+            else bool(thinking) or bool(enable_thinking)
+        )
         parser_config = replace(
             glm47_moe_config(thinking=self.thinking_enabled),
             name="ling3",

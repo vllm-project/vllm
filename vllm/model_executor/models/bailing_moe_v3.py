@@ -27,13 +27,6 @@ from vllm.distributed import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
-from vllm.third_party.flash_linear_attention.ops.kda import (
-    FusedRMSNormGated,
-    chunk_kda,
-    fused_kda_gate,
-    fused_recurrent_kda,
-    fused_recurrent_kda_fwd,
-)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
@@ -74,6 +67,13 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
+from vllm.third_party.flash_linear_attention.ops.kda import (
+    FusedRMSNormGated,
+    chunk_kda,
+    fused_kda_gate,
+    fused_recurrent_kda,
+    fused_recurrent_kda_fwd,
+)
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -125,7 +125,9 @@ direct_register_custom_op(
 )
 
 
-def _is_kda_layer(layer_idx: int, layer_group_size: int, num_hidden_layers: int) -> bool:
+def _is_kda_layer(
+    layer_idx: int, layer_group_size: int, num_hidden_layers: int
+) -> bool:
     return not (
         (layer_idx + 1) % layer_group_size == 0
         or layer_idx >= num_hidden_layers // layer_group_size * layer_group_size
@@ -551,7 +553,9 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             lower_bound=self.lower_bound if self.safe_gate else None,
         )
         g1 = g1.unsqueeze(0)
-        g2 = rearrange(self.g_proj(hidden_states)[0], "... (h d) -> ... h d", d=self.head_dim)
+        g2 = rearrange(
+            self.g_proj(hidden_states)[0], "... (h d) -> ... h d", d=self.head_dim
+        )
 
         core_attn_out = torch.zeros(
             (1, num_tokens, self.local_num_heads, self.head_dim),
@@ -809,9 +813,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
                 scale=self.head_dim**-0.5,
                 initial_state=recurrent_state_active,
                 inplace_final_state=True,
-                cu_seqlens=spec_query_start_loc[
-                    : attn_metadata.num_spec_decodes + 1
-                ],
+                cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                 ssm_state_indices=spec_state_indices,
                 num_accepted_tokens=num_accepted_tokens,
                 use_qk_l2norm_in_kernel=True,
@@ -1112,7 +1114,9 @@ class BailingMoeV3Model(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             hidden_states = (
-                self.word_embeddings(input_ids) if inputs_embeds is None else inputs_embeds
+                self.word_embeddings(input_ids)
+                if inputs_embeds is None
+                else inputs_embeds
             )
             residual = None
         else:
