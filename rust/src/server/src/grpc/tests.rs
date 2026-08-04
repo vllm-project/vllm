@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::fs;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -194,6 +195,73 @@ impl ChatRenderer for FakeTextBackend {
     }
 }
 
+struct FakeMultimodalBackend {
+    model_info: vllm_chat::multimodal::MultimodalModelInfo,
+}
+
+impl TextBackend for FakeMultimodalBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID))
+    }
+
+    fn model_id(&self) -> &str {
+        "test-model"
+    }
+}
+
+impl ChatBackend for FakeMultimodalBackend {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(FakeTextBackend)
+    }
+
+    fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
+        Some(&self.model_info)
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            self.model_id(),
+            self.tokenizer(),
+            options.tool_call_parser,
+            options.reasoning_parser,
+        )?))
+    }
+}
+
+const QWEN_IMAGE_TOKEN_ID: u32 = 151655;
+const TINY_PNG_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
+    let config_path = std::env::temp_dir().join(format!(
+        "vllm-grpc-qwen-config-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(
+        &config_path,
+        r#"{"model_type":"qwen2_vl","image_token_id":151655}"#,
+    )
+    .expect("write qwen test config");
+    let model_info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
+        "qwen2-vl-test".to_string(),
+        Some("qwen2_vl".to_string()),
+        vllm_chat::multimodal::MultimodalConfigFiles {
+            config: Some(&config_path),
+            ..Default::default()
+        },
+        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
+        Default::default(),
+    )
+    .expect("load multimodal info")
+    .expect("qwen multimodal info is registered");
+    let _ = fs::remove_file(config_path);
+    Arc::new(FakeMultimodalBackend { model_info })
+}
+
 /// Build the gRPC service + mock engine that serves a single request with the
 /// given output specs. Shared by the plaintext and TLS server fixtures.
 async fn setup_grpc_service(
@@ -205,6 +273,24 @@ async fn setup_grpc_service(
     tokio::sync::watch::Receiver<bool>,
     MockEngineTask,
 ) {
+    setup_grpc_service_with_backend(engine_id, output_specs, Arc::new(FakeTextBackend), |_| {})
+        .await
+}
+
+async fn setup_grpc_service_with_backend<F>(
+    engine_id: impl Into<EngineId>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    backend: Arc<dyn ChatTextBackend>,
+    check_request: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    tokio::sync::watch::Receiver<bool>,
+    MockEngineTask,
+)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = engine_id.into();
@@ -217,6 +303,7 @@ async fn setup_grpc_service(
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
+                check_request(&request);
                 send_outputs(
                     push,
                     engine_outputs_for_request(&request.request_id, output_specs),
@@ -238,13 +325,11 @@ async fn setup_grpc_service(
     .expect("connect client");
     let engine_health = client.subscribe_health();
 
-    let chat = ChatLlm::from_shared_backend(
-        Llm::new(client),
-        Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
-    );
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), backend);
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
-        InferenceServer::new(InferenceServiceImpl::new(state.clone())),
+        InferenceServer::new(InferenceServiceImpl::new(state.clone()))
+            .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
         ControlServer::new(ControlServiceImpl::new(state)),
         engine_health,
         engine_task,
@@ -547,6 +632,142 @@ async fn unary_generate_with_token_ids_prompt() {
     );
 
     engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_prepares_multimodal_input_for_engine_core() {
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-multimodal",
+            default_stream_output_specs(),
+            multimodal_backend(),
+            |request| {
+                let token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+                let features = request.mm_features.as_ref().expect("multimodal features");
+                assert_eq!(features.len(), 1);
+
+                let feature = &features[0];
+                assert_eq!(feature.modality, "image");
+                assert_eq!(feature.identifier, "image-1");
+                assert_eq!(feature.mm_position.offset, 1);
+                assert!(feature.mm_position.length > 1);
+                assert_eq!(token_ids.len(), feature.mm_position.length + 2);
+                assert_eq!(token_ids[0], 11);
+                assert_eq!(token_ids.last(), Some(&12));
+                assert!(
+                    token_ids[feature.mm_position.offset
+                        ..feature.mm_position.offset + feature.mm_position.length]
+                        .iter()
+                        .all(|token_id| *token_id == QWEN_IMAGE_TOKEN_ID)
+                );
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    client
+        .generate(pb::GenerateRequest {
+            request_id: "test-multimodal".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, QWEN_IMAGE_TOKEN_ID, 12],
+            })),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::DataUri(
+                    TINY_PNG_DATA_URI.to_string(),
+                )),
+                mime_type: String::new(),
+                uuid: "image-1".to_string(),
+            }],
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("multimodal generate");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn streaming_generate_rejects_text_prompt_with_media() {
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        b"engine-grpc-stream-media-text",
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let status = client
+        .generate_stream(pb::GenerateRequest {
+            request_id: "test-stream-media-text".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text(
+                "describe this".to_string(),
+            )),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::DataUri(
+                    TINY_PNG_DATA_URI.to_string(),
+                )),
+                mime_type: String::new(),
+                uuid: "image-1".to_string(),
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("text prompts with media must be rejected");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        status.message(),
+        "multimodal gRPC requests must provide token_ids input"
+    );
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_accepts_request_larger_than_tonic_default() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-large-media", default_stream_output_specs()).await;
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-large-media".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text(
+                "describe this".to_string(),
+            )),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::RawBytes(vec![0; 5 * 1024 * 1024])),
+                mime_type: "image/png".to_string(),
+                uuid: "image-1".to_string(),
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("text prompts with media must be rejected after decoding");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        status.message(),
+        "multimodal gRPC requests must provide token_ids input"
+    );
     server_task.abort();
 }
 
