@@ -177,9 +177,27 @@ class TestProtonProfilerWrapper:
             ("proton_backend", "rocprofiler", "rocprofiler backend"),
         ],
     )
-    def test_newer_features_require_triton_3_8(self, tmp_path, option, value, feature):
+    def test_newer_features_reject_triton_3_6(self, tmp_path, option, value, feature):
         with pytest.raises(RuntimeError, match=feature):
             make_wrapper(tmp_path, **{option: value})
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("proton_output_format", "hatchet_msgpack"),
+            ("proton_mode", "periodic_flushing"),
+        ],
+    )
+    def test_triton_3_7_features(self, tmp_path, option, value):
+        make_wrapper(tmp_path, triton_version="3.7.0", **{option: value})
+
+    def test_rocprofiler_still_requires_triton_3_8(self, tmp_path):
+        with pytest.raises(RuntimeError, match="rocprofiler backend"):
+            make_wrapper(
+                tmp_path,
+                triton_version="3.7.1",
+                proton_backend="rocprofiler",
+            )
 
     def test_rejects_output_format_when_finalize_lacks_capability(self, tmp_path):
         proton = make_proton()

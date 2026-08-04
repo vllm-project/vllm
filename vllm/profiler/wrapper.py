@@ -22,7 +22,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_TRITON_ADVANCED_PROTON_VERSION = Version("3.8.0")
+_TRITON_PROTON_3_7_VERSION = Version("3.7.0")
+_TRITON_PROTON_3_8_VERSION = Version("3.8.0")
 
 
 class WorkerProfiler(ABC):
@@ -390,14 +391,10 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._output_dir,
         )
 
-    def _require_triton_3_8(self, feature: str) -> None:
-        if (
-            self._triton_version is None
-            or self._triton_version < _TRITON_ADVANCED_PROTON_VERSION
-        ):
+    def _require_triton_version(self, feature: str, minimum: Version) -> None:
+        if self._triton_version is None or self._triton_version < minimum:
             raise RuntimeError(
-                f"Proton {feature} requires Triton >= "
-                f"{_TRITON_ADVANCED_PROTON_VERSION}; found "
+                f"Proton {feature} requires Triton >= {minimum}; found "
                 f"{self._triton_version_string}."
             )
 
@@ -415,11 +412,17 @@ class ProtonProfilerWrapper(WorkerProfiler):
                 )
 
         if self._output_format == "hatchet_msgpack":
-            self._require_triton_3_8("hatchet_msgpack output")
+            self._require_triton_version(
+                "hatchet_msgpack output", _TRITON_PROTON_3_7_VERSION
+            )
         if self._mode and self._mode.split(":", 1)[0] == "periodic_flushing":
-            self._require_triton_3_8("periodic flushing")
+            self._require_triton_version(
+                "periodic flushing", _TRITON_PROTON_3_7_VERSION
+            )
         if self._backend == "rocprofiler":
-            self._require_triton_3_8("rocprofiler backend")
+            self._require_triton_version(
+                "rocprofiler backend", _TRITON_PROTON_3_8_VERSION
+            )
 
     @staticmethod
     def _validate_amd_environment() -> None:
