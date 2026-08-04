@@ -152,3 +152,21 @@ def test_colqwen3_5_relevance_ordering(
     dtype: str,
 ) -> None:
     _run_relevance_test(vllm_runner, model, dtype=dtype)
+
+
+def test_colqwen3_5_config_enables_bidirectional_attention() -> None:
+    """ColQwen3.5 retrieval must be served BIDIRECTIONAL (is_causal=False) so the
+    full_attention layers build with AttentionType.ENCODER_ONLY. This guards the
+    silent-causal regression (no GPU / model load needed)."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.models.config import (
+        MODELS_CONFIG_MAP,
+        ColQwen3_5Config,
+    )
+
+    assert MODELS_CONFIG_MAP["ColQwen3_5"] is ColQwen3_5Config
+
+    model_config = SimpleNamespace(hf_config=SimpleNamespace())
+    ColQwen3_5Config.verify_and_update_model_config(model_config)
+    assert model_config.hf_config.is_causal is False

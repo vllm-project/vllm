@@ -14,7 +14,6 @@ import vllm_xpu_kernels._xpu_C  # noqa
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -56,7 +55,7 @@ class XPUPlatform(Platform):
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
         set_kv_cache_layout("NHD")
-        logger.info(
+        logger.info_once(
             "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
             "only NHD layout is supported by XPU attention kernels."
         )
@@ -92,7 +91,7 @@ class XPUPlatform(Platform):
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
-        logger.info("Using Flash Attention backend.")
+        logger.info_once("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
@@ -178,8 +177,6 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        parallel_config = vllm_config.parallel_config
-
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
@@ -190,15 +187,19 @@ class XPUPlatform(Platform):
         attention_config = vllm_config.attention_config
         if attention_config.backend is None:
             attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+
+        # lazy import to avoid circular import
+        from vllm.utils.torch_utils import supports_xpu_graph
+
         if not supports_xpu_graph():
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
+            logger.warning_once(
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
             )
         elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
+            logger.warning_once(
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
@@ -208,7 +209,6 @@ class XPUPlatform(Platform):
 
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
-            "enable_sp": "Sequence parallelism",
             "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
             "fuse_attn_quant": "Attention + quant fusion",
@@ -218,7 +218,7 @@ class XPUPlatform(Platform):
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():
                 if getattr(pass_config, flag):
-                    logger.warning(
+                    logger.warning_once(
                         "Feature %r is not yet supported on XPU and will be disabled.",
                         feature_name,
                     )
@@ -325,9 +325,8 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        from vllm.utils.torch_utils import supports_xccl
-
-        if not supports_xccl():
+        if not torch.distributed.is_xccl_available():
+            # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
             logger.warning(
                 "xccl is not enabled in this torch build, communication"
                 " is not available."

@@ -11,9 +11,12 @@ import psutil
 import torch
 import torch.types
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
+
+logger = init_logger(__name__)
 
 
 def format_kib(b: int) -> str:
@@ -43,6 +46,41 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
+
+
+_UMA_PRESSURE_THRESHOLD = 0.8
+_UMA_MIN_RELEASE_BYTES = 512 * MiB_bytes
+
+
+def release_device_memory_under_pressure(device: torch.device) -> bool:
+    """On integrated (UMA) GPUs, release caching-allocator memory back to the
+    OS when system memory pressure is high. The OS may start thrashing before
+    an allocation failure would trigger PyTorch's own cache release.
+
+    Returns:
+        True if memory was released.
+    """
+    if device.type != "cuda" or not current_platform.is_integrated_gpu(device.index):
+        return False
+
+    releasable = torch.accelerator.memory_reserved(
+        device
+    ) - torch.accelerator.memory_allocated(device)
+    if releasable < _UMA_MIN_RELEASE_BYTES:
+        return False
+
+    # cudaMemGetInfo underreports free memory on UMA, see MemorySnapshot.measure
+    mem = psutil.virtual_memory()
+    if mem.available > (1 - _UMA_PRESSURE_THRESHOLD) * mem.total:
+        return False
+
+    torch.accelerator.synchronize(device)
+    torch.accelerator.empty_cache()
+    logger.debug(
+        "Released %sGiB of cached device memory under memory pressure",
+        format_gib(releasable),
+    )
+    return True
 
 
 class DeviceMemoryProfiler:

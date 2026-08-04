@@ -882,6 +882,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 self.tokenizer, config.model_config.renderer_num_workers + 1
             )
 
+    def _can_produce_offsets(self) -> bool:
+        # HF tokenizers may be slow (use_fast=False); only fast tokenizers
+        # expose offset_mapping.
+        return self.tokenizer is not None and self.tokenizer.is_fast
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],

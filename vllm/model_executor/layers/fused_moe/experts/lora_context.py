@@ -59,3 +59,10 @@ class MoELoRAContext:
     # None means no dispatch happened (non-EP path), in which case callers
     # fall back to punica_wrapper.token_mapping_meta.
     local_token_lora_mapping: torch.Tensor | None = None
+
+    # Original unquantized hidden states, stashed by the modular kernel
+    # before the prepare step potentially quantizes them. Used by
+    # apply_w13_lora so the LoRA kernel sees correct-magnitude activations
+    # instead of raw quantized values that are missing the activation scale.
+    # Set per forward pass; None until the modular kernel writes it.
+    original_hidden_states: torch.Tensor | None = None

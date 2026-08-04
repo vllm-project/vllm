@@ -149,27 +149,16 @@ class BaseRouter(FusedMoERouter):
         top_k: int,
         global_num_experts: int,
         eplb_state: EplbLayerState | None = None,
-        # TODO(bnell): Once the MK is constructed at layer init time, we
-        # can make this a plain value instead of a callback.
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         """
-        Note: the indices dtype might not be available at router construction
-        time, so we need to supply a callback to get it at runtime.  This is
-        because the indices type is supplied by modular kernels which are
-        created after MoE layer/router construction.
-
         Args:
             top_k: Number of experts to select per token
             global_num_experts: Total number of experts
             eplb_state: Optional EPLBLayerState for load balancing
-            indices_type_getter: Optional callback to get indices dtype
         """
-        super().__init__()
+        super().__init__(eplb_state=eplb_state)
         self.top_k = top_k
         self.global_num_experts = global_num_experts
-        self.eplb_state = eplb_state
-        self.indices_type_getter = indices_type_getter
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
@@ -188,12 +177,6 @@ class BaseRouter(FusedMoERouter):
                 raise ValueError("EPLB requires logical_replica_count != None")
             if eplb_state.should_record_tensor is None:
                 raise ValueError("EPLB requires should_record_tensor != None")
-
-    def _get_indices_type(self) -> torch.dtype | None:
-        """Get the desired indices dtype from the getter function."""
-        return (
-            self.indices_type_getter() if self.indices_type_getter is not None else None
-        )
 
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
@@ -247,10 +230,11 @@ class BaseRouter(FusedMoERouter):
         """
         raise NotImplementedError
 
-    def select_experts(
+    def _select_experts(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -260,10 +244,9 @@ class BaseRouter(FusedMoERouter):
 
         This method implements the template method pattern:
         1. Validates EPLB state
-        2. Gets indices type
-        3. Calls _compute_routing() to get topk_weights and topk_ids
-        4. Applies EPLB mapping if enabled
-        5. Converts indices dtype if needed
+        2. Calls _compute_routing() to get topk_weights and topk_ids
+        3. Applies EPLB mapping if enabled
+        4. Converts indices dtype if needed
 
         Returns:
             (topk_weights, topk_ids)
@@ -277,22 +260,19 @@ class BaseRouter(FusedMoERouter):
         # Step 1: Validate EPLB state
         self._validate_eplb_state()
 
-        # Step 2: Get indices type.
-        indices_type = self._get_indices_type()
-
-        # Step 3: Compute routing (delegated to subclass)
+        # Step 2: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(
-            hidden_states, router_logits, indices_type, input_ids=input_ids
+            hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
 
-        # Step 4: Apply EPLB mapping
+        # Step 3: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
 
-        # Step 5: Convert indices dtype
-        topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
+        # Step 4: Convert indices dtype
+        topk_ids = self._convert_indices_dtype(topk_ids, topk_indices_dtype)
 
         return topk_weights, topk_ids

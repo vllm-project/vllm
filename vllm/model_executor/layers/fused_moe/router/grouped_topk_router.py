@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from functools import partial
 
 import torch
@@ -259,13 +258,11 @@ class GroupedTopKRouter(BaseRouter):
         e_score_correction_bias: torch.Tensor | None = None,
         num_fused_shared_experts: int = 0,
         eplb_state: EplbLayerState | None = None,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            indices_type_getter=indices_type_getter,
         )
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group

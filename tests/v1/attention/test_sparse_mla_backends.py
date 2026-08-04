@@ -36,7 +36,7 @@ if not current_platform.is_cuda():
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-    FlashInferMLASparseBackend,
+    FlashInferMLASparseTRTLLMBackend,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
@@ -174,8 +174,8 @@ def _quantize_dequantize_fp8_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    [FlashMLASparseBackend, FlashInferMLASparseBackend],
-    ids=["FlashMLA", "FlashInfer"],
+    [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend],
+    ids=["FlashMLA", "FlashInferTRTLLM"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
@@ -217,9 +217,12 @@ def test_sparse_backend_decode_correctness(
         ok, reason = flashmla.is_flashmla_sparse_supported()
         if not ok:
             pytest.skip(reason)
-    elif backend_cls == FlashInferMLASparseBackend:
-        if not current_platform.has_device_capability(100):
-            pytest.skip("FlashInferMLASparseBackend requires SM 10.0 or higher")
+    elif backend_cls == FlashInferMLASparseTRTLLMBackend:
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None or not backend_cls.supports_compute_capability(
+            device_capability
+        ):
+            pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
 
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"

@@ -12,7 +12,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
-from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
+from vllm.entrypoints.serve.engine.typing import RendererChatRequest, RendererRequest
 from vllm.inputs import EngineInput, SingletonPrompt
 from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq

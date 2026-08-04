@@ -82,11 +82,12 @@ class InductorPass(CustomGraphPass):  # type: ignore[misc]
     def hash_source(*srcs: str | Any) -> str:
         """
         Utility method to hash the sources of functions or objects.
-        :param srcs: strings or objects to add to the hash.
-        Objects and functions have their source inspected.
-        Results are cached by resolved types to avoid repeated
-        inspect.getsource() calls.
-        :return:
+
+        Args:
+            srcs: strings or objects to add to the hash.
+                Objects and functions have their source inspected.
+                Results are cached by resolved types to avoid repeated
+                inspect.getsource() calls.
         """
         # Resolve instances to their class for a hashable cache key.
         cache_key = tuple(
@@ -99,7 +100,9 @@ class InductorPass(CustomGraphPass):  # type: ignore[misc]
     def hash_dict(dict_: dict[Any, Any]) -> str:
         """
         Utility method to hash a dictionary, can alternatively be used for uuid.
-        :return: A sha256 hash of the json rep of the dictionary.
+
+        Returns:
+            A sha256 hash of the json rep of the dictionary.
         """
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()

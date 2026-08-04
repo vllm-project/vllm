@@ -5,8 +5,6 @@ from typing import Any
 
 import regex as re
 import torch
-from humming.layer import HummingInputSchema, HummingMethod
-from humming.schema import BaseWeightSchema
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -16,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.utils.humming import BaseWeightSchema, HummingInputSchema, HummingMethod
 
 
 def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
@@ -84,10 +83,13 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     input_schema = HummingInputSchema()
 
     # ReplicatedLinear has no TP partitioning and so does not set
-    # input_size_per_partition; for it that is just input_size.
-    input_size_per_partition = getattr(
-        layer, "input_size_per_partition", layer.input_size
-    )
+    # input_size_per_partition; for it that is just input_size. Use hasattr
+    # rather than getattr's default arg, which is evaluated eagerly and would
+    # raise on layers lacking input_size (e.g. ParallelLMHead).
+    if hasattr(layer, "input_size_per_partition"):
+        input_size_per_partition = layer.input_size_per_partition
+    else:
+        input_size_per_partition = layer.input_size
     shape_k_stacks = [input_size_per_partition]
     shape_n_stacks = layer.output_partition_sizes
 

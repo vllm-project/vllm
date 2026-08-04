@@ -12,7 +12,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.utils import CpuGpuBuffer
@@ -29,7 +29,10 @@ class ExtractHiddenStatesProposer:
     def __init__(self, vllm_config: VllmConfig, device):
         assert vllm_config.speculative_config is not None
 
-        assert vllm_config.speculative_config.num_speculative_tokens == 1
+        self.num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens
+        )
+        assert self.num_speculative_tokens == 1
         if vllm_config.speculative_config.disable_padded_drafter_batch:
             raise ValueError(
                 "disable_padded_drafter_batch is not supported with "
@@ -55,7 +58,7 @@ class ExtractHiddenStatesProposer:
         self.backup_next_token_ids = CpuGpuBuffer(
             max_batch_size,
             dtype=torch.int32,
-            pin_memory=is_pin_memory_available(),
+            pin_memory=PIN_MEMORY,
             device=device,
             with_numpy=True,
         )
@@ -82,6 +85,7 @@ class ExtractHiddenStatesProposer:
 
     def propose(
         self,
+        num_speculative_tokens: int,
         sampled_token_ids: torch.Tensor,
         target_hidden_states: list[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
@@ -112,6 +116,7 @@ class ExtractHiddenStatesProposer:
                 - Draft tokens matching sampled tokens, shape [batch_size, 1]
                 - KV connector output (if KV transfer is active), else None
         """
+        assert num_speculative_tokens == self.num_speculative_tokens
         assert self.model is not None and isinstance(target_hidden_states, list)
 
         # target_hidden_states is a list of tensors (one per layer)
@@ -312,7 +317,6 @@ class ExtractHiddenStatesProposer:
         (batch_size, 1). For each request we either use the sampled token
         (if valid and not discarded) or a backup token from the request state.
         """
-        num_reqs = gpu_input_batch.num_reqs
 
         # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs

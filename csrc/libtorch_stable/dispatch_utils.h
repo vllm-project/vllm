@@ -30,6 +30,28 @@
   THO_DISPATCH_SWITCH(TYPE, NAME,                            \
                       VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
+#define VLLM_STABLE_DISPATCH_CASE_INTEGRAL_TYPES(...)                  \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Byte, __VA_ARGS__)  \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Char, __VA_ARGS__)  \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Short, __VA_ARGS__) \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Int, __VA_ARGS__)   \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Long, __VA_ARGS__)
+
+#define VLLM_STABLE_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(...)      \
+  VLLM_STABLE_DISPATCH_CASE_INTEGRAL_TYPES(__VA_ARGS__)                 \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::UInt16, __VA_ARGS__) \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::UInt32, __VA_ARGS__) \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::UInt64, __VA_ARGS__)
+
+#define VLLM_STABLE_DISPATCH_INTEGRAL_TYPES(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(TYPE, NAME,                            \
+                      VLLM_STABLE_DISPATCH_CASE_INTEGRAL_TYPES(__VA_ARGS__))
+
+#define VLLM_STABLE_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(                                                    \
+      TYPE, NAME,                                                         \
+      VLLM_STABLE_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(__VA_ARGS__))
+
 // FP8 type dispatch - ROCm uses FNUZ format, CUDA uses OCP format
 #ifdef USE_ROCM
   #define VLLM_STABLE_DISPATCH_CASE_FP8_TYPES(...)                 \

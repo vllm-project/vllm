@@ -29,6 +29,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+vllm-chat.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-managed-engine.workspace = true
 vllm-server.workspace = true

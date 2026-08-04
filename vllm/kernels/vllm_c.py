@@ -25,9 +25,6 @@ rms_no_var_size = lambda x, weight, epsilon, variance_size=None: (
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
-    if weight is None:
-        # Kernel requires weight tensor, pass ones
-        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
     # ROCm's vLLM C RMSNorm kernel operates on contiguous 2D tensors.
     # Higher-rank callers still normalize over the last dimension, so flatten
@@ -64,10 +61,6 @@ def fused_add_rms_norm(
     epsilon: float,
     variance_size: int | None = None,
 ) -> tuple[Tensor, Tensor]:
-    if weight is None:
-        # Kernel requires weight tensor, pass ones
-        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
-
     assert variance_size is None
     if IS_ROCM and (not x.is_contiguous() or not x_residual.is_contiguous()):
         output, residual = ir.ops.fused_add_rms_norm.impls["native"].impl_fn(

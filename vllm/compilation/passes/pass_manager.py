@@ -29,6 +29,9 @@ if rocm_aiter_ops.is_enabled():
         RocmAiterTritonAddRMSNormPadFusionPass,
     )
 
+if current_platform.is_cuda_alike() or current_platform.is_xpu():
+    from .fusion.sequence_parallelism import SequenceParallelismPass
+
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
@@ -37,7 +40,6 @@ if current_platform.is_cuda_alike():
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
-    from .fusion.sequence_parallelism import SequenceParallelismPass
     from .utility.scatter_split_replace import ScatterSplitReplacementPass
     from .utility.split_coalescing import SplitCoalescingPass
 

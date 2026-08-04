@@ -88,6 +88,7 @@ def _worker_parallel_launch(
     rank = node_rank * world_local_size + local_rank
     device = torch.device("cuda", local_rank)
     torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
     torch.distributed.init_process_group(
         backend="cpu:gloo,cuda:nccl",
         init_method=init_method,
@@ -105,7 +106,7 @@ def _worker_parallel_launch(
     if vllm_config is not None:
         cpu_group = _set_vllm_config(vllm_config, world_size, rank, local_rank)
 
-    try:
+    def _run_worker():
         worker(
             ProcessGroupInfo(
                 world_size=world_size,
@@ -120,11 +121,19 @@ def _worker_parallel_launch(
             *args,
             **worker_kwargs,
         )
+
+    try:
+        if vllm_config is not None:
+            with set_current_vllm_config(vllm_config):
+                _run_worker()
+        else:
+            _run_worker()
     except Exception as ex:
         print(ex)
         traceback.print_exc()
         raise
     finally:
+        torch.accelerator.synchronize()
         if vllm_config is not None:
             cleanup_dist_env_and_memory()
         else:

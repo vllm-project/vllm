@@ -7,11 +7,27 @@ ColQwen3.5 is a multi-modal ColBERT-style model based on Qwen3.5.
 It produces per-token embeddings and uses MaxSim scoring for retrieval
 and reranking. Supports both text and image inputs.
 
+Works for any ColQwen3.5 checkpoint, e.g. `athrael-soju/colqwen3.5-4.5B-v3`
+or `vultr/VultronRetrieverPrime-Qwen3.5-8B`.
+
 Start the server with:
-    vllm serve athrael-soju/colqwen3.5-4.5B --max-model-len 4096
+    vllm serve athrael-soju/colqwen3.5-4.5B-v3 --max-model-len 4096 \
+        --mm-processor-kwargs '{"min_pixels": 65536, "max_pixels": 1835008}'
 
 Then run this script:
     python colqwen3_5_rerank_online.py
+
+Parity note (matching the native colpali ColQwen3_5Processor pipeline):
+  - Visual-token budget: ColQwen3_5Processor uses max_num_visual_tokens=1792,
+    i.e. max_pixels = 1792 * (patch_size*merge_size)^2 = 1792 * 32^2 = 1835008
+    (with min_pixels = shortest_edge = 65536). Pass these via --mm-processor-kwargs
+    as above; the default budget gives fewer visual tokens and lower retrieval ndcg.
+  - When you build prompts yourself (token_embed), reproduce the processor exactly:
+      image (document): wrap in the instruction template
+        "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+        "Describe the image.<|im_end|><|endoftext|>"
+      query: append the augmentation suffix  <text> + "<|endoftext|>" * 10
+    Omitting these reproduces a silent ~2.5 ndcg@10 drop vs the native pipeline.
 """
 
 import requests

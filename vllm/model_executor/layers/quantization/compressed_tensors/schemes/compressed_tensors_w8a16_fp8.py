@@ -137,6 +137,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                     "weight_scale",
                     convert_to_channelwise(layer.weight_scale, layer.logical_widths),
                 )
+            # Canonicalize to (K, N) for the kernel.
+            replace_parameter(layer, "weight", layer.weight.t())
 
         self.linear_kernel.process_weights_after_loading(layer)
 

@@ -13,6 +13,7 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backends.flex_attention import (
     BlockSparsityHint,
     FlexAttentionMetadataBuilder,
@@ -76,6 +77,72 @@ def test_flex_attention_full_cudagraphs(vllm_runner):
         outputs_1_lst=output_compile,
         name_0="eager",
         name_1="compile",
+    )
+
+
+def windowed_causal_mask_mod(b, h, q_idx, kv_idx):
+    return (kv_idx <= q_idx) & (q_idx - kv_idx < 4)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    reason="CUDA not available or PyTorch version < 2.7",
+)
+def test_flex_attention_custom_mask_full_cudagraphs(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(
+        Attention,
+        "logical_mask_mod",
+        staticmethod(windowed_causal_mask_mod),
+        raising=False,
+    )
+
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+    seed = 42
+    max_tokens = 24
+    num_logprobs = 5
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+    ]
+
+    set_random_seed(seed)
+    with vllm_runner(
+        model_name,
+        runner="generate",
+        tensor_parallel_size=1,
+        num_gpu_blocks_override=128,
+        enforce_eager=True,
+        attention_config={"backend": "FLEX_ATTENTION"},
+    ) as llm_eager:
+        output_eager = llm_eager.generate_greedy_logprobs(
+            prompts, max_tokens, num_logprobs
+        )
+
+    set_random_seed(seed)
+    with vllm_runner(
+        model_name,
+        runner="generate",
+        tensor_parallel_size=1,
+        num_gpu_blocks_override=128,
+        enforce_eager=False,
+        gpu_memory_utilization=0.85,
+        compilation_config={
+            "cudagraph_mode": "FULL",
+            "cudagraph_capture_sizes": [4],
+        },
+        attention_config={"backend": "FLEX_ATTENTION"},
+    ) as llm_cudagraph:
+        output_cudagraph = llm_cudagraph.generate_greedy_logprobs(
+            prompts, max_tokens, num_logprobs
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=output_eager,
+        outputs_1_lst=output_cudagraph,
+        name_0="eager",
+        name_1="cudagraph",
     )
 
 

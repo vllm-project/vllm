@@ -2,9 +2,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Stream;
-use subenum::subenum;
 use trait_set::trait_set;
 use uuid::Uuid;
+use vllm_llm::TokenUsage;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use crate::FinishReason;
@@ -21,23 +21,19 @@ pub(crate) use harmony::validate_harmony_parser_overrides;
 
 /// Internal assistant event before final assembly.
 ///
-/// - [`ContentEvent`]: subenum after reasoning parsing, carries only text content.
-/// - [`AssistantEvent`]: full event after tool parsing, adds tool-call variants.
-#[subenum(ContentEvent)]
+/// Unified parsing produces these events, and structured assembly consumes
+/// them to build public chat events.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AssistantEvent {
-    #[subenum(ContentEvent)]
     Start {
         prompt_token_ids: Arc<[u32]>,
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
-    #[subenum(ContentEvent)]
     TextDelta {
         kind: AssistantBlockKind,
         delta: String,
     },
     /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
-    #[subenum(ContentEvent)]
     LogprobsDelta {
         logprobs: Option<DecodedLogprobs>,
         token_ids: Vec<u32>,
@@ -47,59 +43,12 @@ pub(crate) enum AssistantEvent {
     /// A delta for the arguments of the currently open tool call. Must follow a
     /// `ToolCallStart`.
     ToolCallArgumentsDelta { delta: String },
-    #[subenum(ContentEvent)]
     Done {
-        prompt_token_count: usize,
-        output_token_count: usize,
+        usage: TokenUsage,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,
     },
-}
-
-impl ContentEvent {
-    /// Convert a [`DecodedTextEvent`] into one or more [`ContentEvent`] values
-    /// by treating all text as plain (non-reasoning) content.
-    fn from_decoded_plain_text(event: DecodedTextEvent) -> Vec<Self> {
-        match event {
-            DecodedTextEvent::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-            } => vec![Self::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-            }],
-            DecodedTextEvent::TextDelta {
-                delta,
-                token_ids,
-                logprobs,
-                finished,
-            } => {
-                let mut events = Vec::new();
-                if !delta.is_empty() {
-                    events.push(Self::TextDelta {
-                        kind: AssistantBlockKind::Text,
-                        delta,
-                    });
-                }
-                if logprobs.is_some() || !token_ids.is_empty() {
-                    events.push(Self::LogprobsDelta {
-                        logprobs,
-                        token_ids,
-                    });
-                }
-                if let Some(finished) = finished {
-                    events.push(Self::Done {
-                        prompt_token_count: finished.prompt_token_count,
-                        output_token_count: finished.output_token_count,
-                        finish_reason: finished.finish_reason,
-                        kv_transfer_params: finished.kv_transfer_params,
-                    });
-                }
-                events
-            }
-        }
-    }
 }
 
 /// Boxed stream of decoded text events coming from [`vllm_text`].
@@ -128,8 +77,6 @@ trait_set! {
 
 /// Generate the northbound tool-call ID using the OpenAI-style `call_<id>`
 /// format.
-// TODO: support other ID scheme like Kimi-K2's
-// `functions.{name}:{global_index}`.
 pub(crate) fn generate_tool_call_id() -> String {
     format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
 }

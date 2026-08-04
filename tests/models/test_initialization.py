@@ -98,11 +98,6 @@ def can_initialize(
         vllm_config.validate_block_size()
         return scheduler_kv_cache_config
 
-    if model_arch == "MiniMaxVL01ForConditionalGeneration":
-        pytest.skip(
-            "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
-        )
-
     if model_arch == "MoonshotKimiaForCausalLM":
         pytest.skip(
             "Kimi-Audio requires SpeechToTextConfig "

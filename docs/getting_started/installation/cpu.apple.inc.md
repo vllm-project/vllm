@@ -15,6 +15,10 @@ Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 - SDK: `XCode 15.4` or later with Command Line Tools
 - Compiler: `Apple Clang >= 15.0.0`
 
+!!! note
+    The macOS CPU build is smoke-tested in CI on the latest GA Apple Silicon
+    runner; other macOS or Apple Clang versions are best-effort.
+
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
 

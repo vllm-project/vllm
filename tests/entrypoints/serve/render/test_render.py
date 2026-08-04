@@ -263,3 +263,109 @@ async def test_chat_completion_render_with_sampling_params(client):
 
     # Check that internal fields are not present
     assert "_all_stop_token_ids" not in sampling_params
+
+
+@pytest.mark.asyncio
+async def test_completion_render_emits_token_offsets(client):
+    """With return_token_offsets, /v1/completions/render returns per-token
+    (start, end) char offsets aligned with token_ids."""
+    prompt = "Hello, world."
+    response = await client.post(
+        "/v1/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "return_token_offsets": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    offsets = data[0]["token_offsets"]
+    assert offsets is not None
+    assert len(offsets) == len(data[0]["token_ids"])
+    for start, end in offsets:
+        assert isinstance(start, int) and isinstance(end, int)
+        assert 0 <= start <= end <= len(prompt)
+
+
+@pytest.mark.asyncio
+async def test_completion_render_default_no_token_offsets(client):
+    """Without the flag, token_offsets must be null (existing responses
+    unchanged)."""
+    response = await client.post(
+        "/v1/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "prompt": "Hello, world.",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data[0]["token_offsets"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_render_emits_token_offsets(client):
+    """With return_token_offsets, /v1/chat/completions/render returns
+    per-token offsets relative to the templated prompt string."""
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Hello, world."}],
+            "return_token_offsets": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, dict)
+    offsets = data["token_offsets"]
+    assert offsets is not None
+    assert len(offsets) == len(data["token_ids"])
+    for start, end in offsets:
+        assert isinstance(start, int) and isinstance(end, int)
+        assert 0 <= start <= end
+
+
+@pytest.mark.asyncio
+async def test_chat_render_default_no_token_offsets(client):
+    """Without the flag, chat render token_offsets must be null."""
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Hello, world."}],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["token_offsets"] is None
+
+
+@pytest.mark.asyncio
+async def test_completion_render_multiple_prompts_token_offsets(client):
+    """Each prompt in a batch gets its own offsets aligned with its tokens."""
+    prompts = ["Hello, world.", "Goodbye, world."]
+    response = await client.post(
+        "/v1/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "prompt": prompts,
+            "return_token_offsets": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == len(prompts)
+    for item, prompt in zip(data, prompts):
+        offsets = item["token_offsets"]
+        assert offsets is not None
+        assert len(offsets) == len(item["token_ids"])
+        for start, end in offsets:
+            assert 0 <= start <= end <= len(prompt)

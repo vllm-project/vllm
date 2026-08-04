@@ -18,9 +18,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
     prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -53,6 +52,16 @@ class Fp8MoeBackend(Enum):
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
     XPU = "XPU"
     CPU = "CPU"
+    HPC = "HPC"
+    # Dequantize-to-BF16 emulation for MXFP8 on devices without a native
+    # MXFP8 MoE kernel (e.g. ROCm). Weights pass through unchanged here.
+    EMULATION = "EMULATION"
+    # MXFP8 MoE via a Triton ``dot_scaled`` kernel that lowers to CDNA4
+    # (gfx950) native MX matrix-core ops. Weights stay in MXFP8 (no load-time
+    # format conversion); the FP8 values + E8M0 scales are consumed directly.
+    TRITON_MXFP8 = "TRITON_MXFP8"
+    # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
+    AITER_MXFP8 = "AITER_MXFP8"
 
 
 def _get_priority_backends(
@@ -79,10 +88,23 @@ def _get_priority_backends(
         Fp8MoeBackend.BATCHED_TRITON,
         Fp8MoeBackend.XPU,
         Fp8MoeBackend.CPU,
+        Fp8MoeBackend.HPC,
     ]
 
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
         backends.insert(0, backends.pop(backends.index(backend)))
+
+    # With DeepEP v2 contiguous layout (do_expand=False), tensors are
+    # worst-case allocated with padding. TrtLLM's tile-level skipping
+    # avoids wasted compute on padding rows; other backends process all rows.
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and moe_config.moe_parallel_config.use_deepep_v2_kernels
+        and activation_key == kFp8Dynamic128Sym
+        and weight_key == kFp8Static128BlockSym
+    ):
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.FLASHINFER_TRTLLM)
 
     # On Hopper for Block Fp8, prefer Triton for TP and FI CUTLASS for EP.
     if (
@@ -186,10 +208,10 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsBlockFp8,
             XPUExpertsFp8,
-            XPUExpertsMxfp8,
+            XPUExpertsMxFp8,
         )
 
-        return [XPUExpertsFp8, XPUExpertsMxfp8, XPUExpertsBlockFp8]
+        return [XPUExpertsFp8, XPUExpertsMxFp8, XPUExpertsBlockFp8]
 
     elif backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
@@ -197,6 +219,13 @@ def backend_to_kernel_cls(
         )
 
         return [CPUExpertsFp8]
+
+    elif backend == Fp8MoeBackend.HPC:
+        from vllm.model_executor.layers.fused_moe.hpc_moe import (
+            HPCExperts,
+        )
+
+        return [HPCExperts]
 
     else:
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
@@ -212,6 +241,7 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
         "flashinfer_cutlass": Fp8MoeBackend.FLASHINFER_CUTLASS,
         "marlin": Fp8MoeBackend.MARLIN,
         "aiter": Fp8MoeBackend.AITER,
+        "hpc": Fp8MoeBackend.HPC,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -308,54 +338,6 @@ def select_fp8_moe_backend(
             requested_backend, config, weight_key, activation_key, activation_format
         )
 
-    # Handle explicit FlashInfer FP8 configuration.
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_FP8:
-            # If the user rejects FlashInfer remove those backends.
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_CUTLASS)
-
-        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
-            fi_backend = get_flashinfer_moe_backend()
-            if fi_backend == FlashinferMoeBackend.CUTLASS:
-                backend = Fp8MoeBackend.FLASHINFER_CUTLASS
-            elif fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = Fp8MoeBackend.FLASHINFER_TRTLLM
-            else:
-                raise ValueError(
-                    f"FlashInfer MOE backend {fi_backend} does not support FP8 MoE."
-                )
-            k_cls = backend_to_kernel_cls(backend)[0]
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
-        else:
-            # If the user is not explicit about the backend, try both.
-            for backend in [
-                Fp8MoeBackend.FLASHINFER_TRTLLM,
-                Fp8MoeBackend.FLASHINFER_CUTLASS,
-            ]:
-                for k_cls in backend_to_kernel_cls(backend):
-                    supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-
-                    if supported:
-                        logger.info_once(_make_log_backend(backend))
-                        return backend, k_cls
-                    else:
-                        logger.debug_once(_make_log_unsupported(backend, reason))
-
-            raise NotImplementedError(
-                "Found VLLM_USE_FLASHINFER_MOE_FP8=1, but no "
-                "FlashInfer FP8 MoE backend supports the configuration."
-            )
-
     # Handle explicit DeepGEMM FP8 configuration.
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
         if not envs.VLLM_USE_DEEP_GEMM or not envs.VLLM_MOE_USE_DEEP_GEMM:
@@ -423,7 +405,7 @@ def select_fp8_moe_backend(
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
     # TODO(bnell): replace layer with weight_block_size
-    layer: torch.nn.Module,
+    layer: RoutedExperts,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -443,6 +425,10 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
+        w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
+            w13, w2, w13_scale, w2_scale
+        )
     elif fp8_backend == Fp8MoeBackend.MARLIN:
         weight_block_size = getattr(layer, "weight_block_size", None)
         if weight_block_size == [1, 32]:
@@ -500,6 +486,11 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
             Fp8MoeBackend.XPU,
+            Fp8MoeBackend.HPC,
+            # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
+            # the MXFP8 weights as-is — neither needs a load-time layout change.
+            Fp8MoeBackend.EMULATION,
+            Fp8MoeBackend.TRITON_MXFP8,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
@@ -518,6 +509,8 @@ def make_fp8_moe_quant_config(
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     swiglu_limit: float | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Create FusedMoEQuantConfig for the specified FP8 Backend.
@@ -540,11 +533,17 @@ def make_fp8_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=block_shape,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
-    # Flashinfer CUTLASS per-tensor uses single dq scale
+    # Flashinfer CUTLASS or HPC per-tensor uses single dq scale
     # (alpha = w_scale * a_scale) and inverse a2 scale.
-    if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS and block_shape is None:
+    if (
+        fp8_backend in [Fp8MoeBackend.FLASHINFER_CUTLASS, Fp8MoeBackend.HPC]
+        and block_shape is None
+    ):
         assert a1_scale is not None and a2_scale is not None
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
@@ -559,10 +558,9 @@ def make_fp8_moe_quant_config(
             g2_alphas=(w2_scale * a2_scale).squeeze(),
             gemm1_clamp_limit=swiglu_limit,
         )
-    # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
-    # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
-    # Non-swizzled layout is required since the TRTLLM kernel expects
-    # scales in (num_tokens, hidden_dim // 32) format.
+    # MXFP8 (block [1, 32]) dispatches to the mxfp8 activation quant. Scales are
+    # the non-swizzled (num_tokens, hidden_dim // 32) uint8 UE8M0 layout for all
+    # backends; the DeepGEMM expert permute repacks them for the grouped GEMM.
     if block_shape == [1, 32]:
         return FusedMoEQuantConfig.make(
             "mxfp8",
@@ -574,6 +572,8 @@ def make_fp8_moe_quant_config(
             a2_scale=a2_scale,
             block_shape=block_shape,
             is_scale_swizzled=False,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
 
@@ -588,6 +588,8 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,
     )
 

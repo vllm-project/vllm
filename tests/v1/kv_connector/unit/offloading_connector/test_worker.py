@@ -30,6 +30,7 @@ BLOCK_SIZE = 16
 NUM_KV_HEADS = 4
 HEAD_SIZE = 64
 DTYPE = torch.float16
+DEVICE_TYPE = current_platform.device_type
 
 # Attention backends to test
 ATTN_BACKENDS: list[str] = []
@@ -42,6 +43,8 @@ if current_platform.is_cuda():
     ]
 elif current_platform.is_rocm():
     ATTN_BACKENDS = ["TRITON_ATTN"]
+elif current_platform.is_xpu():
+    ATTN_BACKENDS = ["TRITON_ATTN", "FLASH_ATTN"]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,7 +98,7 @@ def _make_worker(kv_cache_config: KVCacheConfig):
     spec = MagicMock(spec=OffloadingSpec)
     spec.kv_cache_config = kv_cache_config
     spec.vllm_config = MagicMock()
-    spec.get_handlers.return_value = iter([])
+    spec.get_worker.return_value = MagicMock()
 
     worker = OffloadingConnectorWorker(spec=spec)
     worker.worker = MagicMock()
@@ -270,13 +273,13 @@ def test_register_kv_caches(backend):
     kv_caches = _allocate_and_reshape_kv_caches(
         kv_cache_config,
         attn_groups,
-        device=torch.device("cuda:0"),
+        device=torch.device(f"{DEVICE_TYPE}:0"),
     )
 
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
 
-    canonical = spec.get_handlers.call_args[0][0]
+    canonical = spec.get_worker.call_args[0][0]
     assert isinstance(canonical, CanonicalKVCaches)
 
     # -- Expected block tensors ----------------------------------------------
@@ -413,13 +416,13 @@ def test_register_kv_caches_uniform_type(backend):
     kv_caches = _allocate_and_reshape_kv_caches(
         kv_cache_config,
         attn_groups,
-        device=torch.device("cuda:0"),
+        device=torch.device(f"{DEVICE_TYPE}:0"),
     )
 
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
 
-    canonical = spec.get_handlers.call_args[0][0]
+    canonical = spec.get_worker.call_args[0][0]
     assert isinstance(canonical, CanonicalKVCaches)
 
     for block_tensor in canonical.tensors:

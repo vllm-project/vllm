@@ -97,6 +97,21 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_groups_w2 = num_groups_w13 = 1
             self.group_size = -1
         else:
+            if hidden_size % self.group_size != 0:
+                raise ValueError(
+                    "CompressedTensors WNA16 MoE requires hidden_size "
+                    f"({hidden_size}) to be divisible by group_size "
+                    f"({self.group_size})."
+                )
+            if intermediate_size_per_partition % self.group_size != 0:
+                raise ValueError(
+                    "CompressedTensors WNA16 MoE with static group scales "
+                    "requires the MoE intermediate size per tensor-parallel "
+                    f"partition ({intermediate_size_per_partition}) to be "
+                    f"divisible by group_size ({self.group_size}). Scale "
+                    "groups would otherwise cross TP shard boundaries; use a "
+                    "compatible TP size or enable expert parallelism."
+                )
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 

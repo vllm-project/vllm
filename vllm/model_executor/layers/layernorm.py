@@ -9,7 +9,6 @@ import torch.nn.functional as F
 # Import kernels
 import vllm.kernels  # noqa: F401
 from vllm import envs, ir
-from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
@@ -65,19 +64,12 @@ class RMSNorm(CustomOp):
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
 
-        # Do not pass identity weight to native implementation (causes issue on TPU).
-        # Other implementations require weight to be passed even if all ones.
-        # Cheat and predict if native will be dispatched to:
-        #  1) if native is first in priority list
-        #  2) if variance_size_override is given (only supported by native impl)
-        # TODO(luka): address weight passing inconsistency:
-        # https://github.com/vllm-project/vllm/issues/39370
-        priority = get_current_vllm_config().kernel_config.ir_op_priority
-        var_override = self.variance_size_override is not None
-        native_rms_norm = priority.rms_norm[0] == "native" or var_override
-        native_add_rms_norm = priority.fused_add_rms_norm[0] == "native" or var_override
-        self.pass_weight = self.has_weight or not native_rms_norm
-        self.pass_weight_add = self.has_weight or not native_add_rms_norm
+        # When has_weight=False, pass weight=None so implementations that
+        # support a weightless path can skip the per-channel multiply.
+        # Implementations that require weight (e.g. oink) fall back via IR
+        # op priority when weight=None is unsupported.
+        self.pass_weight = self.has_weight
+        self.pass_weight_add = self.has_weight
 
     def forward_native(
         self,

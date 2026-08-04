@@ -23,12 +23,10 @@ import uvloop
 from fastapi import FastAPI, Response
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.system_utils import (
     decorate_logs,
     kill_process_tree,
     set_process_title,
-    update_environment_variables,
 )
 
 logger = init_logger(__name__)
@@ -127,22 +125,29 @@ def _build_vllm_dp_server_args(
     child_args.data_parallel_multi_port_external_lb = False
     child_args.data_parallel_supervisor_port = None
     child_args.api_server_count = 1
+    child_args.device_ids = _build_device_ids(args, local_rank)
     return child_args
 
 
-def _build_vllm_dp_server_env(
-    args: argparse.Namespace, local_rank: int
-) -> dict[str, str]:
-    # set visible devices for the child process
+def _build_device_ids(args: argparse.Namespace, local_rank: int) -> list[int | str]:
+    """Build the --device-ids value for a DP child process.
+
+    The child resolves these against its own inherited device-control env
+    var (e.g. CUDA_VISIBLE_DEVICES), so integer IDs must stay env-relative
+    here rather than being translated to physical IDs.
+    """
     devices_per_rank = args.tensor_parallel_size * args.pipeline_parallel_size
     start = local_rank * devices_per_rank
     stop = start + devices_per_rank
-    device_env = current_platform.device_control_env_var
-    visible_devices = ",".join(
-        str(current_platform.device_id_to_physical_device_id(idx))
-        for idx in range(start, stop)
-    )
-    return {device_env: visible_devices}
+    device_ids = getattr(args, "device_ids", None)
+    if device_ids is not None:
+        if stop > len(device_ids):
+            raise ValueError(
+                f"--device-ids has {len(device_ids)} entries, but DP rank "
+                f"{local_rank} needs devices [{start}, {stop})"
+            )
+        return device_ids[start:stop]
+    return list(range(start, stop))
 
 
 def _child_base_url(args: argparse.Namespace, port: int) -> str:
@@ -228,9 +233,7 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
     return app
 
 
-def _run_vllm_dp_server(
-    child_args: argparse.Namespace, env_updates: dict[str, str]
-) -> None:
+def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
     """
     Entrypoint function for the vLLM DP Server.
     """
@@ -241,7 +244,6 @@ def _run_vllm_dp_server(
     os.setpgrp()
 
     name = f"APIServer_DP{child_args.data_parallel_rank}"
-    update_environment_variables(env_updates)
     set_process_title(name)
     decorate_logs(name)
     uvloop.run(run_server(child_args))
@@ -345,11 +347,10 @@ class DPSupervisor:
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
             child_args = _build_vllm_dp_server_args(self.args, local_rank)
-            child_env = _build_vllm_dp_server_env(self.args, local_rank)
             process = context.Process(
                 target=_run_vllm_dp_server,
                 name=f"APIServer_DPRank_{child_args.data_parallel_rank}",
-                args=(child_args, child_env),
+                args=(child_args,),
             )
             process.start()
             self._processes.append(process)

@@ -56,6 +56,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -352,19 +353,6 @@ class CohereModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
@@ -410,6 +398,9 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     }
     # LoRA specific attributes
     embedding_modules = {"embed_tokens": "input_embeddings"}
+    # ModelOpt NVFP4 checkpoints carry raw quantizer-module state
+    # (e.g. "*.weight_quantizer._double_scale"); drop them before loading. See #41925.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={"_quantizer.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -466,4 +457,4 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         loader = AutoWeightsLoader(
             self, skip_prefixes=["lm_head", "rotary_emb.inv_freq"]
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

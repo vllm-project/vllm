@@ -272,6 +272,10 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        logger.debug_once(
+            "CPU unquantized GEMM dispatch: using zentorch_linear_unary (prepacked=%s)",
+            is_prepacked,
+        )
         return
 
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
@@ -285,6 +289,9 @@ def dispatch_cpu_unquantized_gemm(
         )
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        logger.debug_once(
+            "CPU unquantized GEMM dispatch: using sgl-kernel weight_packed_linear"
+        )
         return
     elif (
         ops._supports_onednn
@@ -296,6 +303,7 @@ def dispatch_cpu_unquantized_gemm(
             layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
             if remove_weight:
                 layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            logger.debug_once("CPU unquantized GEMM dispatch: using oneDNN onednn_mm")
             return
         except RuntimeError as e:
             logger.warning_once(
@@ -306,6 +314,9 @@ def dispatch_cpu_unquantized_gemm(
     # fallback case
     layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
         x, weight, bias
+    )
+    logger.debug_once(
+        "CPU unquantized GEMM dispatch: using torch.nn.functional.linear (fallback)"
     )
 
 

@@ -8,11 +8,9 @@ on files that have been changed. It groups files into different mypy calls
 based on their directory to avoid import following issues.
 
 Usage:
-    python tools/pre_commit/mypy.py <ci> <python_version> <changed_files...>
+    python tools/pre_commit/mypy.py <python_version> <changed_files...>
 
 Args:
-    ci: "1" if running in CI, "0" otherwise. In CI, follow_imports is set to
-        "silent" for the main group of files.
     python_version: Python version to use (e.g., "3.10") or "local" to use
         the local Python version.
     changed_files: List of changed files to check.
@@ -27,16 +25,12 @@ import regex as re
 # from "skip" to "silent", remove its directory from SEPARATE_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    # v0 related
-    "vllm/lora",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
-    # TODO: Remove these entries after fixing mypy errors.
-    "vllm/benchmarks",
 ]
 
 
@@ -98,8 +92,8 @@ def mypy(
 
 
 def main():
-    python_version = sys.argv[2]
-    file_groups = group_files(sys.argv[3:])
+    python_version = sys.argv[1]
+    file_groups = group_files(sys.argv[2:])
 
     if python_version == "local":
         python_version = f"{sys.version_info.major}.{sys.version_info.minor}"

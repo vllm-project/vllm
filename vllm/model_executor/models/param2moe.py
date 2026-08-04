@@ -751,7 +751,7 @@ class Param2MoEMixtureOfExperts(MixtureOfExperts):
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> None:
-        self.expert_weights.clear()
+        self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
             if hasattr(layer, "get_expert_weights"):
                 self.expert_weights.append(layer.get_expert_weights())
@@ -832,7 +832,6 @@ class Param2MoEForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-        self.expert_weights: list[torch.Tensor] = []
         self.num_moe_layers: int = 0
         self.moe_layers: list = []
         self.moe_mlp_layers: list = []

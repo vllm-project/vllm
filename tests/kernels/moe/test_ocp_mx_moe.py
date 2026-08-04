@@ -9,12 +9,20 @@ import pytest
 import torch
 from packaging import version
 
+from tests.kernels.moe.utils import check_accuracy
+from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
-QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
-    importlib.metadata.version("amd-quark")
-) >= version.parse("0.8.99")
+# MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
+# Earlier torch releases work with older quark versions. See
+# https://github.com/amd/Quark/issues/34
+# TODO: Remove once amd-quark>=0.12.0
+QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
+    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
+    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
+    else True
+)
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
     current_platform.is_cuda() and current_platform.is_device_capability_family(100)
@@ -31,17 +39,15 @@ HOPPER_MXFP4_BF16_AVAILABLE = (
 # ROCm platform and dependencies
 ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
-ROCM_AITER_AVAILABLE = False
+ROCM_AITER_AVAILABLE = is_aiter_found()
 ROCM_GFX950 = False
 
 if ROCM_AVAILABLE:
-    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms.rocm import on_gfx950
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
     ROCM_GFX950 = on_gfx950()
-    ROCM_AITER_AVAILABLE = rocm_aiter_ops.is_enabled()
 
     if ROCM_AITER_AVAILABLE:
         from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
@@ -83,12 +89,15 @@ def enable_pickle(monkeypatch):
     [
         ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
         ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-        ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
+        ModelCase("mawong-amd/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
         ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
         ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
     ],
 )
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_TORCH_COMPATIBLE,
+    reason="MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.",
+)
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
     if torch.accelerator.device_count() < model_case.tp:
         pytest.skip(
@@ -102,6 +111,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         tensor_parallel_size=model_case.tp,
         load_format="dummy",
         compilation_config={"cudagraph_capture_sizes": [16]},
+        gpu_memory_utilization=0.8,  # mxfp6 models use more scratch space
     ) as llm:
         # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
         # def check_model(model):
@@ -506,29 +516,6 @@ def tg_mxfp4_moe(
     return tg_result
 
 
-def check_accuracy(a, b, atol, rtol, percent):
-    """Allow a mismatch percentage of 1 - percent."""
-    if torch.any(torch.isnan(a)):
-        raise Exception("NaN in reference output")
-    if torch.any(torch.isnan(b)):
-        raise Exception("NaN in actual output")
-    if torch.any(torch.isinf(a)):
-        raise Exception("Inf in reference output")
-    if torch.any(torch.isinf(b)):
-        raise Exception("Inf in actual output")
-    assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
-
-    left = torch.abs(a - b)
-    right = atol + rtol * torch.abs(b)
-    count = torch.sum(left > right)
-    mismatch_percent = count / a.numel()
-    if mismatch_percent > 1 - percent:
-        raise Exception(
-            f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
-            f"(threshold: {1 - percent:.4f})"
-        )
-
-
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32, 128])
 @pytest.mark.parametrize("num_tokens", [1, 128, 1024])
@@ -672,19 +659,6 @@ def test_trtllm_gen_mxfp4_fused_moe(
     check_accuracy(ref_result, tg_result, atol=0, rtol=0.3, percent=0.8)
 
 
-def _interleave_scales_lastdim_by4(scales: torch.Tensor) -> torch.Tensor:
-    """Interleave scales on the last dimension by groups of 4, matching
-    the transformation in mxfp4.py's BF16 (Hopper) path."""
-    s = scales.to(torch.uint8)
-    s_shape = s.shape
-    assert s_shape[-1] % 4 == 0
-    s = s.reshape(*s_shape[:-1], s_shape[-1] // 4, 4)
-    # Move the 4-group dimension before the row dimension
-    permuted = s.permute(0, 2, 1, 3)
-    # Merge the row dim with the 4-group dim
-    return permuted.reshape(s_shape[0], s_shape[-1] // 4, s_shape[1] * 4)
-
-
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])
@@ -784,13 +758,25 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
     w1_w, w3_w = torch.chunk(w13_q, 2, dim=1)
     w13_q_swapped = torch.cat([w3_w, w1_w], dim=1)
 
+    # SM90 mixed-input GEMM expects weights/scales in an interleaved layout;
+    # without it the FP4->BF16 LUT reads bytes from wrong positions for K>128.
+    from flashinfer.fused_moe import (
+        interleave_moe_scales_for_sm90_mixed_gemm,
+        interleave_moe_weights_for_sm90_mixed_gemm,
+    )
+
+    w13_q_swapped = interleave_moe_weights_for_sm90_mixed_gemm(
+        w13_q_swapped, quant_type="fp4"
+    )
+    w2_q = interleave_moe_weights_for_sm90_mixed_gemm(w2_q, quant_type="fp4")
+
     b1, b3 = torch.chunk(bias13.to(torch.float32), 2, dim=-1)
     w13_b = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
 
     w1_s, w3_s = torch.chunk(w13_scale, 2, dim=1)
     w13_s = torch.cat([w3_s, w1_s], dim=1)
-    w13_s_inter = _interleave_scales_lastdim_by4(w13_s)
-    w2_s_inter = _interleave_scales_lastdim_by4(w2_scale)
+    w13_s_inter = interleave_moe_scales_for_sm90_mixed_gemm(w13_s)
+    w2_s_inter = interleave_moe_scales_for_sm90_mixed_gemm(w2_scale)
 
     routing_weights = torch.nn.functional.softmax(
         router_logits, dim=1, dtype=torch.float32
@@ -1267,7 +1253,7 @@ def test_rocm_mxfp4_moe_oracle(
 
     This test validates that the oracle functions work end-to-end:
     - select_mxfp4_moe_backend() selects a valid backend
-    - convert_to_mxfp4_moe_kernel_format() converts weights without error
+    - convert_gpt_oss_weight_to_mxfp4_moe_kernel_format() converts weights without error
     - make_mxfp4_moe_quant_config() builds a valid quant config
     - make_mxfp4_moe_kernel() creates a kernel that runs without error
     - The kernel output is within accuracy tolerance of reference
@@ -1287,7 +1273,7 @@ def test_rocm_mxfp4_moe_oracle(
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
         backend_to_kernel_cls,
-        convert_to_mxfp4_moe_kernel_format,
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_kernel,
         make_mxfp4_moe_quant_config,
     )
@@ -1322,7 +1308,7 @@ def test_rocm_mxfp4_moe_oracle(
         num_experts=num_experts,
         experts_per_token=topk,
         hidden_dim=hidden_size,
-        intermediate_size_per_partition=intermediate_size,
+        intermediate_size=intermediate_size,
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
@@ -1387,7 +1373,7 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Convert weights using oracle
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
-        convert_to_mxfp4_moe_kernel_format(
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
             layer=layer,  # type: ignore[arg-type]
             w13_weight=w13_quant,
@@ -1423,7 +1409,7 @@ def test_rocm_mxfp4_moe_oracle(
             mxfp4_backend=backend,
             experts_cls=experts_cls,
             routing_tables=None,
-            shared_experts=None,
+            layer=None,
         )
 
         # Create inputs

@@ -37,6 +37,7 @@ from vllm.distributed import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -355,7 +356,7 @@ class SarvamMLAMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> FusedMoE:
+    def maybe_get_fused_moe(self) -> MoERunner:
         return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
