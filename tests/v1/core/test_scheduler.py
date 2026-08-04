@@ -4425,8 +4425,7 @@ def _validate_chunked_prefill_settings_for_encoder_decoder(
 # =======================================================================# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests start
 # NOTE: In E->P->D disagg case, both KV and EC Connector works in P instance
 # Unless specify, the existence of KV Connector should not affect any test results
-# =======================================================================
-
+# ================================================================
 def _assert_right_encoder_cache_allocated(
     scheduler: Scheduler,
     hashes_to_check: list[str] | None = None,
@@ -5489,8 +5488,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
 
 
 # =======================================================================# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
-# =======================================================================
-
+# ================================================================
 def test_prepend_skipped_requests_order():
     scheduler = create_scheduler(max_num_seqs=1, use_kv_connector=True)
     requests = create_requests(num_requests=4)
@@ -5885,8 +5883,7 @@ def test_ec_connector_update_connector_output_called():
 
 
 # =======================================================================# Variable-length encoder cross-attention block allocation tests
-# =======================================================================
-
+# ================================================================
 def _create_encoder_decoder_scheduler(
     block_size: int = 16,
     num_blocks: int = 10000,
@@ -7607,6 +7604,7 @@ def test_nan_fault_tolerance_chunked_prefill():
     """NaN abort fires during chunked prefill intermediate chunks."""
     scheduler = create_scheduler(
         max_num_batched_tokens=15,
+        max_num_seqs=15,
         enable_chunked_prefill=True,
     )
     scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
@@ -7638,8 +7636,7 @@ def test_nan_fault_tolerance_implies_detect():
     """--enable-nan-fault-tolerance implies --enable-detect-nans-in-logits."""
     from vllm.engine.arg_utils import EngineArgs
 
-    args = EngineArgs(model="facebook/opt-125m",
-                      enable_nan_fault_tolerance=True)
+    args = EngineArgs(model="facebook/opt-125m", enable_nan_fault_tolerance=True)
     assert args.enable_detect_nans_in_logits is True
     assert args.fault_tolerance_config.enable_nan_fault_tolerance is True
 
