@@ -3,24 +3,22 @@
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import (
-    AttentionStatePair,
     BatchExecutionDescriptor,
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    DecodeSpeculatorCudaGraphManager,
-    PrefillSpeculatorCudaGraphManager,
+    SpeculatorCudaGraphManager,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -39,16 +37,22 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_num_reqs, dtype=torch.int64, device=device
         )
 
-        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-            self.draft_model_config
-        )
-        if self.supports_mm_inputs:
-            self.inputs_embeds = torch.zeros(
-                self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-            )
+        self.inputs_embeds: torch.Tensor | None = None
 
-        self.prefill_cudagraph_manager: PrefillSpeculatorCudaGraphManager | None = None
-        self.decode_cudagraph_manager: DecodeSpeculatorCudaGraphManager | None = None
+        self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+        self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+    def load_model(self, target_model: nn.Module) -> None:
+        super().load_model(target_model)
+        if not self.supports_mm_inputs:
+            return
+
+        self.inputs_embeds = torch.zeros(
+            self.max_num_tokens,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -62,7 +66,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
-        self.prefill_cudagraph_manager = PrefillSpeculatorCudaGraphManager(
+        self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
@@ -76,17 +80,14 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_mode = CUDAGraphMode.NONE
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
-        self.decode_cudagraph_manager = DecodeSpeculatorCudaGraphManager(
+        self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
             decode_query_len=1,
         )
 
-    def capture(
-        self,
-        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
-    ) -> None:
+    def capture(self) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
@@ -97,12 +98,19 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # For FULL graphs, the entire routine is recorded as one graph.
         # For PIECEWISE, only the model's compiled regions are captured
         # and the rest (compute_logits, gumbel_sample) runs eagerly.
+        # Draft prefill reuses the target model's attention metadata at
+        # runtime, so capture builds its dummy metadata through the target
+        # model runner's builders and buffers.
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
-            attn_states,
+            self.model_state,
+            self.target_input_buffers,
+            self.block_tables,
+            self.target_attn_groups,
+            self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
 
@@ -266,6 +274,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dummy_run and skip_attn_for_dummy_run,
             decode_batch_desc,
             num_tokens_across_dp,
+            input_batch.seq_lens_cpu_upper_bound,
         )
 
         return self.draft_tokens[:num_reqs]
@@ -292,6 +301,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:
+                assert self.inputs_embeds is not None
                 # Merge multimodal embeddings with input ids.
                 mm_embeds, is_mm_embed = mm_inputs or (None, None)
                 num_input_tokens = (
@@ -374,6 +384,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
         num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -398,6 +409,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
                     num_tokens_padded=batch_desc.num_tokens,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
                 )
 
             # Update the current draft step.
@@ -440,10 +453,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
         last_hidden_states = last_hidden_states[:num_reqs]
 
+        sample_positions = positions
+        if not self.advance_draft_positions:
+            # The forward pass holds positions fixed (Q-only, shared target KV),
+            # but Gumbel sampling still needs the absolute draft position.
+            sample_positions = positions + self.current_draft_step
+
         # Sample the draft tokens.
         draft_tokens = self.sample_draft(
             last_hidden_states,
-            positions,
+            sample_positions,
             idx_mapping,
             self.temperature,
             self.seeds,
@@ -624,6 +643,9 @@ def _prepare_decode_inputs_kernel(
     draft_token = tl.load(draft_tokens_ptr + req_idx * draft_tokens_stride)
     tl.store(input_ids_ptr + req_idx, draft_token)
 
+    target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
+    num_rejected = tl.load(num_rejected_ptr + req_idx)
+    seq_len = target_seq_len - num_rejected
     if ADVANCE_DRAFT_POSITIONS:
         # Compute position and seq_lens.
         # NOTE(woosuk): To prevent out-of-range access, we clamp these values
@@ -631,12 +653,8 @@ def _prepare_decode_inputs_kernel(
         position = tl.load(positions_ptr + req_idx)
         position = tl.minimum(position + 1, max_model_len - 1)
         tl.store(positions_ptr + req_idx, position)
-
-        target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
-        num_rejected = tl.load(num_rejected_ptr + req_idx)
-        seq_len = target_seq_len - num_rejected
         seq_len = tl.minimum(seq_len + 1, max_model_len)
-        tl.store(seq_lens_ptr + req_idx, seq_len)
+    tl.store(seq_lens_ptr + req_idx, seq_len)
 
 
 def prepare_decode_inputs(

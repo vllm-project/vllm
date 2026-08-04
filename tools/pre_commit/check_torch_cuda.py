@@ -9,7 +9,7 @@ import regex as re
 # --------------------------------------------------------------------------- #
 _TORCH_CUDA_PATTERNS = [
     r"\btorch\.cuda\.(empty_cache|synchronize|device_count|current_device|memory_reserved|memory_allocated|max_memory_allocated|max_memory_reserved|reset_peak_memory_stats|memory_stats|mem_get_info|set_device|device\()\b",
-    r"\btorch\.cuda\.(manual_seed|manual_seed_all|Event)\b",
+    r"\btorch\.cuda\.(manual_seed|manual_seed_all)\b",
     r"\bwith\storch\.cuda\.device\b",
     # Calls torch.cuda.{_is_compiled/_device_count_amdsmi/_device_count_nvml} internally
     r"\bcuda_device_count_stateless\(\)\b",
@@ -21,7 +21,6 @@ ALLOWED_FILES = {
     "vllm/device_allocator/",
     "vllm/distributed/weight_transfer/ipc_engine.py",
     "tests/distributed/test_packed_tensor.py",
-    "tools/pre_commit/check_torch_cuda.py",
 }
 
 
@@ -38,13 +37,6 @@ def scan_file(path: str) -> int:
                     f"{path}:{line_num}: "
                     "\033[91merror:\033[0m "
                     f"Found {matched_text} API call. Use set_random_seed instead."
-                )
-                return 1
-            if matched_text == "torch.cuda.Event":
-                print(
-                    f"{path}:{line_num}: "
-                    "\033[91merror:\033[0m "
-                    "Found torch.cuda.Event API call. Use torch.Event instead."
                 )
                 return 1
             print(

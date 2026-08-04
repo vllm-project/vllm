@@ -90,6 +90,7 @@ class ScaleDesc:
             GroupShape.PER_CHANNEL: "per_channel",
         }
         group_shape = d.get(self.group_shape, str(self.group_shape))
+
         return (
             f"{fx.graph.dtype_abbrs[self.dtype]},"
             f"{'static' if self.static else 'dynamic'},{group_shape}"
@@ -106,15 +107,24 @@ class QuantKey:
     symmetric: symmetric if True, asymmetric if False
     """
 
-    dtype: torch.dtype
+    # TODO: QuantKey.dtype is assumed to be `torch.dtype` in matcher_utils.py,
+    # but #37990 introduced e.g. `kInt4Static` that uses a `ScalarType` dtype,
+    # same for kMxfp6 that does not have a native torch representation.
+    # Logical dtype and storage (torch) dtype should be separated (see #48949).
+    dtype: torch.dtype | ScalarType
     scale: ScaleDesc
     scale2: ScaleDesc | None = None
     symmetric: bool = True
 
     def __str__(self):
         scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
+        dtype_description = (
+            fx.graph.dtype_abbrs[self.dtype]
+            if isinstance(self.dtype, torch.dtype)
+            else self.dtype
+        )
         return (
-            f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
+            f"QuantKey({dtype_description},"
             f"scale({self.scale}),{scale2_str}"
             f"{'a' if not self.symmetric else ''}symmetric)"
         )
@@ -172,6 +182,26 @@ kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=Tru
 kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 
+kMxfp6E3M2StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
+kMxfp6E3M2Static = QuantKey(
+    scalar_types.float6_e3m2f, scale=kMxfp6E3M2StaticGroupScale, symmetric=True
+)
+
+kMxfp6E3M2DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp6E3M2Dynamic = QuantKey(
+    scalar_types.float6_e3m2f, scale=kMxfp6E3M2DynamicGroupScale, symmetric=True
+)
+
+kMxfp6E2M3StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
+kMxfp6E2M3Static = QuantKey(
+    scalar_types.float6_e2m3f, scale=kMxfp6E2M3StaticGroupScale, symmetric=True
+)
+
+kMxfp6E2M3DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
+kMxfp6E2M3Dynamic = QuantKey(
+    scalar_types.float6_e2m3f, scale=kMxfp6E2M3DynamicGroupScale, symmetric=True
+)
+
 # TODO: convert this to use SCALAR_TYPE. This is not right.
 kInt4StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
@@ -190,6 +220,8 @@ kInt4Static32Asym = QuantKey(
 
 kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
+kInt8StaticTensorSym = QuantKey(torch.int8, kStaticTensorScale, symmetric=True)
+kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True)
 
 # INT4 W4A8 quantization keys
 
@@ -214,6 +246,12 @@ kInt4W4A8StaticGroup32Sym = QuantKey(
 kInt4W4A8StaticGroupScale = ScaleDesc(torch.bfloat16, True, GroupShape(1, -1))
 kInt4W4A8StaticGroupSym = QuantKey(
     torch.int8, kInt4W4A8StaticGroupScale, symmetric=True
+)
+
+kInt4W4A8StaticChannelSym = QuantKey(
+    torch.int8,
+    ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL),
+    symmetric=True,
 )
 
 

@@ -1,9 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 
 pub(crate) mod logprobs;
+pub(crate) mod sampling;
 pub(crate) mod token_ids;
 
 use logprobs::validate_logprobs;
+use sampling::validate_resolved_sampling_params;
 use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
@@ -18,7 +23,7 @@ use crate::request::{SamplingParams, TextRequest};
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
 pub struct PreparedTextRequest {
-    /// The original high-level request, preserved for response-side metadata
+    /// The high-level request fields still needed for response-side metadata
     /// and decoding options.
     pub text_request: TextRequest,
     /// The southbound request ready to be sent to `vllm-llm`.
@@ -28,7 +33,7 @@ pub struct PreparedTextRequest {
 /// Convert a high-level [`TextRequest`] into one lower-level
 /// [`GenerateRequest`] ready for the `llm` crate.
 pub fn lower_text_request(
-    request: TextRequest,
+    mut request: TextRequest,
     prompt_token_ids: Vec<u32>,
     sampling_hints: SamplingHints,
     sampling_limits: SamplingLimits,
@@ -40,7 +45,10 @@ pub fn lower_text_request(
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
         prompt_token_ids,
-        mm_features: request.mm_features.clone(),
+        // Align with Python's response path: decoded output state does not retain
+        // `mm_features`; move them to the engine request to avoid cloning large
+        // multimodal tensor payloads.
+        mm_features: request.mm_features.take(),
         sampling_params: lower_sampling_params(
             request.sampling_params.clone(),
             sampling_hints,
@@ -51,9 +59,10 @@ pub fn lower_text_request(
         cache_salt: request.cache_salt.clone(),
         priority: request.priority,
         data_parallel_rank: request.data_parallel_rank,
+        session_id: request.session_id.clone(),
         reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
-        arrival_time: None,
+        arrival_time: request.arrival_time,
         trace_headers: None,
     };
 
@@ -180,6 +189,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
     };
+    validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
     Ok(params)
 }
@@ -307,12 +317,13 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
+    use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, PlaceholderRange};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
-    use crate::error::{LogprobsError, TokenIdsError};
+    use crate::error::{LogprobsError, SamplingParamsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
     fn stub_tokenizer() -> TestTokenizer {
@@ -476,6 +487,120 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_rejects_invalid_sampling_ranges() {
+        let cases = [
+            (
+                "temperature",
+                SamplingParams {
+                    temperature: Some(5.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "top_p",
+                SamplingParams {
+                    top_p: Some(0.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "min_p",
+                SamplingParams {
+                    min_p: Some(2.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "repetition_penalty",
+                SamplingParams {
+                    repetition_penalty: Some(0.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "frequency_penalty",
+                SamplingParams {
+                    frequency_penalty: Some(100.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "presence_penalty",
+                SamplingParams {
+                    presence_penalty: Some(100.0),
+                    ..SamplingParams::default()
+                },
+            ),
+        ];
+
+        for (expected_parameter, sampling_params) in cases {
+            let error =
+                lower_sampling_params_with_limits(sampling_params, sample_sampling_limits())
+                    .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    Error::SamplingParams(SamplingParamsError::OutOfRange {
+                        parameter,
+                        ..
+                    }) if parameter == expected_parameter
+                ),
+                "{expected_parameter} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_non_finite_sampling_values() {
+        for (expected_parameter, sampling_params) in [
+            (
+                "temperature",
+                SamplingParams {
+                    temperature: Some(f32::INFINITY),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "repetition_penalty",
+                SamplingParams {
+                    repetition_penalty: Some(f32::NAN),
+                    ..SamplingParams::default()
+                },
+            ),
+        ] {
+            let error =
+                lower_sampling_params_with_limits(sampling_params, sample_sampling_limits())
+                    .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    Error::SamplingParams(SamplingParamsError::NotFinite {
+                        parameter,
+                        ..
+                    }) if parameter == expected_parameter
+                ),
+                "{expected_parameter} should reject non-finite values"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_sampling_params_accepts_python_compatible_repetition_penalty_above_two() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                repetition_penalty: Some(2.5),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap();
+
+        assert_eq!(params.repetition_penalty, 2.5);
+    }
+
+    #[test]
     fn lower_text_request_applies_python_style_eos_hints() {
         let prepared = lower_text_request(
             sample_request(),
@@ -572,6 +697,35 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_text_request_moves_multimodal_features_to_generate_request() {
+        let features = vec![MmFeatureSpec {
+            data: None,
+            modality: "image".to_string(),
+            identifier: "image-1".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 2,
+                length: 4,
+                is_embed: None,
+            },
+            mm_hash: Some("hash-1".to_string()),
+        }];
+        let mut request = sample_request();
+        request.mm_features = Some(features.clone());
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.mm_features, Some(features));
+        assert_eq!(prepared.text_request.mm_features, None);
     }
 
     #[test]
@@ -1108,6 +1262,44 @@ mod tests {
 
         assert!(!prepared.text_request.intermediate);
         assert_eq!(prepared.generate_request.request_id, "text-1");
+    }
+
+    #[test]
+    fn lower_text_request_passes_arrival_time_through() {
+        let request = TextRequest {
+            arrival_time: Some(42.5),
+            ..sample_request()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.arrival_time, Some(42.5));
+    }
+
+    #[test]
+    fn lower_text_request_leaves_arrival_time_unset_when_absent() {
+        let request = TextRequest {
+            arrival_time: None,
+            ..sample_request()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.arrival_time, None);
     }
 
     #[test]

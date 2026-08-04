@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 #![allow(clippy::doc_lazy_continuation)]
 
 use std::fmt::Display;
@@ -296,11 +299,6 @@ pub struct EngineUnsupportedArgs {
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
 
-    /// The maximum number of input items and options allowed per
-    /// prompt for each modality.
-    #[arg(long)]
-    pub limit_mm_per_prompt: Option<Unsupported>,
-
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
     pub media_io_kwargs: Option<Unsupported>,
@@ -456,13 +454,17 @@ pub struct ServerUnsupportedArgs {
 
     /// Enable the `/tokenizer_info` endpoint. May expose chat
     /// templates and other tokenizer configuration.
+    ///
+    /// Accepted as a no-op: the Rust frontend serves `/tokenize` and
+    /// `/detokenize`, but does not implement `/tokenizer_info` yet.
     #[arg(
         long,
         visible_alias = "no-enable-tokenizer-info-endpoint",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub enable_tokenizer_info_endpoint: Option<Unsupported>,
+    pub enable_tokenizer_info_endpoint: Option<Noop>,
 
     /// If set to True, log model outputs (generations).
     /// Requires `--enable-log-requests`. As with `--enable-log-requests`,

@@ -451,6 +451,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
@@ -516,6 +517,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 lora_request=lora_request,
                 priority=request.priority,
                 trace_headers=trace_headers,
+                session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs
                 if self.parser and self.parser.reasoning_parser_cls is not None
                 else None,
@@ -610,7 +612,13 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        tool_dicts = construct_tool_dicts(
+            request.tools,
+            request.tool_choice,
+            exclude_tools_when_tool_choice_none=(
+                self.online_renderer.exclude_tools_when_tool_choice_none
+            ),
+        )
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
@@ -663,6 +671,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
@@ -687,6 +696,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
@@ -743,11 +753,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        if request.tool_choice not in ("auto", "none"):
-            raise NotImplementedError(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony"
-            )
+        if self.parser is not None:
+            # HarmonyParser doesn't need chat_template_kwargs
+            # TODO: Unify adjust_request() call with non-harmony branch
+            self.parser(
+                self.renderer.get_tokenizer(),
+                request.tools,
+                model_config=self.model_config,
+            ).adjust_request(request=request)
 
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
@@ -932,6 +945,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             status=status,
             usage=usage,
             kv_transfer_params=context.kv_transfer_params,
+            ec_transfer_params=context.ec_transfer_params,
         )
 
         if request.store:
@@ -1068,11 +1082,15 @@ class OpenAIServingResponses(GenerateBaseServing):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=final_output.token_ids,
             )
+            if not request.include_reasoning:
+                reasoning = None
+                logprobs = None
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
                 tool_calls=tool_calls,
                 logprobs=logprobs,
+                tools=request.tools,
             )
 
         # Fallback when no parser is configured
@@ -1339,12 +1357,16 @@ class OpenAIServingResponses(GenerateBaseServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        processor = SimpleStreamingEventProcessor()
+        processor = SimpleStreamingEventProcessor(tools=request.tools)
+
+        hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
         def _get_logprobs(
             output: CompletionOutput,
         ) -> list[response_text_delta_event.Logprob]:
             if not request.is_include_output_logprobs():
+                return []
+            if hide_stream_metadata:
                 return []
             return self._create_stream_response_logprobs(
                 token_ids=output.token_ids,

@@ -62,6 +62,8 @@ weight name. Unset fields fall back to the `--quantization` shorthand's
 defaults, or for already-quantized checkpoints to whatever the checkpoint
 declares.
 
+On XPU, non-block FP8 scaled-mm linear layers default to W8A16; setting `--linear-backend xpu` forces W8A8. Use `--linear-backend xpu_woq` to explicitly select weight-only quantization (W8A16). Setting `--linear-backend torch` also forces W8A8 but runs the GEMM through `torch._scaled_mm` instead of the custom XPU kernel.
+
 The CLI accepts the same shape as JSON or as dotted keys:
 
 ```bash
