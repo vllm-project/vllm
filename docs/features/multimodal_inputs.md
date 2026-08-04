@@ -477,6 +477,11 @@ You must enable this feature via `enable_mm_embeds=True`.
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
 
+!!! note
+    The [Transformers modeling backend](../models/supported_models.md#transformers) does not support this feature.
+    Passing pre-computed embeddings skips the Hugging Face processor, which is what provides the extra fields
+    the backend needs to locate the placeholders in the prompt.
+
 #### Image Embeddings
 
 ??? code
