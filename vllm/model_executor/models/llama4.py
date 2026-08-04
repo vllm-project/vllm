@@ -37,7 +37,7 @@ from vllm.model_executor.layers.attention import (
     ChunkedLocalAttention,
 )
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -131,7 +131,7 @@ class Llama4MoE(nn.Module):
         self.n_physical_experts = self.n_local_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_expert,
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,

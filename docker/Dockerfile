@@ -26,8 +26,8 @@ ARG CUDA_VERSION=13.0.3
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
-# This version is only used for CUDA 13+ builds; CUDA 12 falls back to
-# the default NCCL version shipped with the base image.
+# This version is used for CUDA 12+ builds to keep the DeepEP build and
+# runtime NCCL versions compatible.
 ARG NCCL_VERSION=2.30.7
 
 # By parameterizing the base images, we allow third-party to use their own
@@ -487,7 +487,7 @@ ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
     CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
-    if [ "$CUDA_MAJOR" -ge 13 ] && [ -n "$NCCL_VERSION" ]; then \
+    if [ -n "$NCCL_VERSION" ]; then \
         echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
             > /tmp/nccl-override.txt && \
         export UV_OVERRIDE=/tmp/nccl-override.txt; \
@@ -742,9 +742,9 @@ RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" \
 
 # DeepEPv2 GIN requires NCCL >= 2.30.4 at both compile and runtime. torch pins
 # an older version as a transitive dep; this override forces uv to use our
-# pinned version whenever nvidia-nccl-cu* is resolved. Empty on CUDA 12 (no-op).
+# pinned version whenever nvidia-nccl-cu* is resolved.
 RUN CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
-    if [ "$CUDA_MAJOR" -ge 13 ]; then \
+    if [ -n "$NCCL_VERSION" ]; then \
         echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
             > /etc/uv-overrides.txt; \
     else \

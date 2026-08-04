@@ -50,7 +50,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, RSWAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -361,7 +361,7 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -983,6 +983,7 @@ class DeepseekV2MLAAttention(nn.Module):
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
         reduce_results: bool = True,
+        non_causal_multi_token_decode: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -1184,6 +1185,7 @@ class DeepseekV2MLAAttention(nn.Module):
             # the V1 proposer. A frozen True would leave the draft reading a
             # never-written topk buffer.
             skip_topk=_skip_topk and not is_mtp_layer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
             # Do not skip scoring for MTP layers: their top-k buffer may be
             # reused by later draft iterations through index sharing.
             allow_short_prefill_indexer_scoring_skip=not is_mtp_layer,
