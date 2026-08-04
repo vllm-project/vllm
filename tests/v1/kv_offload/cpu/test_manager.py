@@ -6,10 +6,10 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     PrepareStoreOutput,
@@ -37,6 +37,7 @@ _EMPTY_REQ_CTX = make_req_context()
 def make_cpu_manager(
     num_blocks: int = 4,
     cache_policy: str = "lru",
+    cache_policy_module_path: str | None = None,
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
@@ -44,6 +45,7 @@ def make_cpu_manager(
     return CPUOffloadingManager(
         num_blocks=num_blocks,
         cache_policy=cache_policy,
+        cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
@@ -115,7 +117,7 @@ def verify_events(
     stores: list[set[OffloadKey]] = []
     evictions: list[set[OffloadKey]] = []
     for event in events:
-        assert event.medium == MEDIUM_CPU
+        assert event.medium == Medium.CPU
         if event.removed:
             evictions.append(set(event.keys))
         else:

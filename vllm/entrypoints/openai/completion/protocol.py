@@ -147,6 +147,14 @@ class CompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
+        ),
+    )
 
     return_tokens_as_token_ids: bool | None = Field(
         default=None,
@@ -184,6 +192,7 @@ class CompletionRequest(OpenAIBaseModel):
 
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -230,6 +239,16 @@ class CompletionRequest(OpenAIBaseModel):
             "Maximum number of tokens allowed for thinking operations "
             "(reasoning models). Non-negative integer sets the limit; "
             "-1 means unlimited (treated as unset)."
+        ),
+    )
+
+    stream_interval: Annotated[int, Field(ge=1)] | None = Field(
+        default=None,
+        description=(
+            "Number of tokens to batch into each streamed chunk. Raises the "
+            "server's `--stream-interval` for this request. Values below the "
+            "server setting are clamped up to it. The first and last chunks "
+            "are always sent immediately. Ignored for non-streaming requests."
         ),
     )
 
@@ -365,6 +384,7 @@ class CompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
+            stream_interval=self.stream_interval,
             structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
@@ -562,18 +582,6 @@ class CompletionRequest(OpenAIBaseModel):
                 parameter="prompt_embeds",
             )
 
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None and (
-            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
-        ):
-            raise VLLMValidationError(
-                "Parameter 'cache_salt' must be a non-empty string if provided.",
-                parameter="cache_salt",
-            )
         return data
 
 

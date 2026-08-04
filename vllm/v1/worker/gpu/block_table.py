@@ -123,7 +123,7 @@ class BlockTables:
         if self.num_kv_cache_groups == 1:
             # Single group: write directly, skipping the per-write group lookup.
             self.block_tables[0].apply_write()
-        else:
+        elif self.num_kv_cache_groups > 1:
             # Multiple groups: apply all block tables with one fused kernel.
             assert self.fused_writer is not None
             self.fused_writer.apply(
@@ -163,7 +163,13 @@ class BlockTables:
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
-        return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
+        #
+        # Zero the rows so dummy runs write mamba state to the reserved null
+        # block rather than through the previous real step's (stale) block
+        # ids, which may point at blocks since freed and reallocated.
+        return tuple(
+            block_table[:num_reqs].zero_() for block_table in self.input_block_tables
+        )
 
     def compute_slot_mappings(
         self,

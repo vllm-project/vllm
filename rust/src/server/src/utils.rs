@@ -15,6 +15,7 @@ use crate::error::ApiError;
 pub struct ResolvedRequestContext {
     pub request_id: String,
     pub data_parallel_rank: Option<u32>,
+    pub session_id: Option<String>,
 }
 
 /// Return the current Unix timestamp in seconds for OpenAI response objects.
@@ -66,6 +67,24 @@ pub fn merge_ec_transfer_params(
     xargs
 }
 
+pub fn resolve_session_id(
+    ctx: &ResolvedRequestContext,
+    request_session_id: Option<&str>,
+    xargs: Option<&HashMap<String, Value>>,
+) -> Option<String> {
+    request_session_id
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| ctx.session_id.clone())
+        .or_else(|| {
+            xargs
+                .and_then(|map| map.get("session_id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+}
+
 /// Convert OpenAI-style `logit_bias` with string token-ID keys into the
 /// internal `HashMap<u32, f32>` representation, validating that every key
 /// parses as a `u32`.
@@ -91,8 +110,8 @@ pub fn convert_logit_bias(
         .transpose()
 }
 
-/// Extract common request metadata from HTTP headers: the external request ID
-/// and the optional data-parallel rank used for engine routing.
+/// Extract common request metadata from HTTP headers: the external request ID,
+/// session ID, and the optional data-parallel rank used for engine routing.
 pub fn resolve_request_context(
     headers: &HeaderMap,
     request_id: Option<&str>,
@@ -106,10 +125,16 @@ pub fn resolve_request_context(
     // Extract request id from header.
     let request_id_header = headers.get("X-Request-Id").and_then(|value| value.to_str().ok());
     let request_id = resolve_base_request_id(request_id_header, request_id);
+    let session_id = headers
+        .get("X-Session-ID")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
 
     ResolvedRequestContext {
         request_id,
         data_parallel_rank,
+        session_id,
     }
 }
 

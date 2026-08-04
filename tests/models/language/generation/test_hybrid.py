@@ -35,7 +35,6 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
@@ -50,7 +49,6 @@ HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL = {
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 

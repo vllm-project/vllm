@@ -378,11 +378,20 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             "language_model.lm_head.": "lm_head.",
         },
         orig_to_new_suffix={
-            # NVFP4 scale
+            # ModelOpt NVFP4 scales
             ".w13_weight.scale": ".w13_weight_scale",
             ".w13_weight.scale2": ".w13_weight_scale_2",
             ".w2_weight.scale": ".w2_weight_scale",
             ".w2_weight.scale2": ".w2_weight_scale_2",
+            # Compressed tensors NVFP4 parameters
+            ".w13_weight.input_global_scale": ".w13_input_global_scale",
+            ".w13_weight.weight_global_scale": ".w13_weight_global_scale",
+            ".w13_weight.weight_packed": ".w13_weight_packed",
+            ".w13_weight.weight_scale": ".w13_weight_scale",
+            ".w2_weight.input_global_scale": ".w2_input_global_scale",
+            ".w2_weight.weight_global_scale": ".w2_weight_global_scale",
+            ".w2_weight.weight_packed": ".w2_weight_packed",
+            ".w2_weight.weight_scale": ".w2_weight_scale",
         },
     )
     packed_modules_mapping = {
