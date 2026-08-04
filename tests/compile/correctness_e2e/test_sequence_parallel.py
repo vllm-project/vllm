@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...models.registry import HF_EXAMPLE_MODELS, _HfExamplesInfo
-from ...utils import compare_two_settings, create_new_process_for_each_test
+from ...utils import compare_all_settings, create_new_process_for_each_test
 
 logger = init_logger("test_sequence_parallel")
 
@@ -37,7 +37,6 @@ class ParallelSetup(NamedTuple):
     fuse_norm_quant: bool
     fuse_act_quant: bool
     eager_mode: bool
-    chunked_prefill: bool
 
 
 class SPTestOptions(NamedTuple):
@@ -54,38 +53,6 @@ class SPTestSettings:
     test_options: SPTestOptions
 
     @staticmethod
-    def detailed(
-        *,
-        tp_base: int = 2,
-        pp_base: int = 1,
-        multi_node_only: bool = False,
-        runner: RunnerOption = "auto",
-        load_format: str | None = None,
-    ):
-        parallel_setups = []
-        for eager_mode_val in [False, True]:
-            for pp_multiplier in [1, 2]:
-                for chunked_prefill_val in [False, True]:
-                    parallel_setups.append(
-                        ParallelSetup(
-                            tp_size=tp_base,
-                            pp_size=pp_multiplier * pp_base,
-                            fuse_norm_quant=False,
-                            fuse_act_quant=False,
-                            eager_mode=eager_mode_val,
-                            chunked_prefill=chunked_prefill_val,
-                        )
-                    )
-        return SPTestSettings(
-            parallel_setups=parallel_setups,
-            distributed_backends=["mp", "ray"],
-            runner=runner,
-            test_options=SPTestOptions(
-                multi_node_only=multi_node_only, load_format=load_format
-            ),
-        )
-
-    @staticmethod
     def fast(
         *,
         tp_base: int = 2,
@@ -94,20 +61,16 @@ class SPTestSettings:
         multi_node_only: bool = False,
         load_format: str | None = None,
     ):
-        parallel_setups = []
-        for eager_mode_val in [False, True]:
-            for pp_multiplier in [1, 2]:
-                for chunked_prefill_val in [False, True]:
-                    parallel_setups.append(
-                        ParallelSetup(
-                            tp_size=tp_base,
-                            pp_size=pp_multiplier * pp_base,
-                            fuse_norm_quant=False,
-                            fuse_act_quant=False,
-                            eager_mode=eager_mode_val,
-                            chunked_prefill=chunked_prefill_val,
-                        )
-                    )
+        parallel_setups = [
+            ParallelSetup(
+                tp_size=tp_base,
+                pp_size=pp_multiplier * pp_base,
+                fuse_norm_quant=False,
+                fuse_act_quant=False,
+                eager_mode=False,
+            )
+            for pp_multiplier in [1, 2]
+        ]
         return SPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
@@ -135,7 +98,6 @@ class SPTestSettings:
                     fuse_norm_quant=fusion_val,
                     fuse_act_quant=fusion_val,
                     eager_mode=True,
-                    chunked_prefill=False,
                 )
             )
         return SPTestSettings(
@@ -161,7 +123,7 @@ class SPTestSettings:
                 )
 
 
-def _compare_sp(
+def _build_sp_args(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
@@ -172,17 +134,14 @@ def _compare_sp(
     fuse_gemm_comms: bool,
     enable_prompt_embeds: bool,
     *,
-    method: Literal["generate", "encode"],
     is_multimodal: bool,
-    dtype: str = "float16",
-):
+) -> tuple[list[str], list[str]] | None:
     (
         tp_size,
         pp_size,
         fuse_norm_quant,
         fuse_act_quant,
         eager_mode,
-        chunked_prefill,
     ) = parallel_setup
 
     multi_node_only = test_options.multi_node_only
@@ -214,26 +173,18 @@ def _compare_sp(
         model_info.check_available_online(on_fail="skip")
 
     if num_gpus_available < tp_size * pp_size:
-        pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
+        return None
     if VLLM_MULTI_NODE and distributed_backend == "mp":
-        pytest.skip(
-            "Skipping multi-node pipeline parallel test for "
-            "multiprocessing distributed backend"
-        )
+        return None
     if multi_node_only and not VLLM_MULTI_NODE:
-        pytest.skip("Not in multi-node setting")
+        return None
 
     common_args = [
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        dtype,
         "--max-model-len",
         "2048",
         "--max-num-seqs",
         "8",
     ]
-    if chunked_prefill:
-        common_args.append("--enable-chunked-prefill")
     if eager_mode:
         common_args.append("-cc.cudagraph_mode=none")
     if runner != "auto":
@@ -294,85 +245,85 @@ def _compare_sp(
         "mp",
     ]
 
-    compare_two_settings(
-        model_id,
-        tp_sp_args,
-        tp_args,
-        method=method,
-        force_v1_runner=True,
-    )
+    return tp_args, tp_sp_args
+
+
+def _compare_sp_settings(
+    model_id: str,
+    settings: list[tuple[list[str], list[str]]],
+    *,
+    method: Literal["generate", "encode"],
+) -> None:
+    if not settings:
+        pytest.skip("No supported sequence-parallel configurations")
+
+    settings_by_tp_args: dict[tuple[str, ...], list[list[str]]] = {}
+    for tp_args, tp_sp_args in settings:
+        settings_by_tp_args.setdefault(tuple(tp_args), []).append(tp_sp_args)
+
+    for tp_args_key, grouped_tp_sp_args in settings_by_tp_args.items():
+        all_args = [list(tp_args_key), *grouped_tp_sp_args]
+        compare_all_settings(
+            model_id,
+            all_args,
+            [None] * len(all_args),
+            method=method,
+            force_v1_runner=True,
+        )
 
 
 SP_TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "hmellor/tiny-random-LlamaForCausalLM": SPTestSettings.fast(),
-    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8": SPTestSettings.fp8_quant(),
+    "RedHatAI/Llama-3.2-1B-Instruct-FP8": SPTestSettings.fp8_quant(),
 }
-
-SP_TEST_MODELS = [
-    # TODO support other models
-    # [LANGUAGE GENERATION]
-    "hmellor/tiny-random-LlamaForCausalLM",
-    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
-]
 
 
 @pytest.mark.parametrize(
-    (
-        "model_id",
-        "parallel_setup",
-        "distributed_backend",
-        "runner",
-        "test_options",
-    ),
+    ("model_id", "settings"),
     [
-        params
+        pytest.param(model_id, settings, id=model_id)
         for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_id)
-        if model_id in SP_TEST_MODELS
     ],
 )
-@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
-@pytest.mark.parametrize("fuse_gemm_comms", [False])  # TODO: enable async TP
 @create_new_process_for_each_test()
 def test_tp_sp_generation(
     model_id: str,
-    parallel_setup: ParallelSetup,
-    distributed_backend: str,
-    runner: RunnerOption,
-    test_options: SPTestOptions,
+    settings: SPTestSettings,
     num_gpus_available,
-    use_inductor_graph_partition: bool,
-    fuse_gemm_comms: bool,
 ):
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
-
     # Skip FP8 SP-only test on sm89 (compute capability 8.9).
     # An unknown capability (None) is left to fail in the test body rather than
     # being silently skipped here.
     capability = current_platform.get_device_capability()
-    if (
-        "fp8" in model_id.lower()
-        and capability is not None
-        and capability < (9, 0)
-        and (not fuse_gemm_comms)
-    ):
+    if "fp8" in model_id.lower() and capability is not None and capability < (9, 0):
         pytest.skip("FP8 reduction support begins with sm90 capable devices.")
 
-    _compare_sp(
-        model_id,
-        parallel_setup,
-        distributed_backend,
-        runner,
-        test_options,
-        num_gpus_available,
-        use_inductor_graph_partition,
-        fuse_gemm_comms=fuse_gemm_comms,
-        enable_prompt_embeds=False,
-        method="generate",
-        is_multimodal=False,
-    )
+    graph_partition_options = [False]
+    if is_torch_equal_or_newer("2.9.0.dev"):
+        graph_partition_options.append(True)
+
+    comparisons = []
+    for _, parallel_setup, backend, runner, test_options in settings.iter_params(
+        model_id
+    ):
+        for use_inductor_graph_partition in graph_partition_options:
+            comparison = _build_sp_args(
+                model_id,
+                parallel_setup,
+                backend,
+                runner,
+                test_options,
+                num_gpus_available,
+                use_inductor_graph_partition,
+                fuse_gemm_comms=False,  # TODO: enable async TP
+                enable_prompt_embeds=False,
+                is_multimodal=False,
+            )
+            if comparison is not None:
+                comparisons.append(comparison)
+
+    _compare_sp_settings(model_id, comparisons, method="generate")
 
 
 # Focused regression test for the SP + prompt_embeds graph-rewrite path.
@@ -385,36 +336,39 @@ SP_PROMPT_EMBEDS_PARALLEL_SETUPS = [
         fuse_norm_quant=False,
         fuse_act_quant=False,
         eager_mode=False,
-        chunked_prefill=False,
     )
     for pp_size in [1, 2]
 ]
 
 
-@pytest.mark.parametrize("parallel_setup", SP_PROMPT_EMBEDS_PARALLEL_SETUPS)
-@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
 @create_new_process_for_each_test()
 def test_tp_sp_generation_prompt_embeds(
-    parallel_setup: ParallelSetup,
     num_gpus_available,
-    use_inductor_graph_partition: bool,
 ):
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+    model_id = "hmellor/tiny-random-LlamaForCausalLM"
+    graph_partition_options = [False]
+    if is_torch_equal_or_newer("2.9.0.dev"):
+        graph_partition_options.append(True)
 
-    _compare_sp(
-        "hmellor/tiny-random-LlamaForCausalLM",
-        parallel_setup,
-        distributed_backend="mp",
-        runner="auto",
-        test_options=SPTestOptions(multi_node_only=False, load_format=None),
-        num_gpus_available=num_gpus_available,
-        use_inductor_graph_partition=use_inductor_graph_partition,
-        fuse_gemm_comms=False,
-        enable_prompt_embeds=True,
-        method="generate",
-        is_multimodal=False,
-    )
+    comparisons = []
+    for parallel_setup in SP_PROMPT_EMBEDS_PARALLEL_SETUPS:
+        for use_inductor_graph_partition in graph_partition_options:
+            comparison = _build_sp_args(
+                model_id,
+                parallel_setup,
+                distributed_backend="mp",
+                runner="auto",
+                test_options=SPTestOptions(multi_node_only=False, load_format=None),
+                num_gpus_available=num_gpus_available,
+                use_inductor_graph_partition=use_inductor_graph_partition,
+                fuse_gemm_comms=False,
+                enable_prompt_embeds=True,
+                is_multimodal=False,
+            )
+            if comparison is not None:
+                comparisons.append(comparison)
+
+    _compare_sp_settings(model_id, comparisons, method="generate")
 
 
 @create_new_process_for_each_test()
@@ -425,7 +379,7 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
     ):
         pytest.skip("NVFP4 requires Blackwell")
 
-    _compare_sp(
+    comparison = _build_sp_args(
         NVFP4_MODEL_ID,
         ParallelSetup(
             tp_size=2,
@@ -433,7 +387,6 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
             fuse_norm_quant=True,
             fuse_act_quant=True,
             eager_mode=True,
-            chunked_prefill=False,
         ),
         "mp",
         "auto",
@@ -446,7 +399,10 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
         use_inductor_graph_partition=False,
         fuse_gemm_comms=False,
         enable_prompt_embeds=False,
-        method="generate",
         is_multimodal=False,
-        dtype="bfloat16",
+    )
+    _compare_sp_settings(
+        NVFP4_MODEL_ID,
+        [] if comparison is None else [comparison],
+        method="generate",
     )
