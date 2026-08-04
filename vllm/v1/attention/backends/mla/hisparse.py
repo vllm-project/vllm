@@ -30,6 +30,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -41,6 +42,58 @@ logger = init_logger(__name__)
 # fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
 FP8_DS_MLA_ROW_BYTES = 656
 HISPARSE_KERNEL_BLOCK_SIZE = 64
+
+
+@triton.jit
+def _compress_hisparse_slot_mapping_kernel(
+    source_ptr,
+    positions_ptr,
+    output_ptr,
+    num_tokens,
+    logical_block_size: tl.constexpr,
+    storage_block_size: tl.constexpr,
+    compress_ratio: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offset = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offset < num_tokens
+    source = tl.load(source_ptr + offset, mask=mask, other=-1)
+    position = tl.load(positions_ptr + offset, mask=mask, other=-1)
+    valid = (source >= 0) & ((position + 1) % compress_ratio == 0)
+    compressed = (
+        source // logical_block_size * storage_block_size
+        + source % logical_block_size // compress_ratio
+    )
+    tl.store(output_ptr + offset, tl.where(valid, compressed, -1), mask=mask)
+
+
+def compress_hisparse_slot_mapping(
+    source: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    logical_block_size: int,
+    storage_block_size: int,
+    compress_ratio: int,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Map uncompressed HMA slots to a compressed physical cache."""
+    num_tokens = min(source.numel(), positions.numel())
+    if out is None:
+        out = torch.empty_like(source)
+    out.fill_(-1)
+    if num_tokens:
+        block = 256
+        _compress_hisparse_slot_mapping_kernel[(triton.cdiv(num_tokens, block),)](
+            source,
+            positions,
+            out,
+            num_tokens,
+            logical_block_size=logical_block_size,
+            storage_block_size=storage_block_size,
+            compress_ratio=compress_ratio,
+            BLOCK_SIZE=block,
+        )
+    return out[:num_tokens]
 
 
 @dataclass(frozen=True)
@@ -390,6 +443,8 @@ class HiSparseCoordinator:
         row_width: int,
         kv_dtype: torch.dtype,
         device: torch.device | str,
+        storage_block_size: int | None = None,
+        row_value_bytes: int | None = None,
     ) -> None:
         if not _has_hisparse_ops():
             raise RuntimeError(
@@ -403,23 +458,33 @@ class HiSparseCoordinator:
         self.row_width = row_width
         self.kv_dtype = kv_dtype
         self.device = torch.device(device)
+        self.storage_block_size = storage_block_size
+        self.row_value_bytes = row_value_bytes
         # Logical slots per request. Physical rows come from its ephemeral HMA
         # block table and need not be contiguous in the shared slab.
         self.region_stride = config.device_buffer_size
 
         row_bytes = row_width * kv_dtype.itemsize
-        if row_bytes % 16 != 0:
+        if row_value_bytes is None and row_bytes % 16 != 0:
             raise ValueError(
                 f"HiSparse requires 16-byte aligned KV rows, got {row_bytes}B."
+            )
+        if row_value_bytes is not None and not 0 < row_value_bytes < row_bytes:
+            raise ValueError(
+                "HiSparse split-page value bytes must be between zero and the "
+                f"full row width, got {row_value_bytes} for a {row_bytes}B row."
             )
 
         self.hot_cache: torch.Tensor | None = None
         self.attention_hot_cache: torch.Tensor | None = None
         self.resident_block_table: torch.Tensor | None = None
         self.resident_slot_mapping: torch.Tensor | None = None
+        self.compressed_resident_slot_mapping: torch.Tensor | None = None
         self.resident_group_id = -1
         self.resident_block_size = 0
+        self.resident_logical_block_size = 0
         self.fully_resident_batch = False
+        self.decode_batch = False
         self.hot_block_table: torch.Tensor | None = None
         self.attention_block_stride = 0
         self._hot_indices = torch.empty(
@@ -509,19 +574,22 @@ class HiSparseCoordinator:
         itemsize = self.kv_dtype.itemsize
         assert byte_offset % itemsize == 0 and block_stride % itemsize == 0
         row_bytes = self.row_width * itemsize
-        page_bytes = block_size * row_bytes
-        assert byte_offset % page_bytes == 0 and block_stride % page_bytes == 0
+        storage_block_size = self.storage_block_size or block_size
         self.hot_cache = torch.as_strided(
             raw_tensor.view(self.kv_dtype),
-            size=(num_blocks, block_size, self.row_width),
+            size=(num_blocks, storage_block_size, self.row_width),
             stride=(block_stride // itemsize, self.row_width, 1),
             storage_offset=byte_offset // itemsize,
         )
-        attention_storage = raw_tensor[byte_offset:].view(self.kv_dtype)
-        self.attention_hot_cache = attention_storage.view(
-            -1, block_size, self.row_width
-        )
-        self.attention_block_stride = block_stride // row_bytes
+        if block_stride % (storage_block_size * row_bytes) == 0:
+            attention_storage = raw_tensor[byte_offset:].view(self.kv_dtype)
+            self.attention_hot_cache = attention_storage.view(
+                -1, storage_block_size, self.row_width
+            )
+            self.attention_block_stride = block_stride // row_bytes
+        else:
+            self.attention_hot_cache = self.hot_cache
+            self.attention_block_stride = storage_block_size
 
     def bind_hot_block_table(self, block_table: torch.Tensor) -> None:
         self.hot_block_table = block_table
@@ -540,12 +608,10 @@ class HiSparseCoordinator:
     ) -> None:
         """Bind the paged resident view sharing the hot HMA layout."""
         itemsize = self.kv_dtype.itemsize
-        row_bytes = self.row_width * itemsize
-        page_bytes = block_size * row_bytes
-        assert byte_offset % page_bytes == 0 and block_stride % page_bytes == 0
+        storage_block_size = self.storage_block_size or block_size
         resident = torch.as_strided(
             raw_tensor.view(self.kv_dtype),
-            size=(num_blocks, block_size, self.row_width),
+            size=(num_blocks, storage_block_size, self.row_width),
             stride=(block_stride // itemsize, self.row_width, 1),
             storage_offset=byte_offset // itemsize,
         )
@@ -556,11 +622,28 @@ class HiSparseCoordinator:
             assert resident.stride() == self.hot_cache.stride()
         self.resident_block_table = block_table
         self.resident_slot_mapping = slot_mapping
+        if self.storage_block_size is not None:
+            self.compressed_resident_slot_mapping = torch.empty_like(slot_mapping)
         self.resident_group_id = group_id
-        self.resident_block_size = block_size
+        self.resident_block_size = storage_block_size
+        self.resident_logical_block_size = block_size
+
+    def get_compressed_resident_slot_mapping(
+        self, positions: torch.Tensor, compress_ratio: int
+    ) -> torch.Tensor:
+        """Return the current batch's resident slots in compressed units."""
+        assert self.resident_slot_mapping is not None
+        assert self.compressed_resident_slot_mapping is not None
+        return compress_hisparse_slot_mapping(
+            self.resident_slot_mapping,
+            positions,
+            logical_block_size=self.resident_logical_block_size,
+            storage_block_size=self.resident_block_size,
+            compress_ratio=compress_ratio,
+            out=self.compressed_resident_slot_mapping,
+        )
 
     def bind_source_cache(self, kv_cache: torch.Tensor) -> None:
-        flat = kv_cache.view(-1, kv_cache.shape[-1])
         if kv_cache.dtype != self.kv_dtype or kv_cache.shape[-1] != self.row_width:
             raise ValueError(
                 "HiSparse coordinator bound to a KV cache with mismatched "
@@ -584,7 +667,11 @@ class HiSparseCoordinator:
         ):
             raise ValueError("HiSparse host-resident KV pool must be pinned memory.")
 
-        self._host_cache = flat
+        self._host_cache = (
+            kv_cache
+            if self.row_value_bytes is not None
+            else kv_cache.view(-1, kv_cache.shape[-1])
+        )
 
     def resolve_resident(
         self,
@@ -653,12 +740,15 @@ class HiSparseCoordinator:
             device=plan.block_table.device,
         )
         torch.ops._C_cache_ops.hisparse_gather_plan(
-            kv_cache.view(-1, row_width),
-            staged.view(-1, row_width),
+            kv_cache,
+            staged,
             plan.row_ids,
             plan.dst_rows,
             plan.miss_mask,
             None,
+            None,
+            0,
+            self.row_value_bytes or 0,
         )
         return staged
 
@@ -702,7 +792,14 @@ class HiSparseCoordinator:
             src_indices,
             self._host_cache,
             dst_slots,
+            self.row_value_bytes or 0,
         )
+
+    def backup_compressed_rows(
+        self, src_cache: torch.Tensor, src_slots: torch.Tensor, dst_slots: torch.Tensor
+    ) -> None:
+        """Mirror already-encoded compressed rows into the host source."""
+        self._backup_rows(src_cache, src_slots, dst_slots)
 
     def backup_caches(
         self,
@@ -871,6 +968,7 @@ class HiSparseCoordinator:
             self.resident_block_table,
             self.resident_block_size,
             0,
+            self.row_value_bytes or 0,
         )
 
         if produce_plan and self.group_shared:
@@ -888,6 +986,7 @@ class HiSparseCoordinator:
             self._plan.miss_global_indices[:num_tokens],
             self._plan.miss_hot_indices[:num_tokens],
             self._plan.miss_counts[:num_tokens],
+            self.row_value_bytes or 0,
         )
 
     def _prefetch_group(self, num_tokens: int) -> None:
@@ -946,6 +1045,8 @@ def create_hisparse_coordinator(
     row_width: int,
     kv_dtype: torch.dtype,
     device: torch.device | str | None = None,
+    storage_block_size: int | None = None,
+    row_value_bytes: int | None = None,
 ) -> HiSparseCoordinator | None:
     config = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k)
     if config is None:
@@ -963,6 +1064,8 @@ def create_hisparse_coordinator(
         row_width=row_width,
         kv_dtype=kv_dtype,
         device=device,
+        storage_block_size=storage_block_size,
+        row_value_bytes=row_value_bytes,
     )
     kv_transfer_config = vllm_config.kv_transfer_config
     coordinator.eager_host_mirror = bool(

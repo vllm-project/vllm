@@ -55,6 +55,7 @@ def test_expand_hisparse_source_blocks_into_kernel_pages():
 def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
     runtime = object.__new__(HiSparseRuntime)
     runtime.block_size = 64
+    runtime.kernel_block_size = 64
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={"request-0": 1, "request-1": 1},
         scheduled_new_reqs=[SimpleNamespace(block_ids=([2, 3],))],
@@ -112,6 +113,7 @@ def test_hisparse_runtime_enqueues_fused_page_spill(monkeypatch):
     runtime.backup_src_block_stride = 4
     runtime.backup_src_block_size = 5
     runtime.backup_src_rows = 6
+    runtime.backup_row_value_bytes = 0
     current_stream = object()
     recorded_streams: list[object] = []
     runtime.host_write_event = SimpleNamespace(record=recorded_streams.append)
@@ -143,7 +145,7 @@ def test_hisparse_runtime_enqueues_fused_page_spill(monkeypatch):
     runtime._enqueue_spills([spill])
 
     assert len(calls) == 1
-    assert calls[0][6:] == (4, 4, 5, 6)
+    assert calls[0][6:] == (4, 4, 5, 6, 0)
     assert runtime.spill_src_gpu[0, :4].tolist() == [44, 45, 46, 47]
     assert runtime.spill_src_gpu[1, :4].tolist() == [52, 53, 54, 55]
     assert runtime.spill_dst_gpu[:4].tolist() == [44, 45, 46, 47]

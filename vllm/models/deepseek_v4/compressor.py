@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
@@ -27,6 +28,10 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+)
+from vllm.v1.attention.backends.mla.hisparse import (
+    compress_hisparse_slot_mapping,
+    get_indexer_source,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
@@ -403,8 +408,19 @@ class DeepseekCompressor(nn.Module):
         # - position used: (positions // compress_ratio) * compress_ratio
         cos_sin_cache = rotary_emb.cos_sin_cache
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
+        source_k_cache_metadata = k_cache_metadata
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
+        hisparse_coordinator = getattr(k_cache_layer, "hisparse_coordinator", None)
+        if hisparse_coordinator is not None:
+            assert hisparse_coordinator.hot_cache is not None
+            kv_cache = hisparse_coordinator.hot_cache
+            num_kv_slots = source_k_cache_metadata.slot_mapping.numel()
+            k_cache_metadata = SimpleNamespace(
+                slot_mapping=hisparse_coordinator.get_compressed_resident_slot_mapping(
+                    positions[:num_kv_slots], self.compress_ratio
+                )
+            )
 
         # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
         # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
@@ -476,3 +492,31 @@ class DeepseekCompressor(nn.Module):
             scale_dim=self._scale_dim,
             **extra_kwargs,
         )
+
+        if hisparse_coordinator is not None and not hisparse_coordinator.decode_batch:
+            hisparse_coordinator.backup_compressed_rows(
+                kv_cache,
+                k_cache_metadata.slot_mapping,
+                source_k_cache_metadata.slot_mapping,
+            )
+
+        if self.head_dim == 128:
+            source = get_indexer_source(self.k_cache_prefix)
+            if source is not None:
+                host_cache, source_slot_mapping = source
+                src_slots = source_k_cache_metadata.slot_mapping
+                num_slots = src_slots.numel()
+                dst_slots = compress_hisparse_slot_mapping(
+                    source_slot_mapping[:num_slots],
+                    positions[:num_slots],
+                    logical_block_size=(host_cache.shape[1] * self.compress_ratio),
+                    storage_block_size=host_cache.shape[1],
+                    compress_ratio=self.compress_ratio,
+                )
+                torch.ops._C_cache_ops.hisparse_backup_indexer(
+                    kv_cache,
+                    src_slots,
+                    host_cache,
+                    dst_slots,
+                    self._token_stride,
+                )

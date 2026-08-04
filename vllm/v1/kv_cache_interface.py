@@ -1119,11 +1119,17 @@ class KVCacheConfig:
             if isinstance(group.kv_cache_spec, MambaSpec)
         }
         for group in self.kv_cache_groups:
-            spec = group.kv_cache_spec
-            if isinstance(spec, AttentionSpec):
-                pool_precisions.setdefault(group.block_pool_id, set()).add(
-                    (spec.dtype, spec.kv_quant_mode)
-                )
+            group_spec = group.kv_cache_spec
+            specs = (
+                group_spec.kv_cache_specs.values()
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else (group_spec,)
+            )
+            pool_precisions.setdefault(group.block_pool_id, set()).update(
+                (spec.dtype, spec.kv_quant_mode)
+                for spec in specs
+                if isinstance(spec, AttentionSpec)
+            )
         zeroing_pools.update(
             pool_id
             for pool_id, precisions in pool_precisions.items()

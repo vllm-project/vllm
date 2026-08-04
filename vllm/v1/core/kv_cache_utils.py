@@ -1387,15 +1387,35 @@ HISPARSE_INDEXER_SOURCE_SUFFIX = ".hisparse_source"
 
 def _get_hisparse_hma_config(
     vllm_config: VllmConfig,
-    group: KVCacheGroupSpec,
+    groups: KVCacheGroupSpec | list[KVCacheGroupSpec],
     available_memory: int,
     host_budget: int,
     *,
     log_layout: bool = True,
 ) -> KVCacheConfig:
     """Build independent host-source and GPU-HMA allocator domains."""
+    if isinstance(groups, KVCacheGroupSpec):
+        groups = [groups]
+    group = groups[0]
     assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-    specs = group.kv_cache_spec.kv_cache_specs
+    all_full_specs = group.kv_cache_spec.kv_cache_specs
+    is_deepseek_v4 = any(
+        isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
+        for spec in all_full_specs.values()
+    )
+    specs: dict[str, KVCacheSpec]
+    if is_deepseek_v4:
+        specs = {
+            name: spec
+            for name, spec in all_full_specs.items()
+            if isinstance(spec, MLAAttentionSpec) and spec.compress_ratio == 4
+        }
+        if not specs:
+            raise ValueError(
+                "HiSparse requires DeepSeek V4 to expose C4 MLA cache layers."
+            )
+    else:
+        specs = all_full_specs
     host_specs = {
         name: spec for name, spec in specs.items() if _is_hisparse_host_layer(name)
     }
@@ -1417,7 +1437,7 @@ def _get_hisparse_hma_config(
         vllm_config, vllm_config.model_config.hf_config.index_topk
     )
     assert config is not None
-    hot_blocks_per_request = cdiv(config.device_buffer_size, HISPARSE_KERNEL_BLOCK_SIZE)
+    gpu_block_size = block_size if is_deepseek_v4 else HISPARSE_KERNEL_BLOCK_SIZE
 
     source_specs = {
         (
@@ -1429,7 +1449,7 @@ def _get_hisparse_hma_config(
     # Host pages retain the scheduler block size. The packed GPU slab uses
     # native kernel pages so indexer and hot-cache block IDs share one layout.
     gpu_indexer_specs = {
-        name: spec.copy_with_new_block_size(HISPARSE_KERNEL_BLOCK_SIZE)
+        name: spec.copy_with_new_block_size(gpu_block_size)
         for name, spec in indexer_specs.items()
     }
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(gpu_indexer_specs)
@@ -1450,6 +1470,20 @@ def _get_hisparse_hma_config(
     )
 
     indexer_page = sum(spec.page_size_bytes for spec in gpu_indexer_specs.values())
+    storage_block_sizes = {
+        spec.storage_block_size
+        for spec in gpu_indexer_specs.values()
+        if isinstance(spec, MLAAttentionSpec)
+    }
+    if not storage_block_sizes:
+        storage_block_size = gpu_block_size
+    elif len(storage_block_sizes) == 1:
+        storage_block_size = storage_block_sizes.pop()
+    else:
+        raise ValueError(
+            "HiSparse indexer layers require one physical cache block size."
+        )
+    hot_blocks_per_request = cdiv(config.device_buffer_size, storage_block_size)
 
     def layer_prefix(name: str) -> str:
         if ".self_attn." in name:
@@ -1468,7 +1502,7 @@ def _get_hisparse_hma_config(
         hot_units[-1].append(
             (
                 f"{layer_name}{HISPARSE_HOT_SUFFIX}",
-                layer_spec.copy_with_new_block_size(HISPARSE_KERNEL_BLOCK_SIZE),
+                layer_spec.copy_with_new_block_size(gpu_block_size),
             )
         )
 
@@ -1492,7 +1526,7 @@ def _get_hisparse_hma_config(
                     for name, _ in layers
                 ],
                 HiSparseResidentSpec(
-                    block_size=HISPARSE_KERNEL_BLOCK_SIZE,
+                    block_size=gpu_block_size,
                     page_size=page_size,
                 ),
                 block_pool_id=1,
@@ -1504,7 +1538,7 @@ def _get_hisparse_hma_config(
             KVCacheGroupSpec(
                 [name for name, _ in layers],
                 HiSparseHotSpec(
-                    block_size=HISPARSE_KERNEL_BLOCK_SIZE,
+                    block_size=gpu_block_size,
                     page_size=page_size,
                     blocks_per_request=hot_blocks_per_request,
                 ),
@@ -1525,7 +1559,39 @@ def _get_hisparse_hma_config(
     if current:
         append_hot_group(current)
 
-    gpu_groups = [indexer_group, *resident_groups, *hot_groups]
+    regular_groups: list[KVCacheGroupSpec] = []
+    remaining_full_specs = {
+        name: spec for name, spec in all_full_specs.items() if name not in specs
+    }
+    if remaining_full_specs:
+        remaining_full_spec = UniformTypeKVCacheSpecs.from_specs(remaining_full_specs)
+        assert remaining_full_spec is not None
+        regular_groups.append(
+            KVCacheGroupSpec(
+                list(remaining_full_specs),
+                remaining_full_spec,
+                is_eagle_group=group.is_eagle_group,
+                block_pool_id=1,
+            )
+        )
+    regular_groups.extend(
+        KVCacheGroupSpec(
+            layer_names=regular.layer_names,
+            kv_cache_spec=regular.kv_cache_spec,
+            is_eagle_group=regular.is_eagle_group,
+            block_pool_id=1,
+            enable_prefix_caching=regular.enable_prefix_caching,
+            enable_kv_transfer=regular.enable_kv_transfer,
+            role=regular.role,
+        )
+        for regular in groups[1:]
+    )
+    gpu_groups = [
+        indexer_group,
+        *resident_groups,
+        *hot_groups,
+        *regular_groups,
+    ]
     gpu_stride, gpu_layers_by_offset = _get_packed_kv_cache_layout(gpu_groups)
     hot_page_alignment = math.lcm(
         *(group.kv_cache_spec.page_size_bytes for group in hot_groups)
@@ -1581,6 +1647,7 @@ def _get_hisparse_hma_config(
             indexer_group,
             *resident_groups,
             *hot_groups,
+            *regular_groups,
         ],
     )
 
@@ -1597,16 +1664,28 @@ def _hisparse_gpu_memory_usage(
     """
     if vllm_config.attention_config.hisparse_config is None:
         return None
-    if not (
-        len(kv_cache_groups) == 1
-        and isinstance(kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs)
+    if not kv_cache_groups or not isinstance(
+        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
         return None
     per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
-    return sum(
+    is_deepseek_v4 = any(
+        isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
+        for spec in per_layer_specs.values()
+    )
+    full_group_bytes = sum(
         spec.max_memory_usage_bytes(vllm_config)
         for name, spec in per_layer_specs.items()
         if not _is_hisparse_host_layer(name)
+        or (
+            is_deepseek_v4
+            and isinstance(spec, MLAAttentionSpec)
+            and spec.compress_ratio != 4
+        )
+    )
+    return full_group_bytes + sum(
+        group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+        for group in kv_cache_groups[1:]
     )
 
 
@@ -1636,20 +1715,22 @@ def get_kv_cache_config_from_groups(
         )
 
     # Determine how model runners should initialize the KV cache tensors.
+    hisparse_host_budget = _hisparse_host_pool_bytes(vllm_config)
+    if hisparse_host_budget is not None and isinstance(
+        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
+    ):
+        return _get_hisparse_hma_config(
+            vllm_config,
+            kv_cache_groups,
+            available_memory,
+            hisparse_host_budget,
+        )
     if len(kv_cache_groups) == 1 and isinstance(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
         # Special case: all layers have the same type of KV cache but with
         # different hidden sizes. Allocate different amount of memory for each
         # layer based on its hidden size.
-        hisparse_host_budget = _hisparse_host_pool_bytes(vllm_config)
-        if hisparse_host_budget is not None:
-            return _get_hisparse_hma_config(
-                vllm_config,
-                kv_cache_groups[0],
-                available_memory,
-                hisparse_host_budget,
-            )
         num_blocks = (
             available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
         )
@@ -2165,16 +2246,13 @@ def _max_memory_usage_bytes_from_groups(
     if not kv_cache_groups:
         return 0
 
+    hisparse_gpu_bytes = _hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
+    if hisparse_gpu_bytes is not None:
+        return hisparse_gpu_bytes
     if len(kv_cache_groups) == 1 and isinstance(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
         # UniformTypeKVCacheSpecs special case (single group, per-layer specs)
-        hisparse_gpu_bytes = _hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
-        if hisparse_gpu_bytes is not None:
-            # Only GPU-resident (indexer) layers count against GPU memory;
-            # the host part is validated against the pinned host budget in
-            # get_kv_cache_config_from_groups and _estimate_max_model_len.
-            return hisparse_gpu_bytes
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         return sum(
             spec.max_memory_usage_bytes(vllm_config)
