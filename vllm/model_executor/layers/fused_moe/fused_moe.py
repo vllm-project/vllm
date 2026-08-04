@@ -35,7 +35,10 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.platform_utils import get_device_name_as_file_name
+from vllm.utils.platform_utils import (
+    get_device_name_as_file_name,
+    resolve_rocm_device_config_file_path,
+)
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -1135,12 +1138,16 @@ def get_moe_configs(
         user_defined_config_file_path = os.path.join(
             user_defined_config_folder, json_file_name
         )
-        config_file_paths.append(user_defined_config_file_path)
+        config_file_paths.append(
+            resolve_rocm_device_config_file_path(user_defined_config_file_path)
+        )
 
     default_config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
     )
-    config_file_paths.append(default_config_file_path)
+    config_file_paths.append(
+        resolve_rocm_device_config_file_path(default_config_file_path)
+    )
 
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
