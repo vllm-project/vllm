@@ -180,6 +180,8 @@ def _build_sp_args(
         return None
 
     common_args = [
+        "--dtype",
+        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
