@@ -4,8 +4,32 @@
 from unittest.mock import Mock, patch
 
 
+def test_qwen3_5_models_use_platform_specific_implementation():
+    from vllm.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5MTP
+    from vllm.platforms import current_platform
+
+    backend = "amd" if current_platform.is_rocm() else "nvidia"
+    assert Qwen3_5ForCausalLM.__module__ == f"vllm.models.qwen3_5.{backend}.model"
+    assert Qwen3_5MTP.__module__ == f"vllm.models.qwen3_5.{backend}.mtp"
+
+
+def test_qwen3_5_models_do_not_use_torch_compile_wrapper():
+    from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+    from vllm.models.qwen3_5 import (
+        Qwen3_5Model,
+        Qwen3_5MTP,
+        Qwen3_5MultiTokenPredictor,
+    )
+
+    assert not issubclass(Qwen3_5Model, TorchCompileWithNoGuardsWrapper)
+    assert not issubclass(Qwen3_5MultiTokenPredictor, TorchCompileWithNoGuardsWrapper)
+    assert not issubclass(Qwen3_5MTP, TorchCompileWithNoGuardsWrapper)
+
+
 def test_qwen3_5_lm_head_receives_quant_config():
-    from vllm.model_executor.models.qwen3_5 import Qwen3_5ForCausalLMBase
+    from vllm.models.qwen3_5 import Qwen3_5ForCausalLMBase
+
+    model_module = Qwen3_5ForCausalLMBase.__module__
 
     mock_quant_config = Mock()
 
@@ -25,11 +49,11 @@ def test_qwen3_5_lm_head_receives_quant_config():
     mock_pp_group.is_last_rank = True
 
     with (
-        patch("vllm.model_executor.models.qwen3_5.Qwen3_5Model") as MockModel,
-        patch("vllm.model_executor.models.qwen3_5.ParallelLMHead") as MockLMHead,
-        patch("vllm.model_executor.models.qwen3_5.LogitsProcessor"),
+        patch(f"{model_module}.Qwen3_5Model") as MockModel,
+        patch(f"{model_module}.ParallelLMHead") as MockLMHead,
+        patch(f"{model_module}.LogitsProcessor"),
         patch(
-            "vllm.model_executor.models.qwen3_5.get_pp_group",
+            f"{model_module}.get_pp_group",
             return_value=mock_pp_group,
         ),
     ):
@@ -43,8 +67,9 @@ def test_qwen3_5_lm_head_receives_quant_config():
 
 
 def test_qwen3_5_mtp_lm_head_receives_quant_config():
-    from vllm.config import CompilationMode
-    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
+    from vllm.models.qwen3_5 import Qwen3_5MTP
+
+    mtp_module = Qwen3_5MTP.__module__
 
     mock_quant_config = Mock()
 
@@ -56,18 +81,17 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
     mock_vllm_config = Mock()
     mock_vllm_config.model_config.hf_text_config = mock_hf_config
     mock_vllm_config.cache_config.mamba_cache_mode = "align"
-    mock_vllm_config.compilation_config.mode = CompilationMode.NONE
     mock_vllm_config.quant_config = mock_quant_config
 
     mock_pp_group = Mock()
     mock_pp_group.is_last_rank = True
 
     with (
-        patch("vllm.model_executor.models.qwen3_5_mtp.Qwen3_5MultiTokenPredictor"),
-        patch("vllm.model_executor.models.qwen3_5_mtp.ParallelLMHead") as MockLMHead,
-        patch("vllm.model_executor.models.qwen3_5_mtp.LogitsProcessor"),
+        patch(f"{mtp_module}.Qwen3_5MultiTokenPredictor"),
+        patch(f"{mtp_module}.ParallelLMHead") as MockLMHead,
+        patch(f"{mtp_module}.LogitsProcessor"),
         patch(
-            "vllm.model_executor.models.qwen3_5_mtp.get_pp_group",
+            f"{mtp_module}.get_pp_group",
             return_value=mock_pp_group,
         ),
     ):
