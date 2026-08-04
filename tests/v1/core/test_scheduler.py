@@ -5737,16 +5737,6 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     assert replay.num_tokens - num_scheduled == block_size
 
 
-def _prompt_done_req_ids(scheduler, scheduler_output):
-    """Mirror of `GPUModelRunner._prompt_done_req_ids` for scheduler-only tests."""
-    return {
-        req_id
-        for req_id, num_scheduled in scheduler_output.num_scheduled_tokens.items()
-        if scheduler.requests[req_id].num_computed_tokens + num_scheduled
-        >= scheduler.requests[req_id].num_prompt_tokens
-    }
-
-
 def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
     """One request whose image sits after some text, as an EPD proxy sends it.
 
@@ -5758,6 +5748,9 @@ def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
     ecm.cache_size = ecm.num_free_slots = ecm.num_freeable_slots = 8 * image_tokens
     scheduler.max_num_encoder_input_tokens = 8 * image_tokens
 
+    # `make_empty_encoder_model_runner_output` reads only `num_computed_tokens`
+    # and `num_prompt_tokens`, so `scheduler.requests` stands in for the worker's
+    # `CachedRequestState` map without a model runner.
     (request,) = create_requests(
         num_requests=1,
         num_tokens=text_prefix + image_tokens + 4,
@@ -5799,9 +5792,7 @@ def test_encoder_instance_defers_stop_until_prompt_is_consumed():
 
     scheduler.update_from_output(
         output,
-        make_empty_encoder_model_runner_output(
-            output, _prompt_done_req_ids(scheduler, output)
-        ),
+        make_empty_encoder_model_runner_output(output, scheduler.requests),
     )
 
     assert not request.is_finished(), (
@@ -5819,9 +5810,7 @@ def test_encoder_instance_defers_stop_until_prompt_is_consumed():
 
     scheduler.update_from_output(
         output,
-        make_empty_encoder_model_runner_output(
-            output, _prompt_done_req_ids(scheduler, output)
-        ),
+        make_empty_encoder_model_runner_output(output, scheduler.requests),
     )
     assert request.is_finished()
 
@@ -5843,9 +5832,7 @@ def test_encoder_instance_finishes_request_once_prompt_is_consumed():
 
     scheduler.update_from_output(
         output,
-        make_empty_encoder_model_runner_output(
-            output, _prompt_done_req_ids(scheduler, output)
-        ),
+        make_empty_encoder_model_runner_output(output, scheduler.requests),
     )
     assert request.is_finished()
     assert request.num_output_tokens == 1

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+    from vllm.v1.worker.gpu_input_batch import CachedRequestState
 else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
@@ -344,7 +345,7 @@ class DraftTokenIds:
 
 def make_empty_encoder_model_runner_output(
     scheduler_output: "SchedulerOutput",
-    prompt_done_req_ids: Collection[str],
+    requests: dict[str, "CachedRequestState"],
 ) -> ModelRunnerOutput:
     """
     Create a ModelRunnerOutput stub that contains the correct
@@ -352,13 +353,8 @@ def make_empty_encoder_model_runner_output(
 
     Args:
         scheduler_output: The output of the scheduler for this step.
-        prompt_done_req_ids: Requests whose prompt is fully consumed once this
-            step's tokens are counted. Only those get a placeholder token; a
-            request still mid-prefill gets none, so it is scheduled again
-            instead of being stopped on a token it never really produced.
-            Encoder inputs are never scheduled past a multi-modal item that the
-            encoder cache could not admit, so a consumed prompt also means
-            every item in it has been encoded.
+        requests: The caller's request states, keyed by request id. Only
+            `num_computed_tokens` and `num_prompt_tokens` are read.
     """
     if not scheduler_output.num_scheduled_tokens:
         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -370,12 +366,21 @@ def make_empty_encoder_model_runner_output(
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
     # A placeholder token stands in for "this request is done on the encoder
-    # instance". Emitting it while the prompt is only partly consumed would trip
-    # the length/stop check and finish the request before its remaining
-    # multi-modal items were ever encoded.
-    sampled_token_ids: list[list[int]] = [
-        [0] if rid in prompt_done_req_ids else [] for rid in req_ids
-    ]
+    # instance", so it may only be emitted once the prompt is fully consumed.
+    # Emitting it mid-prefill would trip the length/stop check and finish the
+    # request before its remaining multi-modal items were ever encoded. The
+    # encoder instance returns without sampling, so it cannot rely on
+    # `discard_request_mask` to hold those tokens back. Encoder inputs are never
+    # scheduled past a multi-modal item the encoder cache could not admit, so a
+    # consumed prompt also means every item in it has been encoded.
+    sampled_token_ids: list[list[int]] = []
+    for rid in req_ids:
+        request = requests.get(rid)
+        prompt_done = request is not None and (
+            request.num_computed_tokens + scheduler_output.num_scheduled_tokens[rid]
+            >= request.num_prompt_tokens
+        )
+        sampled_token_ids.append([0] if prompt_done else [])
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]
