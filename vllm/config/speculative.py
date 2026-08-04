@@ -974,6 +974,9 @@ class SpeculativeConfig:
                     self.draft_model_config.hf_config.architectures = [
                         "DSparkDraftModel"
                     ]
+                    self.draft_model_config.quantization = (
+                        self.target_model_config.quantization
+                    )
                     self.update_arch_()
                 elif (
                     self.method == "dspark"
