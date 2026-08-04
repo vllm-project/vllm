@@ -525,7 +525,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states,
                 self.input_buffers.query_start_loc,
                 self.model_state.num_new_sampled_tokens_per_step,
-                self.speculative_config.adaptive_verification_ema_alpha,
                 max_total_logits=max_chunk_logits(self.vocab_size),
             )
 

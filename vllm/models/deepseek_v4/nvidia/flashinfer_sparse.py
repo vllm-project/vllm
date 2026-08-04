@@ -18,8 +18,8 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     deep_gemm_fp8_o_proj,
 )
 from vllm.models.deepseek_v4.sparse_mla import (
-    DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
+    DeepseekV4SparseMLABackend,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -74,11 +74,10 @@ def _pad_to_supported_q_heads(num_heads: int) -> int:
     )
 
 
-class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
+class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
-    Inheriting from the FlashMLA V4 backend reuses its
-    ``DeepseekV4FlashMLAMetadata`` builder.
+    Inherits the base and backend reuses its``DeepseekV4SparseMLAMetadataBuilder``
     """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
@@ -159,7 +158,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     ) -> tuple[int, ...]:
         device_capability = current_platform.get_device_capability()
         if device_capability is not None and device_capability.major == 12:
-            return DeepseekV4FlashMLABackend.get_kv_cache_shape(
+            return DeepseekV4SparseMLABackend.get_kv_cache_shape(
                 num_blocks,
                 block_size,
                 num_kv_heads,

@@ -893,6 +893,9 @@ class SamplingParams(
 
         # Adaptive verification compacts logits after the forward pass, while
         # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
+        # TODO(lucas): lift this restriction. The true boundaries exist on device as
+        # cu_num_logits; cu_num_generated_tokens is only read host-side after
+        # the logprobs D2H, so it could ride along on that copy.
         if (
             speculative_config.use_adaptive_verification
             and self.num_logprobs is not None

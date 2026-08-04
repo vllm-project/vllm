@@ -240,13 +240,6 @@ class SpeculativeConfig:
     """Whether to adaptively size the draft-verification budget from
     per-request confidence. Only applies to method="dspark"."""
 
-    adaptive_verification_ema_alpha: float = 0.8
-    """Weight of the latest DSpark confidence observation in the per-request
-    exponential moving average. Set to 1 to disable smoothing. Smoothing trades
-    less noise for more lag; lag does not average out across a batch, so
-    heavier smoothing helps small batches but hurts large ones. 0.8 is the
-    point where the estimator is unbiased at every batch size measured."""
-
     @property
     def use_adaptive_verification(self) -> bool:
         return self.method == "dspark" and self.enable_adaptive_verification
@@ -1346,9 +1339,6 @@ class SpeculativeConfig:
                 "Expected num_speculative_tokens to be greater "
                 f"than zero ({self.num_speculative_tokens})."
             )
-
-        if not 0 < self.adaptive_verification_ema_alpha <= 1:
-            raise ValueError("adaptive_verification_ema_alpha must be in (0, 1].")
 
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates

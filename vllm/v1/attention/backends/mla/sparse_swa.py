@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import cast
+from typing import ClassVar, cast
 
 import torch
 
@@ -61,8 +61,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         dtype: torch.dtype,
         prefix: str,
         cache_config: CacheConfig,
+        backend_cls: "type[AttentionBackend] | None" = None,
     ):
         super().__init__()
+        self.backend_cls = backend_cls or DeepseekSparseSWABackend
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.window_size = window_size
@@ -104,7 +106,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
     def forward(self): ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return DeepseekSparseSWABackend
+        return self.backend_cls
 
 
 class DeepseekSparseSWABackend(AttentionBackend):
@@ -400,18 +402,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     """
 
     reorder_batch_threshold: int | None = None
-
-    @classmethod
-    def get_cudagraph_support(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: KVCacheSpec,
-    ) -> AttentionCGSupport:
-        if current_platform.is_cuda() and current_platform.is_device_capability_family(
-            100
-        ):
-            return AttentionCGSupport.ALWAYS
-        return AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
