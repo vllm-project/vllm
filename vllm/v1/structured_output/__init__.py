@@ -293,14 +293,27 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 post_reasoning_end_in_window = False
-                req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
+                req_tokens = list(scheduled_spec_decode_tokens.get(req_id, ()))
+                # Speculative methods may schedule fewer drafts than
+                # num_speculative_tokens for a step (e.g. dspark on its first
+                # decode). Pad placeholders so every grammar request still
+                # occupies exactly 1 + max_num_spec_tokens rows, keeping the
+                # bitmask aligned with the runner's logit mapping.
+                if len(req_tokens) < max_num_spec_tokens:
+                    req_tokens += [-1] * (max_num_spec_tokens - len(req_tokens))
                 for i, token in enumerate(req_tokens):
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
-                    advance_grammar = apply_bitmask
                     if token == -1:
+                        # Placeholder for an unscheduled draft position: the
+                        # row stays unconstrained and the grammar does not
+                        # advance through it.
+                        self._fill_bitmasks(((grammar, cumulative_index, False),))
                         apply_bitmask = False
                         advance_grammar = False
-                    elif (
+                        cumulative_index += 1
+                        continue
+                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    advance_grammar = apply_bitmask
+                    if (
                         detect_reasoning_end
                         and reasoner is not None
                         and not apply_bitmask
