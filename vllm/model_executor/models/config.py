@@ -622,7 +622,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
                 cache_config.mamba_cache_mode = "align"
-                logger.warning(
+                logger.info(
                     "Mamba cache mode is set to '%s' for %s by default "
                     "when prefix caching is enabled",
                     cache_config.mamba_cache_mode,
@@ -642,13 +642,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
-            logger.info(
-                "Warning: Prefix caching in Mamba cache '%s' "
-                "mode is currently enabled. "
-                "Its support for Mamba layers is experimental. "
-                "Please report any issues you may observe.",
-                cache_config.mamba_cache_mode,
-            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
