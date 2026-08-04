@@ -6,6 +6,7 @@ import atexit
 import contextlib
 import copy
 import functools
+import gc
 import importlib
 import itertools
 import json
@@ -1555,6 +1556,88 @@ def record_gpu_memory_usage_stats(
     return output
 
 
+# Engine-owning objects whose survival keeps VRAM allocated. Matched by name so
+# that this diagnostic does not import (and thus keep alive) engine modules.
+_TEARDOWN_SUSPECT_TYPES = frozenset(
+    {
+        "LLM",
+        "LLMEngine",
+        "AsyncLLM",
+        "SyncMPClient",
+        "AsyncMPClient",
+        "InprocClient",
+        "CoreEngineProcManager",
+    }
+)
+
+
+def _print_referrers(obj: Any, exclude_ids: frozenset[int], limit: int = 10) -> None:
+    referrers = [ref for ref in gc.get_referrers(obj) if id(ref) not in exclude_ids]
+    for ref in itertools.islice(referrers, limit):
+        if isinstance(ref, dict):
+            keys = [k for k, v in ref.items() if v is obj]
+            print(f"[mem-diag]     held by dict, keys={keys}")
+        elif hasattr(ref, "f_code"):
+            code = ref.f_code
+            print(
+                f"[mem-diag]     held by frame {code.co_name} @ "
+                f"{code.co_filename}:{ref.f_lineno}"
+            )
+        else:
+            print(f"[mem-diag]     held by {type(ref).__name__}: {repr(ref)[:160]}")
+
+
+def _report_teardown_state() -> None:
+    """Say why VRAM is still occupied while the wait below is stuck.
+
+    There are two ways to get here and they need different fixes, so name which
+    one it was: either an engine-owning object outlived the ``del`` that was
+    supposed to free it, or the object is gone but an engine subprocess never
+    finished tearing down. Best effort only -- never let this mask the failure.
+    """
+    try:
+        survivors = [
+            obj
+            for obj in gc.get_objects()
+            if type(obj).__name__ in _TEARDOWN_SUSPECT_TYPES
+            and type(obj).__module__.startswith("vllm")
+        ]
+        if survivors:
+            # This frame and the list itself both reference the survivors; report
+            # neither, or every object looks like it is held by the diagnostic.
+            exclude_ids = frozenset(
+                {id(survivors), id(sys._getframe()), id(sys._getframe().f_locals)}
+            )
+            print(f"[mem-diag] {len(survivors)} engine-owning object(s) still alive:")
+            for obj in survivors:
+                print(f"[mem-diag]   {type(obj).__module__}.{type(obj).__name__}")
+                _print_referrers(obj, exclude_ids)
+        else:
+            print("[mem-diag] no engine-owning objects alive; teardown did start")
+        del survivors
+        print(f"[mem-diag] gc.collect() freed {gc.collect()} object(s)")
+    except Exception as exc:
+        print(f"[mem-diag] object inspection failed: {exc!r}")
+
+    try:
+        import psutil
+
+        children = psutil.Process().children(recursive=True)
+        if children:
+            print(f"[mem-diag] {len(children)} child process(es) still alive:")
+            for child in children:
+                with contextlib.suppress(psutil.Error):
+                    cmd = " ".join(child.cmdline())[:120]
+                    print(
+                        f"[mem-diag]   pid={child.pid} status={child.status()} "
+                        f"name={child.name()} cmd={cmd}"
+                    )
+        else:
+            print("[mem-diag] no child processes left; VRAM is held below the runtime")
+    except Exception as exc:
+        print(f"[mem-diag] process inspection failed: {exc!r}")
+
+
 def wait_for_gpu_memory_to_clear(
     *,
     devices: list[int],
@@ -1593,6 +1676,7 @@ def wait_for_gpu_memory_to_clear(
     start_time = time.time()
     stable_since: float | None = None
     stable_used_bytes: dict[int, int] | None = None
+    reported_early = False
     while True:
         output_raw = record_gpu_memory_usage_stats(devices=devices)
         used_bytes_by_device = {
@@ -1677,7 +1761,19 @@ def wait_for_gpu_memory_to_clear(
             stable_since = None
             stable_used_bytes = None
 
+        # An outer watchdog (e.g. pytest-timeout) often fires before this loop
+        # reaches its own timeout, and it kills the process without unwinding,
+        # so report early rather than only on the way out. Teardown that is
+        # going to succeed takes a couple of seconds, so 30 s means this only
+        # ever fires when something is already wrong.
+        early_after_s = min(timeout_s / 2, 30.0)
+        if not all_free and not reported_early and dur_s >= early_after_s:
+            reported_early = True
+            print(f"Memory still held after {dur_s=:.02f}, reporting early:")
+            _report_teardown_state()
+
         if dur_s >= timeout_s:
+            _report_teardown_state()
             raise ValueError(
                 f"Memory of devices {devices=} not free after "
                 f"{dur_s=:.02f} ({threshold=})"
