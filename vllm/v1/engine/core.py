@@ -232,7 +232,7 @@ class EngineCore:
             self.request_block_hasher = get_request_block_hasher(
                 hash_block_size, caching_hash_fn
             )
-            if is_eagle_prefix_cache_hashing_enabled(vllm_config):
+            if is_eagle_prefix_cache_hashing_enabled(vllm_config, kv_connector):
                 self.request_eagle_block_hasher = get_request_eagle_block_hasher(
                     hash_block_size, caching_hash_fn
                 )

@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
+from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -37,6 +37,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 
 # BlockHash represents the hash of a single KV-cache block used for
 # prefix caching.  Treating it as a distinct type from `bytes` helps
@@ -748,18 +751,19 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
-def is_eagle_prefix_cache_hashing_enabled(vllm_config: VllmConfig) -> bool:
+def is_eagle_prefix_cache_hashing_enabled(
+    vllm_config: VllmConfig,
+    kv_connector: "KVConnectorBase_V1 | None" = None,
+) -> bool:
     speculative_config = vllm_config.speculative_config
-    kv_events_config = vllm_config.kv_events_config
-    return (
-        vllm_config.cache_config.enable_prefix_caching
-        and speculative_config is not None
-        and speculative_config.use_eagle()
-        and vllm_config.kv_transfer_config is None
-        and not (
-            kv_events_config is not None and kv_events_config.enable_kv_cache_events
+    if speculative_config is None or not speculative_config.use_eagle():
+        return False
+    if vllm_config.kv_transfer_config is not None:
+        return bool(
+            kv_connector is not None
+            and kv_connector.supports_eagle_prefix_cache_hashing
         )
-    )
+    return vllm_config.cache_config.enable_prefix_caching
 
 
 def get_request_eagle_block_hasher(

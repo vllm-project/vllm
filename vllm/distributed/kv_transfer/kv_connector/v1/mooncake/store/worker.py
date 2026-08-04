@@ -734,6 +734,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 token_len,
                 save_start,
                 num_prompt_tokens=req_meta.num_prompt_tokens,
+                apply_eagle=not req_meta.eagle_hashing_enabled,
             )
 
             starts: list[int] = []
@@ -1674,7 +1675,12 @@ class MooncakeStoreWorker:
 
         return finished_sending
 
-    def lookup(self, num_tokens: int, block_hashes: Sequence[BlockHash]) -> int:
+    def lookup(
+        self,
+        num_tokens: int,
+        block_hashes: Sequence[BlockHash],
+        apply_eagle: bool = True,
+    ) -> int:
         """Check how many prefix tokens exist in the store.
 
         Checks across all rank-specific key namespaces that may be loaded. A
@@ -1767,6 +1773,7 @@ class MooncakeStoreWorker:
             block_hashes,
             token_len,
             cached_block_pool,
+            apply_eagle=apply_eagle,
         )
         if hit_length >= num_tokens:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
@@ -1776,6 +1783,7 @@ class MooncakeStoreWorker:
                 block_hashes,
                 usable_length,
                 cached_block_pool,
+                apply_eagle=apply_eagle,
             )
         return hit_length
 
@@ -1845,8 +1853,11 @@ class LookupKeyServer:
                     num_tokens = int.from_bytes(all_frames[1], byteorder="big")
                     hash_len = int.from_bytes(all_frames[2], byteorder="big")
                     blob = all_frames[3].buffer
+                    apply_eagle = bool(int.from_bytes(all_frames[4], byteorder="big"))
                     block_hashes = BlobBlockHashes(blob, hash_len)
-                    result = self.store_worker.lookup(num_tokens, block_hashes)
+                    result = self.store_worker.lookup(
+                        num_tokens, block_hashes, apply_eagle=apply_eagle
+                    )
                     self.socket.send(result.to_bytes(4, "big"))
 
                 elif msg_type == RESET_MSG:
@@ -1909,13 +1920,19 @@ class LookupKeyClient:
         )
         self.futures: dict[str, Future[int]] = {}
 
-    def _lookup(self, num_tokens: int, block_hashes: list[BlockHash]) -> int:
+    def _lookup(
+        self,
+        num_tokens: int,
+        block_hashes: list[BlockHash],
+        apply_eagle: bool,
+    ) -> int:
         hash_len = len(block_hashes[0]) if block_hashes else 0
         all_frames = (
             LOOKUP_MSG,
             num_tokens.to_bytes(4, byteorder="big"),
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
+            int(apply_eagle).to_bytes(1, byteorder="big"),
         )
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
@@ -1927,12 +1944,15 @@ class LookupKeyClient:
         num_tokens: int,
         block_hashes: list[BlockHash],
         non_block: bool = False,
+        apply_eagle: bool = True,
     ) -> int | None:
         """If non_block is True, will return None until the result is ready,
         so the caller retries on a later step."""
         future = self.futures.get(req_id)
         if future is None:
-            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
+            future = self.executor.submit(
+                self._lookup, num_tokens, list(block_hashes), apply_eagle
+            )
             self.futures[req_id] = future
         if non_block and not future.done():
             return None

@@ -609,6 +609,33 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     assert hit == 64
 
 
+def test_successor_hashes_skip_legacy_eagle_drop():
+    groups = [
+        KVCacheGroupSpec(
+            ["mtp"],
+            _full(16),
+            is_eagle_group=True,
+        )
+    ]
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    hashes = _hashes(4)
+    cached = ExternalCachedBlockPool(
+        16,
+        {(0, bytes(block_hash)) for block_hash in hashes},
+    )
+
+    _, legacy_hit = coord.find_longest_cache_hit(hashes, 64, cached)
+    _, successor_hit = coord.find_longest_cache_hit(
+        hashes,
+        64,
+        cached,
+        apply_eagle=False,
+    )
+
+    assert legacy_hit == 48
+    assert successor_hit == 64
+
+
 def test_dsv4_five_group_eagle_store_lookup_round_trip():
     """Cover the five KV groups observed with DeepSeek-V4-Flash + MTP.
 

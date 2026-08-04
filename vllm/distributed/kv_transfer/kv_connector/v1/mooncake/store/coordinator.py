@@ -189,6 +189,7 @@ class MooncakeStoreCoordinator:
         aligned_token_len: int,
         start_token: int = 0,
         num_prompt_tokens: int | None = None,
+        apply_eagle: bool = True,
     ) -> tuple[list[bool] | None, ...]:
         """Per-group store masks for the suffix starting at ``start_token``.
 
@@ -204,6 +205,7 @@ class MooncakeStoreCoordinator:
             start_token,
             retention_interval=self.retention_interval,
             num_prompt_tokens=num_prompt_tokens,
+            apply_eagle=apply_eagle,
         )
 
     def lookup_mask(
@@ -221,6 +223,7 @@ class MooncakeStoreCoordinator:
             0,
             retention_interval=None,
             num_prompt_tokens=None,
+            apply_eagle=True,
         )
 
     def _reachable_masks(
@@ -230,6 +233,7 @@ class MooncakeStoreCoordinator:
         *,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
+        apply_eagle: bool,
     ) -> tuple[list[bool] | None, ...]:
         mask_alignment = (
             self.hash_block_size
@@ -247,7 +251,7 @@ class MooncakeStoreCoordinator:
             start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
-            use_eagle = g_idx in self.eagle_group_ids
+            use_eagle = apply_eagle and g_idx in self.eagle_group_ids
             reachable_boundaries = (
                 () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
             )

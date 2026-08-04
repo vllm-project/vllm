@@ -722,8 +722,6 @@ def test_eagle_prefix_cache_hashing_supports_all_eagle_methods(method: str):
     [
         {"enable_prefix_caching": False},
         {"method": "ngram"},
-        {"kv_transfer_config": object()},
-        {"enable_kv_cache_events": True},
     ],
 )
 def test_eagle_prefix_cache_hashing_preserves_unsupported_fallbacks(
@@ -752,6 +750,58 @@ def test_eagle_prefix_cache_hashing_preserves_unsupported_fallbacks(
     )
 
     assert not is_eagle_prefix_cache_hashing_enabled(vllm_config)
+
+
+@pytest.mark.parametrize(
+    "config_override",
+    [
+        {"enable_prefix_caching": False, "kv_transfer_config": object()},
+        {"enable_kv_cache_events": True},
+    ],
+)
+def test_eagle_prefix_cache_hashing_supports_cache_integrations(
+    config_override: dict[str, Any],
+):
+    speculative_config = object.__new__(SpeculativeConfig)
+    object.__setattr__(speculative_config, "method", "mtp")
+    vllm_config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                enable_prefix_caching=config_override.get("enable_prefix_caching", True)
+            ),
+            speculative_config=speculative_config,
+            kv_transfer_config=config_override.get("kv_transfer_config"),
+            kv_events_config=SimpleNamespace(
+                enable_kv_cache_events=config_override.get(
+                    "enable_kv_cache_events", False
+                )
+            ),
+        ),
+    )
+
+    connector = (
+        SimpleNamespace(supports_eagle_prefix_cache_hashing=True)
+        if vllm_config.kv_transfer_config is not None
+        else None
+    )
+    assert is_eagle_prefix_cache_hashing_enabled(vllm_config, connector)
+
+
+def test_eagle_prefix_cache_hashing_requires_connector_support():
+    speculative_config = object.__new__(SpeculativeConfig)
+    object.__setattr__(speculative_config, "method", "mtp")
+    vllm_config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(enable_prefix_caching=True),
+            speculative_config=speculative_config,
+            kv_transfer_config=object(),
+        ),
+    )
+    connector = SimpleNamespace(supports_eagle_prefix_cache_hashing=False)
+
+    assert not is_eagle_prefix_cache_hashing_enabled(vllm_config, connector)
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

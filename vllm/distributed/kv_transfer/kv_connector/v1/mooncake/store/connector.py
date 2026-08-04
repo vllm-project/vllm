@@ -88,6 +88,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
     @property
+    def supports_eagle_prefix_cache_hashing(self) -> bool:
+        return True
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         extra_config = self._kv_transfer_config.kv_connector_extra_config
         return (

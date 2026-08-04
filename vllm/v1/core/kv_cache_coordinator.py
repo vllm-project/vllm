@@ -276,9 +276,8 @@ class KVCacheCoordinator(ABC):
 
         Args:
             request: The request.
-            num_computed_tokens: The total number of tokens
-                that need to be cached
-                (including tokens that are already cached).
+            num_computed_tokens: The total number of tokens that need to be
+                cached, including tokens that are already cached.
         """
         for manager in self.single_type_managers:
             manager.cache_blocks(
@@ -851,8 +850,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     def find_longest_cache_hit_per_group(
         self,
         block_hashes: list[BlockHash],
-        eagle_block_hashes: list[BlockHash] | None,
         max_cache_hit_length: int,
+        eagle_block_hashes: list[BlockHash] | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """Like find_longest_cache_hit but evaluates each group independently.
 

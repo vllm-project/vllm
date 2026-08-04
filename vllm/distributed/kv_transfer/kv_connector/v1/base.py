@@ -182,6 +182,11 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def supports_eagle_prefix_cache_hashing(self) -> bool:
+        """Whether lookup and stores honor successor-aware EAGLE cache keys."""
+        return False
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 

@@ -2616,6 +2616,8 @@ def test_eagle_identical_prompt_hits_last_safe_block():
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
+    req.mark_eagle_kv_materialized()
+    manager.cache_blocks(req, req.num_tokens)
     manager.free(req)
 
     # New request with same tokens + Eagle enabled
@@ -2659,6 +2661,8 @@ def test_eagle_with_partial_blocks():
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
+    req.mark_eagle_kv_materialized()
+    manager.cache_blocks(req, req.num_tokens)
     manager.free(req)
 
     # New request with Eagle enabled
@@ -2693,6 +2697,8 @@ def test_eagle_successor_token_controls_last_block_hit():
     )
     computed_blocks, _, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
+    first.mark_eagle_kv_materialized()
+    manager.cache_blocks(first, first.num_tokens)
     manager.free(first)
 
     same_successor = make_request(
@@ -2716,6 +2722,80 @@ def test_eagle_successor_token_controls_last_block_hit():
     assert num_tokens == block_size
 
 
+def test_eagle_blocks_are_published_only_after_draft_materialization():
+    block_size = 2
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=20),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=block_size,
+    )
+    first = make_request(
+        "first",
+        [0, 1, 2, 3, 4],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    computed_blocks, _, _ = manager.get_computed_blocks(first)
+    manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
+
+    before_draft = make_request(
+        "before_draft",
+        first.all_token_ids[:],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    _, num_tokens, _ = manager.get_computed_blocks(before_draft)
+    assert num_tokens == 0
+
+    first.mark_eagle_kv_materialized()
+    manager.cache_blocks(first, first.num_tokens)
+    after_draft = make_request(
+        "after_draft",
+        first.all_token_ids[:],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    _, num_tokens, _ = manager.get_computed_blocks(after_draft)
+    assert num_tokens == 2 * block_size
+
+
+def test_eagle_kv_events_publish_successor_hashes():
+    block_size = 2
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=20),
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    request = make_request(
+        "request",
+        [0, 1, 2, 3, 4],
+        block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    computed_blocks, _, _ = manager.get_computed_blocks(request)
+    manager.allocate_slots(request, request.num_tokens, 0, computed_blocks)
+    request.mark_eagle_kv_materialized()
+    manager.cache_blocks(request, request.num_tokens)
+
+    events = manager.take_events()
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(block_hash)
+        for block_hash in request.eagle_block_hashes
+    ]
+
+
 def test_eagle_hash_is_published_when_successor_arrives():
     block_size = 2
     request = make_request(
@@ -2737,9 +2817,15 @@ def test_eagle_hash_is_published_when_successor_arrives():
         use_eagle_hashes=True,
     )
     assert request.eagle_block_hashes == expected.eagle_block_hashes
+    assert request.kv_transfer_block_hashes == request.eagle_block_hashes
+    assert request.materialized_kv_transfer_block_hashes == []
+
+    request.mark_eagle_kv_materialized()
+
+    assert request.materialized_kv_transfer_block_hashes == (request.eagle_block_hashes)
 
 
-def test_eagle_hashing_is_disabled_for_resumable_requests():
+def test_eagle_hashing_supports_resumable_requests():
     request = make_request(
         "resumable",
         [0, 1, 2],
@@ -2749,8 +2835,23 @@ def test_eagle_hashing_is_disabled_for_resumable_requests():
         resumable=True,
     )
 
-    assert not request.eagle_hashing_enabled
-    assert request.eagle_block_hashes == []
+    original_hash = request.eagle_block_hashes.copy()
+    assert request.eagle_hashing_enabled
+    assert len(original_hash) == 1
+
+    request.truncate_block_hashes(2, hash_block_size=2)
+    del request._all_token_ids[2:]
+    request.append_output_token_ids(3)
+
+    expected = make_request(
+        "expected",
+        [0, 1, 3],
+        2,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    assert request.eagle_block_hashes == expected.eagle_block_hashes
+    assert request.eagle_block_hashes != original_hash
 
 
 def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
@@ -2798,9 +2899,13 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
     )
     computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, 1248, num_computed, computed_blocks)
+    first.mark_eagle_kv_materialized()
+    manager.cache_blocks(first, 1248)
     first.num_computed_tokens = 1248
     manager.new_step_starts()
     manager.allocate_slots(first, 1)
+    first.mark_eagle_kv_materialized()
+    manager.cache_blocks(first, 1249)
     first.num_computed_tokens = 1249
     manager.new_step_starts()
     manager.free(first)

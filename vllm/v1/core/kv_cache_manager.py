@@ -337,9 +337,11 @@ class KVCacheManager:
 
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes,
-            request.eagle_block_hashes if request.eagle_hashing_enabled else None,
-            request.num_tokens - 1,
+            block_hashes=request.block_hashes,
+            max_cache_hit_length=request.num_tokens - 1,
+            eagle_block_hashes=(
+                request.eagle_block_hashes if request.eagle_hashing_enabled else None
+            ),
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
@@ -571,7 +573,8 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        if not request.eagle_hashing_enabled:
+            self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
 

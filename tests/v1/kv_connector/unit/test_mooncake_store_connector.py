@@ -410,11 +410,20 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
 
     # Blocking lookup (non_block defaults to False) runs on the executor and
     # returns the resolved hit length.
-    assert client.lookup("req0", num_tokens=128, block_hashes=[]) == 5
+    assert (
+        client.lookup(
+            "req0",
+            num_tokens=128,
+            block_hashes=[],
+            apply_eagle=False,
+        )
+        == 5
+    )
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
     assert sent_frames[0] == protocol.LOOKUP_MSG
     assert int.from_bytes(sent_frames[1], "big") == 128
+    assert int.from_bytes(sent_frames[4], "big") == 0
 
 
 def test_lookup_key_client_reset_uses_typed_protocol():

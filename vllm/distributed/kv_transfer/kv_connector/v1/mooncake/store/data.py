@@ -358,6 +358,7 @@ class ReqMeta:
     token_len_chunk: int
     block_ids: tuple[list[int], ...]
     block_hashes: list[BlockHash]
+    eagle_hashing_enabled: bool = False
 
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
@@ -380,6 +381,8 @@ class ReqMeta:
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
         is_last_chunk: bool | None = None,
+        eagle_hashing_enabled: bool = False,
+        max_save_tokens: int | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
@@ -388,6 +391,11 @@ class ReqMeta:
 
         chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
+        if max_save_tokens is not None:
+            num_tokens_to_save = min(
+                num_tokens_to_save,
+                max_save_tokens // block_size * block_size,
+            )
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
         # A ReqMeta must never carry both a save AND a load.
@@ -428,6 +436,7 @@ class ReqMeta:
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
+            eagle_hashing_enabled=eagle_hashing_enabled,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
             num_prompt_tokens=tracker.prefill_end_tokens,
