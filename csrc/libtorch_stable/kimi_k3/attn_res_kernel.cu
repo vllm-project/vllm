@@ -914,6 +914,13 @@ void kimi_k3_attn_res(torch::stable::Tensor& prefix,
   cudaDeviceProp const* properties = get_device_prop();
   STD_TORCH_CHECK(properties->major == 10,
                   "Kimi K3 AttnRes requires the SM100 family");
+  int64_t const hidden_size = prefix.size(1);
+  STD_TORCH_CHECK(prefix.stride(0) == hidden_size &&
+                      delta.stride(0) == hidden_size &&
+                      output.stride(0) == hidden_size,
+                  "Kimi K3 AttnRes requires densely packed rows; got strides ",
+                  prefix.stride(0), ", ", delta.stride(0), ", ",
+                  output.stride(0), " for hidden_size ", hidden_size);
 
   using namespace sm100::fwd_prod_v2;
   // Two-source chunks and two resident CTAs are beneficial once setup is

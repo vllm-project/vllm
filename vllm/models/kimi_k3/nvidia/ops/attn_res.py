@@ -187,7 +187,9 @@ def attn_res(
     assert qk_weight.stride(-1) == 1
     assert output_norm_weight is None or output_norm_weight.stride(-1) == 1
     # The in-tree NVIDIA kernel covers the common fused-add + output-norm path;
-    # Triton handles block boundaries and final pre-norm output.
+    # Triton handles block boundaries and final pre-norm output. The native op
+    # is only compiled for SM100 under CUDA >= 13, so a device check alone is
+    # not enough to know it exists.
     if (
         hidden_size == 7168
         and delta is not None
@@ -195,6 +197,7 @@ def attn_res(
         and num_blocks > 0
         and block_write_idx < 0
         and current_platform.is_device_capability_family(100)
+        and hasattr(torch.ops._C, "kimi_k3_attn_res")
     ):
         return ops.kimi_k3_attn_res(
             prefix,
