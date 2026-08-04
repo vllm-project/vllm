@@ -5,7 +5,9 @@
 //! request/response types.
 
 use tonic::Status;
+use url::Url;
 use uuid::Uuid;
+use vllm_chat::MediaContentPart;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
@@ -14,6 +16,78 @@ use vllm_text::{
 };
 
 use super::pb;
+
+pub fn media_parts_from_request(
+    media: Vec<pb::MediaItem>,
+) -> Result<Vec<MediaContentPart>, Status> {
+    let mut parts = Vec::with_capacity(media.len());
+    for (index, item) in media.into_iter().enumerate() {
+        match item.modality() {
+            pb::Modality::Image => {}
+            pb::Modality::Unspecified => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}].modality is required"
+                )));
+            }
+            other => {
+                return Err(Status::unimplemented(format!(
+                    "media[{index}].modality {other:?} is not supported by the gRPC service"
+                )));
+            }
+        }
+        let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
+        let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
+        let part = match item.source {
+            Some(pb::media_item::Source::Url(url)) => {
+                validate_media_uri(index, "url", &url, &["http", "https"])?;
+                MediaContentPart::ImageUrl {
+                    url,
+                    detail: None,
+                    uuid,
+                }
+            }
+            Some(pb::media_item::Source::DataUri(uri)) => {
+                validate_media_uri(index, "data_uri", &uri, &["data"])?;
+                MediaContentPart::ImageUrl {
+                    url: uri,
+                    detail: None,
+                    uuid,
+                }
+            }
+            Some(pb::media_item::Source::RawBytes(bytes)) => MediaContentPart::ImageData {
+                data: bytes,
+                mime_type,
+                uuid,
+                detail: None,
+            },
+            None => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}].source is required"
+                )));
+            }
+        };
+        parts.push(part);
+    }
+    Ok(parts)
+}
+
+fn validate_media_uri(
+    index: usize,
+    field: &str,
+    value: &str,
+    allowed_schemes: &[&str],
+) -> Result<(), Status> {
+    let uri = Url::parse(value).map_err(|_| {
+        Status::invalid_argument(format!("media[{index}].{field} is not a valid URI"))
+    })?;
+    if !allowed_schemes.contains(&uri.scheme()) {
+        return Err(Status::invalid_argument(format!(
+            "media[{index}].{field} must use the {} scheme",
+            allowed_schemes.join(" or ")
+        )));
+    }
+    Ok(())
+}
 
 // ========================================================================================
 // Request conversion
@@ -53,6 +127,7 @@ pub fn to_text_request(
     } else {
         req.request_id
     };
+    let session_id = req.session_id.filter(|s| !s.is_empty());
 
     let sampling = req.sampling.as_ref();
     let decoding = req.decoding.as_ref();
@@ -100,6 +175,7 @@ pub fn to_text_request(
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
         data_parallel_rank: None,
+        session_id,
         reasoning_parser_kwargs: None,
         lora_request: None,
         arrival_time: None,

@@ -59,6 +59,7 @@ const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
 /// How long the server waits for a keepalive PING reply before dropping the gRPC
 /// connection. 20s matches the gRPC-core default.
 const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -181,12 +182,15 @@ where
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
+    let model = state.primary_model_name().to_owned();
+    let app = extend_router(build_router(state.clone()));
+
+    info!(model, "starting vLLM server");
+
     let listener = Listener::bind(&config.listener_mode)
         .await
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr_display()?;
-    let model = state.primary_model_name().to_owned();
-    let app = extend_router(build_router(state.clone()));
 
     // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
@@ -212,7 +216,8 @@ where
         let control_service =
             grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(state.clone()));
         let inference_service =
-            grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()));
+            grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
@@ -220,8 +225,14 @@ where
             .add_service(health_service)
             .add_service(control_service)
             .add_service(inference_service);
-        info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
-        Some((grpc_listener, svc, grpc_tls, health_reporter, engine_health))
+        Some((
+            addr,
+            grpc_listener,
+            svc,
+            grpc_tls,
+            health_reporter,
+            engine_health,
+        ))
     } else {
         None
     };
@@ -231,7 +242,7 @@ where
     } else {
         "http"
     };
-    info!(%bind_address, %scheme, %model, "starting OpenAI server");
+    let model = model.as_str();
 
     // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
     // token. Caller cancellation propagates into both protocols; if either
@@ -285,6 +296,11 @@ where
             };
             let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
 
+            info!(
+                bind_address,
+                scheme, model, "OpenAI server is ready to accept requests"
+            );
+
             let result = tokio::select! {
                 result = server => {
                     result.context("HTTP server failed")
@@ -305,13 +321,15 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((grpc_listener, svc, grpc_tls, health_reporter, engine_health)) = grpc_setup
+            let Some((addr, grpc_listener, svc, grpc_tls, health_reporter, engine_health)) =
+                grpc_setup
             else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
                 return Ok(());
             };
+            let tls = grpc_tls.is_some();
             let incoming = match grpc_tls {
                 Some(context) => MaybeTlsListener::tls(grpc_listener, context),
                 None => MaybeTlsListener::plain(grpc_listener),
@@ -319,6 +337,8 @@ where
             let server =
                 svc.serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
             let health_monitor = grpc::monitor_health(health_reporter, engine_health, shutdown);
+
+            info!(%addr, tls, model, "gRPC server is ready to accept requests");
 
             let server = async move {
                 let result = tokio::select! {

@@ -100,6 +100,13 @@ def _drive_store(
 
         if int((cpu[:, 0].to(torch.int32) != val).sum().item()):
             corrupt += 1
+
+    # Drain the compute stream before returning: in the no-barrier control
+    # phase the store never waits on compute, so the host loop runs far ahead
+    # and leaves a backlog of sleep+fill kernels in flight. Without this, the
+    # leftover control-phase fills race the barrier phase's fill->copy window
+    # on the shared gpu tensor and flakily corrupt one iteration.
+    compute_stream.synchronize()
     return corrupt
 
 
