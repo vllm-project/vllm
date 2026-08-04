@@ -22,6 +22,7 @@ struct BenchFixture {
     tiktoken_rs: TiktokenTokenizer,
     text: String,
     token_ids: Vec<u32>,
+    ordinary_token_ids: Vec<u32>,
 }
 
 impl BenchFixture {
@@ -74,6 +75,7 @@ impl BenchFixture {
             tiktoken_rs,
             text,
             token_ids: fastokens_token_ids,
+            ordinary_token_ids: fastokens_ordinary_token_ids,
         }
     }
 }
@@ -192,5 +194,53 @@ fn bench_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_encode, bench_encode_ordinary, bench_decode);
+fn bench_decode_ordinary(c: &mut Criterion) {
+    let fixture = BenchFixture::load();
+    let mut group = c.benchmark_group("tiktoken_decode_ordinary");
+    group.throughput(Throughput::Elements(fixture.ordinary_token_ids.len() as u64));
+
+    group.bench_function("fastokens", |b| {
+        b.iter(|| {
+            fixture
+                .fastokens
+                .decode(
+                    black_box(fixture.ordinary_token_ids.as_slice()),
+                    black_box(false),
+                )
+                .expect("decode ordinary token ids with fastokens")
+        })
+    });
+    group.bench_function("riptoken", |b| {
+        b.iter(|| {
+            fixture
+                .riptoken
+                .decode(
+                    black_box(fixture.ordinary_token_ids.as_slice()),
+                    black_box(false),
+                )
+                .expect("decode ordinary token ids with riptoken")
+        })
+    });
+    group.bench_function("tiktoken_rs", |b| {
+        b.iter(|| {
+            fixture
+                .tiktoken_rs
+                .decode(
+                    black_box(fixture.ordinary_token_ids.as_slice()),
+                    black_box(false),
+                )
+                .expect("decode ordinary token ids with tiktoken-rs")
+        })
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_encode,
+    bench_encode_ordinary,
+    bench_decode,
+    bench_decode_ordinary
+);
 criterion_main!(benches);
