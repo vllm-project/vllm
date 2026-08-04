@@ -173,9 +173,8 @@ class ModelWithWeightsMapper(torch.nn.Module):
     """Stand-in for models whose keys only align after hf_to_vllm_mapper.
 
     Checkpoint keys like ``model.language_model.*`` never match
-    ``""`` / ``model.`` + name against ``language_model.model.*`` params,
-    so the generic pooling prefix probe would otherwise scan and clone the
-    entire iterator.
+    ``""`` / ``model.`` + raw name against ``language_model.model.*`` params.
+    The pooling prefix probe must consult the mapper so it can early-exit.
     """
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -202,8 +201,13 @@ class ModelWithWeightsMapper(torch.nn.Module):
         return loaded
 
 
-def test_pooling_skips_prefix_probe_when_hf_to_vllm_mapper_present(monkeypatch):
-    """Mapper-owned models must not clone the full checkpoint via the probe."""
+def test_pooling_prefix_probe_uses_hf_to_vllm_mapper(monkeypatch):
+    """Mapper lets the prefix probe early-exit without cloning the full ckpt.
+
+    Checkpoint keys only align after ``hf_to_vllm_mapper``. The probe must use
+    the mapped name for membership, keep forwarding original names to the
+    parent loader, and stop after the first hit instead of cloning everything.
+    """
     ref = {
         "model.language_model.embed.weight": torch.randn(8, 4),
         "model.language_model.layer0.weight": torch.randn(8, 8),
@@ -231,7 +235,10 @@ def test_pooling_skips_prefix_probe_when_hf_to_vllm_mapper_present(monkeypatch):
 
     loaded = model.load_weights(iter(ref.items()))
 
-    assert clone_count == 0
+    # First key maps onto a param, so the probe clones once and breaks.
+    assert clone_count == 1
+    assert clone_count < len(ref)
+    # Parent still receives original (unmapped, unprefixed) checkpoint names.
     assert model.seen_names == list(ref.keys())
     assert loaded == {
         "language_model.model.embed.weight",

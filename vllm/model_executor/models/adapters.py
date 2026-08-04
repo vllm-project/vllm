@@ -174,20 +174,12 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             raise NotImplementedError
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-            # Models that own key remapping (e.g. Gemma4
-            # model.language_model.* -> language_model.model.*) never match
-            # the generic "" / "model." probe below. Running that probe would
-            # clone the entire checkpoint into host memory before falling
-            # through to the parent loader. Skip it and let the mapper handle
-            # remapping.
-            parent_load_weights = getattr(super(), "load_weights", None)
-            if (
-                parent_load_weights is not None
-                and getattr(self, "hf_to_vllm_mapper", None) is not None
-            ):
-                return parent_load_weights(weights)
-
             params_dict = dict(self.named_parameters())
+            # Use model-owned remapping only for the probe membership check
+            # (e.g. Gemma4 model.language_model.* -> language_model.model.*)
+            # so the "" / "model." scan can early-exit. Forwarded names stay
+            # unmapped to avoid double-applying the mapper in the parent loader.
+            hf_to_vllm_mapper = getattr(self, "hf_to_vllm_mapper", None)
 
             # We support loading from both `*ForCausalLM` and `*Model`
             candidate_prefixes = ["", "model."]
@@ -198,11 +190,18 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
                 # Clone because the iterator may reuse the tensor buffer
                 seen_weights.append((name, loaded_weight.clone()))
 
+                lookup_name = name
+                if hf_to_vllm_mapper is not None:
+                    mapped = hf_to_vllm_mapper._map_name(name)
+                    if mapped is None:
+                        continue
+                    lookup_name = mapped
+
                 try:
                     target_prefix = next(
                         prefix
                         for prefix in candidate_prefixes
-                        if prefix + name in params_dict
+                        if prefix + lookup_name in params_dict
                     )
                     break
                 except StopIteration:
