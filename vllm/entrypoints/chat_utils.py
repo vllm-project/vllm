@@ -467,7 +467,7 @@ def _merge_embeds(
 
     first_keys = set(data_items[0].keys())
     if any(set(item.keys()) != first_keys for item in data_items[1:]):
-        raise ValueError(
+        raise VLLMValidationError(
             "All dictionaries in the list of embeddings must have the same keys."
         )
 
@@ -746,9 +746,15 @@ def _resolve_items(
         modality requires a processor, enforced by the guard below.
     """
     if "image" in items_by_modality and "image_embeds" in items_by_modality:
-        raise ValueError("Mixing raw image and embedding inputs is not allowed")
+        raise VLLMValidationError(
+            "Mixing raw image and embedding inputs is not allowed",
+            parameter="image_embeds",
+        )
     if "audio" in items_by_modality and "audio_embeds" in items_by_modality:
-        raise ValueError("Mixing raw audio and embedding inputs is not allowed")
+        raise VLLMValidationError(
+            "Mixing raw audio and embedding inputs is not allowed",
+            parameter="audio_embeds",
+        )
     # `prompt_embeds` bypasses HF MM processors. Every other modality requires one.
     processor_modalities = items_by_modality.keys() - {"prompt_embeds"}
     if processor_modalities and mm_processor is None:
@@ -1448,7 +1454,7 @@ def _get_full_multimodal_text_prompt(
                 interleave_strings,
             )
             logger.debug("Input prompt: %s", text_prompt)
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
                 "actual multimodal data items."
             )
@@ -1696,7 +1702,7 @@ def _reject_reserved_placeholder_in_text(text: str, model_config: ModelConfig) -
     caller move or inject splice positions via plain text content.
     """
     if model_config.enable_prompt_embeds and PROMPT_EMBEDS_PLACEHOLDER_TOKEN in text:
-        raise ValueError(
+        raise VLLMValidationError(
             _RESERVED_PLACEHOLDER_IN_TEXT_ERROR.format(
                 token=PROMPT_EMBEDS_PLACEHOLDER_TOKEN
             )
@@ -2021,15 +2027,6 @@ async def parse_chat_messages_async(
     mm_data, mm_uuids = await mm_tracker.resolve_items()
 
     return conversation, mm_data, mm_uuids
-
-
-def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
-    idx = 0
-    for msg in conversation:
-        if msg["role"] == "assistant":
-            tool_calls = msg.get("tool_calls")
-            idx += len(list(tool_calls)) if tool_calls is not None else 0  # noqa
-    return idx
 
 
 _KIMI_MODEL_TYPES = ("kimi_k2", "kimi_k25", "kimi_k3")
