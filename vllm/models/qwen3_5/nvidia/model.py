@@ -76,7 +76,6 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLDummyInputsBuilder,
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
-    Qwen3VLProcessingInfo,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -88,6 +87,10 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.qwen3_5.common.mm_preprocess import (
+    Qwen3_5MoeProcessingInfo,
+    Qwen3_5ProcessingInfo,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -98,16 +101,6 @@ from vllm.transformers_utils.configs.qwen3_5_moe import (
 )
 
 logger = init_logger(__name__)
-
-
-class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5Config)
-
-
-class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5MoeConfig)
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):

@@ -78,7 +78,6 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLDummyInputsBuilder,
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
-    Qwen3VLProcessingInfo,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -91,6 +90,10 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from vllm.models.qwen3_5.common.mm_preprocess import (
+    Qwen3_5MoeProcessingInfo,
+    Qwen3_5ProcessingInfo,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -101,20 +104,6 @@ from vllm.transformers_utils.configs.qwen3_5_moe import (
 )
 
 logger = init_logger(__name__)
-
-
-class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5Config)
-
-
-class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
-    def get_hf_config(self):
-        # transformers 5.x renames the top-level Qwen3.5-MoE config class to
-        # Qwen3_5MoeTextConfig for text-only models, while transformers ≤4.x
-        # returns Qwen3_5MoeConfig (the multimodal wrapper).  Accept both so
-        # that vLLM works regardless of which transformers version is installed.
-        return self.ctx.get_hf_config((Qwen3_5MoeConfig, Qwen3_5MoeTextConfig))
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):

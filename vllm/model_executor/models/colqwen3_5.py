@@ -27,10 +27,8 @@ from transformers.models.qwen3_vl import Qwen3VLProcessor
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.models.qwen3_5 import (
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5ProcessingInfo,
-)
+from vllm.models.qwen3_5 import Qwen3_5ForConditionalGeneration
+from vllm.models.qwen3_5.common.mm_preprocess import Qwen3_5ProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .interfaces import SupportsLateInteraction
