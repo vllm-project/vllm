@@ -61,11 +61,9 @@ class TileGemmVSX {
                 for(int r=0; r<4; r++) {
                     int r_idx = i*4 + r;
                     if (r_idx < M) {
-                        for(int c=0; c<4; c++) {
-                            ((float*)&tmp[r])[c] = c_ptr[r_idx * ldc + (j*4 + c)];
-                        }
+                        tmp[r] = (v4sf)vec_xl(0, &c_ptr[r_idx * ldc + j*4]);
                     } else {
-                        for(int c=0; c<4; c++) ((float*)&tmp[r])[c] = 0.0f;
+                        tmp[r] = (v4sf){0.0f, 0.0f, 0.0f, 0.0f};
                     }
                 }
                 __builtin_mma_build_acc(&acc[i][j], 
@@ -77,38 +75,31 @@ class TileGemmVSX {
         }
     }
 
-    const uint16_t* __restrict__ curr_a = reinterpret_cast<const uint16_t*>(a_ptr);
-    const uint16_t* __restrict__ curr_b = reinterpret_cast<const uint16_t*>(b_ptr);
-
-    // K must be even for xvbf16ger2pp
     for (int32_t k_idx = 0; k_idx < k; k_idx += 2) {
         // Load A
-        VecBF16 vA[tiles_m];
+        __vector unsigned int vA_uint[tiles_m];
         for (int i = 0; i < tiles_m; i++) {
+            vA_uint[i] = (__vector unsigned int){0, 0, 0, 0};
             for(int r=0; r<4; r++) {
                 int r_idx = i*4 + r;
                 if (r_idx < M) {
-                    vA[i].u16[r*2 + 0] = curr_a[r_idx * lda + k_idx];
-                    vA[i].u16[r*2 + 1] = curr_a[r_idx * lda + k_idx + 1];
-                } else {
-                    vA[i].u16[r*2 + 0] = 0;
-                    vA[i].u16[r*2 + 1] = 0;
+                    uint32_t val;
+                    std::memcpy(&val, &a_ptr[r_idx * lda + k_idx], 4);
+                    vA_uint[i] = vec_insert(val, vA_uint[i], r);
                 }
             }
         }
 
         // Load packed B. B is packed such that we can load exactly 4 cols x 2 elements into one VecBF16.
         // We packed B as [N/4, K/2, 8] elements = 128 bit vectors.
-        VecBF16 vB[tiles_n];
+        __vector unsigned char vB_vec[tiles_n];
         for (int j = 0; j < tiles_n; j++) {
-            for(int e=0; e<8; e++) {
-                vB[j].u16[e] = curr_b[j * k * 4 + k_idx * 4 + e];
-            }
+            vB_vec[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + k_idx * 4]);
         }
 
         for (int i = 0; i < tiles_m; i++) {
             for (int j = 0; j < tiles_n; j++) {
-                __builtin_mma_xvbf16ger2pp(&acc[i][j], vA[i].vec, vB[j].vec);
+                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_uint[i], vB_vec[j]);
             }
         }
     }
@@ -122,9 +113,7 @@ class TileGemmVSX {
             for(int r=0; r<4; r++) {
                 int r_idx = i*4 + r;
                 if (r_idx < M) {
-                    for(int c=0; c<4; c++) {
-                        c_ptr[r_idx * ldc + (j*4 + c)] = ((float*)&tmp[r])[c];
-                    }
+                    vec_xst((__vector float)tmp[r], 0, &c_ptr[r_idx * ldc + j*4]);
                 }
             }
         }
