@@ -130,6 +130,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         enable_per_request_metrics: bool = False,
+        structured_outputs_enable_in_reasoning: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -146,6 +147,9 @@ class OpenAIServingChat(GenerateBaseServing):
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
+        self.structured_outputs_enable_in_reasoning = (
+            structured_outputs_enable_in_reasoning
+        )
 
         self.enable_auto_tools: bool = enable_auto_tools
         self.parser_cls = ParserManager.get_parser(
@@ -176,6 +180,15 @@ class OpenAIServingChat(GenerateBaseServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+
+    def _structured_output_in_reasoning(self, request: ChatCompletionRequest) -> bool:
+        structured_outputs = request.extract_structured_outputs()
+        return (
+            self.structured_outputs_enable_in_reasoning
+            and not request.use_beam_search
+            and structured_outputs is not None
+            and structured_outputs.structural_tag is None
+        )
 
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
@@ -248,6 +261,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 request.tools,
                 chat_template_kwargs=chat_template_kwargs,
                 model_config=self.model_config,
+                structured_output_in_reasoning=self._structured_output_in_reasoning(
+                    request
+                ),
             )
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
@@ -466,6 +482,9 @@ class OpenAIServingChat(GenerateBaseServing):
                         request.tools,
                         chat_template_kwargs=chat_template_kwargs,
                         model_config=self.model_config,
+                        structured_output_in_reasoning=self._structured_output_in_reasoning(
+                            request
+                        ),
                     )
                     for _ in range(num_choices)
                 ]

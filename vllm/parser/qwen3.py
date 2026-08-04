@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -224,16 +225,25 @@ class Qwen3Parser(ParserEngine):
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
+        structured_output_in_reasoning = kwargs.pop(
+            "structured_output_in_reasoning", False
+        )
+        parser_engine_config = qwen3_config(
+            thinking=self.thinking_enabled and not structured_output_in_reasoning,
+            name=self.CONFIG_NAME,
+            think_start=self.THINK_START,
+            think_end=self.THINK_END,
+            tool_start=self.TOOL_START,
+            tool_end=self.TOOL_END,
+        )
+        if structured_output_in_reasoning:
+            parser_engine_config = replace(
+                parser_engine_config,
+                transitions={},
+            )
         kwargs.setdefault(
             "parser_engine_config",
-            qwen3_config(
-                thinking=self.thinking_enabled,
-                name=self.CONFIG_NAME,
-                think_start=self.THINK_START,
-                think_end=self.THINK_END,
-                tool_start=self.TOOL_START,
-                tool_end=self.TOOL_END,
-            ),
+            parser_engine_config,
         )
         super().__init__(
             tokenizer,
