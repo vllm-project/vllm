@@ -64,6 +64,8 @@ from openai_harmony import Message as HarmonyMessage
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
+    MessagePhase,
+    channel_to_phase,
     extract_function_from_recipient,
     is_function_recipient,
 )
@@ -144,6 +146,7 @@ def is_mcp_tool_by_namespace(
 def emit_text_delta_events(
     delta: str,
     state: StreamingState,
+    phase: MessagePhase | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for text content delta streaming."""
     events: list[StreamingResponsesResponse] = []
@@ -161,6 +164,7 @@ def emit_text_delta_events(
                     role="assistant",
                     content=[],
                     status="in_progress",
+                    phase=phase,
                 ),
             )
         )
@@ -382,6 +386,7 @@ def emit_code_interpreter_delta_events(
 def emit_text_output_done_events(
     text: str,
     state: StreamingState,
+    phase: MessagePhase | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a final text output item completes."""
     text_content = ResponseOutputText(
@@ -422,6 +427,7 @@ def emit_text_output_done_events(
                 role="assistant",
                 content=[text_content],
                 status="completed",
+                phase=phase,
             ),
         )
     )
@@ -582,8 +588,8 @@ def emit_content_delta_events(
 
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
-        # are both user-visible text.
-        return emit_text_delta_events(delta, state)
+        # are both user-visible text, distinguished by `phase`.
+        return emit_text_delta_events(delta, state, channel_to_phase(channel))
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
@@ -635,8 +641,10 @@ def emit_previous_item_done_events(
         return emit_reasoning_done_events(text, state)
     elif previous_item.channel in ("commentary", "final"):
         # Preambles (commentary with no recipient) and final messages
-        # are both user-visible text.
-        return emit_text_output_done_events(text, state)
+        # are both user-visible text, distinguished by `phase`.
+        return emit_text_output_done_events(
+            text, state, channel_to_phase(previous_item.channel)
+        )
     return []
 
 

@@ -92,6 +92,41 @@ class TestResponsePreviousInputToHarmony:
         assert messages[0].author.name == "functions.empty_tool"
         assert messages[0].content[0].text == ""
 
+    @pytest.mark.parametrize(
+        ("phase", "expected_channel"),
+        [
+            ("commentary", "commentary"),
+            ("final_answer", "final"),
+            (None, "final"),
+        ],
+    )
+    def test_assistant_message_phase_selects_channel(self, phase, expected_channel):
+        """History replayed through previous_input_messages must keep a
+        preamble on the commentary channel instead of promoting it to final."""
+        chat_msg = {"role": "assistant", "content": "Let me check the weather."}
+        if phase is not None:
+            chat_msg["phase"] = phase
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].channel == expected_channel
+
+    def test_harmony_format_channel_wins_over_conflicting_phase(self):
+        """Harmony-format dicts already carry authoritative channel metadata,
+        so a conflicting `phase` must not override it."""
+        chat_msg = {
+            "author": {"role": "assistant"},
+            "channel": "commentary",
+            "phase": "final_answer",
+            "content": [{"type": "text", "text": "Preamble."}],
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].channel == "commentary"
+
 
 class TestHarmonyToResponseOutput:
     """Tests for harmony_to_response_output function."""
@@ -261,6 +296,34 @@ class TestHarmonyToResponseOutput:
         assert output_items[0].status == "completed"
         assert output_items[0].action.type == "search"
         assert output_items[0].action.query == "cursor:weather in San Francisco"
+
+    @pytest.mark.parametrize(
+        ("channel", "expected_phase"),
+        [("commentary", "commentary"), ("final", "final_answer")],
+    )
+    def test_message_item_carries_phase(self, channel, expected_phase):
+        """Preambles and final answers are both message items, so `phase` is
+        the only signal distinguishing them in the output."""
+        message = Message.from_role_and_content(Role.ASSISTANT, "Some text.")
+        message = message.with_channel(channel)
+
+        output_items = harmony_to_response_output(message, frozenset())
+
+        assert [item.phase for item in output_items] == [expected_phase]
+
+    def test_commentary_with_recipient_is_not_a_phased_message(self):
+        """A commentary tool call is not user-visible text, so it must stay on
+        the tool-call path and never become a phased message item."""
+        message = Message.from_role_and_content(
+            Role.ASSISTANT, '{"location": "San Francisco"}'
+        )
+        message = message.with_channel("commentary")
+        message = message.with_recipient("functions.get_weather")
+
+        output_items = harmony_to_response_output(message, frozenset({"get_weather"}))
+
+        assert not any(isinstance(item, ResponseOutputMessage) for item in output_items)
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
 
     def test_commentary_with_empty_content_and_no_recipient(self):
         """Test edge case: empty commentary with recipient=None."""
