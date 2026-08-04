@@ -1113,19 +1113,6 @@ def launch_core_engines(
     else:
         coordinator = None
 
-    if parallel_config.data_parallel_backend == "ray":
-        logger.info("Starting ray-based data parallel backend")
-
-        engine_actor_manager = CoreEngineActorManager(
-            vllm_config=vllm_config,
-            addresses=addresses,
-            executor_class=executor_class,
-            log_stats=log_stats,
-        )
-
-        yield engine_actor_manager, coordinator, addresses, tensor_queue
-        return
-
     # For coordinated online DP, bind-and-hold a coordination TCPStore so
     # that engines pick DP master ports at bind time instead of using the
     # pre-allocated _data_parallel_master_port_list, whose ports can be
@@ -1152,6 +1139,19 @@ def launch_core_engines(
             wait_for_workers=False,
         )
         parallel_config._coord_store_port = coord_store.port
+
+    if parallel_config.data_parallel_backend == "ray":
+        logger.info("Starting ray-based data parallel backend")
+
+        engine_actor_manager = CoreEngineActorManager(
+            vllm_config=vllm_config,
+            addresses=addresses,
+            executor_class=executor_class,
+            log_stats=log_stats,
+        )
+
+        yield engine_actor_manager, coordinator, addresses, tensor_queue
+        return
 
     if offline_mode:
         assert local_engine_count == 1
