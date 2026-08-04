@@ -388,11 +388,16 @@ def apply_top_k_top_p_pytorch(
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     if k is not None:
-        # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
-        # Get all the top_k values.
-        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
-        top_k_mask = logits_sort < top_k_mask
+        # Apply top-k. Keep exactly the k largest entries (matching the
+        # Triton kernel, which truncates tied entries to k). Using a strict
+        # threshold comparison would keep all tokens tied at the k-th largest
+        # logit, which can exceed k and diverge from the Triton path.
+        vocab_size = logits_sort.size(1)
+        k_arr = k.to(torch.long).clamp_(max=vocab_size)
+        # Positions [0, vocab_size - k) are below the top-k.
+        keep_from = (vocab_size - k_arr).unsqueeze(1)  # shape: B
+        pos = torch.arange(vocab_size, device=logits_sort.device).unsqueeze(0)
+        top_k_mask = pos < keep_from
         logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
     if p is not None:
@@ -422,13 +427,17 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     # Set non-top-k rows to 1 so that we can gather.
     k = k.masked_fill(no_top_k_mask, 1)
     max_top_k = k.max()
-    # topk.values tensor has shape [batch_size, max_top_k].
-    # Convert top k to 0-based index in range [0, max_top_k).
-    k_index = k.sub_(1).unsqueeze(1)
-    top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index.long())
-    # Handle non-topk rows.
-    top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
-    return logits.masked_fill_(logits < top_k_mask, -float("inf"))
+    # Keep exactly the k largest entries. Using `topk.indices` truncates tied
+    # entries to k, matching the Triton kernel (which keeps exactly k entries).
+    # A threshold comparison would retain all tokens tied at the k-th largest
+    # logit, exceeding k.
+    topk_indices = logits.topk(max_top_k, dim=1).indices  # [B, max_top_k]
+    topk_pos = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
+    keep_mask = topk_pos < k.unsqueeze(1)  # keep first k of each row
+    keep = torch.zeros_like(logits, dtype=torch.bool)
+    keep.scatter_(1, topk_indices, keep_mask)
+    keep = keep | no_top_k_mask.unsqueeze(1)
+    return logits.masked_fill_(~keep, -float("inf"))
 
 
 def empty_exponential_noise_like(

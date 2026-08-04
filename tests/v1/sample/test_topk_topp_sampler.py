@@ -355,10 +355,77 @@ class TestTritonTopkTopp:
 
         logits = torch.randn(32, 1024, generator=self.generator, dtype=torch.float32)
         logits_clone = logits.clone()
-
         result = apply_top_k_top_p_triton(logits_clone, k=None, p=None)
 
         assert torch.equal(result, logits), "Should be no-op when both k and p are None"
+
+    @pytest.mark.parametrize("num_tied", [2, 3, 5, 17])
+    def test_topk_keeps_exactly_k_with_ties(self, num_tied: int):
+        """Top-k must keep exactly k entries even when logits are tied.
+
+        A threshold comparison (`logits < kth_largest`) would keep *all* tokens
+        tied at the k-th largest logit, which can exceed k and diverge from the
+        Triton kernel. Both paths must keep exactly k entries (ties truncated),
+        matching `torch.topk` semantics.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch_size, vocab_size = 8, 64
+        k_val = 2
+        assert num_tied >= k_val
+        logits = torch.full((batch_size, vocab_size), -1.0, device=DEVICE_TYPE)
+        logits[:, :num_tied] = 10.0  # num_tied tokens tied at the top
+
+        k = torch.full((batch_size,), k_val, dtype=torch.int32, device=DEVICE_TYPE)
+
+        result_triton = apply_top_k_top_p_triton(logits.clone(), k, None)
+        result_pytorch = apply_top_k_top_p_pytorch(
+            logits.clone(), k.to(torch.long), None, allow_cpu_sync=True
+        )
+        result_pytorch_sort = apply_top_k_top_p_pytorch(
+            logits.clone(), k.to(torch.long), None, allow_cpu_sync=False
+        )
+
+        kept_triton = (result_triton != float("-inf")).sum(dim=-1)
+        kept_pytorch = (result_pytorch != float("-inf")).sum(dim=-1)
+        kept_pytorch_sort = (result_pytorch_sort != float("-inf")).sum(dim=-1)
+
+        assert torch.equal(kept_triton, kept_pytorch), (
+            f"top-k tie handling diverges: Triton kept {kept_triton.tolist()}, "
+            f"PyTorch (topk-only) kept {kept_pytorch.tolist()}"
+        )
+        assert torch.equal(kept_triton, kept_pytorch_sort), (
+            f"top-k tie handling diverges: Triton kept {kept_triton.tolist()}, "
+            f"PyTorch (sort path) kept {kept_pytorch_sort.tolist()}"
+        )
+        assert torch.equal(kept_triton, torch.full_like(kept_triton, k_val)), (
+            f"expected exactly {k_val} kept, got {kept_triton.tolist()}"
+        )
+
+    def test_topk_keeps_exactly_k_with_ties_and_topp(self):
+        """Top-k (with top-p) must keep exactly k entries when logits are tied."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch_size, vocab_size = 8, 64
+        k_val = 2
+        num_tied = 5
+        logits = torch.full((batch_size, vocab_size), -1.0, device=DEVICE_TYPE)
+        logits[:, :num_tied] = 10.0
+
+        k = torch.full((batch_size,), k_val, dtype=torch.int32, device=DEVICE_TYPE)
+        p = torch.full((batch_size,), 0.9, dtype=torch.float32, device=DEVICE_TYPE)
+
+        result_triton = apply_top_k_top_p_triton(logits.clone(), k, p)
+        result_pytorch = apply_top_k_top_p_pytorch(
+            logits.clone(), k.to(torch.long), p, allow_cpu_sync=False
+        )
+
+        kept_triton = (result_triton != float("-inf")).sum(dim=-1)
+        kept_pytorch = (result_pytorch != float("-inf")).sum(dim=-1)
+        assert torch.equal(kept_triton, kept_pytorch), (
+            f"top_k+top_p tie handling diverges: Triton kept "
+            f"{kept_triton.tolist()}, PyTorch kept {kept_pytorch.tolist()}"
+        )
 
     def test_extreme_k_values(self):
         """Test edge cases for k values."""
