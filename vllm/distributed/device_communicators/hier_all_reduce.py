@@ -50,23 +50,47 @@ class _IpcHandle(ctypes.Structure):
 _cudart = None
 
 
+def _find_cudart() -> str:
+    """Locate libcudart across install layouts: the CUDA runtime may come
+    from the pip wheel, from torch's bundled libs, or from a system CUDA
+    install (as in most container images)."""
+    # If torch already loaded it, reuse exactly that library.
+    try:
+        with open("/proc/self/maps") as f:
+            for line in f:
+                path = line.split()[-1] if " /" in line else ""
+                if os.path.basename(path).startswith("libcudart.so"):
+                    return path
+    except OSError:
+        pass
+    tdir = os.path.dirname(torch.__file__)
+    for pattern in (
+        os.path.join(
+            os.path.dirname(tdir), "nvidia", "cuda_runtime", "lib", "libcudart.so*"
+        ),
+        os.path.join(tdir, "lib", "libcudart*.so*"),
+    ):
+        found = glob.glob(pattern)
+        if found:
+            return found[0]
+    from ctypes.util import find_library
+
+    name = find_library("cudart")
+    if name:
+        return name
+    raise RuntimeError(
+        "hierarchical allreduce could not locate libcudart; it needs the CUDA "
+        "runtime to map peer buffers via cudaIpcOpenMemHandle"
+    )
+
+
 def _get_cudart():
     """The shared buffers are cudaMalloc'd and IPC-opened via ctypes: torch
     opens IPC handles inside the OWNER's device context, so the mapping is
     never made peer-accessible to the importing device's kernels."""
     global _cudart
     if _cudart is None:
-        tdir = os.path.dirname(torch.__file__)
-        cands = glob.glob(
-            os.path.join(
-                os.path.dirname(tdir),
-                "nvidia",
-                "cuda_runtime",
-                "lib",
-                "libcudart.so*",
-            )
-        ) + glob.glob(os.path.join(tdir, "lib", "libcudart*.so*"))
-        lib = ctypes.CDLL(cands[0])
+        lib = ctypes.CDLL(_find_cudart())
         lib.cudaMalloc.argtypes = [
             ctypes.POINTER(ctypes.c_void_p),
             ctypes.c_size_t,
