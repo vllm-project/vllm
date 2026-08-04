@@ -27,14 +27,6 @@ DeepseekV4MegaMoEExpertsFI: type | None = None
 # instead of encoding it in the backend name.
 FI_MOE_EP_MIN_CAPABILITY = (10, 0)
 
-# First flashinfer release whose ``moe_ep`` runtime this integration targets.
-# Set FI_MOE_EP_SKIP_VERSION_CHECK=1 to run against a pre-release build.
-FI_MOE_EP_MIN_FLASHINFER = (0, 6, 17)
-
-
-# CuteDSL megakernels, one per expert-weight format they are built around.
-CUTEDSL_MEGAKERNELS = frozenset({"nvfp4_cutedsl", "mxfp8_cutedsl"})
-
 
 @dataclass(frozen=True)
 class FiMoeEpBackendSpec:
@@ -47,7 +39,6 @@ class FiMoeEpBackendSpec:
 
     megakernel: str
     needs_nvshmem: bool
-    is_cutedsl: bool = False
 
 
 FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
@@ -63,7 +54,6 @@ FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
     "flashinfer_moe_ep_mega_cutedsl": FiMoeEpBackendSpec(
         megakernel="nvfp4_cutedsl",
         needs_nvshmem=True,
-        is_cutedsl=True,
     ),
 }
 
@@ -71,11 +61,6 @@ FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
 # plus prepare_megamoe routing), whether the experts compute natively or
 # through flashinfer.
 MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe", *FI_MOE_EP_BACKENDS})
-
-# Environment variables that used to select the flashinfer path and its
-# megakernel. Both are now encoded in the backend string; a stale export would
-# otherwise silently produce native numbers under a flashinfer label.
-_RETIRED_SELECTION_ENVS = ("FI_MOE_EP", "FI_MOE_EP_MEGAKERNEL")
 
 _FI_RUNTIME_HANDLE: Any = None
 _FI_MOE_EP_RUNTIME_AVAILABLE: bool | None = None
@@ -126,89 +111,11 @@ def fi_moe_ep_backend_spec(moe_backend: str) -> FiMoeEpBackendSpec:
         ) from None
 
 
-def fi_megakernel(vllm_config: "VllmConfig") -> str:
-    """The flashinfer megakernel for the configured backend and checkpoint.
-
-    Only the CuteDSL family has a choice to make. NVFP4 experts are consumed
-    prequantized and MXFP4 experts are requantized to NVFP4 -- the faster
-    kernel at every geometry measured so far -- so both checkpoints in
-    circulation resolve to ``nvfp4_cutedsl``.
-
-    ``mxfp8_cutedsl`` is kept for a checkpoint whose experts are already E4M3
-    with E8M0-per-32 scales. None exists yet to derive from or validate
-    against, so rather than ship a detector written blind it is reachable by
-    explicit request via ``FI_MOE_EP_CUTEDSL_KERNEL``; fold it into the
-    derivation here once there is such a checkpoint to test.
-    """
-    spec = fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend)
-    if not spec.is_cutedsl:
-        return spec.megakernel
-    override = os.environ.get("FI_MOE_EP_CUTEDSL_KERNEL")
-    if override:
-        if override not in CUTEDSL_MEGAKERNELS:
-            raise ValueError(
-                f"FI_MOE_EP_CUTEDSL_KERNEL={override!r} is not a CuteDSL "
-                f"megakernel; expected one of {sorted(CUTEDSL_MEGAKERNELS)}"
-            )
-        return override
-    return spec.megakernel
-
-
-def _flashinfer_version() -> tuple[int, ...] | None:
-    """Installed flashinfer as a comparable tuple, or None if undeterminable."""
-    from importlib.metadata import PackageNotFoundError, version
-
-    try:
-        raw = version("flashinfer-python")
-    except PackageNotFoundError:
-        return None
-    parts: list[int] = []
-    for chunk in raw.split(".")[:3]:
-        digits = "".join(c for c in chunk if c.isdigit())
-        if not digits:
-            break
-        parts.append(int(digits))
-    return tuple(parts) or None
-
-
-def check_flashinfer_version() -> None:
-    """Reject flashinfer builds older than the moe_ep runtime we target.
-
-    Skipped when the version cannot be determined (source checkouts and
-    editable installs do not always carry usable metadata) rather than
-    blocking a build that may well be new enough.
-    """
-    if os.environ.get("FI_MOE_EP_SKIP_VERSION_CHECK") == "1":
-        return
-    found = _flashinfer_version()
-    if found is None or found >= FI_MOE_EP_MIN_FLASHINFER:
-        return
-    want = ".".join(map(str, FI_MOE_EP_MIN_FLASHINFER))
-    have = ".".join(map(str, found))
-    raise ValueError(
-        f"The flashinfer moe_ep backends require flashinfer-python >= {want}, "
-        f"found {have}. Upgrade flashinfer, use "
-        "moe_backend=deep_gemm_mega_moe for the native mega path, or set "
-        "FI_MOE_EP_SKIP_VERSION_CHECK=1 to run against a pre-release build."
-    )
-
-
 def validate_fi_moe_ep_config(vllm_config: "VllmConfig") -> None:
     """Config-time checks for the mega-MoE backends, native and flashinfer."""
-    for env in _RETIRED_SELECTION_ENVS:
-        if os.environ.get(env):
-            raise ValueError(
-                f"{env} is set but no longer selects anything: the flashinfer "
-                "moe_ep path and its megakernel are chosen by backend string "
-                f"(--moe-backend {'|'.join(sorted(FI_MOE_EP_BACKENDS))}). "
-                f"Unset {env}."
-            )
-
     moe_backend = vllm_config.kernel_config.moe_backend
     if not is_fi_moe_ep_backend(moe_backend):
         return
-
-    check_flashinfer_version()
 
     # flashinfer validates the arch too, but not until the layer constructor
     # runs during weight load; check here so the error names the flag the user
@@ -270,21 +177,15 @@ def ensure_fi_moe_ep_runtime(vllm_config: "VllmConfig") -> None:
 
     bootstrap = make_fi_moe_ep_bootstrap()
     spec = fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend)
-    megakernel = fi_megakernel(vllm_config)
     # flashinfer's runtime/layer constructors bind the process to
     # cuda:LOCAL_RANK (falling back to bootstrap.rank). vLLM has already bound
     # this worker to its (possibly remapped) visible device, and a mismatched
     # rebind launches the weight transforms on the wrong GPU against another
     # device's pointers (observed as CUDA_ERROR_ILLEGAL_ADDRESS in the
     # deep_gemm transform_sf during load). Pin LOCAL_RANK to the device vLLM
-    # chose so every internal set_device is a no-op.
+    # chose so every internal set_device is a no-op. TODO: drop once
+    # flashinfer respects the caller's current device.
     os.environ["LOCAL_RANK"] = str(torch.cuda.current_device())
-    print(
-        f"[fi_moe_ep] ep_rank={bootstrap.rank} world={bootstrap.world_size} "
-        f"cuda.current_device={torch.cuda.current_device()} "
-        f"megakernel={megakernel}",
-        flush=True,
-    )
     _FI_RUNTIME_HANDLE = bootstrap_moe_ep_runtime(
         bootstrap,
         megakernel_runtime_requirements(spec),
@@ -356,8 +257,8 @@ def mega_moe_weight_pack_from_params(
             w13_scale=w13_weight_scale.data,
             w2_scale=w2_weight_scale.data,
         )
-    # cutedsl kernels quantize with their own recipe (nvfp4 e2m1+e4m3-per-16 /
-    # mxfp8 e4m3-per-32): dequantize the checkpoint fp4 to bf16 and let the
+    # The cutedsl kernel quantizes with its own recipe (nvfp4
+    # e2m1+e4m3-per-16): dequantize the checkpoint fp4 to bf16 and let the
     # backend preprocess requantize. Double quantization: outputs are close to
     # but not bit-identical with the native path.
     return MoEWeightPack(
@@ -366,43 +267,16 @@ def mega_moe_weight_pack_from_params(
     )
 
 
-_NVFP4_CKPT_CACHE: dict[str, bool] = {}
-
-
 def ckpt_uses_nvfp4_experts(vllm_config: "VllmConfig") -> bool:
     """True when the loaded checkpoint quantizes experts with modelopt NVFP4
     (e2m1 + fp8-e4m3 per-16 block scales + per-tensor weight_scale_2), i.e.
     the recipe the nvfp4_cutedsl prequantized-weights path consumes verbatim.
 
-    Detection: ``hf_quant_config.json`` next to the model weights. Override
-    with FI_MOE_EP_CKPT_RECIPE={nvfp4,mx}.
+    DeepSeek-V4 NVFP4-expert checkpoints declare ``moe_quant_algo: NVFP4`` in
+    their ``quantization_config``, which DeepseekV4FP8Config surfaces as
+    ``moe_quant_algo``.
     """
-    override = os.environ.get("FI_MOE_EP_CKPT_RECIPE", "").lower()
-    if override in ("mx", "mxfp4"):
-        return False
-    if override == "nvfp4":
-        return True
-    model_path = vllm_config.model_config.model
-    cached = _NVFP4_CKPT_CACHE.get(model_path)
-    if cached is not None:
-        return cached
-    result = False
-    cfg_path = os.path.join(model_path, "hf_quant_config.json")
-    if os.path.exists(cfg_path):
-        import json
-
-        try:
-            with open(cfg_path) as f:
-                cfg = json.load(f)
-            layers = (cfg.get("quantization") or {}).get("quantized_layers") or {}
-            result = any(
-                (v or {}).get("quant_algo") == "NVFP4"
-                for _, v in zip(range(8), layers.values())
-            )
-        except (OSError, ValueError):
-            result = False
-    _NVFP4_CKPT_CACHE[model_path] = result
-    return result
+    return getattr(vllm_config.quant_config, "moe_quant_algo", "") == "NVFP4"
 
 
 def nvfp4_prequant_pack_and_alphas(
@@ -481,33 +355,8 @@ def build_fi_mega_config(
     from flashinfer.moe_ep import (
         DeepGemmMegaMoeConfig,
         MegaConfig,
-        Mxfp8CutedslMegaMoeConfig,
         Nvfp4CutedslMegaMoeConfig,
     )
-
-    knobs: dict | str | None = None
-    knobs_env = os.environ.get("FI_MOE_EP_KNOBS", "")
-    # In-kernel topk-reduce (opt-in, FI_MOE_EP_IKR=1): removes the explicit
-    # combine-reduce launch, BUT measured 2026-07-17 (run 22) it LOSES both
-    # workloads at DSV4 geometry with the current non-ikr-tuned knobs
-    # (decode-graphs 4328 vs 10101, prefill 25708 vs 28204) — ikr's known
-    # small-token penalty dominates at decode sizes. Revisit after an
-    # ikr-aware retune (moe_ep.tune --allow-nondeterministic) or kernel-side
-    # small-batch ikr work.
-    ikr = os.environ.get("FI_MOE_EP_IKR", "0") == "1"
-    # Cross-rank combine wire format (nvfp4_cutedsl only): "bf16" (exact,
-    # default), "mxfp8" (2x less combine traffic), "nvfp4" (4x less). The
-    # quantized wires won the kernel-level microbench at large tokens
-    # (prefill regime) at a small accuracy cost; they force dispatch-warp
-    # token-back and are incompatible with ikr.
-    combine = os.environ.get("FI_MOE_EP_COMBINE", "bf16")
-    if knobs_env:
-        if knobs_env.strip().startswith("{"):
-            import json
-
-            knobs = json.loads(knobs_env)
-        else:
-            knobs = knobs_env  # e.g. "auto"
 
     if megakernel == "deep_gemm_mega":
         mk = DeepGemmMegaMoeConfig(
@@ -522,18 +371,6 @@ def build_fi_mega_config(
             top_k=top_k,
             activation_clamp=activation_clamp,
             fast_math=fast_math,
-            in_kernel_fc2_reduce=ikr,
-            combine_dtype=combine,
-            knobs=knobs,
-        )
-    elif megakernel == "mxfp8_cutedsl":
-        mk = Mxfp8CutedslMegaMoeConfig(
-            intermediate_size=intermediate_size,
-            top_k=top_k,
-            activation_clamp=activation_clamp,
-            fast_math=fast_math,
-            in_kernel_fc2_reduce=ikr,
-            knobs=knobs,
         )
     else:
         raise ValueError(f"Unsupported fi_moe_ep megakernel {megakernel!r}")
@@ -565,7 +402,9 @@ def build_fi_mega_layer(
 ) -> "MoEEpMegaLayer":
     from flashinfer.moe_ep import FleetParams, MoEEpLayer
 
-    megakernel = fi_megakernel(vllm_config)
+    megakernel = fi_moe_ep_backend_spec(
+        vllm_config.kernel_config.moe_backend
+    ).megakernel
     mega_config = build_fi_mega_config(
         intermediate_size=intermediate_size,
         top_k=top_k,
@@ -593,108 +432,6 @@ def build_fi_mega_layer(
 
 
 _MOE_SKIP_PADDING: bool | None = None
-
-
-_SHAPE_LOG_FH = None
-
-
-_LOAD_STATS: dict[int, list] = {}
-_LOAD_LAYER_SEQ = [0]
-
-
-def collect_layer_load(topk_ids: torch.Tensor, num_experts: int) -> None:
-    """Env-gated per-layer expert-load skew collector (FI_MOE_EP_LOAD_STATS).
-
-    Cold-run diagnosis for layer-wise heuristics: accumulates, per MoE layer,
-    the max/mean expert-load ratio of each forward (1.0 = perfectly balanced;
-    the mega kernel's slowest expert is the straggler bound). Layer identity =
-    call index mod FI_MOE_EP_NUM_LAYERS (default 43). Written as JSON at
-    process exit next to the env-given prefix.
-    """
-    import os as _os
-
-    prefix = _os.environ.get("FI_MOE_EP_LOAD_STATS")
-    if not prefix:
-        return
-    n_layers = int(_os.environ.get("FI_MOE_EP_NUM_LAYERS", "43"))
-    layer = _LOAD_LAYER_SEQ[0] % n_layers
-    _LOAD_LAYER_SEQ[0] += 1
-    counts = torch.bincount(
-        topk_ids[topk_ids >= 0].flatten(), minlength=num_experts
-    ).float()
-    ratio = float(counts.max() / counts.mean().clamp(min=1e-9))
-    _LOAD_STATS.setdefault(layer, []).append(ratio)
-
-    # Routing matrix (COMM.md): this rank's send-side traffic per dst rank.
-    # cells = (token, expert) pairs per dst (combine sends one fc2 row per
-    # cell); tokens = rank-deduped (dispatch sends one payload per
-    # (token, dst rank)). Eager-only by nature: under captured graphs this
-    # python never re-runs on replay.
-    world = (
-        torch.distributed.get_world_size()
-        if torch.distributed.is_initialized()
-        else 1
-    )
-    experts_per_rank = max(num_experts // world, 1)
-    valid = topk_ids >= 0
-    dst = torch.where(valid, topk_ids // experts_per_rank, 0)
-    cells = torch.bincount(dst[valid].flatten(), minlength=world)
-    presence = torch.zeros(
-        topk_ids.shape[0], world, dtype=torch.bool, device=topk_ids.device
-    )
-    presence.scatter_(1, dst.long(), valid)
-    tokens = presence.sum(dim=0)
-    acc = _LOAD_STATS.setdefault("_send_matrix", {})
-    entry = acc.setdefault(layer, {"cells": [0] * world, "tokens": [0] * world, "calls": 0})
-    for r in range(world):
-        entry["cells"][r] += int(cells[r])
-        entry["tokens"][r] += int(tokens[r])
-    entry["calls"] += 1
-    if not getattr(collect_layer_load, "_hooked", False):
-        collect_layer_load._hooked = True
-        import atexit
-        import json
-
-        def _dump():
-            rank = (
-                torch.distributed.get_rank()
-                if torch.distributed.is_initialized()
-                else 0
-            )
-            payload: dict = {}
-            for k, v in sorted(_LOAD_STATS.items(), key=lambda kv: str(kv[0])):
-                if k == "_send_matrix":
-                    payload["send_matrix"] = {
-                        str(layer): entry for layer, entry in sorted(v.items())
-                    }
-                else:
-                    payload[str(k)] = {
-                        "n": len(v),
-                        "mean": sum(v) / len(v),
-                        "max": max(v),
-                    }
-            with open(f"{prefix}.rank{rank}.json", "w") as f:
-                json.dump(payload, f, indent=1)
-
-        atexit.register(_dump)
-
-
-def log_step_shape(num_tokens: int) -> None:
-    """Env-gated per-MoE-call batch-shape log (FI_MOE_EP_SHAPE_LOG=<prefix>).
-
-    Diagnosis tool for the fi_dg run-to-run nondeterminism: if the sequence
-    of scheduled batch shapes differs between two identical runs, the
-    divergence source is engine batch-formation timing, not MoE numerics.
-    One line per MoE layer call; rank-suffixed files.
-    """
-    global _SHAPE_LOG_FH
-    prefix = os.environ.get("FI_MOE_EP_SHAPE_LOG")
-    if not prefix:
-        return
-    if _SHAPE_LOG_FH is None:
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        _SHAPE_LOG_FH = open(f"{prefix}.rank{rank}", "a", buffering=1)
-    _SHAPE_LOG_FH.write(f"{num_tokens}\n")
 
 
 def resolve_mega_moe_is_padding(num_tokens: int) -> torch.Tensor | None:
@@ -748,7 +485,9 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
             self._epilogue_alphas: tuple[torch.Tensor, torch.Tensor] | None = None
             self._nvfp4_prequant = ckpt_uses_nvfp4_experts(vllm_config)
             if self._nvfp4_prequant:
-                megakernel = fi_megakernel(vllm_config)
+                megakernel = fi_moe_ep_backend_spec(
+                    vllm_config.kernel_config.moe_backend
+                ).megakernel
                 if megakernel != "nvfp4_cutedsl":
                     raise ValueError(
                         "NVFP4-quantized expert checkpoint requires "
@@ -859,7 +598,9 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
                     self.w13_weight_scale,
                     self.w2_weight,
                     self.w2_weight_scale,
-                    megakernel=fi_megakernel(self._vllm_config),
+                    megakernel=fi_moe_ep_backend_spec(
+                        self._vllm_config.kernel_config.moe_backend
+                    ).megakernel,
                 )
             self._mega_layer = build_fi_mega_layer(
                 make_fi_moe_ep_bootstrap(),
@@ -937,8 +678,6 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
             from flashinfer.moe_ep import MoEEpTensors
 
             num_tokens = hidden_states.shape[0]
-            log_step_shape(num_tokens)
-            collect_layer_load(topk_ids, self.num_experts)
             is_padding = resolve_mega_moe_is_padding(num_tokens)
             topk_ids = apply_mega_moe_routing_preprocess(
                 topk_ids,
@@ -1020,7 +759,6 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
 
 __all__ = [
     "DeepseekV4MegaMoEExpertsFI",
-    "CUTEDSL_MEGAKERNELS",
     "FI_MOE_EP_BACKENDS",
     "FiMoeEpBackendSpec",
     "MEGA_MOE_BACKENDS",
@@ -1030,7 +768,6 @@ __all__ = [
     "ckpt_uses_nvfp4_experts",
     "nvfp4_prequant_pack_and_alphas",
     "ensure_fi_moe_ep_runtime",
-    "fi_megakernel",
     "fi_moe_ep_backend_spec",
     "finalize_fi_moe_ep_runtime",
     "is_fi_moe_ep_backend",
