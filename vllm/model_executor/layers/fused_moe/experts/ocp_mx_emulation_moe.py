@@ -107,7 +107,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         if not has_quark():
             return False, "kernel requires amd-quark package"
 
-        return super().is_supported_config(
+        return TritonExperts.is_supported_config(
             cls=cls,
             moe_config=moe_config,
             weight_key=weight_key,
