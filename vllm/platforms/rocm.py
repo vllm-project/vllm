@@ -1122,29 +1122,15 @@ class RocmPlatform(Platform):
     ) -> tuple[Any, list[Any]]:
         """Launch default and auxiliary work on separate HIP streams.
 
-        ROCm uses ``Stream.wait_stream()`` fork-join instead of the CUDA Event
-        sync used by ``CudaPlatformBase.launch_multi_stream``. On HIP, bare
-        ``Event.wait()`` / ``Event.wait_event()`` cross-stream ordering was
-        observed to deadlock during DeepSeek-V4 CSA multistream decode; ATOM's
-        validated DSV4 path (``maybe_compressors_async``,
-        ``dual_stream_moe_forward`` in ``atom/models/deepseek_v4.py``)
-        synchronizes exclusively via ``wait_stream``.
+        Uses ``Stream.wait_stream()`` fork-join instead of CUDA events.
+        On HIP, ``Event.wait()`` / ``Event.wait_event()`` cross-stream
+        ordering is not reliably enforced and can deadlock or hang under
+        multistream overlap, especially during HIP graph capture/replay.
+        Stream-level waits express dependencies directly and are the
+        supported synchronization path on ROCm.
 
-        Why ROCm differs from CUDA:
-
-        * **CUDA** records ``start_event`` on the main stream and joins each
-          aux stream back via ``done_events[i].wait()`` on the main stream.
-        * **ROCm** calls ``aux_stream.wait_stream(current_stream)`` before aux
-          work and ``current_stream.wait_stream(aux_stream)`` before return.
-          ``start_event`` and ``done_events`` are kept for a uniform platform
-          API but are not used on ROCm.
-        * Neither platform needs ``record_stream()`` on aux **outputs** here:
-          both join back to the main stream before returning results. ATOM DSV4
-          and vLLM ``shared_experts`` follow the same rule.
-
-        Side-stream launches should be gated at the call site (for example
-        ATOM's ``forward_context.in_hipgraph``); this method only implements
-        the fork-join primitives.
+        ``start_event`` and ``done_events`` are kept for API compatibility
+        with CUDA but are unused here.
 
         Args:
             default_fn: Callable for the current (default) stream.
@@ -1152,16 +1138,14 @@ class RocmPlatform(Platform):
             start_event: Unused on ROCm; CUDA-path fan-out event.
             done_events: Unused on ROCm; CUDA-path per-aux join events.
             aux_streams: Per-aux HIP streams. Length must match ``aux_fns``.
-            queue_aux_before_default: When True, queue aux before
-                ``default_fn`` (``execute_in_parallel`` / ATOM CSA compressor
-                pattern). When False, run ``default_fn`` first
-                (``maybe_execute_in_parallel`` / ATOM MoE dual-stream
+            queue_aux_before_default: When True, queue aux kernels before
+                ``default_fn`` (``execute_in_parallel`` pattern). When False,
+                run ``default_fn`` first (``maybe_execute_in_parallel``
                 pattern).
 
         Returns:
             Tuple of (default_result, aux_results).
         """
-        _ = (start_event, done_events)
         assert aux_streams is not None
         aux_results = [None] * len(aux_fns)
         current_stream = torch.cuda.current_stream()
