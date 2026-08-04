@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
+from vllm.model_executor.layers.fused_moe.router import fused_topk_bias_router
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -125,6 +126,105 @@ def test_fused_topk_softplus_sqrt(
     sorted_w_ref = topk_weights_ref.gather(1, idx_ref)
     sorted_w = topk_weights.gather(1, idx_ops)
     torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("num_tokens", [1, 33])
+@pytest.mark.parametrize("hidden_size", [1024])
+@pytest.mark.parametrize("num_experts", [160, 100, 200, 1000])
+@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize("renormalize", [True, False])
+@pytest.mark.parametrize("routed_scaling_factor", [1.0])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_fused_topk_softplus_sqrt_unsupported_experts(
+    num_tokens: int,
+    hidden_size: int,
+    num_experts: int,
+    topk: int,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    dtype: torch.dtype,
+):
+    """Expert counts not instantiated by the CUDA kernel (e.g. pruned/REAP
+    checkpoints with n_routed_experts=160) must fall back to the torch
+    implementation instead of crashing with "Unsupported expert number"."""
+    torch.manual_seed(0)
+    hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+    e_score_correction_bias = torch.randn(
+        (num_experts,), dtype=torch.float32, device="cuda"
+    )
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=e_score_correction_bias,
+    )
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=e_score_correction_bias,
+        topk=topk,
+        renormalize=renormalize,
+        routed_scaling_factor=routed_scaling_factor,
+    )
+
+    # Different kernels may return the topk experts in different orders when
+    # scores tie; sort by expert id before comparing.
+    sorted_ref_ids, idx_ref = topk_ids_ref.sort(dim=-1)
+    sorted_ids, idx_ops = topk_ids.sort(dim=-1)
+    torch.testing.assert_close(sorted_ref_ids, sorted_ids, atol=0, rtol=0)
+
+    sorted_w_ref = topk_weights_ref.gather(1, idx_ref)
+    sorted_w = topk_weights.gather(1, idx_ops)
+    torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-5, rtol=2e-5)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("num_experts", [8, 64, 256, 384])
+def test_supported_experts_use_kernel_path(num_experts: int, monkeypatch):
+    """Supported expert counts must route to the CUDA kernel, not the torch
+    fallback. This pins the Python whitelist (_SOFTPLUS_SQRT_SUPPORTED_EXPERTS)
+    to the kernel's switch: if the whitelist is missing a count the fallback is
+    called (boom fires), and if the C++ switch drops a count the kernel raises.
+    """
+
+    def boom(*args, **kwargs):
+        raise AssertionError(
+            f"num_experts={num_experts} should use the CUDA kernel, "
+            "not the torch fallback"
+        )
+
+    monkeypatch.setattr(fused_topk_bias_router, "_topk_softplus_sqrt_torch", boom)
+
+    torch.manual_seed(0)
+    hidden_states = torch.randn((1, 1024), dtype=torch.float32, device="cuda")
+    gating_output = torch.randn((1, num_experts), dtype=torch.float32, device="cuda")
+    e_score_correction_bias = torch.randn(
+        (num_experts,), dtype=torch.float32, device="cuda"
+    )
+
+    # topk=8 keeps us off the dsv4 fast path (which requires topk==6), so this
+    # exercises vllm_topk_softplus_sqrt -> CUDA kernel for supported counts.
+    fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=e_score_correction_bias,
+        topk=8,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+    )
 
 
 @pytest.mark.skipif(
