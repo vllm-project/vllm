@@ -578,7 +578,10 @@ class VllmConfig:
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
-            return use_v2_model_runner
+            return (
+                use_v2_model_runner
+                and not self._get_v2_model_runner_unsupported_features()
+            )
 
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
@@ -2249,6 +2252,13 @@ class VllmConfig:
         if self.ec_transfer_config is not None:
             # Will be added by https://github.com/vllm-project/vllm/pull/38390
             unsupported.append("EC transfer")
+
+        if (
+            model_config is not None
+            and model_config.runner_type is not None
+            and model_config.runner_type == "pooling"
+        ):
+            unsupported.append("Pooling model")
 
         return unsupported
 
