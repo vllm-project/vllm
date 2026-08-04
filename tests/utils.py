@@ -1567,6 +1567,10 @@ _TEARDOWN_SUSPECT_TYPES = frozenset(
         "AsyncMPClient",
         "InprocClient",
         "CoreEngineProcManager",
+        # With VLLM_ENABLE_V1_MULTIPROCESSING=0 these live in the test process
+        # itself, so they are the ones holding VRAM rather than a subprocess.
+        "EngineCore",
+        "GPUModelRunner",
     }
 )
 
@@ -1596,6 +1600,10 @@ def _report_teardown_state() -> None:
     finished tearing down. Best effort only -- never let this mask the failure.
     """
     try:
+        # Engine startup calls gc.freeze(), and frozen objects are invisible to
+        # gc.get_objects(). Without this the in-process engine (MP=0) reports
+        # nothing at all, since there the freeze happens in this very process.
+        gc.unfreeze()
         survivors = [
             obj
             for obj in gc.get_objects()
