@@ -74,3 +74,5 @@ class OffloadingConfig:
     # support it. Aggregate layout decision; per-layer replication metadata
     # is planned for CanonicalKVCacheRef (#48408).
     replicated_layout: bool = False
+    # Unified number of CPU offload blocks across all workers, if precomputed.
+    num_cpu_blocks: int | None = None

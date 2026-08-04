@@ -11,7 +11,14 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -1216,6 +1223,53 @@ def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
             kv_cache_groups=[KVCacheGroupSpec(["layer2"], ref_kv_cache_spec)],
         ),
     ]
+
+
+def test_get_kv_cache_configs_unifies_cpu_offload_blocks_across_pp_stages():
+    model_config = SimpleNamespace(
+        max_model_len=512,
+        original_max_model_len=512,
+        use_mla=False,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=CacheConfig(block_size=16),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        speculative_config=None,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "cpu_bytes_to_use": 10 * GiB_bytes,
+            },
+        ),
+    )
+
+    ref_kv_cache_spec = new_kv_cache_spec()
+    pp_kv_cache_specs = [
+        {f"layer{i}": ref_kv_cache_spec for i in range(5)},
+        {f"layer{i}": ref_kv_cache_spec for i in range(5, 8)},
+    ]
+
+    num_gpu_blocks = 1000
+    available_memory = [
+        ref_kv_cache_spec.page_size_bytes * 5 * num_gpu_blocks,
+        ref_kv_cache_spec.page_size_bytes * 3 * num_gpu_blocks,
+    ]
+
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config,
+        pp_kv_cache_specs,
+        available_memory,
+    )
+
+    expected_num_cpu_blocks = 10 * GiB_bytes // (
+        ref_kv_cache_spec.page_size_bytes * 5 * vllm_config.parallel_config.world_size
+    )
+    assert [
+        kv_cache_config.num_cpu_blocks for kv_cache_config in kv_cache_configs
+    ] == [expected_num_cpu_blocks, expected_num_cpu_blocks]
 
 
 def test_project_kv_cache_groups_to_worker():

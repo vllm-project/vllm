@@ -179,4 +179,5 @@ def build_offloading_config(
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        num_cpu_blocks=kv_cache_config.num_cpu_blocks,
     )

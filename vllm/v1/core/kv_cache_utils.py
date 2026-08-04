@@ -5,6 +5,7 @@
 import copy
 import hashlib
 import math
+import mmap
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -2057,6 +2058,142 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+def _get_cpu_offload_blocks_per_chunk(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> int:
+    kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
+    extra_config = kv_transfer_config.kv_connector_extra_config
+
+    blocks_per_chunk_config = extra_config.get("blocks_per_chunk")
+    tokens_per_chunk = extra_config.get("block_size")
+
+    if blocks_per_chunk_config is not None and tokens_per_chunk is not None:
+        raise ValueError(
+            "Specify only one of 'block_size' or 'blocks_per_chunk' "
+            "in kv_connector_extra_config."
+        )
+
+    if blocks_per_chunk_config is not None:
+        blocks_per_chunk = int(blocks_per_chunk_config)
+        if blocks_per_chunk <= 0:
+            raise ValueError("'blocks_per_chunk' must be greater than 0.")
+        return blocks_per_chunk
+
+    if tokens_per_chunk is None:
+        return 1
+
+    tokens_per_chunk_int = int(tokens_per_chunk)
+    _, tokens_per_block = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    assert tokens_per_chunk_int % tokens_per_block == 0
+    return tokens_per_chunk_int // tokens_per_block
+
+
+def _uses_replicated_cpu_offload_layout(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    worker_kv_bytes_per_block: int,
+) -> bool:
+    parallel_config = vllm_config.parallel_config
+    single_group_spec = (
+        kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        if len(kv_cache_config.kv_cache_groups) == 1
+        else None
+    )
+
+    return (
+        vllm_config.model_config.use_mla
+        and type(single_group_spec) is MLAAttentionSpec
+        and worker_kv_bytes_per_block > 0
+        and worker_kv_bytes_per_block
+        == single_group_spec.page_size_bytes
+        * len(kv_cache_config.kv_cache_groups[0].layer_names)
+        and parallel_config.tensor_parallel_size > 1
+        and parallel_config.pipeline_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and parallel_config.world_size == parallel_config.tensor_parallel_size
+        and parallel_config.distributed_executor_backend == "mp"
+        and parallel_config.nnodes_within_dp == 1
+    )
+
+
+def get_cpu_offload_num_blocks(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> int:
+    kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
+
+    cpu_bytes_to_use = kv_transfer_config.kv_connector_extra_config.get(
+        "cpu_bytes_to_use"
+    )
+    if not cpu_bytes_to_use:
+        raise Exception(
+            "cpu_bytes_to_use must be specified in kv_connector_extra_config"
+        )
+
+    worker_kv_bytes_per_block = 0
+    if kv_cache_config.num_blocks > 0:
+        packed_tensors = tuple(
+            bool(tensor.block_stride) for tensor in kv_cache_config.kv_cache_tensors
+        )
+        is_packed = any(packed_tensors)
+        assert not is_packed or all(packed_tensors)
+        total_gpu_kv_bytes = (
+            kv_cache_config.kv_cache_tensors[0].size
+            if is_packed
+            else sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors)
+        )
+        worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
+
+    world_size = vllm_config.parallel_config.world_size
+    if worker_kv_bytes_per_block <= 0 or world_size <= 0:
+        return 0
+
+    num_copies = (
+        1
+        if _uses_replicated_cpu_offload_layout(
+            vllm_config, kv_cache_config, worker_kv_bytes_per_block
+        )
+        else world_size
+    )
+    kv_bytes_per_block = worker_kv_bytes_per_block * num_copies
+    kv_bytes_per_chunk = (
+        kv_bytes_per_block
+        * _get_cpu_offload_blocks_per_chunk(vllm_config, kv_cache_config)
+    )
+    aligned_kv_bytes_per_chunk = round_up(kv_bytes_per_chunk, mmap.PAGESIZE)
+    return int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+
+
+def _uses_cpu_offloading_spec(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if (
+        kv_transfer_config is None
+        or kv_transfer_config.kv_connector != "OffloadingConnector"
+    ):
+        return False
+
+    spec_name = kv_transfer_config.kv_connector_extra_config.get(
+        "spec_name", "CPUOffloadingSpec"
+    )
+    return spec_name == "CPUOffloadingSpec"
+
+
+def _unify_cpu_offload_num_blocks(
+    vllm_config: VllmConfig, kv_cache_configs: list[KVCacheConfig]
+) -> None:
+    if not _uses_cpu_offloading_spec(vllm_config):
+        return
+
+    min_num_cpu_blocks = min(
+        get_cpu_offload_num_blocks(vllm_config, kv_cache_config)
+        for kv_cache_config in kv_cache_configs
+    )
+    for kv_cache_config in kv_cache_configs:
+        kv_cache_config.num_cpu_blocks = min_num_cpu_blocks
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2081,6 +2218,8 @@ def get_kv_cache_configs(
        different PP stages are similar.)
     5. Change the num_blocks of each worker to the smallest among all workers
        and shrink tensor sizes proportionally to avoid allocating unused memory.
+    6. If native CPU offloading is enabled, set the CPU offload num_blocks to
+       the smallest value supported by any worker.
 
     Args:
         vllm_config: The global VllmConfig
@@ -2188,6 +2327,9 @@ def get_kv_cache_configs(
             assert tensor.size % num_blocks_old == 0
             tensor.size = tensor.size // num_blocks_old * min_num_blocks
 
+    _unify_cpu_offload_num_blocks(vllm_config, kv_cache_configs)
+
+    for kv_cache_config in kv_cache_configs:
         if len(kv_cache_config.kv_cache_groups) > 0:
             max_model_len = vllm_config.model_config.max_model_len
             # GPU KV cache size in tokens = max_concurrency * max_model_len:
