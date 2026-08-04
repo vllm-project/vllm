@@ -1156,9 +1156,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # target is checking draft tokens, so position t must not see t+1 --
         # and attention rows are independent, so giving row t the KV range
         # [0, context + t] is exactly causal multi-token attention.
+        # Gluon only has a gfx950 build, so gate on the arch as well (mirrors
+        # use_gluon_decode). On gfx942 this falls through to the asm decode,
+        # which pads to 16 heads and handles qlen>1 verify directly.
         if (
             self.num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
             and int(decode.max_qo_len) > 1
+            and _gluon_mla_decode_supported()
         ):
             qlen = int(decode.max_qo_len)
             if type(q) is tuple:
