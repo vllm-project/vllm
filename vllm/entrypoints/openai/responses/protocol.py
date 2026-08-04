@@ -220,6 +220,14 @@ class ResponsesRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
+        ),
+    )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
         default=None,
         description=(
@@ -243,6 +251,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -337,6 +346,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            tool_choice=self.tool_choice if self.tools else None,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -472,18 +482,6 @@ class ResponsesRequest(OpenAIBaseModel):
         if data.get("prompt") is not None:
             raise VLLMValidationError(
                 "prompt template is not supported", parameter="prompt"
-            )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None and (
-            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
-        ):
-            raise VLLMValidationError(
-                "Parameter 'cache_salt' must be a non-empty string if provided.",
-                parameter="cache_salt",
             )
         return data
 

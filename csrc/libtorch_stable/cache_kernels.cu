@@ -453,6 +453,55 @@ __global__ void concat_and_cache_mla_kernel(
   copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
 }
 
+// Grouped variant of concat_and_cache_mla: inserts the context K/V for every
+// draft layer in a single launch. Grid is (num_tokens, num_layers); each layer
+// reads its own cache base pointer from kv_cache_ptrs (same pointer-array
+// pattern as copy_blocks_kernel). bf16 only, so it is a raw 16-bit copy with no
+// scaling or quantization; scalar_t is uint16_t for portability.
+template <typename scalar_t>
+__global__ void concat_and_cache_mla_grouped_kernel(
+    const scalar_t* __restrict__ kv_c,  // [num_layers, num_tokens,
+                                        // kv_lora_rank]
+    const scalar_t* __restrict__ k_pe,  // [num_layers, num_tokens, pe_dim]
+    const int64_t* __restrict__ kv_cache_ptrs,  // [num_layers]
+    const int64_t* __restrict__ slot_mapping,   // [num_layers, num_tokens]
+    const int64_t kv_c_layer_stride, const int64_t kv_c_token_stride,
+    const int64_t k_pe_layer_stride, const int64_t k_pe_token_stride,
+    const int64_t slot_layer_stride, const int64_t block_stride,
+    const int64_t entry_stride, const int kv_lora_rank, const int pe_dim,
+    const int block_size) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t layer_idx = blockIdx.y;
+  const int64_t slot_idx =
+      slot_mapping[layer_idx * slot_layer_stride + token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+
+  scalar_t* __restrict__ kv_cache =
+      reinterpret_cast<scalar_t*>(kv_cache_ptrs[layer_idx]);
+  const scalar_t* __restrict__ kv_c_layer =
+      kv_c + layer_idx * kv_c_layer_stride;
+  const scalar_t* __restrict__ k_pe_layer =
+      k_pe + layer_idx * k_pe_layer_stride;
+
+  auto copy = [&](const scalar_t* __restrict__ src, int64_t src_token_stride,
+                  int size, int offset) {
+    for (int i = threadIdx.x; i < size; i += blockDim.x) {
+      const int64_t src_idx = token_idx * src_token_stride + i;
+      const int64_t dst_idx =
+          block_idx * block_stride + block_offset * entry_stride + i + offset;
+      kv_cache[dst_idx] = src[src_idx];
+    }
+  };
+
+  copy(kv_c_layer, kv_c_token_stride, kv_lora_rank, 0);
+  copy(k_pe_layer, k_pe_token_stride, pe_dim, kv_lora_rank);
+}
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void concat_and_cache_ds_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
@@ -912,6 +961,53 @@ void concat_and_cache_mla(
     DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
                                CALL_CONCAT_AND_CACHE_MLA);
   }
+}
+
+void concat_and_cache_mla_grouped(
+    torch::stable::Tensor& kv_c,  // [num_layers, num_tokens, kv_lora_rank]
+    torch::stable::Tensor& k_pe,  // [num_layers, num_tokens, pe_dim]
+    torch::stable::Tensor& kv_cache_ptrs,  // [num_layers] int64, on device
+    torch::stable::Tensor& slot_mapping,   // [num_layers, num_tokens] int64
+    int64_t block_size, int64_t block_stride, int64_t entry_stride) {
+  int num_layers = kv_c.size(0);
+  int num_tokens = kv_c.size(1);
+  int kv_lora_rank = kv_c.size(2);
+  int pe_dim = k_pe.size(2);
+
+  STD_TORCH_CHECK(
+      kv_c.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
+          k_pe.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "concat_and_cache_mla_grouped only supports a bf16 KV cache; got kv_c=",
+      kv_c.scalar_type(), ", k_pe=", k_pe.scalar_type());
+  STD_TORCH_CHECK(
+      kv_cache_ptrs.scalar_type() == torch::headeronly::ScalarType::Long,
+      "kv_cache_ptrs must be int64");
+
+  if (num_tokens == 0 || num_layers == 0) {
+    return;
+  }
+
+  const int64_t kv_c_layer_stride = kv_c.stride(0);
+  const int64_t kv_c_token_stride = kv_c.stride(1);
+  const int64_t k_pe_layer_stride = k_pe.stride(0);
+  const int64_t k_pe_token_stride = k_pe.stride(1);
+  const int64_t slot_layer_stride = slot_mapping.stride(0);
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      kv_c.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+
+  dim3 grid(num_tokens, num_layers);
+  dim3 block(std::min(kv_lora_rank, 512));
+  vllm::concat_and_cache_mla_grouped_kernel<uint16_t>
+      <<<grid, block, 0, stream>>>(
+          reinterpret_cast<const uint16_t*>(kv_c.data_ptr()),
+          reinterpret_cast<const uint16_t*>(k_pe.data_ptr()),
+          kv_cache_ptrs.const_data_ptr<int64_t>(),
+          slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,
+          kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,
+          slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim,
+          block_size);
 }
 
 namespace vllm {

@@ -257,8 +257,18 @@ def test_q_path_matches_reference(num_tokens: int, n_heads: int, padded_heads: i
         num_blocks, bs, HEAD_BYTES, dtype=torch.uint8, device=device
     ).view(num_blocks, -1)
     slot_mapping = torch.full((num_tokens,), -1, dtype=torch.int64, device=device)
-    q_out = _call_fused(
-        q, padded_heads, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
+    q_out = torch.empty(num_tokens, padded_heads, HEAD_DIM, dtype=dtype, device=device)
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
+        q,
+        kv,
+        q_out,
+        k_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        padded_heads,
+        eps,
+        bs,
     )
 
     torch.testing.assert_close(q_out[:, :n_heads], q_ref, rtol=1e-2, atol=1e-2)

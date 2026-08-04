@@ -40,6 +40,8 @@ def test_mamba_align_split_partial_tail_schedule():
     hash_block_size = 32
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle=False,
         hash_block_size=hash_block_size,
         mamba_partial_cache_hit=True,
@@ -73,6 +75,78 @@ def test_mamba_align_split_partial_tail_schedule():
     assert split(self=mock, request=req2, num_new_tokens=2016) == 256
     req2.num_computed_tokens = 10240
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
+
+
+def test_mamba_align_split_when_block_exceeds_scheduling_budget():
+    """Sub-block chunks make progress only when no step can fit a full block."""
+    block_size = 11392
+    token_budget = 8192
+    prompt_length = 30000
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=token_budget,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle=False,
+        hash_block_size=32,
+        mamba_partial_cache_hit=False,
+    )
+    req = make_request("0", [0] * prompt_length, 32, sha256)
+    split = Scheduler._mamba_block_aligned_split
+
+    mock.max_num_scheduled_tokens = block_size
+    assert split(self=mock, request=req, num_new_tokens=token_budget) == 0
+    mock.max_num_scheduled_tokens = token_budget
+
+    scheduled_chunks = []
+    while req.num_computed_tokens < prompt_length:
+        num_new_tokens = min(token_budget, prompt_length - req.num_computed_tokens)
+        num_scheduled_tokens = split(
+            self=mock,
+            request=req,
+            num_new_tokens=num_new_tokens,
+        )
+        assert 0 < num_scheduled_tokens <= token_budget
+        scheduled_chunks.append(num_scheduled_tokens)
+        req.num_computed_tokens += num_scheduled_tokens
+
+    assert scheduled_chunks == [8192, 3200, 8192, 3200, 7216]
+
+
+def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
+    """A long-prefill cap below the block size permits sub-block progress."""
+    block_size = 512
+    token_budget = 8192
+    long_prefill_threshold = 384
+    prompt_length = 1300
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=token_budget,
+        scheduler_config=SimpleNamespace(
+            long_prefill_token_threshold=long_prefill_threshold
+        ),
+        use_eagle=False,
+        hash_block_size=32,
+        mamba_partial_cache_hit=False,
+    )
+    req = make_request("0", [0] * prompt_length, 32, sha256)
+    split = Scheduler._mamba_block_aligned_split
+
+    scheduled_chunks = []
+    while req.num_computed_tokens < prompt_length:
+        num_new_tokens = min(
+            long_prefill_threshold,
+            prompt_length - req.num_computed_tokens,
+        )
+        num_scheduled_tokens = split(
+            self=mock,
+            request=req,
+            num_new_tokens=num_new_tokens,
+        )
+        assert 0 < num_scheduled_tokens <= long_prefill_threshold
+        scheduled_chunks.append(num_scheduled_tokens)
+        req.num_computed_tokens += num_scheduled_tokens
+
+    assert scheduled_chunks == [384, 128, 384, 128, 276]
 
 
 def test_hybrid_mamba_align_partial_hash_hit():
