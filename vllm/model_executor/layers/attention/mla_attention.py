@@ -2697,10 +2697,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         self.dcp_world_size: int = -1
 
-        self.cp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
-        )
-
     @abstractmethod
     def forward_mqa(
         self,
