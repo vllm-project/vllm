@@ -185,15 +185,19 @@ mkdocs.yaml @hmellor
 /vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
 /vllm/model_executor/layers/fused_moe/rocm*.py @tjtanaa @dllehr-amd
-/csrc/rocm @tjtanaa @dllehr-amd
+/csrc/rocm @tjtanaa @dllehr-amd @hongxiayang
 /requirements/*rocm* @tjtanaa @AndreasKaratzas
 /tests/**/*rocm* @tjtanaa @AndreasKaratzas
-/docs/**/*rocm* @tjtanaa
+/docs/**/*rocm* @tjtanaa @hongxiayang
 /vllm/**/*quark* @tjtanaa
 /tests/**/*quark* @tjtanaa @AndreasKaratzas
-/docs/**/*quark* @tjtanaa
+/docs/**/*quark* @tjtanaa @hongxiayang
 /vllm/**/*aiter* @tjtanaa @AndreasKaratzas
 /tests/**/*aiter* @tjtanaa @AndreasKaratzas
+
+# AMD per-model amd/ subtrees
+/vllm/models/*/amd @tjtanaa @dllehr-amd @hongxiayang
+/vllm/models/deepseek_v4/amd @tjtanaa @dllehr-amd @hongxiayang @zyongye
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche
