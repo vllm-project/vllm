@@ -90,13 +90,12 @@ $ curl -X POST http://localhost:8000/stop_profile
 is Triton's GPU profiler. It can collect a low-overhead aggregate tree or a
 Chrome trace and works through the same vLLM profiling controls as the PyTorch
 and CUDA profilers. Proton currently supports NVIDIA GPUs through CUPTI and
-requires eager execution.
+supports CUDA graph attribution.
 
 Start a server with a local output directory:
 
 ```bash
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
-    --enforce-eager \
     --profiler-config '{
         "profiler": "proton",
         "proton_profiler_dir": "./proton_profile",
@@ -123,14 +122,16 @@ The Proton-specific options are:
 - `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
 
 `hatchet` and `hatchet_msgpack` require `proton_data: "tree"`, while
-`chrome_trace` requires `proton_data: "trace"`. CUDA graph profiling is not yet
-supported, so `--enforce-eager` is required for every Proton mode.
+`chrome_trace` requires `proton_data: "trace"`.
 
 Automatic backend selection is recommended. vLLM currently supports Proton's
 `cupti` backend on NVIDIA GPUs. ROCm support is not yet available. vLLM does not
 expose Proton's experimental instrumentation backend because current upstream
-Triton builds can produce profiles without timing metrics. Backend-specific
-modes, including `pcsampling`, can be selected with `proton_mode`.
+can produce profiles without timing metrics. Proton observes vLLM's CUDA graph
+capture so later profiles can attribute replayed kernels without retaining
+model-startup activity. Backend-specific modes can be selected with
+`proton_mode`; `pcsampling` synchronizes the CUDA context and therefore
+requires `--enforce-eager`.
 
 Triton 3.6 supports explicit `hatchet` and `chrome_trace` output. The
 `hatchet_msgpack` format and `periodic_flushing` mode require Triton 3.7 or

@@ -170,6 +170,7 @@ class Worker(WorkerBase):
         # Profiler wrapper is created lazily in profile() when start is called,
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
+        self._proton_capture_profiler: ProtonProfilerWrapper | None = None
         self.profiler_config = vllm_config.profiler_config
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
@@ -715,7 +716,8 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            with self._get_proton_capture_context():
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -856,6 +858,36 @@ class Worker(WorkerBase):
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
+
+    def _get_proton_capture_context(self) -> AbstractContextManager[None]:
+        """Prepare Proton only when CUDA graphs will actually be captured."""
+        if (
+            self.profiler_config.profiler != "proton"
+            or self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        ):
+            return nullcontext()
+
+        if self.use_v2_model_runner:
+            cudagraph_manager = getattr(self.model_runner, "cudagraph_manager", None)
+            assert cudagraph_manager is not None
+            if not cudagraph_manager.needs_capture():
+                return nullcontext()
+        else:
+            capture_descs = self.model_runner.cudagraph_dispatcher.get_capture_descs()
+            if not capture_descs:
+                self.model_runner._maybe_init_encoder_cudagraph_manager()
+                if self.model_runner.encoder_cudagraph_manager is None:
+                    return nullcontext()
+
+        if self._proton_capture_profiler is None:
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+            self._proton_capture_profiler = ProtonProfilerWrapper(
+                self.profiler_config,
+                worker_name=rank_suffix,
+            )
+        return self._proton_capture_profiler.capture_cuda_graphs()
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
@@ -1345,6 +1377,8 @@ class Worker(WorkerBase):
             ensure_ec_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
+        if self._proton_capture_profiler is not None:
+            self._proton_capture_profiler.shutdown()
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()

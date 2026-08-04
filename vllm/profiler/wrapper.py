@@ -6,8 +6,8 @@ import inspect
 import json
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext, suppress
 from typing import Literal
 from uuid import uuid4
 
@@ -389,6 +389,11 @@ class ProtonProfilerWrapper(WorkerProfiler):
         # worker cannot overwrite profiles left by an earlier server process.
         self._instance_id = f"pid{os.getpid()}_{uuid4().hex}"
         self._run_id = 0
+        self._capture_session_id: int | None = None
+        self._capture_output_path = os.path.join(
+            self._output_dir,
+            f".proton_cuda_graph_capture_{worker_name}_{os.getpid()}",
+        )
 
         logger.info_once(
             "Proton profiling enabled. Output will be saved under: %s",
@@ -424,12 +429,12 @@ class ProtonProfilerWrapper(WorkerProfiler):
                 "periodic flushing", _TRITON_PROTON_3_7_VERSION
             )
 
-    def _create_session(self, output_path: str) -> int:
+    def _create_session(self, output_path: str, *, capture: bool = False) -> int:
         os.makedirs(self._output_dir, exist_ok=True)
         session_id = self._proton.start(
             name=output_path,
-            context=self._context,
-            data=self._data,
+            context="shadow" if capture else self._context,
+            data="tree" if capture else self._data,
             backend=self._backend,
             mode=self._mode,
             hook=self._hook,
@@ -437,6 +442,30 @@ class ProtonProfilerWrapper(WorkerProfiler):
         if session_id is None:
             raise RuntimeError("Proton did not create a profiling session")
         return session_id
+
+    @contextmanager
+    def capture_cuda_graphs(self) -> Iterator[None]:
+        """Keep a dormant session aware of CUDA graphs captured by vLLM."""
+        if self._mode and self._mode.split(":", 1)[0] == "pcsampling":
+            raise ValueError(
+                "Proton PC sampling is incompatible with CUDA graph capture; "
+                "enable eager execution or disable CUDA graphs."
+            )
+        if self._running:
+            yield
+            return
+
+        if self._capture_session_id is None:
+            self._capture_session_id = self._create_session(
+                self._capture_output_path, capture=True
+            )
+        else:
+            self._proton.activate(session=self._capture_session_id)
+
+        try:
+            yield
+        finally:
+            self._proton.deactivate(session=self._capture_session_id)
 
     @override
     def _start(self) -> None:
@@ -460,6 +489,23 @@ class ProtonProfilerWrapper(WorkerProfiler):
                     )
             finally:
                 self._session_id = None
+
+    @override
+    def shutdown(self) -> None:
+        super().shutdown()
+        if self._capture_session_id is not None:
+            capture_session_id = self._capture_session_id
+            self._capture_session_id = None
+            try:
+                self._proton.finalize(session=capture_session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to finalize Proton CUDA graph capture during "
+                    "worker shutdown."
+                )
+            finally:
+                with suppress(FileNotFoundError):
+                    os.remove(f"{self._capture_output_path}.hatchet")
 
     @override
     def annotate_context_manager(self, name: str):
