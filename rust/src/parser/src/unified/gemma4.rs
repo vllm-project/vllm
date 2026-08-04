@@ -751,6 +751,22 @@ mod tests {
     }
 
     #[test]
+    fn gemma4_nesting_limit_accepts_128_and_rejects_129() {
+        let nested_value = format!(
+            "{}1{}",
+            "nested:{".repeat(super::MAX_GEMMA4_NESTING_DEPTH),
+            "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH),
+        );
+        assert!(super::gemma4_nesting_is_within_limit(&nested_value));
+
+        assert!(!super::gemma4_nesting_is_within_limit(&format!(
+            "{}1{}",
+            "nested:{".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+        )));
+    }
+
+    #[test]
     fn gemma4_parse_args_rejects_excessive_nesting() {
         let nested_value = format!(
             "{}1{}",
