@@ -127,7 +127,7 @@ def torch_w8a8_block_fp8_moe(
     # Quantize with the production per-token-group fp8 kernel (same HIP/CUDA op the
     # kernels use) so the reference is bit-identical here; removes ~0.06-0.10% fp8
     # boundary-flip divergence that otherwise accumulates over K. Matmul stays fp32.
-    a_q, a_s = per_token_group_quant_fp8(a, block_k, dtype=torch.float8_e4m3fn)
+    a_q, a_s = per_token_group_quant_fp8(a, block_k, dtype=current_platform.fp8_dtype())
     a_q = a_q.to(torch.float32)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
@@ -139,7 +139,7 @@ def torch_w8a8_block_fp8_moe(
                 inter_out.float() if silu_fp32 else inter_out
             )
             act_out_q, act_out_s = per_token_group_quant_fp8(
-                act_out, block_k, dtype=torch.float8_e4m3fn
+                act_out, block_k, dtype=current_platform.fp8_dtype()
             )
             out[mask] = native_w8a8_block_matmul(
                 act_out_q, w2[i], act_out_s, w2_s[i], block_shape, output_dtype=a.dtype
