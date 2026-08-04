@@ -99,10 +99,11 @@ class ArtifactWorkerConnector:
         self._pending_blocks: dict[str, list[tuple[int, np.ndarray]]] = {}
         self._capture_cursors: dict[str, int] = {}
         self._emit_cursors: dict[str, int] = {}
+        self._block_hashes: dict[str, list[bytes]] = {}
         self._generation = -1
         self._pending_requests: dict[str, int] = {}
         self._finished_requests: dict[str, Sequence[bytes] | None] = {}
-        self._pending_lock = Lock()
+        self._lock = Lock()
 
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the artifact data plane.
@@ -153,7 +154,7 @@ class ArtifactWorkerConnector:
         # Warmup runs capture without scheduler metadata.
         if self._store is None or metadata is None or routed_experts is None:
             return None
-        with self._pending_lock:
+        with self._lock:
             for request in metadata.requests:
                 request_id = request.request_id
                 self._pending_requests[request_id] = (
@@ -168,6 +169,20 @@ class ArtifactWorkerConnector:
         )
 
     def process_output(
+        self,
+        metadata: ArtifactConnectorMetadata,
+        routed_experts: np.ndarray,
+        request_ids: list[str],
+        num_rejected: np.ndarray,
+    ) -> ArtifactConnectorOutput:
+        with self._lock:
+            if metadata.generation != self._generation:
+                return ArtifactConnectorOutput({})
+            return self._process_output(
+                metadata, routed_experts, request_ids, num_rejected
+            )
+
+    def _process_output(
         self,
         metadata: ArtifactConnectorMetadata,
         routed_experts: np.ndarray,
@@ -192,6 +207,7 @@ class ArtifactWorkerConnector:
             request = by_request.get(request_id)
             if request is None:
                 raise RuntimeError(f"artifact metadata is missing {request_id}")
+            block_hashes = self._block_hashes[request_id]
             end = offset + request.num_tokens
             valid_end = end - int(num_rejected[request_index])
             rows: np.ndarray = routed_experts[offset:valid_end].astype(
@@ -209,12 +225,12 @@ class ArtifactWorkerConnector:
             self._capture_cursors[request_id] = capture_start + len(rows)
             pending, ready = self._take_available_blocks(
                 request_id,
-                request.block_hashes,
+                block_hashes,
                 completed,
                 metadata.block_size,
             )
             if ready:
-                commit_batches.append((request.block_hashes, ready))
+                commit_batches.append((block_hashes, ready))
                 committed_rows.extend(rows for _, rows in ready)
             captured.append(
                 (request, capture_start, rows, [*ready, *pending], emit_start)
@@ -230,12 +246,13 @@ class ArtifactWorkerConnector:
         )
         outputs: dict[str, ArtifactRequestOutput] = {}
         for request, capture_start, rows, local_segments, emit_start in captured:
+            block_hashes = self._block_hashes[request.request_id]
             token_end = capture_start + len(rows)
             if not request.emit_output or emit_start >= token_end:
                 continue
             stored_end = min(
                 capture_start // metadata.block_size * metadata.block_size,
-                len(request.block_hashes) * metadata.block_size,
+                len(block_hashes) * metadata.block_size,
             )
             segments: list[tuple[int, np.ndarray]] = []
             if emit_start < stored_end:
@@ -245,7 +262,7 @@ class ArtifactWorkerConnector:
                         self._materialize(
                             emit_start,
                             stored_end,
-                            request.block_hashes,
+                            block_hashes,
                             metadata.block_size,
                         ),
                     )
@@ -317,28 +334,34 @@ class ArtifactWorkerConnector:
     def begin_step(self, metadata: ArtifactConnectorMetadata | None) -> None:
         if self._buffer is None or metadata is None:
             return
-        if metadata.generation != self._generation:
-            self._buffer.reset()
-            self._pending_blocks.clear()
-            self._capture_cursors.clear()
-            self._emit_cursors.clear()
-            self._finished_requests.clear()
-            self._generation = metadata.generation
-        finished = []
-        with self._pending_lock:
+        with self._lock:
+            if metadata.generation != self._generation:
+                self._buffer.reset()
+                self._pending_blocks.clear()
+                self._capture_cursors.clear()
+                self._emit_cursors.clear()
+                self._block_hashes.clear()
+                self._pending_requests.clear()
+                self._finished_requests.clear()
+                self._generation = metadata.generation
+            for request in metadata.requests:
+                self._merge_block_hashes(request)
+            finished = []
             for request_id, block_hashes in metadata.finished_requests.items():
                 if self._pending_requests.get(request_id, 0):
                     self._finished_requests[request_id] = block_hashes
                 else:
                     finished.append((request_id, block_hashes))
-        for request_id, block_hashes in finished:
-            self._finish_request(request_id, block_hashes, metadata.block_size)
+            for request_id, block_hashes in finished:
+                self._finish_request(request_id, block_hashes, metadata.block_size)
 
     def output_finished(self, metadata: ArtifactConnectorMetadata) -> None:
         if self._buffer is None:
             return
-        finished = []
-        with self._pending_lock:
+        with self._lock:
+            if metadata.generation != self._generation:
+                return
+            finished = []
             for request in metadata.requests:
                 request_id = request.request_id
                 pending = self._pending_requests[request_id] - 1
@@ -350,8 +373,25 @@ class ArtifactWorkerConnector:
                         finished.append(
                             (request_id, self._finished_requests.pop(request_id))
                         )
-        for request_id, block_hashes in finished:
-            self._finish_request(request_id, block_hashes, metadata.block_size)
+            for request_id, block_hashes in finished:
+                self._finish_request(request_id, block_hashes, metadata.block_size)
+
+    def _merge_block_hashes(self, request: ArtifactRequestMetadata) -> None:
+        block_hashes = self._block_hashes.setdefault(request.request_id, [])
+        start = request.block_hash_start
+        if start > len(block_hashes):
+            raise RuntimeError(
+                f"artifact block-hash delta is missing for {request.request_id}"
+            )
+        overlap = min(len(request.block_hashes), len(block_hashes) - start)
+        if (
+            list(request.block_hashes[:overlap])
+            != block_hashes[start : start + overlap]
+        ):
+            raise RuntimeError(
+                f"artifact block-hash history changed for {request.request_id}"
+            )
+        block_hashes.extend(request.block_hashes[overlap:])
 
     def _finish_request(
         self,
@@ -387,6 +427,7 @@ class ArtifactWorkerConnector:
         self._pending_blocks.pop(request_id, None)
         self._capture_cursors.pop(request_id, None)
         self._emit_cursors.pop(request_id, None)
+        self._block_hashes.pop(request_id, None)
         self._buffer.discard(request_id)
 
     def _materialize(

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, overload
 
 import numpy as np
@@ -61,6 +61,7 @@ class ArtifactRequestMetadata:
     emit_start: int
     emit_output: bool
     block_hashes: Sequence[bytes]
+    block_hash_start: int = 0
 
 
 @dataclass
@@ -85,7 +86,7 @@ class ArtifactConnectorOutput:
 @dataclass
 class _RequestState:
     emit_cursor: int
-    packed_hashes: bytes = b""
+    packed_hashes: bytearray = field(default_factory=bytearray)
     num_hashes: int = 0
     hash_size: int = 0
 
@@ -135,16 +136,18 @@ class ArtifactSchedulerConnector:
             request = requests.get(request_id)
             if state is None or request is None:
                 continue
-            block_hashes = (
-                self._pack_block_hashes(state, request.block_hashes)
-                if self._reuse_kv_hashes
-                else [
+            source_hashes: Sequence[bytes]
+            if self._reuse_kv_hashes:
+                source_hashes = request.block_hashes
+            else:
+                source_hashes = [
                     f"{request_id}:{i}".encode()
                     for i in range(
                         (token_starts[request_id] + num_tokens) // self._block_size
                     )
                 ]
-            )
+            block_hash_start = state.num_hashes
+            block_hashes = self._pack_new_block_hashes(state, source_hashes)
             metadata.append(
                 ArtifactRequestMetadata(
                     request_id=request_id,
@@ -156,6 +159,7 @@ class ArtifactSchedulerConnector:
                         >= request.num_prompt_tokens
                     ),
                     block_hashes=block_hashes,
+                    block_hash_start=block_hash_start,
                 )
             )
         finished_requests = {
@@ -200,25 +204,28 @@ class ArtifactSchedulerConnector:
     def request_finished(self, request: Request) -> None:
         request_id = request.request_id
         state = self._states[request_id]
-        self._finished_requests[request_id] = self._pack_block_hashes(
-            state, request.block_hashes
+        self._pack_new_block_hashes(state, request.block_hashes)
+        self._finished_requests[request_id] = PackedBlockHashes(
+            bytes(state.packed_hashes), state.hash_size or 1
         )
         self._states.pop(request_id, None)
         self._resume_emit_cursors.pop(request_id, None)
 
     @staticmethod
-    def _pack_block_hashes(
+    def _pack_new_block_hashes(
         state: _RequestState, block_hashes: Sequence[bytes]
     ) -> PackedBlockHashes:
+        packed_hashes = b""
         if state.num_hashes < len(block_hashes):
             new_hashes = block_hashes[state.num_hashes :]
             if state.hash_size == 0:
                 state.hash_size = len(new_hashes[0])
             if any(len(block_hash) != state.hash_size for block_hash in new_hashes):
                 raise RuntimeError("KV block hashes have inconsistent sizes")
-            state.packed_hashes += b"".join(new_hashes)
+            packed_hashes = b"".join(new_hashes)
+            state.packed_hashes.extend(packed_hashes)
             state.num_hashes = len(block_hashes)
-        return PackedBlockHashes(state.packed_hashes, state.hash_size or 1)
+        return PackedBlockHashes(packed_hashes, state.hash_size or 1)
 
     def request_aborted(self, request_id: str) -> None:
         self._finished_requests[request_id] = None

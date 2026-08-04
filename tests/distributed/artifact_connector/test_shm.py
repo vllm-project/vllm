@@ -139,12 +139,13 @@ def _make_worker(tmp_path, max_num_seqs: int) -> ArtifactWorkerConnector:
     worker._pending_blocks = {}
     worker._capture_cursors = {}
     worker._emit_cursors = {}
+    worker._block_hashes = {}
     worker._generation = -1
     worker._shape_per_token = _SHAPE
     worker._dtype = _DTYPE
     worker._pending_requests = {}
     worker._finished_requests = {}
-    worker._pending_lock = threading.Lock()
+    worker._lock = threading.Lock()
     return worker
 
 
@@ -402,6 +403,67 @@ def test_worker_retains_tail_until_inflight_output_finishes(tmp_path):
     worker.close()
 
 
+def test_worker_discards_inflight_output_from_old_generation(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    old = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("old", 0, 1, 0, True, [b"a" * 32])],
+        {},
+    )
+    worker.begin_step(old)
+    worker._pending_requests["old"] = 1
+
+    new = ArtifactConnectorMetadata(
+        1,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("new", 0, 1, 0, True, [b"b" * 32])],
+        {},
+    )
+    worker.begin_step(new)
+
+    output = worker.process_output(
+        old,
+        np.zeros((1, *_SHAPE), dtype=_DTYPE),
+        ["old"],
+        np.array([0]),
+    )
+    worker.output_finished(old)
+
+    assert not output.requests
+    assert worker._generation == 1
+    assert worker._block_hashes == {"new": [b"b" * 32]}
+    assert not worker._pending_requests
+    worker.close()
+
+
+def test_worker_merges_block_hash_deltas(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    worker.begin_step(
+        ArtifactConnectorMetadata(
+            0,
+            _BLOCK_SIZE,
+            [ArtifactRequestMetadata("request", 0, 1, 0, True, [b"a" * 32])],
+            {},
+        )
+    )
+    worker.begin_step(
+        ArtifactConnectorMetadata(
+            0,
+            _BLOCK_SIZE,
+            [
+                ArtifactRequestMetadata(
+                    "request", 1, 1, 0, True, [b"b" * 32], block_hash_start=1
+                )
+            ],
+            {},
+        )
+    )
+
+    assert worker._block_hashes["request"] == [b"a" * 32, b"b" * 32]
+    worker.close()
+
+
 def test_worker_fails_if_request_finishes_before_block_gets_kv_hash(tmp_path):
     worker = _make_worker(tmp_path, 1)
     worker._generation = 0
@@ -639,7 +701,7 @@ def test_scheduler_connector_sends_final_block_hashes(tmp_path):
     assert list(metadata.finished_requests[request.request_id]) == block_hashes
 
 
-def test_scheduler_connector_hash_snapshots_are_self_contained(tmp_path):
+def test_scheduler_connector_sends_only_new_block_hashes(tmp_path):
     connector = _make_connector(tmp_path)
     request = _scheduler_request("request", [b"a" * 32], num_tokens=8)
     connector.request_started(request)
@@ -654,7 +716,9 @@ def test_scheduler_connector_hash_snapshots_are_self_contained(tmp_path):
     )
 
     assert list(first.requests[0].block_hashes) == [b"a" * 32]
-    assert list(second.requests[0].block_hashes) == [b"a" * 32, b"b" * 32]
+    assert first.requests[0].block_hash_start == 0
+    assert list(second.requests[0].block_hashes) == [b"b" * 32]
+    assert second.requests[0].block_hash_start == 1
 
 
 def test_scheduler_connector_reset_preserves_emit_cursor(tmp_path):

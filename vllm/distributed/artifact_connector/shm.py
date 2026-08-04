@@ -43,7 +43,7 @@ class _Entry:
 
 
 class LocalSharedMemoryArtifactStore:
-    """Single-owner immutable object store backed by one SHM mmap arena."""
+    """Bounded immutable SHM store that fails closed after an eviction."""
 
     @staticmethod
     def _object_id(key: str) -> str:
