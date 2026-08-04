@@ -333,12 +333,3 @@ class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
     def __call__(self, graph: torch.fx.Graph) -> None:
         self.matched_count = self.pm_pass.apply(graph)
         VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
-
-
-class PrinterInductorPass(VllmInductorPass):
-    def __init__(self, name: str, config: VllmConfig) -> None:
-        super().__init__(config)
-        self.name = name
-
-    def __call__(self, graph: torch.fx.Graph) -> None:
-        self.dump_graph(graph, self.name)
