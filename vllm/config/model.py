@@ -1619,6 +1619,7 @@ class ModelConfig:
             "top_p",
             "min_p",
             "max_new_tokens",
+            "repetition_detection",
         ]
         if any(p in config for p in available_params):
             diff_sampling_param = {
@@ -1629,6 +1630,14 @@ class ModelConfig:
             if "max_new_tokens" in diff_sampling_param:
                 diff_sampling_param["max_tokens"] = diff_sampling_param.pop(
                     "max_new_tokens"
+                )
+            # repetition_detection arrives as a raw dict from JSON configs
+            repetition_detection = diff_sampling_param.get("repetition_detection")
+            if isinstance(repetition_detection, dict):
+                from vllm.sampling_params import RepetitionDetectionParams
+
+                diff_sampling_param["repetition_detection"] = RepetitionDetectionParams(
+                    **repetition_detection
                 )
         else:
             diff_sampling_param = {}
