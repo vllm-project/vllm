@@ -245,7 +245,9 @@ def test_grammar_bitmask_pads_missing_drafts():
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
         structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
-        speculative_config=SpeculativeConfig(model="[ngram]", num_speculative_tokens=num_spec),
+        speculative_config=SpeculativeConfig(
+            model="[ngram]", num_speculative_tokens=num_spec
+        ),
     )
     manager = StructuredOutputManager(vllm_config)
 
@@ -255,7 +257,12 @@ def test_grammar_bitmask_pads_missing_drafts():
         )
         sampling_params.structured_outputs._backend = "guidance"
         sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
-        req = Request(req_id, prompt_token_ids=prompt, sampling_params=sampling_params, pooling_params=None)
+        req = Request(
+            req_id,
+            prompt_token_ids=prompt,
+            sampling_params=sampling_params,
+            pooling_params=None,
+        )
         manager.grammar_init(req)
         return req
 
