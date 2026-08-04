@@ -5,6 +5,8 @@ Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00b
 and updated to fit vllm needs and terminology.
 """
 
+import math
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -424,7 +426,7 @@ def ep_gather(
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
-    BLOCK_D = min(hidden_size, 1024)
+    BLOCK_D = math.gcd(hidden_size, 1024)
     assert hidden_size % BLOCK_D == 0
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
 
@@ -505,7 +507,7 @@ def deepgemm_moe_permute(
             dtype=torch.int32,
         )
     else:
-        aq_scale_out = torch.empty((M_sum, sf_k), device=device, dtype=torch.float32)
+        aq_scale_out = torch.zeros((M_sum, sf_k), device=device, dtype=torch.float32)
 
     # DeepGEMM uses negative values in m_indices (here expert_ids) to mark
     # completely invalid / padded blocks that should be skipped. We always

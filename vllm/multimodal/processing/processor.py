@@ -627,13 +627,25 @@ def iter_token_matches(
 
     Note that empty matches are ignored.
     """
+    if start_idx < 0:
+        raise ValueError("start_idx must be non-negative")
+
     prompt_len = len(token_ids)
     match_len = len(match_ids)
 
     if match_len == 0:
         return
 
-    while start_idx < prompt_len - match_len + 1:
+    first_id = match_ids[0]
+    last_start_idx = prompt_len - match_len
+
+    while start_idx <= last_start_idx:
+        # Fast-forward to the next candidate position using a C-level scan
+        try:
+            start_idx = token_ids.index(first_id, start_idx, last_start_idx + 1)
+        except ValueError:
+            return
+
         end_idx = start_idx + match_len
 
         if token_ids[start_idx:end_idx] == match_ids:
@@ -708,6 +720,37 @@ def _find_matches(
     mode: UpdateMode | None = None
     mm_matches = dict[tuple[str, int], tuple[PromptTargetMatch, int]]()
 
+    # Items commonly share the same target object (a static PromptUpdate
+    # target resolves to the same object for every item); scan the prompt once
+    # per distinct target instead of once per item. The cache is keyed by
+    # object identity: it implies value equality, costs O(1) per lookup
+    # (hashing a long target value per lookup would defeat the point), and the
+    # target objects are kept alive by `mm_prompt_updates` for the duration of
+    # this call. Items with equal-valued but distinct target objects simply
+    # miss the cache and scan independently.
+    # NOTE: ResolvedPromptUpdate.iter_matches depends only on the target,
+    # prompt, tokenizer and start_idx, so updates sharing a target share the
+    # same first match within this invocation. Revisit this cache if matching
+    # ever depends on other update attributes.
+    first_match_by_target_id = dict[int, PromptTargetMatch | None]()
+
+    def get_first_match(update: "ResolvedPromptUpdate") -> PromptTargetMatch | None:
+        target = update.target
+        if isinstance(target, PromptIndex):  # Matches are not cacheable
+            return next(
+                update.iter_matches(prompt, tokenizer, start_idx=prev_end_idx),
+                None,
+            )
+
+        key = id(target)
+        if key not in first_match_by_target_id:
+            first_match_by_target_id[key] = next(
+                update.iter_matches(prompt, tokenizer, start_idx=prev_end_idx),
+                None,
+            )
+
+        return first_match_by_target_id[key]
+
     for modality, modality_updates in mm_prompt_updates.items():
         for item_idx, item_updates in enumerate(modality_updates):
             if current_result[modality][item_idx] is not None:
@@ -717,19 +760,17 @@ def _find_matches(
                 if (modality, item_idx) in mm_matches:
                     break  # Already found a match for this item
 
-                for match in update.iter_matches(
-                    prompt,
-                    tokenizer,
-                    start_idx=prev_end_idx,
-                ):
-                    # All matches should share the same mode
-                    if mode is None:
-                        mode = update.mode
-                    elif mode != update.mode:
-                        continue
+                match = get_first_match(update)
+                if match is None:
+                    continue
 
-                    mm_matches[(modality, item_idx)] = match, update_idx
-                    break  # Get only the first valid match per item
+                # All matches should share the same mode
+                if mode is None:
+                    mode = update.mode
+                elif mode != update.mode:
+                    continue
+
+                mm_matches[(modality, item_idx)] = match, update_idx
 
     # Prioritize earlier matches
     matches_to_apply = sorted(mm_matches.items(), key=lambda item: item[1][0])
@@ -885,47 +926,59 @@ def _iter_placeholders(
     prompt_len = len(prompt)
     start_idx = 0
 
-    while start_idx < prompt_len:
-        found = False
+    # The current (unfound) item's updates for each modality, with their
+    # content resolved to token ids; rebuilt whenever an item is found.
+    # Items are only resolved once the scan reaches them.
+    candidates: list[tuple[str, ResolvedPromptUpdate, list[int]]] | None = None
 
-        for modality, modality_updates in mm_prompt_updates.items():
-            item_idx = item_idx_by_modality[modality]
-            if item_idx >= mm_item_counts.get(modality, 0):
+    while start_idx < prompt_len:
+        if candidates is None:
+            candidates = [
+                (modality, update, _seq2tokens(tokenizer, update.content.full))
+                for modality, modality_updates in mm_prompt_updates.items()
+                if item_idx_by_modality[modality] < mm_item_counts.get(modality, 0)
+                for update in modality_updates[item_idx_by_modality[modality]]
+            ]
+            if not candidates:
+                return
+
+        found = False
+        first_token = prompt[start_idx]
+
+        for modality, update, content_tokens_full in candidates:
+            content_len_full = len(content_tokens_full)
+            end_idx_full = start_idx + content_len_full
+
+            if content_len_full == 0 or end_idx_full > prompt_len:
                 continue
 
-            for update in modality_updates[item_idx]:
+            # Check the first token before comparing the full slice
+            if (
+                first_token == content_tokens_full[0]
+                and prompt[start_idx:end_idx_full] == content_tokens_full
+            ):
                 content = update.content
-                content_tokens_full = _seq2tokens(tokenizer, content.full)
-                content_len_full = len(content_tokens_full)
-                end_idx_full = start_idx + content_len_full
+                content_is_embed = content.is_embed
+                if content_is_embed is not None:
+                    content_is_embed = content_is_embed(tokenizer, content.full)
 
-                if content_len_full == 0 or end_idx_full > prompt_len:
-                    continue
+                yield PlaceholderFeaturesInfo(
+                    modality=modality,
+                    item_idx=item_idx_by_modality[modality],
+                    start_idx=start_idx,
+                    tokens=content_tokens_full,
+                    is_embed=content_is_embed,
+                )
 
-                if prompt[start_idx:end_idx_full] == content_tokens_full:
-                    content_is_embed = content.is_embed
-                    if content_is_embed is not None:
-                        content_is_embed = content_is_embed(tokenizer, content.full)
-
-                    yield PlaceholderFeaturesInfo(
-                        modality=modality,
-                        item_idx=item_idx,
-                        start_idx=start_idx,
-                        tokens=content_tokens_full,
-                        is_embed=content_is_embed,
-                    )
-
-                    # Exclude overlapping matches
-                    start_idx = end_idx_full
-                    item_idx_by_modality[modality] += 1
-                    found = True
-                    break
-
-            if found:
+                # Exclude overlapping matches
+                start_idx = end_idx_full
+                item_idx_by_modality[modality] += 1
                 if _all_items_found(mm_item_counts, item_idx_by_modality):
                     return
 
-                break  # Go back to the outer while loop
+                candidates = None
+                found = True
+                break
 
         if not found:
             start_idx += 1
@@ -1422,7 +1475,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+            mm_hashes = inputs.get_mm_hashes(
+                self.info.model_id,
+                self.info.ctx.get_mm_config().mm_hasher_algorithm,
+            )
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             inputs.mm_data_items,
@@ -1454,7 +1510,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+            mm_hashes = inputs.get_mm_hashes(
+                self.info.model_id,
+                self.info.ctx.get_mm_config().mm_hasher_algorithm,
+            )
 
         with timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
