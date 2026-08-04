@@ -145,7 +145,15 @@ def test_head_size_falls_back_when_head_dim_is_zero():
 )
 def test_num_experts_per_tok_aliases(attribute: str):
     hf_config = PretrainedConfig(**{attribute: 4})
-    model_config = cast(ModelConfig, SimpleNamespace(hf_text_config=hf_config))
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            model_arch_config=SimpleNamespace(
+                num_experts_per_token=convertor.get_num_experts_per_token()
+            )
+        ),
+    )
 
     assert ModelConfig.get_num_experts_per_tok(model_config) == 4
 
@@ -155,7 +163,15 @@ def test_num_experts_per_tok_skips_none_aliases():
         num_experts_per_tok=None,
         num_experts_per_token=4,
     )
-    model_config = cast(ModelConfig, SimpleNamespace(hf_text_config=hf_config))
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            model_arch_config=SimpleNamespace(
+                num_experts_per_token=convertor.get_num_experts_per_token()
+            )
+        ),
+    )
 
     assert ModelConfig.get_num_experts_per_tok(model_config) == 4
 

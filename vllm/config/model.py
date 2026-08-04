@@ -1437,18 +1437,7 @@ class ModelConfig:
         return self.model_arch_config.num_experts
 
     def get_num_experts_per_tok(self) -> int:
-        """Return the number of routed experts selected per token."""
-        for name in (
-            "num_experts_per_tok",
-            "num_experts_per_token",
-            "top_k_experts",
-            "moe_topk",
-            "moe_top_k",
-        ):
-            value = getattr(self.hf_text_config, name, None)
-            if value is not None:
-                return int(value)
-        return 0
+        return self.model_arch_config.num_experts_per_token
 
     def get_total_num_hidden_layers(self) -> int:
         return self.model_arch_config.total_num_hidden_layers

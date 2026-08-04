@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.transformers_utils.model_arch_config_convertor import (
+    ModelArchConfigConvertorBase,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -83,7 +86,15 @@ def _make_modular_routed_experts():
 
 
 def _make_model_config(hf_config):
-    model_config = SimpleNamespace(hf_text_config=hf_config)
+    num_experts_per_token = ModelArchConfigConvertorBase(
+        hf_config, hf_config
+    ).get_num_experts_per_token()
+    model_config = SimpleNamespace(
+        hf_text_config=hf_config,
+        model_arch_config=SimpleNamespace(
+            num_experts_per_token=num_experts_per_token,
+        ),
+    )
     model_config.get_num_experts = lambda: hf_config.num_experts
     model_config.get_num_experts_per_tok = lambda: (
         ModelConfig.get_num_experts_per_tok(model_config)

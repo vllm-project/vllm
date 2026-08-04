@@ -164,6 +164,19 @@ class ModelArchConfigConvertorBase:
             num_experts = self.get_num_experts_from_block_configs()
         return num_experts
 
+    def get_num_experts_per_token(self) -> int:
+        for name in (
+            "num_experts_per_tok",
+            "num_experts_per_token",
+            "top_k_experts",
+            "moe_topk",
+            "moe_top_k",
+        ):
+            value = getattr(self.hf_text_config, name, None)
+            if value is not None:
+                return int(value)
+        return 0
+
     @final
     @classmethod
     def get_torch_dtype(
@@ -379,6 +392,7 @@ class ModelArchConfigConvertorBase:
             vocab_size=self.get_vocab_size(),
             total_num_kv_heads=self.get_total_num_kv_heads(),
             num_experts=self.get_num_experts(),
+            num_experts_per_token=self.get_num_experts_per_token(),
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
             is_mm_prefix_lm=self.is_mm_prefix_lm(supports_multimodal),
