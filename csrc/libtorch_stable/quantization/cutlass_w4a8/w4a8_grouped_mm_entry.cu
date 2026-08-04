@@ -166,6 +166,13 @@ struct W4A8GroupedGemmKernel {
   // pack to 3xint32,
   static_assert(sizeof(LayoutB_Reordered) % sizeof(int32_t) == 0,
                 "LayoutB_Reordered size must be divisible by 4 bytes");
+  // The Python fake op in vllm/_custom_ops.py hardcodes (num_experts, 3) as
+  // the layout tensor shape; pin it here so any change to LayoutB_Reordered
+  // fails the build until the fake op is updated to match.
+  static_assert(sizeof(LayoutB_Reordered) == 3 * sizeof(int32_t),
+                "LayoutB_Reordered must be 3 int32s; update "
+                "cutlass_encode_and_reorder_int4b_grouped_fake in "
+                "vllm/_custom_ops.py if this changes");
 
   static void grouped_mm(torch::stable::Tensor& out_tensors,
                          const torch::stable::Tensor& a_tensors,
