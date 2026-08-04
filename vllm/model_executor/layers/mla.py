@@ -23,7 +23,6 @@ def _mla_rope_kvcache_fusion_enabled(
     is_sparse: bool,
     model_dtype: torch.dtype,
     fuse_rope_kvcache_cat_mla: bool,
-    calculate_kv_scales: bool,
 ) -> bool:
     """Decide whether the manual RoPE + MLA KV-cache-write fusion
     can be used.
@@ -43,12 +42,6 @@ def _mla_rope_kvcache_fusion_enabled(
         return False
     # Kernel enforces cos_sin_cache dtype == activation dtype.
     if rotary_emb.cos_sin_cache.dtype != model_dtype:
-        return False
-    # Dynamic KV-scale calibration updates _k_scale inside
-    # MLAAttention.forward (maybe_calc_kv_scales), i.e. *after* the fused
-    # producer would have already quantized and written this layer's cache
-    # row with the stale scale. Keep the unfused order in that case.
-    if calculate_kv_scales:
         return False
     # fp8_ds_mla / sparse use cache layouts only the unfused path supports.
     return not (kv_cache_dtype == "fp8_ds_mla" or is_sparse)
@@ -200,7 +193,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             fuse_rope_kvcache_cat_mla=(
                 vllm_config.compilation_config.pass_config.fuse_rope_kvcache_cat_mla
             ),
-            calculate_kv_scales=self.mla_attn.calculate_kv_scales,
         )
 
     def forward(
