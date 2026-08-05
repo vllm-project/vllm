@@ -8,6 +8,7 @@ import os
 import threading
 import time
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -610,3 +611,72 @@ def test_wait_for_file_size_timeout(tmp_path):
             _wait_for_file_size(fd, PAGE_SIZE, timeout=0.1)
     finally:
         os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Constructor — capacity validation
+# ---------------------------------------------------------------------------
+
+
+def test_insufficient_space_raises_clear_error(monkeypatch):
+    """A failed creator capacity check must clean up and give a clear error."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_open = MagicMock(return_value=9999)
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", mock_open)
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=4,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_unlink.assert_called_once_with(mmap_path)
+    mock_close.assert_called_once_with(9999)
+
+
+def test_ftruncate_failure_cleans_up_creator(monkeypatch):
+    """A failed creator ftruncate must close and unlink before re-raising."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+    monkeypatch.setattr(
+        region.os,
+        "ftruncate",
+        MagicMock(side_effect=OSError("ftruncate failed")),
+    )
+
+    with pytest.raises(OSError, match="ftruncate failed"):
+        SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=4,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_unlink.assert_called_once_with(mmap_path)
+    mock_close.assert_called_once_with(9999)
