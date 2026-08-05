@@ -548,13 +548,15 @@ impl BenchConfig {
                 ));
             }
 
-            // Normalize and validate min/max turns. ShareGPT only consumes max_turns
-            // (the loader walks all available turns up to the cap), so the
-            // min/num/max coupling used for synthetic generation does not apply.
-            if args.dataset_name == DatasetName::ShareGpt {
+            // Normalize and validate min/max turns. Conversation datasets only
+            // consume max_turns (the loader walks all available turns up to the
+            // cap), so the min/num/max coupling used for synthetic generation
+            // does not apply.
+            if matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf) {
                 if args.multi_turn_max_turns == 1 {
                     return Err(BenchError::Config(
-                        "--multi-turn-max-turns must be at least 2 for ShareGPT multi-turn".into(),
+                        "--multi-turn-max-turns must be at least 2 for ShareGPT-format multi-turn"
+                            .into(),
                     ));
                 }
             } else {
@@ -712,7 +714,7 @@ impl BenchConfig {
             multi_turn_min_turns,
             multi_turn_max_turns,
             sharegpt_multi_turn_max_turns: if args.multi_turn
-                && args.dataset_name == DatasetName::ShareGpt
+                && matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf)
                 && args.multi_turn_max_turns != 0
             {
                 Some(args.multi_turn_max_turns)
@@ -1038,6 +1040,30 @@ mod tests {
         let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.sharegpt_multi_turn_max_turns, Some(20));
+    }
+
+    #[test]
+    fn test_hf_multi_turn_uses_conversation_turn_cap() {
+        let args = vec![
+            "vllm-bench",
+            "--backend",
+            "openai-chat",
+            "--multi-turn",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "org/sharegpt-dataset",
+            "--hf-subset",
+            "sharegpt",
+            "--multi-turn-max-turns",
+            "2",
+        ];
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
+
+        assert_eq!(config.sharegpt_multi_turn_max_turns, Some(2));
     }
 
     #[test]
