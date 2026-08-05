@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import torch
 
 from vllm.logger import init_logger
@@ -475,15 +473,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled():
-            # AITER keeps bf16 activations below this token count, which
-            # would not match the fp8 a8w4 kernels the interleaved SiTU
-            # path is tuned for. The a16w4 path never reads it.
-            # TODO: Remove once AITER takes this as a kernel argument.
-            os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
         self.weight_dtype = "mxfp4"
         self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
