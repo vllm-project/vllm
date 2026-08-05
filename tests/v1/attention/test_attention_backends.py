@@ -46,9 +46,12 @@ BACKENDS_TO_TEST = [
 
 DEVICE_TYPE = current_platform.device_type
 
+# Use the platform's preferred FP8 type so the stored cache matches what the
+# backends reinterpret at runtime. On ROCm gfx94x this is e4m3fnuz, not e4m3fn;
+# storing e4m3fn bytes there would be re-read as fnuz and produce NaNs.
 FP8_KV_CACHE_DTYPES = {
-    "fp8": torch.float8_e4m3fn,
-    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8": current_platform.fp8_dtype(),
+    "fp8_e4m3": current_platform.fp8_dtype(),
 }
 
 # Remove flashinfer from the list if it's not available

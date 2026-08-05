@@ -2220,7 +2220,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.7.1"
-source = "git+https://github.com/smg-project/llm-multimodal?rev=5390032d6dc8a3e6fdc83acd320260367eb4b9b5#5390032d6dc8a3e6fdc83acd320260367eb4b9b5"
+source = "git+https://github.com/smg-project/llm-multimodal?rev=15adba5e025d8636ba4a334fb379b1371f6196a1#15adba5e025d8636ba4a334fb379b1371f6196a1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3446,7 +3446,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -5498,12 +5497,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "thiserror-ext",
  "tiktoken-rs 0.9.1",
  "tokenizers",
  "tokio",
  "tokio-stream",
+ "tracing",
  "url",
  "uuid",
+ "vllm-tracing",
 ]
 
 [[package]]
@@ -5568,17 +5570,16 @@ dependencies = [
  "serde_json",
  "serde_with",
  "thiserror-ext",
- "time",
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "vllm-bench",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
  "vllm-server",
+ "vllm-tracing",
 ]
 
 [[package]]
@@ -5752,6 +5753,7 @@ dependencies = [
  "tracing",
  "tracing-futures",
  "tracing-subscriber",
+ "url",
  "uuid",
  "validator",
  "vllm-chat",
@@ -5823,6 +5825,15 @@ dependencies = [
  "serde_json",
  "thiserror-ext",
  "vllm-parser",
+]
+
+[[package]]
+name = "vllm-tracing"
+version = "0.1.0"
+dependencies = [
+ "time",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

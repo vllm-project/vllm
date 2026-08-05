@@ -20,6 +20,8 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    vllm_tracing::init_tracing("Bench");
+
     let cli = Cli::parse();
     vllm_bench::prepare_process();
 
