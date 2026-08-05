@@ -31,6 +31,7 @@ use self::types::{
     GenerateLogprob, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
     GenerateStreamResponse,
 };
+pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;

@@ -13,11 +13,13 @@ use thiserror_ext::AsReport as _;
 use vllm_chat::NewChatOutputProcessorOptions;
 use vllm_text::TextRequest;
 
+use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
-use crate::routes::DEFAULT_JSON_BODY_LIMIT_BYTES;
-use crate::routes::inference::generate::GenerateRequest;
+use crate::routes::inference::generate::{
+    GenerateRequest, validate_request_compat as validate_generate_request,
+};
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
@@ -33,7 +35,7 @@ pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
         .route("/v1/chat/completions/render", post(render_chat))
         .route("/v1/completions/render", post(render_completion))
         .with_state(state)
-        .layer(DefaultBodyLimit::max(DEFAULT_JSON_BODY_LIMIT_BYTES))
+        .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
 }
 
 async fn health() -> StatusCode {
@@ -81,7 +83,7 @@ fn lower_render_request(
     let token_ids = prepared.generate_request.prompt_token_ids;
     let text_request = prepared.text_request;
 
-    Ok(GenerateRequest {
+    let request = GenerateRequest {
         request_id: Some(text_request.request_id),
         model: Some(model),
         token_ids,
@@ -93,7 +95,9 @@ fn lower_render_request(
         kv_transfer_params: None,
         ec_transfer_params: None,
         other: Default::default(),
-    })
+    };
+    validate_generate_request(&request, &state.served_model_names)?;
+    Ok(request)
 }
 
 async fn render_chat(
