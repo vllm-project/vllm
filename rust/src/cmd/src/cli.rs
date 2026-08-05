@@ -154,7 +154,7 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
-    /// TCP port for the gRPC Generate service. When not set, no gRPC server is
+    /// TCP port for the gRPC Inference service. When not set, no gRPC server is
     /// started.
     #[arg(long)]
     #[serde(default)]
