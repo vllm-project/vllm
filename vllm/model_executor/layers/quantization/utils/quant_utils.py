@@ -223,6 +223,13 @@ kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
 kInt8StaticTensorSym = QuantKey(torch.int8, kStaticTensorScale, symmetric=True)
 kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True)
 
+kLutBStaticCodebook = ScaleDesc(
+    torch.float8_e4m3fn,
+    True,
+    GroupShape(8, 64),
+)
+kLutBStatic = QuantKey(torch.uint8, kLutBStaticCodebook, symmetric=True)
+
 # INT4 W4A8 quantization keys
 
 # For group-wise quantization (e.g., group_size=128)

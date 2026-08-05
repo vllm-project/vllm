@@ -97,6 +97,14 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.weight = layer.weight_packed
         del layer.weight_packed
 
+        if self.kernel.supports_per_partition_weight_global_scale():
+            layer.weight_global_scale = Parameter(
+                1.0 / layer.weight_global_scale.to(torch.float32),
+                requires_grad=False,
+            )
+            self.kernel.process_weights_after_loading(layer)
+            return
+
         # Check for mismatched weight global scales
         if torch.unique(layer.weight_global_scale).numel() != 1:
             logger.warning_once(

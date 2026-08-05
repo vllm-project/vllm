@@ -1190,6 +1190,15 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.kernel.supports_per_partition_weight_global_scale():
+            layer.weight_global_scale = Parameter(
+                layer.weight_scale_2.to(torch.float32),
+                requires_grad=False,
+            )
+            del layer.weight_scale_2
+            self.kernel.process_weights_after_loading(layer)
+            return
+
         if (
             torch.unique(layer.input_scale).numel() != 1
             or torch.unique(layer.weight_scale_2).numel() != 1

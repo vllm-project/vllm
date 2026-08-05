@@ -9,18 +9,124 @@ from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
 )
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.kernels.linear.nvfp4.lut_b import dequantize_lut_b
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.lut_b import (
+    LutBOnlineLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+
+def test_online_lut_b_dispatches_dense_linear(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(
+            linear="lut_b",
+        )
+    )
+    layer = LinearBase(
+        64,
+        8,
+        params_dtype=torch.bfloat16,
+        quant_config=config,
+        prefix="proj",
+        tp_rank=0,
+        tp_size=1,
+    )
+
+    assert isinstance(layer.quant_method, LutBOnlineLinearMethod)
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    loaded_layer = torch.nn.Module()
+    layer.quant_method.create_weights(
+        loaded_layer,
+        input_size_per_partition=64,
+        output_partition_sizes=[8],
+        input_size=64,
+        output_size=8,
+        params_dtype=torch.bfloat16,
+    )
+    assert loaded_layer.weight.shape == (8, 64)
+    assert loaded_layer.weight.device.type == "meta"
+
+
+def test_online_lut_b_repacks_and_uses_reference_linear() -> None:
+    torch.manual_seed(0)
+    weight = torch.randn(8, 64, dtype=torch.float32) * 0.1
+    x = torch.randn(3, 64, dtype=torch.float32)
+    bias = torch.randn(8, dtype=torch.float32)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+    method = LutBOnlineLinearMethod()
+
+    method.process_weights_after_loading(layer)
+    actual = method.apply(layer, x, bias)
+
+    reconstructed = dequantize_lut_b(
+        layer.weight,
+        layer.weight_codebook,
+        out_dtype=x.dtype,
+    )
+    expected = torch.nn.functional.linear(x, reconstructed, bias)
+    assert layer.weight.shape == (1, 1, 192)
+    assert layer.weight_codebook.shape == (1, 1, 8)
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "has_scale", "has_residual"),
+    [
+        ("multistart", False, False),
+        ("scaled", True, False),
+        ("residual_1", False, True),
+        ("scaled_residual_1", True, True),
+    ],
+)
+def test_online_lut_b_calibration_free_algorithms(
+    algorithm: str,
+    has_scale: bool,
+    has_residual: bool,
+) -> None:
+    torch.manual_seed(1)
+    weight = torch.randn(8, 64, dtype=torch.float32) * 0.1
+    x = torch.randn(2, 64, dtype=torch.float32)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+    method = LutBOnlineLinearMethod(algorithm=algorithm)
+
+    method.process_weights_after_loading(layer)
+    actual = method.apply(layer, x)
+
+    assert hasattr(layer, "weight_output_scale") is has_scale
+    assert hasattr(layer, "weight_residual_position") is has_residual
+    assert hasattr(layer, "weight_residual_value") is has_residual
+    expected_weight = dequantize_lut_b(
+        layer.weight,
+        layer.weight_codebook,
+        out_dtype=x.dtype,
+        output_scale=getattr(layer, "weight_output_scale", None),
+        residual_position=getattr(layer, "weight_residual_position", None),
+        residual_value=getattr(layer, "weight_residual_value", None),
+    )
+    torch.testing.assert_close(actual, torch.nn.functional.linear(x, expected_weight))
 
 
 @pytest.mark.skipif(

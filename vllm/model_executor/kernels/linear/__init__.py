@@ -145,6 +145,9 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
 from vllm.model_executor.kernels.linear.nvfp4.humming import (
     HummingNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.lut_b import (
+    LutBNvFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
@@ -261,6 +264,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         HummingMxfp8LinearKernel,
         HummingMxFp4LinearKernel,
         HummingNvFp4LinearKernel,
+    },
+    "lut_b": {
+        LutBNvFp4LinearKernel,
     },
     "marlin": {
         MarlinFP8ScaledMMLinearKernel,
@@ -475,9 +481,11 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         FbgemmNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
+        LutBNvFp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
+        LutBNvFp4LinearKernel,
     ],
 }
 
@@ -1205,6 +1213,7 @@ __all__ = [
     "FlashInferCutlassNvFp4LinearKernel",
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
+    "LutBNvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",
