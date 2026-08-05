@@ -67,6 +67,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -1317,11 +1318,14 @@ class Gemma4ForConditionalGeneration(
                     pp_tensor,
                     pad_tensor,
                 ).to(self.model_dtype)
-                encoder_outputs = vt.encoder(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=~pad_tensor,
-                    pixel_position_ids=pp_tensor,
-                )
+                # HuggingFace's mask builder probes `padding_mask.all()` to
+                # decide whether the mask can be skipped, which syncs.
+                with gpu_sync_allowed():
+                    encoder_outputs = vt.encoder(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=~pad_tensor,
+                        pixel_position_ids=pp_tensor,
+                    )
                 hidden_states = encoder_outputs.last_hidden_state
 
                 for i, (orig_idx, _, _) in enumerate(chunk_items):
@@ -1396,7 +1400,9 @@ class Gemma4ForConditionalGeneration(
         pooling_k2 = vision_cfg.pooling_kernel_size**2
 
         if isinstance(frame_counts, torch.Tensor):
-            fc_list = frame_counts.tolist()
+            # Per-video frame counts drive the Python-level batching below.
+            with gpu_sync_allowed():
+                fc_list = frame_counts.tolist()
         else:
             fc_list = list(frame_counts)
 

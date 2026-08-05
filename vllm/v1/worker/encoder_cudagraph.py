@@ -300,6 +300,15 @@ class EncoderCudaGraphManager:
         with gpu_sync_allowed():
             return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
 
+    def _select_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        """Select the mm kwargs for `indices` from the model."""
+        # Same as `_get_item_specs`: implementations re-read the per-item
+        # grid/patch counts to slice the batch, so the D2H is inherent.
+        with gpu_sync_allowed():
+            return self.model.select_encoder_cudagraph_items(mm_kwargs, indices)
+
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
         return [spec.output_tokens for spec in self._get_item_specs(mm_kwargs)]
@@ -415,9 +424,7 @@ class EncoderCudaGraphManager:
 
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
         for batch_indices, path_budgets in batches:
-            batch_mm_kwargs = self.model.select_encoder_cudagraph_items(
-                mm_kwargs, batch_indices
-            )
+            batch_mm_kwargs = self._select_items(mm_kwargs, batch_indices)
             graph_outputs: dict[str, torch.Tensor] = {}
             all_eager = True
 
@@ -491,11 +498,9 @@ class EncoderCudaGraphManager:
         ]
 
         if len(local_indices) > 0:
-            local_mm_kwargs = self.model.select_encoder_cudagraph_items(
-                mm_kwargs, local_indices
-            )
+            local_mm_kwargs = self._select_items(mm_kwargs, local_indices)
         else:
-            local_mm_kwargs = self.model.select_encoder_cudagraph_items(mm_kwargs, [])
+            local_mm_kwargs = self._select_items(mm_kwargs, [])
 
         max_output_tokens_per_rank = (
             max(

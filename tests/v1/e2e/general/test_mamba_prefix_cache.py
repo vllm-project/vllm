@@ -1096,11 +1096,10 @@ def _run_mamba_prefix_cache_mrv2(
             device=hidden_states.device,
             dtype=torch.int64,
         )
-        num_logits = torch.tensor(
+        num_logits = async_tensor_h2d(
             input_batch.cu_num_logits_np[1 : num_reqs + 1]
             - input_batch.cu_num_logits_np[:num_reqs],
             device=hidden_states.device,
-            dtype=torch.int32,
         )
         accepted = torch.full_like(num_logits, num_accepted_tokens)
         num_sampled = torch.minimum(accepted, num_logits)

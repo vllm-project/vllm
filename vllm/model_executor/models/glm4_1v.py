@@ -99,6 +99,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import get_processor_cls_name_from_config
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -816,7 +817,9 @@ class Glm4vVisionTransformer(nn.Module):
             )
 
             lengths = [h * w] * t
-            image_shapes = torch.tensor([[t, h, w]], device=device)
+            image_shapes = async_tensor_h2d(
+                [[t, h, w]], dtype=torch.long, device=device
+            )
 
             h_coords_repeated = h_coords.repeat(t)
             w_coords_repeated = w_coords.repeat(t)
