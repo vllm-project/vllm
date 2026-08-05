@@ -227,11 +227,16 @@ def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
 
 
 def test_encoder_timing_stats_registry():
-    from vllm.v1.worker.utils import EncoderTimingStats
-
     runner = _make_runner([], [])
-    runner.encoder_timing_registry["r1"] = EncoderTimingStats(0.5, 2)
+    runner.enable_timing = True
+
+    with runner.timed_encoder_operation({"r1"}):
+        pass
+    with runner.timed_encoder_operation({"r1"}):
+        pass
 
     stats = runner.get_encoder_timing_stats()
-    assert stats == {"r1": {"encoder_forward_secs": 0.5, "num_encoder_calls": 2}}
+    assert set(stats) == {"r1"}
+    assert stats["r1"]["num_encoder_calls"] == 2
+    assert stats["r1"]["encoder_forward_secs"] >= 0
     assert runner.get_encoder_timing_stats() == {}

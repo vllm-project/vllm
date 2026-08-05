@@ -155,9 +155,10 @@ class ModelState(ABC):
             scheduled_encoder_inputs
         )
         if mm_kwargs:
-            encoder_outputs = self.encoder_runner.execute_mm_encoder(
-                mm_kwargs, request_ids=scheduled_encoder_inputs.keys()
-            )
+            with self.encoder_runner.timed_encoder_operation(
+                scheduled_encoder_inputs.keys()
+            ):
+                encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
     def gather_mm_embeddings(

@@ -3,6 +3,7 @@
 import threading
 import time
 from collections.abc import Collection
+from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -110,15 +111,8 @@ class EncoderRunner:
 
     @torch.inference_mode()
     def execute_mm_encoder(
-        self,
-        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
-        request_ids: Collection[str] | None = None,
+        self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
     ) -> list[torch.Tensor]:
-        should_time = self.enable_timing and request_ids
-        if should_time:
-            torch.accelerator.synchronize()
-            start_time = time.perf_counter()
-
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=True
@@ -126,9 +120,19 @@ class EncoderRunner:
             batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
+        return encoder_outputs
 
-        if should_time:
-            assert request_ids is not None
+    @contextmanager
+    def timed_encoder_operation(self, request_ids: Collection[str]):
+        if not (self.enable_timing and request_ids):
+            yield
+            return
+
+        torch.accelerator.synchronize()
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
             torch.accelerator.synchronize()
             per_request_time = (time.perf_counter() - start_time) / len(request_ids)
             with self._timing_lock:
@@ -138,7 +142,6 @@ class EncoderRunner:
                     )
                     stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
-        return encoder_outputs
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         with self._timing_lock:
