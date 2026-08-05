@@ -3,8 +3,9 @@
 
 
 from http import HTTPStatus
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.chat_completion.batch_serving import OpenAIServingChatBatch
@@ -50,7 +51,13 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 )
 @with_cancellation
 @load_aware_call
-async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+async def create_chat_completion(
+    request: ChatCompletionRequest,
+    raw_request: Request,
+    priority: Annotated[int | None, Header(alias="X-Vllm-Priority")] = None,
+):
+    if priority is not None:
+        request.priority = priority
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )
@@ -88,8 +95,12 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 @with_cancellation
 @load_aware_call
 async def create_batch_chat_completion(
-    request: BatchChatCompletionRequest, raw_request: Request
+    request: BatchChatCompletionRequest,
+    raw_request: Request,
+    priority: Annotated[int | None, Header(alias="X-Vllm-Priority")] = None,
 ):
+    if priority is not None:
+        request.priority = priority
     handler = batch_chat(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Chat Completions API")

@@ -3,8 +3,9 @@
 
 
 from http import HTTPStatus
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.completion.protocol import (
@@ -43,7 +44,13 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
 )
 @with_cancellation
 @load_aware_call
-async def create_completion(request: CompletionRequest, raw_request: Request):
+async def create_completion(
+    request: CompletionRequest,
+    raw_request: Request,
+    priority: Annotated[int | None, Header(alias="X-Vllm-Priority")] = None,
+):
+    if priority is not None:
+        request.priority = priority
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )

@@ -4,8 +4,9 @@
 
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -57,7 +58,13 @@ async def _convert_stream_to_sse_events(
 )
 @with_cancellation
 @load_aware_call
-async def create_responses(request: ResponsesRequest, raw_request: Request):
+async def create_responses(
+    request: ResponsesRequest,
+    raw_request: Request,
+    priority: Annotated[int | None, Header(alias="X-Vllm-Priority")] = None,
+):
+    if priority is not None:
+        request.priority = priority
     handler = responses(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Responses API")
