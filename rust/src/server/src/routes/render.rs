@@ -11,14 +11,14 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use thiserror_ext::AsReport as _;
 use vllm_chat::NewChatOutputProcessorOptions;
-use vllm_llm::GenerateRequest;
 use vllm_text::TextRequest;
 
 use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::DEFAULT_JSON_BODY_LIMIT_BYTES;
-use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject};
+use crate::routes::inference::generate::GenerateRequest;
+use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
@@ -70,12 +70,30 @@ fn model_resolution(state: &RenderState) -> LoraModelResolution {
 fn lower_render_request(
     state: &RenderState,
     text_request: TextRequest,
+    model: String,
+    stream: bool,
+    stream_options: Option<StreamOptions>,
 ) -> Result<GenerateRequest, ApiError> {
-    state
+    let prepared = state
         .text
         .prepare(text_request)
-        .map(|prepared| prepared.generate_request)
-        .map_err(|error| text_submit_error("failed to prepare render request", error))
+        .map_err(|error| text_submit_error("failed to prepare render request", error))?;
+    let token_ids = prepared.generate_request.prompt_token_ids;
+    let text_request = prepared.text_request;
+
+    Ok(GenerateRequest {
+        request_id: Some(text_request.request_id),
+        model: Some(model),
+        token_ids,
+        sampling_params: text_request.sampling_params,
+        stream,
+        stream_options: stream.then_some(stream_options).flatten(),
+        cache_salt: text_request.cache_salt,
+        priority: text_request.priority,
+        kv_transfer_params: None,
+        ec_transfer_params: None,
+        other: Default::default(),
+    })
 }
 
 async fn render_chat(
@@ -83,6 +101,9 @@ async fn render_chat(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
+    let model = body.model.clone();
+    let stream = body.stream;
+    let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     let (text_request, _) = state
@@ -96,7 +117,13 @@ async fn render_chat(
         )
         .await
         .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?;
-    Ok(Json(lower_render_request(&state, text_request)?))
+    Ok(Json(lower_render_request(
+        &state,
+        text_request,
+        model,
+        stream,
+        stream_options,
+    )?))
 }
 
 async fn render_completion(
@@ -104,6 +131,9 @@ async fn render_completion(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
+    let model = body.model.clone();
+    let stream = body.stream;
+    let stream_options = body.stream_options.clone();
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let tokenizer = state.text.tokenizer();
     let text_request = lower_completion_request(
@@ -112,5 +142,11 @@ async fn render_completion(
         request_context,
         tokenizer.as_ref(),
     )?;
-    Ok(Json(vec![lower_render_request(&state, text_request)?]))
+    Ok(Json(vec![lower_render_request(
+        &state,
+        text_request,
+        model,
+        stream,
+        stream_options,
+    )?]))
 }

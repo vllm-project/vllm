@@ -90,10 +90,10 @@ It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
 tokenizer and model configuration files are loaded; model weights, PyTorch,
 and vLLM kernels are not required.
 
-The render endpoints currently serialize the internal
-`vllm_llm::GenerateRequest` produced by the normal Rust lowering path. This is
-not yet the Python scale-out `GenerateRequest` wire format, and the Rust
-`/inference/v1/generate` endpoint does not consume it directly.
+The render endpoints return the public token-in `GenerateRequest` consumed by
+the Rust `/inference/v1/generate` endpoint. A chat render response, or one item
+from a completion render response, can be submitted to that endpoint without
+changing its fields.
 
 The render and inference paths use the same `vllm-chat` and `vllm-text`
 request-preparation logic; render mode stops before engine submission.

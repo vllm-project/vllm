@@ -1074,7 +1074,11 @@ async fn render_chat_returns_generate_request_with_header_request_id() {
                         "request_id": "body-req",
                         "model": "render-model",
                         "messages": [{"role": "user", "content": "hello"}],
-                        "max_completion_tokens": 8
+                        "max_completion_tokens": 8,
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
+                        "cache_salt": "render-cache-salt",
+                        "priority": -3
                     })
                     .to_string(),
                 ))
@@ -1088,7 +1092,15 @@ async fn render_chat_returns_generate_request_with_header_request_id() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
     assert_eq!(json["request_id"], "chatcmpl-header-req");
-    assert!(!json["prompt_token_ids"].as_array().unwrap().is_empty());
+    assert_eq!(json["model"], "render-model");
+    assert_eq!(json["stream"], true);
+    assert_eq!(json["stream_options"]["include_usage"], true);
+    assert_eq!(json["cache_salt"], "render-cache-salt");
+    assert_eq!(json["priority"], -3);
+    assert_eq!(json["sampling_params"]["max_tokens"], 8);
+    assert!(!json["token_ids"].as_array().unwrap().is_empty());
+    assert!(json.get("prompt_token_ids").is_none());
+    assert!(json.get("mm_features").is_none());
 }
 
 #[tokio::test]
@@ -1119,7 +1131,84 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
     assert_eq!(json[0]["request_id"], "cmpl-body-req");
-    assert!(!json[0]["prompt_token_ids"].as_array().unwrap().is_empty());
+    assert_eq!(json[0]["model"], "render-model");
+    assert_eq!(json[0]["stream"], false);
+    assert_eq!(json[0]["sampling_params"]["max_tokens"], 8);
+    assert!(!json[0]["token_ids"].as_array().unwrap().is_empty());
+    assert!(json[0].get("stream_options").is_none());
+    assert!(json[0].get("prompt_token_ids").is_none());
+    assert!(json[0].get("mm_features").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
+    let mut render_app = test_render_app();
+    let render_response = render_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "round-trip",
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8,
+                        "bad_words": ["blocked"],
+                        "vllm_xargs": {"custom": 1}
+                    })
+                    .to_string(),
+                ))
+                .expect("build render request"),
+        )
+        .await
+        .expect("call render app");
+
+    assert_eq!(render_response.status(), StatusCode::OK);
+    let render_body = to_bytes(render_response.into_body(), usize::MAX)
+        .await
+        .expect("read render response");
+    let render_json: serde_json::Value =
+        serde_json::from_slice(&render_body).expect("decode render response");
+    let token_ids: Vec<u32> = serde_json::from_value(render_json["token_ids"].clone())
+        .expect("decode rendered token IDs");
+
+    assert_eq!(
+        render_json["sampling_params"]["bad_words"],
+        json!(["blocked"])
+    );
+    assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-render-generate-round-trip",
+        default_stream_output_specs(),
+        Some(token_ids),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut generate_app = build_router(Arc::new(AppState::new(
+        vec!["render-model".to_string()],
+        chat,
+    )));
+    let generate_response = generate_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(render_body))
+                .expect("build generate request"),
+        )
+        .await
+        .expect("call generate app");
+
+    assert_eq!(generate_response.status(), StatusCode::OK);
+    let _ = to_bytes(generate_response.into_body(), usize::MAX)
+        .await
+        .expect("read generate response");
+    engine_task.finish().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

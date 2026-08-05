@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
@@ -22,7 +21,7 @@ use crate::request_metrics::current_unix_timestamp_secs;
 ///
 /// Original Python API reference:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/protocol.py#L67-L84>
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GenerateRequest {
     /// Unique ID of the request.
     pub request_id: String,
