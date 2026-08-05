@@ -7,7 +7,6 @@ from typing import ClassVar, Literal
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -80,7 +79,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 
-from .attention import Glm5NextLinearAttention, Glm5NextMLAAttention
+from .attention import Glm5NextMLAAttention
+from .kda import Glm5NextLinearAttention
 from .multimodal import Glm5NextProcessingInfo, Glm5NextVisionTransformer
 
 logger = init_logger(__name__)
@@ -483,7 +483,6 @@ class Glm5NextDecoderLayer(nn.Module):
         return self.mhc_post_op(x, residual, post, comb)
 
 
-@support_torch_compile
 class Glm5NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -926,7 +925,8 @@ class Glm5NextForConditionalGeneration(
                 norm_eps=config.vision_config.rms_norm_eps,
                 # Vision tower ships BF16 weights in this fp8 checkpoint (no
                 # weight_scale_inv for visual.*), so it must NOT inherit the
-                # global fp8 quant_config -- doing so mis-quantizes the tower
+                # global fp8 quant_config -- doing so incorrectly quantizes
+                # the tower
                 # and yields NaN image features. Mirrors the MLA/KDA proj
                 # pattern (quant_config=None for BF16 submodules).
                 quant_config=None,

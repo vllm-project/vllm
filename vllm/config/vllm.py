@@ -1242,6 +1242,9 @@ class VllmConfig:
                     "KimiLinearForCausalLM",
                     "MiniMaxM3SparseForCausalLM",
                     "MiniMaxM3SparseForConditionalGeneration",
+                    "Glm5NextForCausalLM",
+                    "Glm5NextForConditionalGeneration",
+                    "Glm5NextMTPModel",
                 )
                 for a in self.model_config.architectures
             )

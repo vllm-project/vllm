@@ -20,9 +20,6 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    KimiGatedDeltaNetAttention,
-)
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -30,7 +27,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.layers.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
@@ -41,20 +37,6 @@ from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
-
-
-def naive_kda_lowerbound_gate(
-    g: torch.Tensor,
-    A_log: torch.Tensor,
-    dt_bias: torch.Tensor,
-    lower_bound: float = -5.0,
-    output_dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    g = g.float()
-    g = g + dt_bias.view(1, -1)
-    g = g.view(g.shape[0], A_log.numel(), -1)
-    g = lower_bound * torch.nn.functional.sigmoid(A_log.view(-1, 1).exp() * g)
-    return g.to(output_dtype)
 
 
 class Glm5NextIndexerCache(DeepseekV32IndexerCache):
@@ -573,70 +555,3 @@ class Glm5NextMLAAttention(nn.Module):
         # buffer empty and silently corrupting attention. Mirrors
         # DeepseekV2MLAAttention.forward.
         output[:] = self.mla_attn(positions, hidden_states)
-
-
-class Glm5NextLinearAttention(KimiGatedDeltaNetAttention):
-    """GLM5-Next KDA layer.
-
-    The config exposes ``linear_lower_bound``: when set, the bounded gate
-    ``y = lower_bound * sigmoid(exp(A)*(g+g_bias))`` is used (default
-    ``lower_bound`` -5.0); otherwise the unbounded fused-kernel default
-    ``gate = -exp(A)*softplus(g+g_bias)`` is used. Without the bounded gate the
-    KDA forget factor is wrong, which corrupts the linear-attention state and
-    degrades generation as the sequence grows. We read ``linear_lower_bound``
-    off the config and expose it as ``self.kda_safe_gate``/
-    ``self.kda_lower_bound``, consumed by ``KimiGatedDeltaNetAttention._forward``
-    to select the gate branch in ``fused_kda_gate`` /
-    ``chunk_kda_with_fused_gate``. Other customizations:
-
-    - KDA projections are kept BF16 even in FP8 checkpoints (no
-      ``weight_scale_inv`` is stored for them), so the quant config is stripped
-      while building the projection modules -- mirroring the MLA path, which
-      also passes ``quant_config=None``.
-    - The checkpoint stores ``A_log`` as a 1-D ``(num_heads,)`` tensor; the
-      upstream loader assumes the 4-D param shape, so a reshape-aware loader
-      is attached.
-    """
-
-    def __init__(
-        self,
-        config: Glm5NextConfig,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
-        # KDA projections are BF16 in the checkpoint (no weight_scale_inv),
-        # even for FP8 checkpoints. The GDN base reads quant_config off
-        # vllm_config wholesale, so swap it to None just for this layer's
-        # construction and restore it afterwards (single-threaded init).
-        saved_quant = vllm_config.quant_config
-        vllm_config.quant_config = None
-        try:
-            super().__init__(config, vllm_config, prefix)
-        finally:
-            vllm_config.quant_config = saved_quant
-
-        # KDA bounded-gate variant. The new schema flattens lower_bound to
-        # linear_lower_bound (safe_gate is dropped -- the bounded gate is always
-        # used when linear_lower_bound is set). Fall back to the legacy
-        # linear_attn_config dict for older checkpoints. Consumed by
-        # KimiGatedDeltaNetAttention._forward.
-        linear_lower_bound = getattr(config, "linear_lower_bound", None)
-        if linear_lower_bound is not None:
-            self.kda_safe_gate = True
-            self.kda_lower_bound = linear_lower_bound
-        else:
-            legacy = getattr(config, "linear_attn_config", None) or {}
-            if legacy.get("safe_gate", True):
-                self.kda_safe_gate = True
-                self.kda_lower_bound = legacy.get("lower_bound", -5.0)
-            else:
-                self.kda_safe_gate = False
-                self.kda_lower_bound = -5.0
-
-        # checkpoint A_log is 1-D (num_heads,); upstream loader assumes 4-D.
-        def a_log_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
-            if loaded_weight.dim() == 1:
-                loaded_weight = loaded_weight.view([1, 1, -1, 1])
-            return sharded_weight_loader(2)(param, loaded_weight)
-
-        self.A_log.weight_loader = a_log_weight_loader
