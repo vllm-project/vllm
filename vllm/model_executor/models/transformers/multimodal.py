@@ -395,6 +395,17 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     **tokenization_kwargs,
                     "add_special_tokens": False,
                 }
+            else:
+                # Chat templates render special tokens themselves; mirror the
+                # fallback in `ProcessorMixin.apply_chat_template`.
+                bos_token = getattr(
+                    getattr(hf_processor, "tokenizer", None), "bos_token", None
+                )
+                if bos_token is not None and prompt.startswith(bos_token):
+                    tokenization_kwargs = {
+                        **tokenization_kwargs,
+                        "add_special_tokens": False,
+                    }
 
             # Bypass cached processor and always apply to the full set of mm inputs
             # NOTE: we can't just set caching=False because base class method
