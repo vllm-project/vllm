@@ -14,12 +14,6 @@ INNER_VOCAB = {
     "<think>": 500,
     "</think>": 501,
 }
-THINK_VOCAB = {
-    "<think>": 32,
-    "</think>": 33,
-    "<|inner_prefix|>": 900,
-    "<|inner_suffix|>": 901,
-}
 
 
 class MockTokenizer:
@@ -39,20 +33,29 @@ def make_parser(vocab: dict[str, int]) -> ReasoningParser:
     return parser_cls(MockTokenizer(vocab))
 
 
-@pytest.mark.parametrize(
-    "vocab, start, end",
-    [
-        (INNER_VOCAB, "<|inner_prefix|>", "<|inner_suffix|>"),
-        (THINK_VOCAB, "<think>", "</think>"),
-    ],
-)
-def test_delimiters_follow_the_tokenizer(vocab, start, end):
-    """The emitted (lower-id) delimiter pair wins, whichever scheme the
-    tokenizer build registers there."""
-    parser = make_parser(vocab)
+def test_delimiters_are_the_inner_pair():
+    """The inner pair carries the ids the model emits for thinking."""
+    parser = make_parser(INNER_VOCAB)
 
-    assert (parser.start_token, parser.end_token) == (start, end)
+    assert (parser.start_token, parser.end_token) == (
+        "<|inner_prefix|>",
+        "<|inner_suffix|>",
+    )
     assert (parser.start_token_id, parser.end_token_id) == (32, 33)
+
+
+def test_think_strings_are_not_delimiters():
+    """``<think>`` is an ordinary vocab entry: the tokenizer's normalizer maps it
+    to the inner pair on input only, so generated ``<think>`` text is content."""
+    parser = make_parser(INNER_VOCAB)
+    output = "<think>not a thinking block</think>plain answer"
+
+    reasoning, content = run_reasoning_extraction(
+        reasoning_parser=parser, model_output=[output]
+    )
+
+    assert reasoning is None
+    assert content == output
 
 
 @pytest.mark.parametrize("streaming", [True, False])
