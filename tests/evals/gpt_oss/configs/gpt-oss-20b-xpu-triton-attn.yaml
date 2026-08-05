@@ -4,3 +4,5 @@ model_name: openai/gpt-oss-20b
 metric_threshold: 0.568
 reasoning_effort: low
 server_args: "--attention-backend TRITON_ATTN"
+# Cap output length to prevent unbounded generation (no EOS) from hanging the eval
+max_tokens: 8192

@@ -46,7 +46,12 @@ def ensure_tiktoken_files():
             print(f"  {filename} already exists.")
 
 
-def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> float:
+def run_gpqa_eval(
+    model_name: str,
+    base_url: str,
+    reasoning_effort: str,
+    max_tokens: int | None = None,
+) -> float:
     """Run GPQA evaluation using the gpt-oss evaluation package."""
 
     # Build the command to run the evaluation
@@ -65,6 +70,10 @@ def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> floa
         "--n-threads",
         "200",
     ]
+
+    # Limit per-request output length to prevent unbounded generation
+    if max_tokens is not None:
+        cmd.extend(["--max-tokens", str(max_tokens)])
 
     try:
         # Set up environment for the evaluation subprocess
@@ -136,10 +145,12 @@ def test_gpqa_correctness(config_filename):
         server_env.update(eval_config["env"])
 
     reasoning_effort = eval_config.get("reasoning_effort", "low")
+    max_tokens = eval_config.get("max_tokens", None)
 
     print(f"Starting GPQA evaluation for model: {eval_config['model_name']}")
     print(f"Expected metric threshold: {eval_config['metric_threshold']}")
     print(f"Reasoning effort: {reasoning_effort}")
+    print(f"Max tokens per request: {max_tokens}")
     print(f"Server args: {' '.join(server_args)}")
     print(f"Server environment variables: {server_env}")
 
@@ -154,7 +165,10 @@ def test_gpqa_correctness(config_filename):
         print(f"Server started at: {base_url}")
 
         measured_metric = run_gpqa_eval(
-            eval_config["model_name"], base_url, reasoning_effort
+            eval_config["model_name"],
+            base_url,
+            reasoning_effort,
+            max_tokens=max_tokens,
         )
         expected_metric = eval_config["metric_threshold"]
 
