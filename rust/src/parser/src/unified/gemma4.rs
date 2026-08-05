@@ -389,30 +389,81 @@ fn parse_gemma4_args(args: &str) -> ModalResult<Map<String, Value>> {
 
 /// Check that nested Gemma4 containers stay within the parser's stack budget.
 fn gemma4_nesting_is_within_limit(mut input: &str) -> bool {
-    let mut depth = 0;
-    let mut in_string = false;
+    enum Container {
+        Args,
+        Array,
+    }
 
-    while !input.is_empty() {
-        if let Some(rest) = input.strip_prefix(STRING_DELIM) {
-            in_string = !in_string;
+    let mut depth = 0;
+    let mut containers = vec![Container::Args];
+
+    while let Some(container) = containers.last() {
+        input = input.trim_start();
+        if let Some(rest) = input.strip_prefix(',') {
             input = rest;
             continue;
         }
 
-        let character = input.chars().next().unwrap();
-        if !in_string {
-            match character {
-                '{' | '[' => {
-                    depth += 1;
-                    if depth > MAX_GEMMA4_NESTING_DEPTH {
-                        return false;
-                    }
+        match container {
+            Container::Args if input.strip_prefix('}').is_some() => {
+                if containers.len() > 1 {
+                    depth -= 1;
                 }
-                '}' | ']' => depth = depth.saturating_sub(1),
-                _ => {}
+                containers.pop();
+                input = &input[1..];
+                continue;
             }
+            Container::Array if input.strip_prefix(']').is_some() => {
+                if containers.len() > 1 {
+                    depth -= 1;
+                }
+                containers.pop();
+                input = &input[1..];
+                continue;
+            }
+            Container::Args => {
+                let Some(key_end) = input.find(':') else {
+                    return true;
+                };
+                input = &input[key_end + 1..];
+            }
+            Container::Array => {}
         }
-        input = &input[character.len_utf8()..];
+
+        input = input.trim_start();
+        if let Some(rest) = input.strip_prefix(STRING_DELIM) {
+            let Some(string_end) = rest.find(STRING_DELIM) else {
+                return true;
+            };
+            input = &rest[string_end + STRING_DELIM.len()..];
+            continue;
+        }
+
+        match input.chars().next() {
+            Some('{') => {
+                depth += 1;
+                if depth > MAX_GEMMA4_NESTING_DEPTH {
+                    return false;
+                }
+                containers.push(Container::Args);
+                input = &input[1..];
+            }
+            Some('[') => {
+                depth += 1;
+                if depth > MAX_GEMMA4_NESTING_DEPTH {
+                    return false;
+                }
+                containers.push(Container::Array);
+                input = &input[1..];
+            }
+            Some(_) => {
+                let Some(value_end) = input.find([',', '}', ']']) else {
+                    return true;
+                };
+                input = &input[value_end..];
+            }
+            None => return true,
+        }
     }
 
     true
@@ -753,15 +804,15 @@ mod tests {
     #[test]
     fn gemma4_nesting_limit_accepts_128_and_rejects_129() {
         let nested_value = format!(
-            "{}1{}",
-            "nested:{".repeat(super::MAX_GEMMA4_NESTING_DEPTH),
+            "value:{}1{}",
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH),
             "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH),
         );
         assert!(super::gemma4_nesting_is_within_limit(&nested_value));
 
         assert!(!super::gemma4_nesting_is_within_limit(&format!(
-            "{}1{}",
-            "nested:{".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "value:{}1{}",
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
             "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
         )));
     }
@@ -770,7 +821,7 @@ mod tests {
     fn gemma4_parse_args_rejects_excessive_nesting() {
         let nested_value = format!(
             "{}1{}",
-            "nested:{".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
             "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
         );
 
@@ -786,6 +837,29 @@ mod tests {
         let parsed = parse_gemma4_args(&format!("value:<|\"|>{value}<|\"|>")).unwrap();
 
         assert_eq!(Value::Object(parsed), json!({ "value": value }));
+    }
+
+    #[test]
+    fn gemma4_nesting_limit_ignores_string_delimiters_inside_keys() {
+        let args = format!(
+            "key{}:{}1{}{}",
+            super::STRING_DELIM,
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            super::STRING_DELIM,
+        );
+
+        assert!(!super::gemma4_nesting_is_within_limit(&args));
+    }
+
+    #[test]
+    fn gemma4_nesting_limit_allows_many_sibling_containers() {
+        let args = std::iter::repeat("value:{}")
+            .take(super::MAX_GEMMA4_NESTING_DEPTH + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        assert!(super::gemma4_nesting_is_within_limit(&args));
     }
 
     #[test]
@@ -824,7 +898,7 @@ mod tests {
     fn gemma4_parse_complete_rejects_excessive_nesting() {
         let nested_value = format!(
             "{}1{}",
-            "nested:{".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
             "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
         );
         let input = format!("<|tool_call>call:tool{{value:{nested_value}}}<tool_call|>");
