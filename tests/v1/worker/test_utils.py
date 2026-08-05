@@ -177,6 +177,27 @@ def test_hisparse_offload_store_prepare_step_invalidates_and_restores(monkeypatc
     assert store._post_forward_transfers == []
 
 
+def test_hisparse_offload_store_prepare_step_accepts_warmup_without_command():
+    store = object.__new__(HiSparseOffloadStore)
+    store.kernel_block_size = 64
+    store._post_forward_transfers = [object()]
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(new_block_ids=[]),
+    )
+    layer = SimpleNamespace(fully_resident=True)
+    store.layers = [layer]
+    calls = []
+    store.invalidate_blocks = lambda block_ids: calls.append(("invalidate", block_ids))
+    store.restore_prefix = lambda output: calls.append(("restore", output))
+
+    store.prepare_step(None, scheduler_output)
+
+    assert not layer.fully_resident
+    assert store._post_forward_transfers == []
+    assert calls == [("invalidate", []), ("restore", scheduler_output)]
+
+
 def test_hisparse_offload_store_enqueues_fused_page_spill(monkeypatch):
     store = object.__new__(HiSparseOffloadStore)
     store.kernel_block_size = 4

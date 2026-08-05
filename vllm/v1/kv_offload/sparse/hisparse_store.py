@@ -187,11 +187,13 @@ class HiSparseOffloadStore:
 
     def prepare_step(
         self,
-        command: SparseKVOffloadCommand,
+        command: SparseKVOffloadCommand | None,
         scheduler_output: SchedulerOutput,
     ) -> None:
-        self.set_fully_resident_batch(command.fully_resident)
-        transfers = command.page_transfers
+        self.set_fully_resident_batch(
+            command.fully_resident if command is not None else False
+        )
+        transfers = command.page_transfers if command is not None else []
         if transfers:
             self._post_forward_transfers = [
                 transfer for transfer in transfers if transfer.after_forward

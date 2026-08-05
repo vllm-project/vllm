@@ -1304,9 +1304,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
             if self.hisparse_store is not None:
-                command = scheduler_output.sparse_kv_offload
-                assert command is not None
-                self.hisparse_store.prepare_step(command, scheduler_output)
+                self.hisparse_store.prepare_step(
+                    scheduler_output.sparse_kv_offload, scheduler_output
+                )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
