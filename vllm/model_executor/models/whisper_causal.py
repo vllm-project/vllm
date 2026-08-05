@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import functools
 import logging
 import math
 from dataclasses import replace
 from functools import partial
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -26,6 +26,7 @@ from vllm.model_executor.models.whisper import WhisperPosEmbedType
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionMetadata,
     AttentionType,
     CommonAttentionMetadata,
@@ -121,6 +122,16 @@ def create_whisper_attention_backend_with_block_pooling(
     underlying_impl = underlying_attn_backend.get_impl_cls()
 
     class WhisperCausalAttentionWithBlockPoolingBuilder(underlying_builder):  # type: ignore
+        # Full cudagraphs only for uniform single-token decode: capture bakes in
+        # tensor addresses, so `build` writes metadata into persistent buffers
+        # (below). Prefill/mixed batches fall back to piecewise.
+        _cudagraph_support: ClassVar[AttentionCGSupport] = (
+            AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        )
+        # Disable the update_block_table fast path: it would bypass block pooling
+        # by splicing the raw slot_mapping/block_table into cached metadata.
+        supports_update_block_table: bool = False
+
         def __init__(
             self,
             kv_cache_spec: AttentionSpec,
@@ -153,6 +164,38 @@ def create_whisper_attention_backend_with_block_pooling(
             # num_heads_q for the encoder is the same as num_kv_heads
             # (no GQA in whisper encoder)
             self.num_heads_q = kv_cache_spec.num_kv_heads
+            # Persistent capture-safe buffers for pooled metadata; lazily sized
+            # on first `build` to match the incoming tensors' dtype/device.
+            self._pool_buffers_ready = False
+
+        def _maybe_init_pool_buffers(
+            self, common_attn_metadata: CommonAttentionMetadata
+        ) -> None:
+            if self._pool_buffers_ready:
+                return
+            device = common_attn_metadata.slot_mapping.device
+            sched = self.vllm_config.scheduler_config
+            self._qsl_buf = torch.empty(
+                sched.max_num_seqs + 1,
+                dtype=common_attn_metadata.query_start_loc.dtype,
+                device=device,
+            )
+            self._seq_buf = torch.empty(
+                sched.max_num_seqs,
+                dtype=common_attn_metadata.seq_lens.dtype,
+                device=device,
+            )
+            self._slot_buf = torch.empty(
+                sched.max_num_batched_tokens * block_pool_size,
+                dtype=common_attn_metadata.slot_mapping.dtype,
+                device=device,
+            )
+            self._pool_arange = torch.arange(
+                block_pool_size,
+                dtype=common_attn_metadata.slot_mapping.dtype,
+                device=device,
+            )
+            self._pool_buffers_ready = True
 
         def build(
             self,
@@ -160,29 +203,68 @@ def create_whisper_attention_backend_with_block_pooling(
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
-            new_common_attn_metadata = copy.deepcopy(common_attn_metadata)
-            new_common_attn_metadata.query_start_loc *= block_pool_size
-            new_common_attn_metadata.query_start_loc_cpu *= block_pool_size
-            new_common_attn_metadata.seq_lens *= block_pool_size
-            if new_common_attn_metadata._seq_lens_cpu is not None:
-                new_common_attn_metadata._seq_lens_cpu *= block_pool_size
-            if new_common_attn_metadata._num_computed_tokens_cpu is not None:
-                new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
-            new_common_attn_metadata.num_actual_tokens *= block_pool_size
-            new_common_attn_metadata.max_query_len *= block_pool_size
-            new_common_attn_metadata.max_seq_len *= block_pool_size
-            original_slot_mapping = common_attn_metadata.slot_mapping
-            common_prefix_len *= block_pool_size
-            new_common_attn_metadata.slot_mapping = (
-                (
-                    original_slot_mapping.unsqueeze(1) * block_pool_size
-                    + torch.arange(block_pool_size, device=original_slot_mapping.device)
-                )
-                .flatten()
-                .clamp(min=-1)
+            cm = common_attn_metadata
+            self._maybe_init_pool_buffers(cm)
+
+            # Scale query_start_loc / seq_lens into the persistent buffers.
+            n = cm.query_start_loc.numel()
+            assert n <= self._qsl_buf.numel(), (
+                f"{n=} exceeds pooled query_start_loc buffer {self._qsl_buf.numel()}"
+            )
+            qsl_buf = self._qsl_buf[:n]
+            qsl_buf.copy_(cm.query_start_loc)
+            qsl_buf.mul_(block_pool_size)
+
+            r = cm.seq_lens.numel()
+            assert r <= self._seq_buf.numel(), (
+                f"{r=} exceeds pooled seq_lens buffer {self._seq_buf.numel()}"
+            )
+            seq_buf = self._seq_buf[:r]
+            seq_buf.copy_(cm.seq_lens)
+            seq_buf.mul_(block_pool_size)
+
+            # Expand each slot into block_pool_size contiguous slots. Padding
+            # slots (-1) stay -1 after clamp so the KV write is skipped.
+            m = cm.slot_mapping.numel()
+            assert m * block_pool_size <= self._slot_buf.numel(), (
+                f"pooled slot_mapping {m * block_pool_size} exceeds buffer "
+                f"{self._slot_buf.numel()}"
+            )
+            slot_buf = self._slot_buf[: m * block_pool_size]
+            slot_buf.view(m, block_pool_size).copy_(
+                cm.slot_mapping.unsqueeze(1) * block_pool_size + self._pool_arange
+            )
+            slot_buf.clamp_(min=-1)
+
+            # CPU tensors aren't captured; fresh scaled copies avoid mutating
+            # the runner's shared buffers.
+            qsl_cpu = cm.query_start_loc_cpu * block_pool_size
+            seq_lens_cpu = (
+                cm._seq_lens_cpu * block_pool_size
+                if cm._seq_lens_cpu is not None
+                else None
+            )
+            num_computed_cpu = (
+                cm._num_computed_tokens_cpu * block_pool_size
+                if cm._num_computed_tokens_cpu is not None
+                else None
+            )
+
+            new_common_attn_metadata = cm.replace(
+                query_start_loc=qsl_buf,
+                query_start_loc_cpu=qsl_cpu,
+                seq_lens=seq_buf,
+                _seq_lens_cpu=seq_lens_cpu,
+                _num_computed_tokens_cpu=num_computed_cpu,
+                num_actual_tokens=cm.num_actual_tokens * block_pool_size,
+                max_query_len=cm.max_query_len * block_pool_size,
+                max_seq_len=cm.max_seq_len * block_pool_size,
+                slot_mapping=slot_buf,
             )
             return super().build(
-                common_prefix_len, new_common_attn_metadata, fast_build
+                common_prefix_len * block_pool_size,
+                new_common_attn_metadata,
+                fast_build,
             )
 
     # NOTE: We need a custom impl so we can use the transformed slot_mapping
