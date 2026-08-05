@@ -314,20 +314,13 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     assert worker._recving_transfers_callback_addr == {}
 
 
-def test_requires_piecewise_write_mode_never(monkeypatch):
-    # WRITE / producer side is cudagraph-safe: never force PIECEWISE, even when
-    # VLLM_MORIIO_FORCE_PIECEWISE is set.
-    monkeypatch.setenv("VLLM_MORIIO_FORCE_PIECEWISE", "1")
+def test_requested_cudagraph_mode_is_never_overridden():
+    # The configured cudagraph mode is always honored: the barrier fires when
+    # the operator sets cudagraph_mode=PIECEWISE, and READ mode with full
+    # graphs only warns instead of silently forcing PIECEWISE.
+    assert (
+        MoRIIOConnector.requires_piecewise_for_cudagraph({"read_mode": True}) is False
+    )
     assert (
         MoRIIOConnector.requires_piecewise_for_cudagraph({"read_mode": False}) is False
     )
-
-
-def test_requires_piecewise_read_mode_gated_by_env(monkeypatch):
-    read_cfg = {"read_mode": True}
-    # Opt in -> force PIECEWISE so the per-layer read-completion barrier fires.
-    monkeypatch.setenv("VLLM_MORIIO_FORCE_PIECEWISE", "1")
-    assert MoRIIOConnector.requires_piecewise_for_cudagraph(read_cfg) is True
-    # Default (unset / 0) -> honor the requested cudagraph mode.
-    monkeypatch.setenv("VLLM_MORIIO_FORCE_PIECEWISE", "0")
-    assert MoRIIOConnector.requires_piecewise_for_cudagraph(read_cfg) is False

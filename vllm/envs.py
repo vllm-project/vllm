@@ -86,7 +86,6 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
-    VLLM_MORIIO_FORCE_PIECEWISE: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
@@ -608,12 +607,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
-    # MoRIIO READ mode: force PIECEWISE CUDA graphs so the per-layer
-    # read-completion barrier can fire. Off by default (the requested cudagraph
-    # mode is honored); see PR #48534 / RFC #49643.
-    "VLLM_MORIIO_FORCE_PIECEWISE": lambda: bool(
-        int(os.getenv("VLLM_MORIIO_FORCE_PIECEWISE", "0"))
-    ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
     # Intel XPU; the non-TD branch is dead-code-eliminated at Triton

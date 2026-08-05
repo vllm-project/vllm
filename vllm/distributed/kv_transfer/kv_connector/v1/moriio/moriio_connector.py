@@ -17,8 +17,7 @@ import numpy as np
 import torch
 import zmq
 
-import vllm.envs as envs
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -191,39 +190,6 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1):
-    @classmethod
-    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
-        # Only MoRIIO READ mode needs the barrier; WRITE / producer side are
-        # cudagraph-safe.
-        kv_transfer_config = KVTransferConfig(kv_connector_extra_config=extra_config)
-        if get_moriio_mode(kv_transfer_config) != MoRIIOMode.READ:
-            return False
-
-        # READ mode issues asynchronous per-layer RDMA reads and blocks in
-        # wait_for_layer_load() between layers. That Python barrier is skipped
-        # when replayed inside a FULL CUDA graph, so attention can run before the
-        # remote KV lands and degrade accuracy at high concurrency ("salad").
-        # PIECEWISE lets the barrier fire.
-        #
-        # The safe(PIECEWISE)-vs-fast(FULL) tradeoff is deployment-specific and
-        # is operator-controlled rather than forced. Set
-        # VLLM_MORIIO_FORCE_PIECEWISE=1 to force PIECEWISE for correctness;
-        # otherwise the requested cudagraph mode is honored (with a warning).
-        if envs.VLLM_MORIIO_FORCE_PIECEWISE:
-            return True
-
-        logger.warning_once(
-            "MoRIIO READ mode is running with FULL CUDA graphs. The per-layer "
-            "read-completion barrier (wait_for_layer_load) cannot fire inside a "
-            "full graph, so attention may run over in-flight RDMA reads and "
-            "degrade accuracy at high concurrency (reproduced on DeepSeek-R1 "
-            "P/D TP8:TP8, gsm8k). Set VLLM_MORIIO_FORCE_PIECEWISE=1 to force "
-            "PIECEWISE for correctness. See "
-            "https://github.com/vllm-project/vllm/pull/48534 and "
-            "https://github.com/vllm-project/vllm/issues/49643."
-        )
-        return False
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -244,6 +210,27 @@ class MoRIIOConnector(KVConnectorBase_V1):
             + str(self.kv_transfer_config.kv_connector_extra_config["handshake_port"])
         )
         self.mode = get_moriio_mode(self.kv_transfer_config)
+        if (
+            self.mode == MoRIIOMode.READ
+            and self.kv_transfer_config.is_kv_consumer
+            and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            # The per-layer read-completion barrier (wait_for_layer_load) is
+            # skipped when attention is replayed inside a FULL CUDA graph, so
+            # attention can run over in-flight RDMA reads and degrade accuracy
+            # at high concurrency (reproduced on DeepSeek-R1 P/D TP8:TP8,
+            # gsm8k). The requested cudagraph mode is honored; set
+            # cudagraph_mode=PIECEWISE in --compilation-config for the barrier
+            # to fire. See https://github.com/vllm-project/vllm/pull/48534 and
+            # https://github.com/vllm-project/vllm/issues/49643.
+            logger.warning_once(
+                "MoRIIO READ mode is running with %s CUDA graphs; the "
+                "per-layer read-completion barrier cannot fire inside a full "
+                "graph and accuracy may degrade at high concurrency. Set "
+                "cudagraph_mode=PIECEWISE in --compilation-config for "
+                "correctness.",
+                vllm_config.compilation_config.cudagraph_mode.name,
+            )
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MoRIIOConnectorScheduler | None = (
                 MoRIIOConnectorScheduler(vllm_config, self.engine_id)
