@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -620,58 +618,6 @@ class PCPManager:
         return self.restore_hidden_states(hidden_states), self._global_batch
 
 
-DEFAULT_PCP_MANAGER_NAME = "default"
-
-
-class PCPManagerRegistry:
-    """Registry for lazily loaded PCP manager implementations."""
-
-    _registry: dict[str, Callable[[], type[PCPManager]]] = {}
-
-    @classmethod
-    def register_manager(
-        cls,
-        name: str,
-        module_path: str,
-        class_name: str,
-    ) -> None:
-        """Register a PCP manager using a lazy module and class reference."""
-        if name in cls._registry:
-            raise ValueError(f"PCP manager {name!r} is already registered.")
-
-        def loader() -> type[PCPManager]:
-            module = importlib.import_module(module_path)
-            manager_cls = getattr(module, class_name)
-            if not isinstance(manager_cls, type) or not issubclass(
-                manager_cls, PCPManager
-            ):
-                raise TypeError(
-                    f"Registered PCP manager {name!r} must be a subclass of "
-                    f"{PCPManager.__name__}, got {manager_cls!r}."
-                )
-            return manager_cls
-
-        cls._registry[name] = loader
-
-    @classmethod
-    def get_manager_class(cls, name: str) -> type[PCPManager]:
-        """Resolve a registered PCP manager class by name."""
-        if name not in cls._registry:
-            available = ", ".join(sorted(cls._registry)) or "<none>"
-            raise ValueError(
-                f"PCP manager {name!r} is not registered. "
-                f"Available PCP managers: {available}."
-            )
-        return cls._registry[name]()
-
-
-PCPManagerRegistry.register_manager(
-    DEFAULT_PCP_MANAGER_NAME,
-    "vllm.v1.worker.gpu.pcp_manager",
-    "PCPManager",
-)
-
-
 def maybe_partition_pcp_batch(
     manager: PCPManager | None,
     input_batch: InputBatch,
@@ -708,21 +654,20 @@ def maybe_build_pcp_manager(
     supports_mm_inputs: bool,
     req_states: RequestState,
     block_tables: BlockTables,
-    manager_name: str = DEFAULT_PCP_MANAGER_NAME,
+    cls: type[PCPManager] = PCPManager,
 ) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
     if pcp_size <= 1:
         return None
 
-    manager_cls = PCPManagerRegistry.get_manager_class(manager_name)
-    manager_cls.validate_config(vllm_config, supports_mm_inputs)
+    cls.validate_config(vllm_config, supports_mm_inputs)
 
     pcp_rank = get_pcp_group().rank_in_group
     dcp_size = parallel_config.decode_context_parallel_size
     dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
 
-    return manager_cls(
+    return cls(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
