@@ -2235,3 +2235,72 @@ def test_sharded_rdt_rejects_metadata_disagreement_across_ranks(monkeypatch):
     )
     with pytest.raises(ValueError, match="disagrees across trainer ranks"):
         engine._build_router(2, 0)
+
+
+def _serve_ring_server(src_name, src):
+    """A producer server with one cached tensor and a pre-seeded serve ring, so a
+    pull needs no Ray and no NIXL registration. Returns (server, serve) where
+    ``serve(chain)`` packs one spec into the SAME ring slot every time — which is
+    what puts the destination-view cache, and only it, under test."""
+    from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
+        _RDTProducerServer,
+    )
+
+    srv = _RDTProducerServer(
+        num_rdt_buffers=2,
+        arena_presize_gb=0.0,
+        nosync=False,
+        pack_check=False,
+        gather_lookahead=2,
+    )
+    srv._cache[src_name] = src
+    srv._serve_rings[0] = [
+        torch.empty(1 << 16, dtype=torch.uint8, device="cuda") for _ in range(2)
+    ]
+
+    def serve(chain):
+        srv._serve_idx[0] = 0
+        return srv.rdt_produce_weights_batched([(src_name, chain)], consumer_id=0)[0]
+
+    return srv, serve
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the producer server needs a CUDA device"
+)
+def test_serve_does_not_reuse_packed_views_of_another_shape():
+    """Two requests can share a name yet pack different slices of it.
+
+    The producer caches the destination views it carves into a serve ring slot.
+    Keyed by name alone, the second request is packed through the first's views.
+    Reachable with layerwise_split > 1, when one name's copies split across chunks.
+    """
+    name = "model.layers.0.w"
+    src = torch.arange(64, dtype=torch.bfloat16, device="cuda").reshape(8, 8)
+    _srv, serve = _serve_ring_server(name, src)
+
+    serve((("narrow", (0, 0, 2), ()),))  # 2 rows
+    wide = src.narrow(0, 0, 6)  # 6 rows, same name, same slot
+    blob = serve((("narrow", (0, 0, 6), ()),))
+
+    got = blob[: wide.numel() * wide.element_size()].view(wide.dtype).reshape(6, 8)
+    assert torch.equal(got, wide)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the producer server needs a CUDA device"
+)
+def test_serve_does_not_reuse_packed_views_of_another_dtype():
+    """The SILENT case of the same cache: two requests whose slices have the same
+    name and the same shape but different dtypes pack at identical offsets, so
+    reusing the stale views raises nothing — ``copy_`` just casts, and the blob
+    carries the wrong bytes with no check downstream."""
+    name = "model.layers.0.w"
+    src = torch.arange(64, dtype=torch.bfloat16, device="cuda").reshape(8, 8)
+    _srv, serve = _serve_ring_server(name, src)
+
+    serve((("to", (torch.float16,), ()),))  # same shape, fp16
+    blob = serve(())  # same name and shape, bf16
+
+    got = blob[: src.numel() * src.element_size()].view(src.dtype).reshape(8, 8)
+    assert torch.equal(got, src), "packed through a cached view of the wrong dtype"

@@ -442,12 +442,24 @@ class _RDTProducerServer:
                 ss.wait_event(ev)
         # [RDT-PACK-DSTS] The destination views are a pure function of this
         # consumer's packed layout, which is byte-identical every sync (its plan
-        # is static), so build them ONCE per (consumer, ring slot, group) and
+        # is static), so build them ONCE per (consumer, ring slot, layout) and
         # reuse. Rebuilding them per call cost 5.2ms of the 7.5ms measured for a
         # 384-spec 235B group — three Python ops per spec, all redundant.
         # _foreach_copy_ then issues the copies in one dispatch (a further
         # 0.6ms; verified byte-identical to the per-view loop).
-        dst_key = (consumer_id, idx, tuple(n for n, _ in specs))
+        #
+        # The key is the LAYOUT the views were carved for — each slice's packed
+        # offset, dtype and shape — not the spec names. Names alone do not
+        # identify it: a name can appear in two requests with different op chains
+        # (the same source sliced differently, which layerwise_split > 1 produces
+        # when one name's copies land in separate chunks), and serving the second
+        # through the first's views would write the wrong bytes with nothing
+        # downstream to catch it. Building the signature costs ~1.5% of the pack.
+        dst_key = (
+            consumer_id,
+            idx,
+            tuple((off, t.dtype, t.shape) for off, t in sliced),
+        )
         cached = self._pack_dsts.get(dst_key)
         if cached is None or cached[0] != arena.data_ptr():
             dsts = []
