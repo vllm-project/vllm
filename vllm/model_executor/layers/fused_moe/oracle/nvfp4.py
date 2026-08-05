@@ -191,6 +191,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.EMULATION,
     }
 
     if config.swiglu_limit is not None:
@@ -468,6 +469,8 @@ def make_nvfp4_moe_quant_config(
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
     swiglu_limit: float | None = None,
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.HUMMING:
@@ -495,6 +498,8 @@ def make_nvfp4_moe_quant_config(
             w1_scale=w13_scale,
             w2_scale=w2_scale,
             gemm1_clamp_limit=swiglu_limit,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
         )
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
