@@ -467,7 +467,9 @@ class UltravoxTransformerProjector(nn.Module):
             audio_config.d_model,
         )
 
-        audio_vllm_config = vllm_config.with_hf_config(audio_config)
+        audio_vllm_config = vllm_config.with_hf_config(
+            audio_config, architectures=["UltravoxModel"]
+        )
         self.layers = nn.ModuleList(
             [
                 WhisperEncoderLayer(
@@ -664,8 +666,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = UltravoxWhisperEncoder(
-                vllm_config=vllm_config.with_hf_config(config.audio_config),
+                vllm_config=vllm_config.with_hf_config(
+                    config.audio_config, architectures=["UltravoxModel"]
+                ),
                 prefix=maybe_prefix(prefix, "audio_tower"),
+                enable_pp=False,
             )
             if config.num_projector_layers > 0:
                 self.multi_modal_projector = UltravoxTransformerProjector(

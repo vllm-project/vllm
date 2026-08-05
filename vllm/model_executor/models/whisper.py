@@ -47,6 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
+from vllm.model_executor.offloader import get_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -495,7 +496,12 @@ class WhisperDecoderLayer(nn.Module):
 
 class WhisperEncoder(nn.Module):
     def __init__(
-        self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        init_in_fp32: bool = False,
+        enable_pp: bool = True,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -512,13 +518,27 @@ class WhisperEncoder(nn.Module):
         self.conv2 = nn.Conv1d(embed_dim, embed_dim, stride=2, kernel_size=3, padding=1)
 
         self.total_stride = self.conv1.stride[0] * self.conv2.stride[0]
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.encoder_layers,
-            lambda prefix: WhisperEncoderLayer(
+
+        def create_layer(prefix: str) -> nn.Module:
+            return WhisperEncoderLayer(
                 vllm_config=vllm_config, prefix=f"{prefix}.layers"
-            ),
-            prefix=f"{prefix}.layers",
-        )
+            )
+
+        if enable_pp:
+            self.start_layer, self.end_layer, self.layers = make_layers(
+                config.encoder_layers,
+                create_layer,
+                prefix=f"{prefix}.layers",
+            )
+        else:
+            self.start_layer = 0
+            self.end_layer = config.encoder_layers
+            self.layers = nn.ModuleList(
+                get_offloader().wrap_modules(
+                    create_layer(prefix=f"{prefix}.layers.{idx}")
+                    for idx in range(config.encoder_layers)
+                )
+            )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
         if self.pos_embed_type not in (
