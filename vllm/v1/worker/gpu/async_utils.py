@@ -15,7 +15,6 @@ from vllm.v1.outputs import (
     RoutedExpertsTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 
