@@ -17,7 +17,9 @@ use super::KimiK3ChatRenderer;
 use crate::ChatRenderer;
 use crate::renderer::kimi_k3::encoding::{CLOSE, END_OF_MSG, IMAGE_PLACEHOLDER, OPEN, SEP};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatContentPart, ChatMessage, GenerationPromptMode, ReasoningEffort};
+use crate::request::{
+    ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode, ReasoningEffort,
+};
 use crate::{AssistantContentBlock, AssistantToolCall};
 
 const OPEN_ID: u32 = 256;
@@ -88,6 +90,70 @@ fn golden_controls_thinking_off() {
 #[test]
 fn golden_dynamic_system_tool_declare() {
     assert_golden("dynamic_system_tool_declare");
+}
+
+#[test]
+fn tool_declare_omits_absent_fields_and_preserves_parameter_nulls() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.tools = vec![ChatTool {
+        name: "lookup".to_string(),
+        description: None,
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": ["integer", "null"],
+                    "default": null
+                }
+            }
+        }),
+        strict: None,
+    }];
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains(
+        r#"[{"function":{"name":"lookup","parameters":{"properties":{"limit":{"default":null,"type":["integer","null"]}},"type":"object"}},"type":"function"}]"#
+    ));
+    assert!(!rendered.contains(r#""description":"#));
+    assert!(!rendered.contains(r#""strict":"#));
+}
+
+#[test]
+fn tool_declare_preserves_present_optional_fields() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.tools = vec![ChatTool {
+        name: "lookup".to_string(),
+        description: Some("Look up a record".to_string()),
+        parameters: json!({"type": "object"}),
+        strict: Some(false),
+    }];
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains(
+        r#"[{"function":{"description":"Look up a record","name":"lookup","parameters":{"type":"object"},"strict":false},"type":"function"}]"#
+    ));
+}
+
+#[test]
+fn malformed_tool_arguments_render_as_raw_text() {
+    let malformed = "  {\"city\":\"Beijing\"  ";
+    let mut request = crate::request::ChatRequest::for_test();
+    request.messages = vec![ChatMessage::assistant_blocks(vec![
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "call-1".to_string(),
+            name: "weather".to_string(),
+            arguments: malformed.to_string(),
+        }),
+    ])];
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains(&format!(
+        "<|open|>json type=\"object\"<|sep|>{malformed}<|close|>json<|sep|>"
+    )));
 }
 
 #[test]
