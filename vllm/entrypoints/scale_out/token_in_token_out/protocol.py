@@ -113,6 +113,7 @@ class GenerateRequest(BaseModel):
     stream_options: StreamOptions | None = None
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -284,7 +285,7 @@ class DerenderChatRequest(BaseModel):
 
     Required by the parsing so that tool/reasoning parsers can receive the full
     request context they expect (request.tools, request.tool_choice,
-    request._grammar_from_tool_parser, etc.).
+    request._grammar_from_parser, etc.).
     """
     # --8<-- [end:derender-chat-request]
 

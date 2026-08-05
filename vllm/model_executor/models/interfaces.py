@@ -110,7 +110,22 @@ _language_model_by_module = dict[nn.Module, "VllmModel"]()
 
 
 @runtime_checkable
-class SupportsMultiModal(Protocol):
+class SupportsMultiModalEmbeddings(Protocol):
+    """The interface for models that can merge external multimodal embeddings."""
+
+    supports_multimodal_embeddings: ClassVar[Literal[True]] = True
+
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+
+@runtime_checkable
+class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     """The interface required for all multi-modal models."""
 
     supports_multimodal: ClassVar[Literal[True]] = True
@@ -486,6 +501,24 @@ def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
     return getattr(model, "supports_multimodal", False)
+
+
+@overload
+def supports_multimodal_embeddings(
+    model: type[object],
+) -> TypeIs[type[SupportsMultiModalEmbeddings]]: ...
+
+
+@overload
+def supports_multimodal_embeddings(
+    model: object,
+) -> TypeIs[SupportsMultiModalEmbeddings]: ...
+
+
+def supports_multimodal_embeddings(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMultiModalEmbeddings]] | TypeIs[SupportsMultiModalEmbeddings]:
+    return getattr(model, "supports_multimodal_embeddings", False)
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
@@ -1407,7 +1440,7 @@ class EagleModelMixin:
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
+        residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states
@@ -1696,13 +1729,12 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Post-process encoder output, directly call scatter_output_slices by default.
@@ -1714,7 +1746,9 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
-        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
+        scatter_output_slices(
+            outputs["default"], indices, per_item_out_tokens, dest, clone
+        )
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,

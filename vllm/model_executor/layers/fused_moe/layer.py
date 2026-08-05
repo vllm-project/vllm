@@ -96,8 +96,7 @@ def determine_expert_counts(
     return global_num_experts, logical_num_experts, num_fused_shared_experts
 
 
-# TODO: rename this
-def FusedMoE(
+def FusedMoEFactory(
     num_experts: int,  # Global number of experts
     top_k: int,
     hidden_size: int,

@@ -671,10 +671,10 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
-        )
+        # One-sided FI-NVL all2all pairs with MarlinExperts fine (the
+        # compressed-tensors MXFP4 path runs this exact combo); only the
+        # two-sided kernels are unsupported here.
+        return not moe_parallel_config.use_fi_nvl_two_sided_kernels
 
     @property
     def quant_type_id(self) -> int:
@@ -1068,11 +1068,8 @@ class BatchedMarlinExperts(MarlinExpertsBase):
                 return
 
             num_experts, max_num_tokens = hidden_states.shape[:2]
-            beta = activation_situ_beta
+            beta = 1.0 if activation_situ_beta is None else activation_situ_beta
             linear_beta = activation_situ_linear_beta
-            assert beta is not None, (
-                "SITU requires activation_situ_beta from FusedMoEConfig"
-            )
             torch.ops._C.masked_situ_and_mul(
                 act_output.view(num_experts, max_num_tokens, -1),
                 act_input.view(num_experts, max_num_tokens, -1),
