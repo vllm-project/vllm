@@ -6,6 +6,10 @@ import math
 import torch
 
 from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (
@@ -66,6 +70,11 @@ class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not (per_tensor_activation_scales and per_tensor_weight_scales):
             return False, "requires per tensor activation and weight scales."
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        if self.config.activation_quant_key == kFp8StaticTensorSym:
+            return kFp8StaticTensorSym
+        return None
 
     def apply_scaled_mm(
         self,
