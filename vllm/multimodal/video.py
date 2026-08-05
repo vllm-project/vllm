@@ -637,6 +637,24 @@ class TorchCodecVideoBackendMixin:
         return batch.data.numpy(), list(frame_indices)
 
 
+def _pynvvc_frames_to_nhwc(frames):
+    """Return a stacked PyNvVideoCodec frame batch as contiguous NHWC.
+
+    PyNvVideoCodec's per-frame layout has varied across versions (HWC vs CHW),
+    so detect the channel axis rather than assuming a fixed order. NHWC is the
+    layout the other video backends return and the HF video processors expect.
+
+    Args:
+        frames: A ``(N, ?, ?, ?)`` uint8 tensor in either NHWC or NCHW order.
+
+    Returns:
+        The same frames as a contiguous ``(N, H, W, C)`` tensor.
+    """
+    if frames.shape[-1] != 3 and frames.shape[-3] == 3:
+        frames = frames.permute(0, 2, 3, 1)  # NCHW -> NHWC
+    return frames.contiguous()
+
+
 class PyNvVideoCodecVideoBackendMixin:
     """PyNvVideoCodec utilities for GPU-backed frame decode."""
 
@@ -807,7 +825,7 @@ class PyNvVideoCodecVideoBackendMixin:
                         "PyNvVideoCodec returned frames with unexpected shape "
                         f"{tuple(device_frames.shape)}"
                     )
-                device_frames = device_frames.contiguous()
+                device_frames = _pynvvc_frames_to_nhwc(device_frames)
                 host_frames = torch.empty(
                     device_frames.shape,
                     dtype=device_frames.dtype,
