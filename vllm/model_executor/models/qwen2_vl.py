@@ -804,10 +804,14 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            if "pixel_values" in data:
+                required_fields = {"pixel_values", "image_grid_thw"}
+            else:
+                required_fields = {"image_embeds", "image_grid_thw"}
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_embeds", "image_grid_thw"},
+                required_fields=required_fields,
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
@@ -818,10 +822,14 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            if "pixel_values_videos" in data:
+                required_fields = {"pixel_values_videos", "video_grid_thw"}
+            else:
+                required_fields = {"video_embeds", "video_grid_thw"}
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={"video_embeds", "video_grid_thw"},
+                required_fields=required_fields,
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
