@@ -55,6 +55,7 @@ from .interfaces import (
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
     supports_pp,
+    supports_replayssm,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -96,7 +97,7 @@ _TEXT_GENERATION_MODELS = {
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
-    "ExaoneMoEForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
+    "ExaoneMoeForCausalLM": ("exaone_moe", "ExaoneMoeForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
@@ -113,7 +114,7 @@ _TEXT_GENERATION_MODELS = {
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
     "Glm4MoeLiteForCausalLM": ("glm4_moe_lite", "Glm4MoeLiteForCausalLM"),
-    "GlmMoeDsaForCausalLM": ("vllm.models.deepseek_v32", "GlmMoeDsaForCausalLM"),
+    "GlmMoeDsaForCausalLM": ("deepseek_v2", "GlmMoeDsaForCausalLM"),
     "GptOssForCausalLM": ("gpt_oss", "GptOssForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
@@ -136,7 +137,10 @@ _TEXT_GENERATION_MODELS = {
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
     "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
-    "KimiLinearForCausalLM": ("kimi_linear", "KimiLinearForCausalLM"),
+    "KimiLinearForCausalLM": (
+        "vllm.models.kimi_k3",
+        "KimiLinearForCausalLM",
+    ),
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "LagunaForCausalLM": ("laguna", "LagunaForCausalLM"),
@@ -182,7 +186,6 @@ _TEXT_GENERATION_MODELS = {
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
-    "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
     "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
     "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
@@ -190,12 +193,13 @@ _TEXT_GENERATION_MODELS = {
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
-    "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
+    "Qwen3_5ForCausalLM": ("qwen3_5", "Qwen3_5ForCausalLM"),
+    "Qwen3_5MoeForCausalLM": ("qwen3_5", "Qwen3_5MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
     "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
@@ -459,6 +463,10 @@ _MULTIMODAL_MODELS = {
     ),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),
     "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),
+    "KimiK3ForConditionalGeneration": (
+        "vllm.models.kimi_k3",
+        "KimiK3ForConditionalGeneration",
+    ),
     "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),
     "MossTranscribeDiarizeForConditionalGeneration": (
         "moss_transcribe_diarize",
@@ -608,6 +616,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
+    "K3DSparkModel": (
+        "vllm.models.kimi_k3.nvidia.dspark_mla",
+        "K3DSparkForCausalLM",
+    ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
     "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
@@ -628,7 +640,6 @@ _SPECULATIVE_DECODING_MODELS = {
     "Eagle3DeepseekV3ForCausalLM": ("deepseek_eagle3", "Eagle3DeepseekV2ForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
-    "DeepseekV32MTPModel": ("vllm.models.deepseek_v32", "DeepseekV32MTP"),
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
     "MiniMaxM3MTP": ("vllm.models.minimax_m3", "MiniMaxM3MTP"),
     "BailingMoeV25MTPModel": ("bailing_moe_mtp", "BailingMoeV25MTPModel"),
@@ -649,6 +660,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Qwen3_5MTP": ("qwen3_5_mtp", "Qwen3_5MTP"),
     "Qwen3_5MoeMTP": ("qwen3_5_mtp", "Qwen3_5MoeMTP"),
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
+    "KimiK3MTPModel": ("vllm.models.kimi_k3", "KimiK3MTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
@@ -661,8 +673,13 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
     "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
@@ -760,6 +777,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "TeleChatForCausalLM": "0.25.0",
     "PersimmonForCausalLM": "0.25.0",
     "FuyuForCausalLM": "0.25.0",
+    "Plamo2ForCausalLM": "0.26.0",
+    "OuroForCausalLM": "0.26.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
@@ -789,8 +808,10 @@ class _ModelInfo:
     is_hybrid: bool
     has_noops: bool
     supports_mamba_prefix_caching: bool
+    supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
+    supported_video_pruning_methods: tuple[str, ...]
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -815,11 +836,15 @@ class _ModelInfo:
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
+            supports_replayssm=supports_replayssm(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only
             ),
             has_noops=has_noops(model),
+            supported_video_pruning_methods=getattr(
+                model, "supported_video_pruning_methods", ()
+            ),
         )
 
 
@@ -1069,7 +1094,7 @@ class _ModelRegistry:
         else:
             msg = (
                 "`model_cls` should be a string or PyTorch model class, "
-                f"not a {type(model_arch)}"
+                f"not a {type(model_cls)}"
             )
             raise TypeError(msg)
 
@@ -1327,88 +1352,88 @@ class _ModelRegistry:
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.is_text_generation_model
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.is_text_generation_model
 
     def is_pooling_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.is_pooling_model
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.is_pooling_model
 
     def is_multimodal_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_multimodal
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_multimodal
 
     def is_multimodal_raw_input_only_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_multimodal_raw_input_only
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_multimodal_raw_input_only
 
     def is_pp_supported_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_pp
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_pp
 
     def model_has_inner_state(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.has_inner_state
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.has_inner_state
 
     def is_attention_free_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.is_attention_free
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.is_attention_free
 
     def is_hybrid_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.is_hybrid
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.is_hybrid
 
     def is_noops_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.has_noops
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.has_noops
 
     def is_transcription_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_transcription
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_transcription
 
     def is_transcription_only_model(
         self,
         architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_transcription_only
+        model_info, _ = self.inspect_model_cls(architectures, model_config)
+        return model_info.supports_transcription_only
 
 
 def _resolve_module_name(mod_relname: str) -> str:

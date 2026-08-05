@@ -272,12 +272,10 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
         token_num=16,
         eps=1e-6,
         dtype: torch.dtype = torch.bfloat16,
-        use_triton_quant: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
-        self.use_triton_quant = use_triton_quant
         assert hidden_size % self.quant_group_size == 0, (
             f"hidden_size ({hidden_size}) must be a multiple of "
             f"quant_group_size ({self.quant_group_size}) for per-group FP8 quant"
@@ -289,10 +287,6 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
         ]
 
     def _group_quant(self, rms: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.use_triton_quant:
-            return torch.ops.vllm.triton_per_token_group_quant_fp8(
-                rms, self.quant_group_size
-            )
         return torch.ops.vllm.rocm_aiter_group_fp8_quant.default(
             rms, self.quant_group_size
         )
@@ -339,11 +333,7 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            (
-                torch.ops.vllm.triton_per_token_group_quant_fp8.default
-                if self.use_triton_quant
-                else torch.ops.vllm.rocm_aiter_group_fp8_quant.default
-            ),
+            torch.ops.vllm.rocm_aiter_group_fp8_quant.default,
         ]
 
     def ops_in_model_after(self):
@@ -646,7 +636,6 @@ def all_reduce_fusion_pass_on_test_model(
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("use_triton_quant", [True, False])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
 @pytest.mark.parametrize("hidden_size", [128])
@@ -663,7 +652,6 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
     hidden_size: int,
     dtype: torch.dtype,
     enable_rms_norm_custom_op: bool,
-    use_triton_quant: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Sibling of ``test_all_reduce_fusion_pass_replace`` for the new
@@ -676,9 +664,9 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
     * ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`` (with-residual,
       single ``rms`` consumer)
     * ``AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern`` (with-
-      residual, DSv3.2 indexer fan-out; parametrized over both
-      ``triton_per_token_group_quant_fp8`` and ``rocm_aiter_group_fp8_quant``
-      producers).
+      residual, DSv3.2 indexer fan-out; parametrized over
+      ``rocm_aiter_group_fp8_quant``
+      producer).
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -703,7 +691,6 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
                 hidden_size,
                 dtype,
                 enable_rms_norm_custom_op,
-                use_triton_quant,
                 monkeypatch,
             ),
             nprocs=nprocs,
@@ -721,7 +708,6 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
     hidden_size: int,
     dtype: torch.dtype,
     enable_rms_norm_custom_op: bool,
-    use_triton_quant: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     set_random_seed(0)
@@ -749,10 +735,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
     custom_ops = []
     if enable_rms_norm_custom_op:
         custom_ops.append("+rms_norm")
-    # ``triton_per_token_group_quant_fp8`` is emitted by ``QuantFP8.forward_hip``
-    # only when QuantFP8 is enabled as a custom op (and ``use_triton=True`` at
-    # the call site). The patterns in this PR are robust to both Triton and
-    # rocm_aiter forms; we always enable +quant_fp8 so the matcher's example
+    # We always enable +quant_fp8 so the matcher's example
     # trace finds the same form the test model uses.
     custom_ops.append("+quant_fp8")
 
@@ -783,9 +766,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        model = test_model_cls(
-            hidden_size, token_num, dtype=dtype, use_triton_quant=use_triton_quant
-        )
+        model = test_model_cls(hidden_size, token_num, dtype=dtype)
 
         hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
 

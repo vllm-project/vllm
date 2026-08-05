@@ -1235,6 +1235,26 @@ def test_vllm_config_defaults_are_none():
                 assert getattr(config.compilation_config, k) is None
 
 
+def test_validate_mamba_align_subblock_prefill():
+    """Align mode permits configured prefill chunks smaller than a block."""
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=11392,
+            mamba_cache_mode="align",
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8192,
+            long_prefill_token_threshold=4096,
+            disable_chunked_mm_input=False,
+        ),
+    )
+
+    VllmConfig.validate_block_size(config)
+
+
 @pytest.mark.parametrize(
     ("model_id", "compilation_config", "optimization_level"),
     [
@@ -1547,21 +1567,42 @@ def test_needs_dp_coordination(
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
 
 
+def test_fault_tolerance_requires_single_api_server():
+    """Fault tolerance assumes one AsyncMPClient manages all engines, so it
+    is incompatible with API server scale-out (_api_process_count > 1)."""
+    with pytest.raises(ValueError, match="single API server"):
+        ParallelConfig(enable_fault_tolerance=True, _api_process_count=2)
+
+    # Single API server (the FT-supported topology) is accepted.
+    ParallelConfig(enable_fault_tolerance=True, _api_process_count=1)
+
+
 def test_renderer_num_workers_with_mm_cache():
-    """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
-    since neither cache type is thread-safe."""
+    """Disallow renderer_num_workers > 1 with the mm processor cache only for
+    pooling models, whose preprocessing runs on the renderer workers."""
     mm_model = "Qwen/Qwen2-VL-2B-Instruct"
 
-    # Should raise: multi-worker + cache enabled (default cache_gb=4)
+    # Should raise: pooling + multi-worker + cache enabled (default cache_gb=4)
     with pytest.raises(ValueError, match="renderer-num-workers"):
-        ModelConfig(mm_model, renderer_num_workers=4)
+        ModelConfig(mm_model, runner="pooling", renderer_num_workers=4)
 
-    # Should raise: multi-worker + explicit cache size
+    # Should raise: pooling + multi-worker + explicit cache size
     with pytest.raises(ValueError, match="renderer-num-workers"):
-        ModelConfig(mm_model, renderer_num_workers=2, mm_processor_cache_gb=1.0)
+        ModelConfig(
+            mm_model,
+            runner="pooling",
+            renderer_num_workers=2,
+            mm_processor_cache_gb=1.0,
+        )
 
-    # Should pass: multi-worker + cache disabled
-    config = ModelConfig(mm_model, renderer_num_workers=4, mm_processor_cache_gb=0)
+    # Should pass: pooling + multi-worker + cache disabled
+    config = ModelConfig(
+        mm_model, runner="pooling", renderer_num_workers=4, mm_processor_cache_gb=0
+    )
+    assert config.renderer_num_workers == 4
+
+    # Should pass: generate models preprocess on the dedicated mm executor
+    config = ModelConfig(mm_model, renderer_num_workers=4)
     assert config.renderer_num_workers == 4
 
     # Should pass: single worker + cache enabled (default)

@@ -1134,9 +1134,9 @@ class FusedMoEParallelConfig:
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
-            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
-            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
+            tp_size_ (int): `tp_size` passed into the FusedMoEFactory constructor.
+            pcp_size_ (int): `pcp_size` passed into the FusedMoEFactory constructor.
+            dp_size_ (int): `dp_size` passed into the FusedMoEFactory constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 
@@ -1313,6 +1313,10 @@ class FusedMoEConfig:
     swiglu_limit: float | None = None
     swiglu_alpha: float | None = None
     swiglu_beta: float | None = None
+
+    # SituGLU parameters used by Kimi sit(u/v2) activations.
+    activation_situ_beta: float | None = None
+    activation_situ_linear_beta: float | None = None
 
     max_capture_size: int = 0
 
