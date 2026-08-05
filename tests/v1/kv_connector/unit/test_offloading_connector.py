@@ -566,6 +566,10 @@ def test_mamba_cpu_offload_boundary(
         language_model_only=True,
         enable_prefix_caching=True,
         mamba_cache_mode=mamba_cache_mode,
+        # Use lossless state storage so this exact-equality regression isolates
+        # offload boundary selection from low-precision Mamba checkpointing.
+        mamba_cache_dtype="float32",
+        mamba_ssm_cache_dtype="float32",
         disable_hybrid_kv_cache_manager=False,
     )
 
