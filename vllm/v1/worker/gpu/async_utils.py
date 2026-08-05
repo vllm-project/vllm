@@ -5,6 +5,7 @@ import contextlib
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -14,6 +15,8 @@ from vllm.v1.outputs import (
     RoutedExpertsTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.utils import raise_if_nan_logits
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
@@ -90,6 +93,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.num_nans_in_logits = dict(
                 zip(self.model_runner_output.req_ids, self.num_nans.tolist())
             )
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(self.model_runner_output.num_nans_in_logits)
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
