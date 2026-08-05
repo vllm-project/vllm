@@ -211,6 +211,22 @@ steps:
   - tests/compile
   commands:
   - pytest -v -s compile/fullgraph/test_full_graph.py
+  mirror:
+    amd:
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/model_executor/
+      - vllm/v1/attention/
+      - vllm/config/compilation.py
+      - csrc/
+      - tests/compile
+      - vllm/platforms/rocm.py
 
 - label: Pytorch Nightly Dependency Override Check # 2min
   key: pytorch-nightly-dependency-override-check
