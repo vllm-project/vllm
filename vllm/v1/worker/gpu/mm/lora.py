@@ -29,6 +29,7 @@ def set_active_mm_loras(
     token_lora_mapping: list[int] = []
     lora_requests = set()
     encoder_token_counts: list[int] = []
+    connector_token_counts: list[int] = []
 
     # iterate through images
     for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
@@ -42,10 +43,18 @@ def set_active_mm_loras(
         # iterate through visual tokens
         for mm_input_id in encoder_input_ids:
             pos_info = mm_features[mm_input_id].mm_position
-            num_tokens = model.get_num_mm_encoder_tokens(pos_info.get_num_embeds())
+            # num_tokens = model.get_num_mm_encoder_tokens(pos_info.get_num_embeds())
+
+            tower_tokens, connector_tokens = model.get_mm_lora_token_counts(
+                modality=mm_features[mm_input_id].modality,
+                mm_kwargs=mm_features[mm_input_id].data,
+                num_mm_embeds=pos_info.get_num_embeds(),
+            )
+
             prompt_lora_mapping.append(lora_id)
-            token_lora_mapping.extend([lora_id] * num_tokens)
-            encoder_token_counts.append(num_tokens)
+            token_lora_mapping.extend([lora_id] * tower_tokens)
+            encoder_token_counts.append(tower_tokens)
+            connector_token_counts.append(connector_tokens)
 
         if lora_id > 0:
             lora_request = lora_state.lora_requests.get(req_id)
@@ -75,13 +84,7 @@ def set_active_mm_loras(
 
     connector_token_mapping = np.repeat(
         np.array(prompt_lora_mapping, dtype=np.int32),
-        np.array(
-            [
-                model.get_num_mm_connector_tokens(num_tokens)
-                for num_tokens in encoder_token_counts
-            ],
-            dtype=np.int32,
-        ),
+        np.array(connector_token_counts, dtype=np.int32),
     )
     lora_manager.set_active_adapters(
         lora_requests,
