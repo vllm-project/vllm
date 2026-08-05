@@ -596,6 +596,11 @@ def make_input_norm(model_config: "ModelConfig") -> nn.BatchNorm1d:
     assert image_mean is not None
     assert image_std is not None
 
+    do_rescale = config.get("do_rescale", True)
+    do_normalize = config.get("do_normalize", True)
+
+    assert do_rescale and do_normalize
+
     image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
         1.0 / rescale_factor
     )
