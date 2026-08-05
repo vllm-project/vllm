@@ -53,7 +53,7 @@ from vllm.v1.attention.ops.triton_turboquant_decode import (
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, TQFullAttentionSpec
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -105,6 +105,24 @@ class TurboQuantAttentionBackend(AttentionBackend):
         "turboquant_k3v4_nc",
         "turboquant_3bit_nc",
     ]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec, kv_cache_dtype: str) -> AttentionSpec:
+        """Re-spec the layer with TQ slot bytes instead of head_size * dtype."""
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            TurboQuantConfig,
+        )
+
+        tq_config = TurboQuantConfig.from_cache_dtype(kv_cache_dtype, spec.head_size)
+        return TQFullAttentionSpec(
+            block_size=spec.block_size,
+            num_kv_heads=spec.num_kv_heads,
+            head_size=spec.head_size,
+            head_size_v=spec.head_size,
+            dtype=spec.dtype,
+            kv_quant_mode=spec.kv_quant_mode,
+            tq_slot_size=tq_config.slot_size_aligned,
+        )
 
     @staticmethod
     def get_name() -> str:

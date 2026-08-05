@@ -123,7 +123,6 @@ def new_kv_cache_spec(
     page_size_padded=None,
     sliding_window=None,
     attention_chunk_size=None,
-    indexes_kv_by_block_stride=False,
     kv_quant_mode=KVQuantMode.NONE,
 ):
     return FullAttentionSpec(
@@ -134,7 +133,6 @@ def new_kv_cache_spec(
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
-        indexes_kv_by_block_stride=indexes_kv_by_block_stride,
         kv_quant_mode=kv_quant_mode,
     )
 
@@ -146,7 +144,6 @@ def new_sliding_window_spec(
     dtype=torch.float32,
     page_size_padded=None,
     sliding_window=1,
-    indexes_kv_by_block_stride=False,
 ):
     return SlidingWindowSpec(
         block_size=block_size,
@@ -155,7 +152,6 @@ def new_sliding_window_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
-        indexes_kv_by_block_stride=indexes_kv_by_block_stride,
     )
 
 
@@ -1816,9 +1812,9 @@ def test_get_kv_cache_config_one_worker():
 
     # different hidden size that cannot be aligned by using different block size,
     # but can be aligned by padding the smaller physical page.
-    swa_spec = new_sliding_window_spec(head_size=96, indexes_kv_by_block_stride=True)
+    swa_spec = new_sliding_window_spec(head_size=96)
     kv_cache_specs_hybrid = {
-        "layer_1": new_kv_cache_spec(head_size=64, indexes_kv_by_block_stride=True),
+        "layer_1": new_kv_cache_spec(head_size=64),
         "layer_2": swa_spec,
     }
 
@@ -1840,12 +1836,11 @@ def test_get_kv_cache_config_one_worker():
                 new_kv_cache_spec(
                     head_size=64,
                     page_size_padded=padded_page_size,
-                    indexes_kv_by_block_stride=True,
                 ),
             ),
             KVCacheGroupSpec(
                 ["layer_2"],
-                new_sliding_window_spec(head_size=96, indexes_kv_by_block_stride=True),
+                new_sliding_window_spec(head_size=96),
             ),
         ],
     )
@@ -2560,13 +2555,13 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
     block-size multiple, so the smaller page must be padded instead.
     """
     # Both layers' backends opt into the padded-page strided view (e.g.
-    # FlashAttention / its DiffKV subclass), so padding is allowed.
+    # Attention layers read padded pages through a strided view, so padding
+    # is allowed.
     target_spec = new_kv_cache_spec(
         block_size=16,
         num_kv_heads=1,
         head_size=192,
         dtype=torch.bfloat16,
-        indexes_kv_by_block_stride=True,
     )
     draft_spec = new_sliding_window_spec(
         block_size=16,
@@ -2574,7 +2569,6 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
         head_size=128,
         dtype=torch.bfloat16,
         sliding_window=1024,
-        indexes_kv_by_block_stride=True,
     )
 
     unified_specs = kv_cache_utils.unify_kv_cache_spec_page_size(
@@ -2590,35 +2584,6 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
     assert unified_draft_spec.real_page_size_bytes == draft_spec.real_page_size_bytes
     assert unified_draft_spec.page_size_padded == target_spec.page_size_bytes
     assert unified_draft_spec.page_size_bytes == target_spec.page_size_bytes
-
-
-def test_unify_kv_cache_page_size_padding_requires_backend_support():
-    """Padding is gated on the backend declaring ``indexes_kv_by_block_stride``.
-
-    A backend that does not support the strided padded-page view must raise
-    rather than silently padding (and misreading KV at runtime).
-    """
-    target_spec = new_kv_cache_spec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=192,
-        dtype=torch.bfloat16,
-        indexes_kv_by_block_stride=True,
-    )
-    # The non-divisible draft layer needs padding but its backend does not
-    # support the strided padded-page view -> must raise, not silently pad.
-    draft_spec = new_sliding_window_spec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        sliding_window=1024,
-        indexes_kv_by_block_stride=False,
-    )
-    specs = {"target_attn": target_spec, "draft_attn": draft_spec}
-
-    with pytest.raises(NotImplementedError):
-        kv_cache_utils.unify_kv_cache_spec_page_size(specs)
 
 
 def test_unpadded_page_size_without_quant_matches_real_page():
@@ -2787,14 +2752,18 @@ def test_unify_kv_cache_spec_page_size_mamba():
     )
     assert unified["mamba_layer"].page_size_bytes == 32768
 
-    # 4. Attention layers with non-divisible page sizes still raise.
-    with pytest.raises(NotImplementedError):
-        kv_cache_utils.unify_kv_cache_spec_page_size(
-            {
-                "attn_layer": new_kv_cache_spec(block_size=24),  # 24576
-                "draft_attn_layer": draft_attn_spec,  # 32768
-            }
-        )
+    # 4. Attention layers with non-divisible page sizes are padded too: every
+    # backend reads a padded page through the view's block stride, so there is
+    # no longer a case that must raise.
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "attn_layer": new_kv_cache_spec(block_size=24),  # 24576
+            "draft_attn_layer": draft_attn_spec,  # 32768
+        }
+    )
+    assert unified["attn_layer"].page_size_padded == 32768
+    assert unified["attn_layer"].page_size_bytes == 32768
+    assert unified["attn_layer"].block_size == 24
 
     # 5. Uniform page sizes are returned unchanged.
     specs = {

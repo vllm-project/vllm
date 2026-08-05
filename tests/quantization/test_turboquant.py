@@ -294,7 +294,14 @@ class TestTurboQuantKVCacheSpec:
         )
         vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=32))
 
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+
+        # The layer builds a generic spec; the backend re-specs it for TQ via
+        # customize_spec (AttentionBackend.customize_spec contract).
         spec = Attention.get_kv_cache_spec(layer, vllm_config)
+        spec = TurboQuantAttentionBackend.customize_spec(spec, preset)
 
         assert isinstance(spec, TQFullAttentionSpec)
         assert spec.kv_quant_mode == KVQuantMode.TURBOQUANT

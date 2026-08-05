@@ -454,7 +454,7 @@ class FlashInferBackend(AttentionBackend):
     def get_required_kv_cache_layout(cls) -> str | None:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
-            return "HND"
+            return "LBHNC"
         return None
 
     forward_includes_kv_cache_update: bool = False

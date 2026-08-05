@@ -4,7 +4,6 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from itertools import product
 from typing import Any
 
 import numpy as np
@@ -115,7 +114,6 @@ class KVBlockZeroer:
         device: torch.device,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
-        cache_dtype: str,
         static_forward_context: dict[str, Any],
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
@@ -518,142 +516,39 @@ def bind_kv_cache(
         forward_context[layer_name].bind_kv_cache(kv_cache)
 
 
-def get_kv_cache_block_regions(
-    named_tensors: Iterable[tuple[str, torch.Tensor]],
-    num_blocks: int,
-) -> dict[str, torch.Tensor]:
-    """Return unique contiguous ``[num_blocks, block_bytes]`` byte views.
-
-    A standardized per-layer cache has logical block dimension 0, but that
-    dimension need not be physically outermost. Block-major layouts can pack
-    every layer into one storage block, while specialized layouts such as
-    ``separate_kv_head_groups`` place one or more head dimensions outside the
-    block dimension. Virtual block splitting can also make several physical
-    blocks correspond to one scheduler block.
-
-    Derive regions from the actual views rather than the configured global
-    layout so all of those cases use the same copy/offload representation.
-    """
-    if num_blocks <= 0:
-        raise ValueError("num_blocks must be positive")
-
-    storage_groups: dict[tuple[torch.device, int], list[tuple[str, torch.Tensor]]] = (
-        defaultdict(list)
-    )
-    for name, tensor in named_tensors:
-        if tensor.ndim == 0:
-            raise ValueError(f"KV cache tensor {name!r} must have a block dimension")
-        storage = tensor.untyped_storage()
-        storage_groups[(tensor.device, storage.data_ptr())].append((name, tensor))
-
-    regions: dict[str, torch.Tensor] = {}
-    seen_regions: set[tuple[torch.device, int, int, int]] = set()
-    for entries in storage_groups.values():
-        first_name, first_tensor = entries[0]
-        storage = first_tensor.untyped_storage()
-        storage_nbytes = storage.nbytes()
-        if storage_nbytes % num_blocks != 0:
-            raise ValueError(
-                f"KV cache storage for {first_name!r} has {storage_nbytes} bytes, "
-                f"which is not divisible by {num_blocks} blocks"
-            )
-        storage_block_bytes = storage_nbytes // num_blocks
-
-        tensor_block_bytes: dict[int, int] = {}
-        for _, tensor in entries:
-            physical_num_blocks = tensor.shape[0]
-            if physical_num_blocks % num_blocks != 0:
-                raise ValueError(
-                    f"KV cache has {physical_num_blocks} physical blocks, which is "
-                    f"not divisible by {num_blocks} scheduler blocks"
-                )
-            physical_per_logical = physical_num_blocks // num_blocks
-            tensor_block_bytes[id(tensor)] = (
-                tensor.stride(0) * tensor.element_size() * physical_per_logical
-            )
-
-        raw = torch.empty(0, dtype=torch.uint8, device=first_tensor.device).set_(
-            storage, 0, (storage_nbytes,)
-        )
-
-        # A block stride spanning the complete storage block means the storage
-        # itself is block-major (for example BLHNC/BHLNC). Copy it exactly once.
-        if any(
-            tensor_block_bytes[id(tensor)] == storage_block_bytes
-            for _, tensor in entries
-        ):
-            regions[first_name] = raw.view(num_blocks, storage_block_bytes)
-            continue
-
-        for name, tensor in entries:
-            block_bytes = tensor_block_bytes[id(tensor)]
-            element_size = tensor.element_size()
-            # Dimensions physically outside B form independent block sequences.
-            outer_dims = [
-                dim
-                for dim in range(1, tensor.ndim)
-                if tensor.shape[dim] > 1
-                and tensor.stride(dim) * element_size >= block_bytes
-            ]
-            outer_indices = (
-                product(*(range(tensor.shape[dim]) for dim in outer_dims))
-                if outer_dims
-                else [()]
-            )
-            segment_idx = 0
-            for indices in outer_indices:
-                offset = tensor.storage_offset() * element_size + sum(
-                    index * tensor.stride(dim) * element_size
-                    for dim, index in zip(outer_dims, indices)
-                )
-                region_key = (tensor.device, storage.data_ptr(), offset, block_bytes)
-                if region_key in seen_regions:
-                    continue
-                seen_regions.add(region_key)
-                end = offset + num_blocks * block_bytes
-                if end > storage_nbytes:
-                    raise ValueError(
-                        f"KV cache region for {name!r} exceeds its backing storage"
-                    )
-                region_name = name if segment_idx == 0 else f"{name}.{segment_idx}"
-                while region_name in regions:
-                    segment_idx += 1
-                    region_name = f"{name}.{segment_idx}"
-                regions[region_name] = raw[offset:end].view(num_blocks, block_bytes)
-                segment_idx += 1
-
-    return regions
-
-
 def copy_kv_cache_blocks_inplace(
-    kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
+    kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
 ) -> None:
     if not kv_cache_block_copies:
         return
 
-    named_tensors: list[tuple[str, torch.Tensor]] = []
-    for entry_idx, entry in enumerate(kv_caches):
-        # Mamba layers hold a list of state tensors; attention layers a single
-        # tensor. Both alias the shared block-major backing storage.
-        tensors = entry if isinstance(entry, (list, tuple)) else (entry,)
-        named_tensors.extend(
-            (f"cache.{entry_idx}.{tensor_idx}", tensor)
-            for tensor_idx, tensor in enumerate(tensors)
-        )
-
-    block_regions = get_kv_cache_block_regions(named_tensors, num_blocks)
-    if not block_regions:
-        return
-    device = next(iter(block_regions.values())).device
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices = async_tensor_h2d(indices_np, device=device)
-    src_indices, dst_indices = indices.unbind(dim=1)
+    indices: torch.Tensor | None = None
+    seen: set[tuple[torch.device, int]] = set()
+    for cache in kv_caches:
+        # Layers sharing KV (cross-layer sharing) alias the same view; copy it
+        # once. data_ptr distinguishes per-layer views of a shared allocation.
+        key = (cache.device, cache.data_ptr())
+        if key in seen:
+            continue
+        seen.add(key)
 
-    for blocks in block_regions.values():
-        assert blocks.device == device
-        blocks[dst_indices] = blocks[src_indices]
+        if indices is None:
+            indices = async_tensor_h2d(indices_np, device=cache.device)
+        assert cache.device == indices.device
+        src, dst = indices.unbind(dim=1)
+
+        kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
+        assert remainder == 0, (
+            f"{cache.shape[0]} kernel blocks not divisible by "
+            f"{num_blocks} scheduler blocks"
+        )
+        # Fold virtual block splitting into the shape so that dim 0 counts
+        # scheduler blocks; unflatten of dim 0 is always a view.
+        blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+        blocks[dst] = blocks[src]
 
 
 def is_residual_scattered_for_sp(

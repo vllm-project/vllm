@@ -65,7 +65,6 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -1492,7 +1491,7 @@ class MooncakeStoreWorker:
 
     def register_kv_caches(
         self,
-        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+        kv_caches: dict[str, torch.Tensor],
     ) -> None:
         """Register KV cache tensors and start transfer threads."""
         if self._capacity_only:
@@ -1500,14 +1499,6 @@ class MooncakeStoreWorker:
         if not kv_caches:
             logger.warning("No KV caches to offload.")
             return
-
-        # Resolve each entry to a representative tensor for storage
-        # deduplication. For attention layers the value is already a tensor;
-        # for Mamba layers it is a list of tensors that all share the same
-        # underlying raw storage, so we take the first one.
-        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-            assert isinstance(v, torch.Tensor | list)
-            return v if isinstance(v, torch.Tensor) else v[0]
 
         assert self.cache_config.num_gpu_blocks is not None
         self.num_blocks = self.cache_config.num_gpu_blocks
@@ -1518,19 +1509,7 @@ class MooncakeStoreWorker:
         addrs: list[int] = []
         block_lens: list[int] = []
 
-        layer_specs = {}
-        for group in self._kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            for layer_name in group.layer_names:
-                layer_specs[layer_name] = (
-                    group_spec.kv_cache_specs[layer_name]
-                    if isinstance(group_spec, UniformTypeKVCacheSpecs)
-                    else group_spec
-                )
-
-        for layer_name, value in kv_caches.items():
-            cache = _repr_tensor(value)
-            layer_spec = layer_specs.get(layer_name)
+        for cache in kv_caches.values():
             cache_storage = cache.untyped_storage()
             base_addr = cache_storage.data_ptr()
             region_len = cache_storage.nbytes()
@@ -1546,10 +1525,7 @@ class MooncakeStoreWorker:
                         ret,
                     )
 
-            if (
-                isinstance(layer_spec, AttentionSpec)
-                and layer_spec.separate_kv_head_groups
-            ):
+            if layout.heads_outside_blocks:
                 for head_idx in range(cache.shape[1]):
                     head_cache = cache[:, head_idx]
                     region_addr = head_cache.data_ptr()

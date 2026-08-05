@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
     split_decodes_prefills_and_extends,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
@@ -313,6 +314,19 @@ if current_platform.is_rocm():
 
 
 logger = init_logger(__name__)
+
+
+def _use_separate_kv_head_groups() -> bool:
+    """Whether to allocate K and V as two separate token-major head groups.
+
+    The AITER fused QK-norm+RoPE+cache kernel addresses each side as
+    ``block_id * stride(0) + token * (H*hs) + head * hs``, i.e. token-major and
+    contiguous within a block. The shuffle-layout variant uses its own x-packed
+    interior instead, so it keeps the default packed content dim.
+    """
+    return (
+        rocm_aiter_ops.is_enabled() and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+    )
 
 
 @dataclass
@@ -745,6 +759,18 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     forward_includes_kv_cache_update: bool = False
 
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec, kv_cache_dtype: str) -> AttentionSpec:
+        if not _use_separate_kv_head_groups():
+            return spec
+        return replace(spec, separate_kv_head_groups=True)
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+        # Separate K/V head groups need H inside the block and L outermost so
+        # each side is a token-major, block-contiguous [B, N, H*hs] region.
+        return "LBHNC" if _use_separate_kv_head_groups() else None
+
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
@@ -792,6 +818,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
+        self.separate_kv_head_groups = _use_separate_kv_head_groups()
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         if alibi_slopes is not None:
@@ -1053,7 +1080,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = self._key_value_caches(kv_cache)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(current_platform.fp8_dtype())
@@ -1372,6 +1399,21 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         return output
 
+    def _key_value_caches(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split the per-layer cache into K/V views shaped [B, N, H, hs].
+
+        With separate planes the cache is [B, 2, N, H*hs] and each side is a
+        contiguous, token-major block region. Otherwise K/V are packed in the
+        content dim of [B, H, N, 2*hs] and the split is a strided view.
+        """
+        if self.separate_kv_head_groups:
+            key_cache, value_cache = kv_cache.unbind(1)
+            shape = (*key_cache.shape[:-1], self.num_kv_heads, self.head_size)
+            return key_cache.view(shape), value_cache.view(shape)
+        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+
     def do_kv_cache_update(
         self,
         layer: AttentionLayer,
@@ -1381,7 +1423,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         slot_mapping: torch.Tensor,
     ):
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = self._key_value_caches(kv_cache)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
@@ -1436,9 +1478,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # AITER requires K/V to be contiguous within each cache block, but
-        # standardized caches pack K/V in the content dimension.
-        return False
+        # The fused kernel needs K and V as separate block-contiguous caches,
+        # which only the separate-planes allocation provides.
+        return self.separate_kv_head_groups
 
     def do_qk_norm_rope_kvcache_update(
         self,
@@ -1455,7 +1497,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = self._key_value_caches(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
             qkv=qkv,
             q_weight=q_weight,
@@ -1475,7 +1517,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             k_scale=layer._k_scale_cpu,
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
-            use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
+            # Separate planes and the shuffle layout are mutually exclusive
+            # (see _use_separate_kv_head_groups), so this path is never shuffled.
+            use_shuffle_layout=False,
         )
 
     def do_rope_and_kv_cache_update(
@@ -1491,7 +1535,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
     ):
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = self._key_value_caches(kv_cache)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

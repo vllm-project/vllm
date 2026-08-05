@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
@@ -67,10 +67,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             if isinstance(spec, AttentionSpec):
-                backend = attn_module.get_attn_backend()
-                spec = replace(
-                    spec,
-                    indexes_kv_by_block_stride=backend.indexes_kv_by_block_stride(),
+                spec = attn_module.get_attn_backend().customize_spec(
+                    spec, attn_module.kv_cache_dtype
                 )
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
@@ -189,14 +187,14 @@ def _allocate_and_reshape_kv_cache(
             tuple(attn_backends) if attn_backends else None
         )
 
-    layer_to_group: dict[str, tuple[KVCacheSpec, int]] = {}
+    layer_to_spec: dict[str, KVCacheSpec] = {}
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
         for layer_name in group.layer_names:
             if isinstance(spec, UniformTypeKVCacheSpecs):
-                layer_to_group[layer_name] = (spec.kv_cache_specs[layer_name], group_id)
+                layer_to_spec[layer_name] = spec.kv_cache_specs[layer_name]
             else:
-                layer_to_group[layer_name] = (spec, group_id)
+                layer_to_spec[layer_name] = spec
 
     kv_caches: dict[str, Any] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -214,7 +212,7 @@ def _allocate_and_reshape_kv_cache(
             layer_names = [n for n in group.layer_names if n in tensor_layers]
             if not layer_names:
                 continue
-            spec, _ = layer_to_group[layer_names[0]]
+            spec = layer_to_spec[layer_names[0]]
             num_blocks = slot_bytes // spec.page_size_bytes
 
             if (
@@ -247,15 +245,12 @@ def init_kv_cache(
     kv_cache_config: KVCacheConfig,
     attn_groups: list[list[AttentionGroup]],
     device: torch.device,
-    cache_dtype: str,
     kernel_block_sizes: list[int] | None = None,
-    layout: KVCacheLayout | None = None,
     vllm_config: VllmConfig | None = None,
 ) -> dict[str, Any]:
     kv_caches = _allocate_and_reshape_kv_cache(
         kv_cache_config,
         device,
-        layout=layout,
         kernel_block_sizes=kernel_block_sizes,
         attn_backends=tuple(
             group.backend for groups in attn_groups for group in groups

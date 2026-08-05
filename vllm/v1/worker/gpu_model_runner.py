@@ -1152,7 +1152,6 @@ class GPUModelRunner(
             self.device,
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self._kernel_block_sizes,
-            cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=self.compilation_config.static_forward_context,
         )
@@ -7579,10 +7578,8 @@ class GPUModelRunner(
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                 if isinstance(spec, AttentionSpec):
-                    backend = attn_module.get_attn_backend()
-                    spec = replace(
-                        spec,
-                        indexes_kv_by_block_stride=backend.indexes_kv_by_block_stride(),
+                    spec = attn_module.get_attn_backend().customize_spec(
+                        spec, attn_module.kv_cache_dtype
                     )
                 kv_cache_spec[layer_name] = spec
 

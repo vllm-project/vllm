@@ -107,12 +107,6 @@ class InklingSconvBackend(AttentionBackend):
     def get_name() -> str:
         return "INKLING_SCONV_SWA"
 
-    @classmethod
-    def indexes_kv_by_block_stride(cls) -> bool:
-        # The standardized layout keeps num_blocks outermost for this cache,
-        # padded conv page is read through a strided view.
-        return True
-
     @staticmethod
     def get_impl_cls():
         raise NotImplementedError(

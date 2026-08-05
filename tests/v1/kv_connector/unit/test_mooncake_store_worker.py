@@ -1952,8 +1952,8 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = (
-        lambda keys, addrs, sizes, *_args: [256] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, addrs, sizes, *_args: (
+        [256] * len(keys)
     )
 
     full_spec = FullAttentionSpec(
@@ -2758,7 +2758,18 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     )
 
     db = worker.token_dbs[0]
-    if layout.is_layer_compact:
+    if layout.heads_outside_blocks:
+        # Each head group is its own plane, so a block spans L*H regions.
+        head_cache = caches[0][:, 0]
+        assert db.kv_caches_base_addr == [
+            cache[:, head_idx].data_ptr()
+            for cache in caches
+            for head_idx in range(cache.shape[1])
+        ]
+        assert db.block_len == [head_cache.stride(0) * head_cache.element_size()] * (
+            num_layers * caches[0].shape[1]
+        )
+    elif layout.is_layer_compact:
         assert db.kv_caches_base_addr == [cache.data_ptr() for cache in caches]
         assert db.block_len == [spec.page_size_bytes] * num_layers
     else:
@@ -2767,8 +2778,10 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
 
 
-@pytest.mark.parametrize("layout", list(KVCacheLayout))
-def test_register_kv_caches_separate_head_groups(layout: KVCacheLayout):
+def test_register_kv_caches_separate_head_groups():
+    # LHBNC is the layout that gives each head group its own plane; the K/V
+    # split only doubles the head count.
+    layout = KVCacheLayout.LHBNC
     num_blocks = 3
     num_layers = 2
     worker = _make_bare_worker(num_gpu_blocks=num_blocks)

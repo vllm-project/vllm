@@ -44,7 +44,7 @@ from vllm.v1.attention.backend import (
 logger = init_logger(__name__)
 
 # Deprecated: use resolve_kv_cache_layout() instead (RFC #42082).
-KVCacheLayoutType = Literal["LBNHC", "LBHNC", "BLHNC", "BLNHC", "BHLNC"]
+KVCacheLayoutType = Literal["LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC"]
 _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
@@ -164,10 +164,6 @@ _FLASHINFER_LAYOUT_NAMES = {
     "BLNHC": "NHD",
     "BHLNC": "HND",
 }
-
-
-def is_valid_kv_cache_layout(value: str) -> bool:
-    return value in KVCacheLayout.__members__ or value in _LAYOUT_COMPAT_ALIASES
 
 
 def get_flashinfer_layout_string() -> str:

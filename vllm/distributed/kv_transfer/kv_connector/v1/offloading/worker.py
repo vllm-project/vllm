@@ -62,9 +62,7 @@ class OffloadingConnectorWorker:
     def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
         self.worker = self.spec.get_worker(kv_caches)
 
-    def register_kv_caches(
-        self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
-    ):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
         mappings = derive_canonical_mappings(
@@ -89,16 +87,7 @@ class OffloadingConnectorWorker:
                 layer_kv_cache_spec = per_layer_specs.get(
                     layer_name, group_kv_cache_spec
                 )
-                layer_kv_cache = kv_caches[layer_name]
-                # AttentionSpec yields a single tensor; MambaSpec yields a
-                # list of typed state tensors that share one underlying
-                # buffer. Either way, the first tensor's storage_offset
-                # marks the start of this layer's region.
-                ref = (
-                    layer_kv_cache[0]
-                    if isinstance(layer_kv_cache, list)
-                    else layer_kv_cache
-                )
+                ref = kv_caches[layer_name]
                 page = layer_kv_cache_spec.page_size_bytes
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size

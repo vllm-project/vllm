@@ -55,7 +55,7 @@ def _layer_stride_order(ndim: int) -> tuple[int, ...]:
     indexer side cache (H=1) is contiguous, so identity."""
     if ndim == 3:
         return (0, 1, 2)
-    stride_order = resolve_kv_cache_layout().layer_stride_order
+    stride_order = resolve_kv_cache_layout().layer_view_order
     assert len(stride_order) == ndim
     return stride_order
 
@@ -947,7 +947,7 @@ def test_main_cache_layout_contract():
     for layout in ("NHD", "HND"):
         try:
             set_kv_cache_layout(layout)
-            order = resolve_kv_cache_layout().layer_stride_order
+            order = resolve_kv_cache_layout().layer_view_order
         finally:
             set_kv_cache_layout(None)
         # Valid permutation: no duplicates, covers every axis.
@@ -1030,7 +1030,7 @@ def test_hnd_allocation_is_packed_head_major():
     logical = _main_kv_logical_shape(nb)
     try:
         set_kv_cache_layout("HND")
-        stride_order = resolve_kv_cache_layout().layer_stride_order
+        stride_order = resolve_kv_cache_layout().layer_view_order
     finally:
         set_kv_cache_layout(None)
 
@@ -1066,7 +1066,7 @@ def test_main_cache_is_block_first_and_unpadded():
     for layout in ("NHD", "HND"):
         try:
             set_kv_cache_layout(layout)
-            order = resolve_kv_cache_layout().layer_stride_order
+            order = resolve_kv_cache_layout().layer_view_order
         finally:
             set_kv_cache_layout(None)
         inv_order = [order.index(i) for i in range(len(order))]
@@ -1405,7 +1405,7 @@ def test_padded_main_cache_is_flagged():
 
     try:
         set_kv_cache_layout("HND")
-        stride_order = resolve_kv_cache_layout().layer_stride_order
+        stride_order = resolve_kv_cache_layout().layer_view_order
     finally:
         set_kv_cache_layout(None)
 

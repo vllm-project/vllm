@@ -1924,13 +1924,14 @@ def test_register_kv_caches(
             "layer3": tensor0,
         }
 
-        if separate_kv_head_groups:
+        if KVCacheLayout[layout].heads_outside_blocks:
+            # Each head group is its own plane, so one region per (layer, head).
             expected_base_addrs = [
                 cache[:, head_idx].data_ptr()
                 for cache in (tensor0, tensor1, tensor2)
                 for head_idx in range(cache.shape[1])
             ]
-            expected_block_len = block_size * head_size * torch.float16.itemsize
+            expected_block_len = tensor0.stride(0) * tensor0.element_size()
             expected_blocks_count = num_blocks * len(expected_base_addrs)
         elif layout in ("LBHNC", "LBNHC", "BLHNC"):
             expected_base_addrs = [

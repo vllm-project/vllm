@@ -317,7 +317,6 @@ class TritonAttentionBackend(AttentionBackend):
         return TritonAttentionImpl
 
     @staticmethod
-    @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 

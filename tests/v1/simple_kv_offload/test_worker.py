@@ -231,18 +231,26 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
         set_kv_cache_layout(None)
 
     assert worker.gpu_kv_caches is not None
-    expected_regions = num_layers if layout.is_layer_compact else 1
+    if layout.heads_outside_blocks:
+        # Each head group is its own plane, so a block spans L*H regions.
+        expected_regions = num_layers * spec.num_heads
+        expected_block_bytes = spec.page_size_bytes // spec.num_heads
+    elif layout.is_layer_compact:
+        expected_regions = num_layers
+        expected_block_bytes = spec.page_size_bytes
+    else:
+        expected_regions = 1
+        expected_block_bytes = spec.page_size_bytes * num_layers
     assert len(worker.gpu_kv_caches) == expected_regions
-    expected_block_bytes = spec.page_size_bytes * (
-        1 if layout.is_layer_compact else num_layers
-    )
     assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
         (num_blocks, expected_block_bytes)
     }
 
 
-@pytest.mark.parametrize("layout", [KVCacheLayout.BLHNC, KVCacheLayout.BHLNC])
-def test_register_separate_kv_head_groups(monkeypatch, layout: KVCacheLayout):
+def test_register_separate_kv_head_groups(monkeypatch):
+    # LHBNC hoists the K/V head groups outside the block dim, so each layer's
+    # blocks are registered as one region per group (K, V).
+    layout = KVCacheLayout.LHBNC
     num_blocks = 4
     num_layers = 2
     spec = FullAttentionSpec(
@@ -276,7 +284,9 @@ def test_register_separate_kv_head_groups(monkeypatch, layout: KVCacheLayout):
 
     assert worker.gpu_kv_caches is not None
     assert len(worker.gpu_kv_caches) == num_layers * spec.num_heads
-    per_head_block_bytes = spec.block_size * spec.head_size * spec.dtype.itemsize
+    per_group_block_bytes = (
+        spec.num_kv_heads * spec.block_size * spec.head_size * spec.dtype.itemsize
+    )
     assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
-        (num_blocks, per_head_block_bytes)
+        (num_blocks, per_group_block_bytes)
     }

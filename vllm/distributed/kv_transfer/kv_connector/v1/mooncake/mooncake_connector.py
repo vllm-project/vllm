@@ -121,7 +121,6 @@ def _expand_transfer_regions(
     kv_block_lens: list[int],
     layer_names: list[str],
     layer_indices: list[int],
-    is_kv_layout_blocks_first: bool,  # kept for API compat, unused
     group_indices: list[int] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
@@ -1633,6 +1632,7 @@ class MooncakeConnectorWorker:
 
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
+        layout = resolve_kv_cache_layout()
         kv_data_ptrs: list[int] = []
         kv_data_lens: list[int] = []
         region_base_addresses: list[int] = []
@@ -1643,7 +1643,7 @@ class MooncakeConnectorWorker:
         self.registered_layer_indices = []
         self.registered_group_indices = []
 
-        for layer_name, cache_or_caches in kv_caches.items():
+        for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
             layer_spec = self._layer_specs.get(layer_name)
             if layer_spec is None:
@@ -1655,48 +1655,36 @@ class MooncakeConnectorWorker:
             # Standardized allocation exposes one raw page tensor per layer.
             # For Mamba that page contains all recurrent states; the layer
             # unpacks it only when binding the cache for model execution.
-            cache_list = [cache_or_caches]
+            self._log_debug_cache_registration(layer_name, cache)
+            if layout.heads_outside_blocks:
+                region_caches = [cache[:, head] for head in range(cache.shape[1])]
+            else:
+                region_caches = [cache]
 
-            logger.debug(
-                "registering layer %s with %d cache tensor(s)",
-                layer_name,
-                len(cache_list),
-            )
+            for region_cache in region_caches:
+                base_addr = region_cache.data_ptr()
+                block_len = region_cache.stride(0) * region_cache.element_size()
+                region_base_addresses.append(base_addr)
 
-            for cache in cache_list:
-                self._log_debug_cache_registration(layer_name, cache)
-                if (
-                    isinstance(layer_spec, AttentionSpec)
-                    and layer_spec.separate_kv_head_groups
-                ):
-                    region_caches = [cache[:, head] for head in range(cache.shape[1])]
-                else:
-                    region_caches = [cache]
-
-                for region_cache in region_caches:
-                    base_addr = region_cache.data_ptr()
-                    block_len = region_cache.stride(0) * region_cache.element_size()
-                    region_base_addresses.append(base_addr)
-
-                    kv_block_len = (
-                        layer_spec.page_size_bytes
-                        if isinstance(layer_spec, AttentionSpec)
-                        and not layer_spec.separate_kv_head_groups
-                        else block_len
-                    )
-                    self.block_len_per_layer.append(block_len)
-                    self.kv_block_len_per_layer.append(kv_block_len)
-                    self.registered_layer_names.append(layer_name)
-                    self.registered_layer_indices.append(layer_index)
-                    self.registered_group_indices.append(
-                        self._layer_group_indices[layer_name]
-                    )
-                storage = cache.untyped_storage()
-                storage_addr = storage.data_ptr()
-                if storage_addr not in seen_storage_ptrs:
-                    seen_storage_ptrs.add(storage_addr)
-                    kv_data_ptrs.append(storage_addr)
-                    kv_data_lens.append(storage.nbytes())
+                kv_block_len = (
+                    layer_spec.page_size_bytes
+                    if isinstance(layer_spec, AttentionSpec)
+                    and not layout.heads_outside_blocks
+                    else block_len
+                )
+                self.block_len_per_layer.append(block_len)
+                self.kv_block_len_per_layer.append(kv_block_len)
+                self.registered_layer_names.append(layer_name)
+                self.registered_layer_indices.append(layer_index)
+                self.registered_group_indices.append(
+                    self._layer_group_indices[layer_name]
+                )
+            storage = cache.untyped_storage()
+            storage_addr = storage.data_ptr()
+            if storage_addr not in seen_storage_ptrs:
+                seen_storage_ptrs.add(storage_addr)
+                kv_data_ptrs.append(storage_addr)
+                kv_data_lens.append(storage.nbytes())
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
@@ -2043,7 +2031,6 @@ class MooncakeConnectorWorker:
             kv_block_lens=kv_block_lens,
             layer_names=layer_names,
             layer_indices=layer_indices,
-            is_kv_layout_blocks_first=self.transfer_topo.is_kv_layout_blocks_first,
             group_indices=group_indices,
         )
 

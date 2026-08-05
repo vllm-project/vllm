@@ -1106,8 +1106,11 @@ async def test_worker_get_finished_timeout(monkeypatch):
     [
         (KVCacheLayout.LBHNC, False),
         (KVCacheLayout.BLHNC, False),
-        (KVCacheLayout.LBHNC, True),
-        (KVCacheLayout.BHLNC, True),
+        (KVCacheLayout.BHLNC, False),
+        # LHBNC gives each head group its own plane; the K/V split doubles the
+        # head count but the registration shape is driven by the layout.
+        (KVCacheLayout.LHBNC, False),
+        (KVCacheLayout.LHBNC, True),
     ],
 )
 def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
@@ -1163,7 +1166,7 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
             assert registered_ptrs == [raw.data_ptr()]
             assert registered_lens == [raw.nbytes]
 
-            if separate_kv_head_groups:
+            if layout.heads_outside_blocks:
                 expected_addrs = [
                     cache[:, head_idx].data_ptr()
                     for cache in (tensor1, tensor2)

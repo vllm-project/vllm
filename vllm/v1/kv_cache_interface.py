@@ -210,6 +210,7 @@ class KVCacheLayout(Enum):
 
     LBHNC = (0, 1, 2, 3, 4)  # [L, B, H, N, C] (identity)
     LBNHC = (0, 1, 3, 2, 4)  # [L, B, N, H, C]
+    LHBNC = (0, 2, 1, 3, 4)  # [L, H, B, N, C]
     BLHNC = (1, 0, 2, 3, 4)  # [B, L, H, N, C]
     BLNHC = (1, 0, 3, 2, 4)  # [B, L, N, H, C]
     BHLNC = (1, 2, 0, 3, 4)  # [B, H, L, N, C]
@@ -217,18 +218,6 @@ class KVCacheLayout(Enum):
     @property
     def stride_order(self) -> tuple[int, ...]:
         return self.value
-
-    @property
-    def layer_stride_order(self) -> tuple[int, ...]:
-        """4D permutation [B, H, N, C] for per-layer tensors."""
-        if not self.is_layer_compact:
-            compact = [m.name for m in KVCacheLayout if m.is_layer_compact]
-            raise ValueError(
-                f"KVCacheLayout.{self.name} cannot produce a 4D"
-                f" layer_stride_order because L is not outermost."
-                f" Use a layer-compact layout: {compact}"
-            )
-        return self.layer_view_order
 
     @property
     def layer_view_order(self) -> tuple[int, ...]:
@@ -244,6 +233,11 @@ class KVCacheLayout(Enum):
     def is_block_contiguous(self) -> bool:
         """True when [H, N, C] is contiguous within a block."""
         return self.value[-3:] == (_DIM_H, _DIM_N, _DIM_C)
+
+    @property
+    def heads_outside_blocks(self) -> bool:
+        """True when H is physically outside B"""
+        return self.value.index(_DIM_H) < self.value.index(_DIM_B)
 
 
 def num_states_for(block_size: int, tokens_per_state: int) -> int:
@@ -282,11 +276,7 @@ def reshape_kv_cache(
         num_layer_slots,
         *compute_layer_kv_cache_shape_bytes(spec, num_blocks, block_size),
     )
-    stride_order: tuple[int, ...]
-    if getattr(spec, "separate_kv_head_groups", False):
-        stride_order = (_DIM_L, _DIM_H, _DIM_B, _DIM_N, _DIM_C)
-    else:
-        stride_order = layout.stride_order
+    stride_order = layout.stride_order
     physical_shape_bytes = tuple(logical_shape_bytes[i] for i in stride_order)
     inv_order = [stride_order.index(i) for i in range(5)]
 
@@ -320,8 +310,14 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
-    indexes_kv_by_block_stride: bool = False
     separate_kv_head_groups: bool = False
+    """K and V occupy two separate head groups ``[B, 2, N, H*hs]`` rather than
+    being interleaved in the content dim, so each side is one contiguous region
+    per block. The layout then decides where those groups sit: LBHNC keeps them
+    inside the block (token-major per side, what the AITER fused
+    QK-norm+RoPE+cache kernel addresses), LHBNC hoists them outside it (separate
+    planes spanning all blocks, what AITER sparse PA wants). Backends opt in via
+    ``AttentionBackend.separate_kv_head_groups()``."""
     tokens_per_state: int = 1
 
     # NVFP4: K and V are stored as separate head groups [L, B, 2*H, N, dim]
@@ -329,7 +325,10 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def num_heads(self) -> int:
-        if self.kv_quant_mode.is_nvfp4 or self.separate_kv_head_groups:
+        if self.separate_kv_head_groups:
+            # Two groups (K, V); the real heads fold into the content dim.
+            return 2
+        if self.kv_quant_mode.is_nvfp4:
             return 2 * self.num_kv_heads
         return self.num_kv_heads
 
@@ -337,7 +336,7 @@ class AttentionSpec(KVCacheSpec):
     def state_content_size_bytes(self) -> int:
         hs = self.head_size
         if self.separate_kv_head_groups:
-            return hs * get_dtype_size(self.dtype)
+            return self.num_kv_heads * hs * get_dtype_size(self.dtype)
         if self.kv_quant_mode.is_nvfp4:
             hs = nvfp4_kv_cache_full_dim(hs)
             return hs * get_dtype_size(self.dtype)
@@ -425,16 +424,18 @@ class FullAttentionSpec(AttentionSpec):
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
+        assert not self.separate_kv_head_groups or self.head_size == self.head_size_v, (
+            "Separate K/V head groups require symmetric K/V head sizes."
+        )
 
     @property
     def state_content_size_bytes(self) -> int:
         hs_k = self.head_size
         hs_v = self.head_size_v
         if self.separate_kv_head_groups:
-            assert hs_k == hs_v, (
-                "Separate K/V head groups require symmetric K/V head sizes."
-            )
-            return hs_k * get_dtype_size(self.dtype)
+            return self.num_kv_heads * hs_k * get_dtype_size(self.dtype)
+        # TODO(lucas): make these dtype specific paths seperate specs once we have it
+        # so the attention backend returns the spec
         if self.kv_quant_mode.is_nvfp4:
             hs_k = nvfp4_kv_cache_full_dim(hs_k)
             hs_v = nvfp4_kv_cache_full_dim(hs_v)
@@ -442,6 +443,13 @@ class FullAttentionSpec(AttentionSpec):
                 "nvfp4 with asymmetric K/V head sizes not yet supported"
             )
             return hs_k * get_dtype_size(self.dtype)
+        if self.kv_quant_mode.is_per_token_head:
+            # Per-token-head scales live inline after each head's data
+            # so the content is (data + one float32 scale)
+            if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+                hs_k, hs_v = hs_k // 2, hs_v // 2
+            scale_bytes = get_dtype_size(torch.float32)
+            return (hs_k + hs_v) * get_dtype_size(self.dtype) + 2 * scale_bytes
         return (hs_k + hs_v) * get_dtype_size(self.dtype)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -492,7 +500,6 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
             separate_kv_head_groups=specs[0].separate_kv_head_groups,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
@@ -516,12 +523,7 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        if self.separate_kv_head_groups:
-            assert self.head_size == self.head_size_v, (
-                "Separate K/V head groups require symmetric K/V head sizes."
-            )
-            last_dim = 2 * self.head_size
-        elif self.kv_quant_mode.is_nvfp4:
+        if self.kv_quant_mode.is_nvfp4:
             # Packed layout per head: fp4 data + fp8 block scales.
             # fp4 data: head_size//2 bytes (2 fp4 values per byte)
             # fp8 block scale: head_size//16 bytes (1 scale per 16 elements)
@@ -632,16 +634,13 @@ class MLAAttentionSpec(FullAttentionSpec):
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
-        block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
-            and len(block_stride_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version, and KV block "
-            "stride indexing."
+            "quantization method, compress ratio, and model version."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -650,7 +649,6 @@ class MLAAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            indexes_kv_by_block_stride=block_stride_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
@@ -706,7 +704,6 @@ class RSWASpec(FullAttentionSpec):
             dtype=base.dtype,
             kv_quant_mode=base.kv_quant_mode,
             page_size_padded=base.page_size_padded,
-            indexes_kv_by_block_stride=base.indexes_kv_by_block_stride,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
@@ -877,17 +874,15 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
-        block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
-            and len(block_stride_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version, sliding "
-            "window size, and KV block stride indexing."
+            "quantization method, compress ratio, model version, and sliding "
+            "window size."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -895,7 +890,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
-            indexes_kv_by_block_stride=block_stride_set.pop(),
             sliding_window=sliding_window_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
@@ -1028,7 +1022,6 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
-            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
             separate_kv_head_groups=specs[0].separate_kv_head_groups,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),

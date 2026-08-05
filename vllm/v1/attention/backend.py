@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.kv_cache_interface import KVCacheSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
@@ -144,15 +144,19 @@ class AttentionBackend(ABC):
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
-    def indexes_kv_by_block_stride(cls) -> bool:
-        """Whether the backend reads KV pages by the runtime block stride.
+    def customize_spec(
+        cls, spec: "AttentionSpec", kv_cache_dtype: str
+    ) -> "AttentionSpec":
+        """Adjust the layer's KV cache spec for this backend's kernels.
 
-        Under the standardized ``[L, B, H, N, C]`` layouts (RFC #42082) the
-        per-layer KV view is always blocks-first, so pages are addressed
-        through the view's block stride and page-size padding is tolerated.
-        This gates page size padding and cross-layer uniform KV layout.
+        The layer builds a spec from the model config; a backend overrides this
+        to apply what only it knows: fields it owns (e.g.
+        ``separate_kv_head_groups`` when its kernels need K and V as distinct
+        block-contiguous caches) or a backend-specific spec subclass for its
+        cache dtypes. Return an ``AttentionSpec``; changing the concrete
+        subclass is allowed, changing model-derived fields is not.
         """
-        return True
+        return spec
 
     @classmethod
     def is_mla(cls) -> bool:
