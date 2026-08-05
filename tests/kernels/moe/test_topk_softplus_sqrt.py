@@ -130,6 +130,54 @@ def test_fused_topk_softplus_sqrt(
     not current_platform.is_cuda_alike(),
     reason="This test is skipped on non-CUDA platform.",
 )
+def test_fused_topk_softplus_sqrt_pruned_expert_count():
+    torch.manual_seed(0)
+    num_tokens = 2
+    hidden_size = 128
+    num_experts = 104
+    topk = 6
+    hidden_states = torch.randn(
+        (num_tokens, hidden_size), dtype=torch.bfloat16, device="cuda"
+    )
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.bfloat16, device="cuda"
+    )
+    e_score_correction_bias = torch.randn(
+        (num_experts,), dtype=torch.float32, device="cuda"
+    )
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=e_score_correction_bias,
+    )
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=e_score_correction_bias,
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+    )
+
+    sorted_ref_ids, idx_ref = topk_ids_ref.sort(dim=-1)
+    sorted_ids, idx_ops = topk_ids.sort(dim=-1)
+    torch.testing.assert_close(sorted_ref_ids, sorted_ids, atol=0, rtol=0)
+    torch.testing.assert_close(
+        topk_weights_ref.gather(1, idx_ref),
+        topk_weights.gather(1, idx_ops),
+        atol=2e-2,
+        rtol=1e-2,
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
 @pytest.mark.parametrize("num_tokens", [1, 33, 128])
 @pytest.mark.parametrize("hidden_size", [1024, 2048])
 @pytest.mark.parametrize("num_experts", [256, 384, 512])

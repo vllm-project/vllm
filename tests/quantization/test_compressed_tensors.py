@@ -516,6 +516,29 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
         assert output
 
 
+def test_compressed_tensors_fp8_block_bmm_uses_deep_gemm_scale_name():
+    scheme = object.__new__(CompressedTensorsW8A8Fp8)
+    scheme.strategy = QuantizationStrategy.BLOCK
+    scheme.is_static_input_scheme = False
+    scheme.fp8_linear = Mock()
+
+    processed_scale = torch.tensor([[2.0]])
+    scheme.fp8_linear.process_weights_after_loading.side_effect = (
+        lambda layer: layer.weight_scale.data.copy_(processed_scale)
+    )
+
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight_scale", torch.nn.Parameter(torch.ones_like(processed_scale))
+    )
+    layer.is_bmm = True
+
+    scheme.process_weights_after_loading(layer)
+
+    assert not hasattr(layer, "weight_scale")
+    torch.testing.assert_close(layer.weight_scale_inv, processed_scale)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="This test is not for non-CUDA platforms",

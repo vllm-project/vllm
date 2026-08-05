@@ -121,7 +121,9 @@ def vllm_topk_softplus_sqrt(
 ) -> tuple[torch.Tensor, ...]:
     from vllm.platforms import current_platform
 
-    if current_platform.is_xpu():
+    # The CUDA kernel only instantiates stock expert counts. Pruned 104E
+    # checkpoints use the equivalent tensor implementation.
+    if current_platform.is_xpu() or gating_output.shape[-1] == 104:
         return _topk_softplus_sqrt_torch(
             topk_weights,
             topk_indices,

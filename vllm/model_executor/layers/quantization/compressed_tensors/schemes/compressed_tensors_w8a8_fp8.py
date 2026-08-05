@@ -41,6 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
 )
+from vllm.model_executor.utils import replace_parameter
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -167,6 +168,13 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False
             self.fp8_linear.process_weights_after_loading(layer)
+
+            # DeepSeek-V4's grouped WO_A einsum consumes the ModelOpt-style
+            # attribute name after the linear kernel has prepared its layout.
+            if getattr(layer, "is_bmm", False):
+                weight_scale_data = layer.weight_scale.data
+                del layer._parameters["weight_scale"]
+                replace_parameter(layer, "weight_scale_inv", weight_scale_data)
 
             layer.input_scale = None
             # fp8_linear.process_weights_after_loading applies the post process
