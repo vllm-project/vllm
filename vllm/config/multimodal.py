@@ -135,7 +135,7 @@ class MultiModalConfig:
 
     For example, for Phi-3-Vision:
     `{"num_crops": 4}`."""
-    mm_device_do_normalize: bool = True
+    mm_device_do_normalize: bool | None = True
     """
     Move the do_normalize computation in the mm preprocessing to before the ViT, 
     and let the device do it, so that CPU computation can be saved.

@@ -597,7 +597,7 @@ class EngineArgs:
     video_pruning_method: str = MultiModalConfig.video_pruning_method
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
-    mm_device_do_normalize: bool = MultiModalConfig.mm_device_do_normalize
+    mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -1355,7 +1355,11 @@ class EngineArgs:
             **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
         )
         multimodal_group.add_argument(
-            "--mm-device-do-normalize", **multimodal_kwargs["mm_device_do_normalize"]
+            "--mm-device-do-normalize",
+            **{
+                **multimodal_kwargs["mm_device_do_normalize"],
+                "default": None,
+            },
         )
 
         # LoRA related configs
