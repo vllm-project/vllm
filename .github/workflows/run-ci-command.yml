@@ -18,6 +18,8 @@ jobs:
     if: >-
       github.event.issue.pull_request &&
       (github.event.comment.body == '/ci run' ||
+      github.event.comment.body == '/ci run all' ||
+      github.event.comment.body == '/ci run nightly' ||
       github.event.comment.body == '/ci retry')
     runs-on: ubuntu-latest
     steps:
