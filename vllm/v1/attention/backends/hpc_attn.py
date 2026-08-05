@@ -7,9 +7,7 @@ Independent metadata / builder; KV cache layout is NHD:
 (num_blocks, 2, block_size, num_kv_heads, head_size).
 """
 
-import functools
 import importlib.util
-import inspect
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -50,19 +48,6 @@ def _get_fp8_dtype_for_kv_cache(kv_cache_dtype: str) -> torch.dtype:
         return torch.float8_e5m2
     else:
         raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
-
-
-@functools.cache
-def _bf16_decode_supports_task_map() -> bool:
-    """hpc >= 6e2eced (PR #73) extends dynamic scheduling to bf16 decode.
-
-    Older hpc builds only accept ``task_map`` on ``attention_decode_fp8``;
-    passing it to ``attention_decode_bf16`` would raise. Probe the installed
-    version once and cache the result.
-    """
-    import hpc
-
-    return "task_map" in inspect.signature(hpc.attention_decode_bf16).parameters
 
 
 @dataclass
@@ -182,7 +167,7 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         # This matches sglang's HPCOpsAttnBackend behavior.
         kv_cache_dtype = kv_cache_spec.dtype
         self.use_fp8 = kv_cache_dtype == torch.float8_e4m3fn
-        self._dynamic_sched = self.use_fp8 or _bf16_decode_supports_task_map()
+        self._dynamic_sched = True
         if self._dynamic_sched:
             self.task_map = hpc.get_attention_decode_task_workspace(
                 vllm_config.scheduler_config.max_num_seqs,
