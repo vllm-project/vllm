@@ -33,6 +33,18 @@ pub struct RenderConfig {
     pub max_logprobs: Option<i32>,
 }
 
+impl RenderConfig {
+    /// Validate configuration before initializing renderer/tokenizer backends
+    /// or binding a listener.
+    pub fn validate(&self) -> Result<()> {
+        vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        if self.max_logprobs.is_some_and(|value| value < -1) {
+            bail!("max_logprobs must be non-negative or -1");
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: Vec<String>,
@@ -74,9 +86,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
 /// Run the text-only preprocessing server without starting or connecting
 /// to an inference engine.
 pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> Result<()> {
-    if config.max_logprobs.is_some_and(|value| value < -1) {
-        bail!("max_logprobs must be non-negative or -1");
-    }
+    config.validate().context("invalid render server configuration")?;
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
@@ -98,4 +108,40 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         .with_graceful_shutdown(shutdown.cancelled_owned())
         .await
         .context("render server failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn serve_render_rejects_unknown_parser_before_startup() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let error = serve_render(
+            RenderConfig {
+                model: "test-model".to_string(),
+                served_model_name: Vec::new(),
+                host: "127.0.0.1".to_string(),
+                port: 8000,
+                tool_call_parser: ParserSelection::Auto,
+                reasoning_parser: ParserSelection::Explicit("typo".to_string()),
+                renderer: RendererSelection::Auto,
+                chat_template: None,
+                default_chat_template_kwargs: HashMap::new(),
+                chat_template_content_format: ChatTemplateContentFormatOption::Auto,
+                max_model_len: 128,
+                max_logprobs: None,
+            },
+            shutdown,
+        )
+        .await
+        .unwrap_err();
+        let report = format!("{error:#}");
+
+        assert!(
+            report.contains("reasoning parser `typo` is not registered"),
+            "{report}"
+        );
+    }
 }

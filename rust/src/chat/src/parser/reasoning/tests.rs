@@ -38,8 +38,12 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
 }
 
 #[test]
-fn factory_does_not_route_qwen2_5_to_qwen3_parser() {
+fn factory_distinguishes_qwen_model_families() {
     let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/QwQ-32B"),
+        Some(names::DEEPSEEK_R1)
+    );
     assert_eq!(
         factory.resolve_name_for_model("Qwen/Qwen3-8B"),
         Some(names::QWEN3)
