@@ -234,7 +234,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            "default_torch_num_threads": 1,
         },
         marks=[pytest.mark.core_model],
     ),
