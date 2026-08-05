@@ -94,6 +94,7 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+        self.is_encoder_only = vllm_config.is_encoder_only
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -368,10 +369,11 @@ class Scheduler(SchedulerInterface):
     ) -> int:
         """Clip a prefill chunk so it ends where Mamba state must be cached.
 
-        In "align" cache mode the SSM state is only materialized at chunk
-        ends, so chunk ends are steered onto cacheable positions: block
-        boundaries by default, plus mandatory early stops (the prompt's
-        partial-tail hash boundary, a detected shared-prefix junction).
+        In "align" cache mode reusable SSM states are materialized at block
+        boundaries, plus mandatory early stops (the prompt's partial-tail hash
+        boundary, a detected shared-prefix junction). If a block is larger
+        than the configured prefill chunk limit, intermediate chunks keep
+        private running state until they reach the next cacheable position.
         """
         start = (
             request.num_computed_tokens
@@ -392,11 +394,17 @@ class Scheduler(SchedulerInterface):
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
-        # Until `last_cache_position`, chunk ends must land on block
-        # boundaries. May yield an empty chunk (budget cannot reach the next
-        # boundary); the caller then skips the request.
+        # Until `last_cache_position`, prefer chunks ending on block
+        # boundaries. When a block cannot fit in any configured prefill chunk,
+        # allow sub-block progress and re-align at the next reachable boundary.
         if end < last_cache_position:
-            end = end // block_size * block_size
+            max_prefill_tokens = self.max_num_scheduled_tokens
+            long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+            if long_prefill_threshold > 0:
+                max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
+            aligned_end = end // block_size * block_size
+            if aligned_end > start or block_size <= max_prefill_tokens:
+                end = aligned_end
 
         next_block_boundary = (start // block_size + 1) * block_size
         tail_boundary = (
@@ -1804,6 +1812,17 @@ class Scheduler(SchedulerInterface):
                 )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
+            elif (
+                self.is_encoder_only
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                # An encoder instance runs the encoder and publishes the
+                # embeddings instead of sampling, so it stops as soon as the
+                # whole prompt is consumed. Encoder inputs are never scheduled
+                # past a multi-modal item the encoder cache could not admit, so
+                # a consumed prompt also means every item in it was encoded.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
