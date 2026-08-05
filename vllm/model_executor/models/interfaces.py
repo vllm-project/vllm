@@ -784,7 +784,7 @@ def supports_pp(
 
 def _supports_pp_attributes(model: type[object] | object) -> bool:
     if isinstance(model, type):
-        return isinstance(model, _SupportsPPType)
+        return SupportsPP in model.__mro__ or isinstance(model, _SupportsPPType)
 
     return isinstance(model, SupportsPP)
 
