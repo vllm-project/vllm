@@ -777,6 +777,7 @@ def get_model_params(config):
         intermediate_size = config.moe_intermediate_size
         hidden_size = config.hidden_size
     elif architecture in (
+        "BailingMoeV3ForCausalLM",
         "Qwen2MoeForCausalLM",
         "Qwen3MoeForCausalLM",
         "Qwen3NextForCausalLM",

@@ -60,6 +60,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "glm47_moe_reasoning_parser",
         "Glm47MoeParserReasoningAdapter",
     ),
+    "ling3": (
+        "ling3_reasoning_parser",
+        "Ling3ParserReasoningAdapter",
+    ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
         "GptOssReasoningParser",
