@@ -133,7 +133,6 @@ def shard_sequence_parallel_mlp(
     hidden_size: int,
     intermediate_size: int,
     use_sequence_parallel: bool,
-    eligible: bool,
 ) -> bool:
     """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
 
@@ -141,7 +140,7 @@ def shard_sequence_parallel_mlp(
     the trade-off and :mod:`vllm.envs` for when it is worth enabling.
     """
     enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
-    if not (use_sequence_parallel and eligible and enabled):
+    if not (use_sequence_parallel and enabled):
         return False
     tp_size = get_tensor_model_parallel_world_size()
     return (
@@ -173,7 +172,6 @@ class KimiMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         use_sequence_parallel: bool = False,
-        can_shard_sequence_parallel: bool = False,
         prefix: str = "",
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
@@ -184,7 +182,6 @@ class KimiMLP(nn.Module):
             hidden_size,
             intermediate_size,
             use_sequence_parallel,
-            can_shard_sequence_parallel,
         )
         replicate = use_sequence_parallel and not self.shard_sequence_parallel
 
@@ -497,7 +494,7 @@ class KimiMoE(nn.Module):
         min_moe_intermediate_per_partition = getattr(
             config, "min_moe_intermediate_per_partition", 256
         )
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not vllm_config.parallel_config.enable_expert_parallel:
             moe_intermediate_per_partition = moe_intermediate_size // self.tp_size
             if moe_intermediate_per_partition < min_moe_intermediate_per_partition:
                 self.padded_moe_intermediate_size = (
@@ -532,10 +529,6 @@ class KimiMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 use_sequence_parallel=use_sequence_parallel,
-                # Only the MegaMoE path calls the shared experts directly; the
-                # FusedMoE path below hands them to the runner, which fuses
-                # their reduction and assumes the replicated layout.
-                can_shard_sequence_parallel=self.use_mega_moe,
                 prefix=f"{prefix}.shared_experts",
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -846,7 +839,6 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 use_sequence_parallel=self.use_sequence_parallel,
-                can_shard_sequence_parallel=True,
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
             )
