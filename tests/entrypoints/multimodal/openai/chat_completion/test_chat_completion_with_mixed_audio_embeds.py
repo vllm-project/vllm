@@ -12,11 +12,12 @@ import pytest_asyncio
 import safetensors
 import torch
 import torch.nn as nn
-from huggingface_hub import hf_hub_download
 from transformers import AutoConfig, AutoTokenizer
 
 from tests.utils import RemoteOpenAIServer
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.serial_utils import tensor2base64
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 QWEN2AUDIO_MODEL = "Qwen/Qwen2-Audio-7B-Instruct"
 
@@ -125,11 +126,13 @@ def qwen2audio_aligned_content_and_embeds_b64() -> tuple[str, str]:
     content = "Describe this audio."
     tokenizer = AutoTokenizer.from_pretrained(QWEN2AUDIO_MODEL, trust_remote_code=True)
 
-    index_path = hf_hub_download(QWEN2AUDIO_MODEL, "model.safetensors.index.json")
+    index_path = hf_api().hf_hub_download(
+        QWEN2AUDIO_MODEL, "model.safetensors.index.json"
+    )
     with open(index_path) as f:
         weight_map = json.load(f)["weight_map"]
     embed_key = next(k for k in weight_map if k.endswith("embed_tokens.weight"))
-    shard_path = hf_hub_download(QWEN2AUDIO_MODEL, weight_map[embed_key])
+    shard_path = hf_api().hf_hub_download(QWEN2AUDIO_MODEL, weight_map[embed_key])
     with safetensors.safe_open(shard_path, framework="pt", device="cpu") as f:
         embed_weight = f.get_tensor(embed_key)
     embed_layer = nn.Embedding.from_pretrained(embed_weight.to(QWEN2AUDIO_DTYPE))
@@ -142,8 +145,20 @@ def qwen2audio_aligned_content_and_embeds_b64() -> tuple[str, str]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "audio_first",
-    [True, False],
-    ids=["audio_embeds-then-text", "text-then-audio_embeds"],
+    [
+        pytest.param(True, id="audio_embeds-then-text"),
+        pytest.param(
+            False,
+            id="text-then-audio_embeds",
+            marks=pytest.mark.xfail(
+                condition=is_torch_equal_or_newer("2.12.0"),
+                reason="torch 2.12 regression: prompt_embeds output diverges "
+                "from raw-text when text precedes audio; "
+                "https://github.com/pytorch/pytorch/issues/184431",
+                strict=True,
+            ),
+        ),
+    ],
 )
 async def test_text_content_and_prompt_embeds_match_with_audio_embeds(
     qwen2audio_client: openai.AsyncOpenAI,

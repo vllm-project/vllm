@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
@@ -13,7 +16,10 @@ use crate::routes::openai::utils::structured_outputs::convert_from_response_form
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
 };
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::utils::{
+    ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
+    resolve_session_id,
+};
 
 /// Lowered chat request plus the public response metadata carried by every SSE
 /// chunk.
@@ -37,6 +43,8 @@ pub(super) struct ResponseOptions {
     pub include_continuous_usage: bool,
     /// Whether the caller requested output logprobs on chat choices.
     pub requested_logprobs: bool,
+    /// Number of top logprobs to include for each output token.
+    pub output_top_logprobs: i32,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether to include reasoning content in OpenAI responses.
@@ -47,6 +55,8 @@ pub(super) struct ResponseOptions {
     pub return_token_ids: bool,
     /// Whether to format logprob tokens as `token_id:{id}`.
     pub return_tokens_as_token_ids: bool,
+    /// Whether the request forces one named function tool.
+    pub is_named_tool_choice: bool,
 }
 
 /// Validate and lower one OpenAI chat completion request into the internal chat
@@ -80,6 +90,15 @@ pub(super) fn prepare_chat_request(
     )?;
 
     let template_kwargs = request.chat_template_kwargs.unwrap_or_default();
+    let response_format =
+        request.response_format.as_ref().map(serde_json::to_value).transpose().map_err(
+            |error| {
+                ApiError::invalid_request(
+                    format!("failed to serialize response_format: {error}"),
+                    Some("response_format"),
+                )
+            },
+        )?;
 
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
@@ -91,6 +110,7 @@ pub(super) fn prepare_chat_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let requested_logprobs = request.logprobs;
+    let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
     // behavior.
@@ -104,6 +124,11 @@ pub(super) fn prepare_chat_request(
         request.response_format.as_ref(),
         &request.structured_outputs,
     )?;
+    let session_id = resolve_session_id(
+        &ctx,
+        request.session_id.as_deref(),
+        request.vllm_xargs.as_ref(),
+    );
 
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
@@ -132,7 +157,7 @@ pub(super) fn prepare_chat_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
+                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
         },
@@ -140,6 +165,7 @@ pub(super) fn prepare_chat_request(
             generation_prompt_mode,
             chat_template: request.chat_template,
             reasoning_effort: request.reasoning_effort,
+            response_format,
             template_kwargs,
         },
         tools: convert_tools(request.tools)?,
@@ -157,6 +183,7 @@ pub(super) fn prepare_chat_request(
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
+        session_id,
         lora_request: lora_resolution.lora_request.clone(),
     };
 
@@ -167,11 +194,13 @@ pub(super) fn prepare_chat_request(
             include_usage,
             include_continuous_usage,
             requested_logprobs,
+            output_top_logprobs: top_logprobs,
             include_prompt_logprobs,
             include_reasoning,
             echo,
             return_token_ids: request.return_token_ids.unwrap_or(false),
             return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            is_named_tool_choice,
         },
         chat_request,
     })
@@ -290,7 +319,19 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     detail: image_url.detail,
                     uuid,
                 }),
-                _ => bail_invalid_request!("Only text and image_url content parts are supported."),
+                ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
+                    video_url: video_url.url,
+                    uuid,
+                }),
+                ContentPart::AudioUrl { audio_url, uuid } => Ok(ChatContentPart::AudioUrl {
+                    audio_url: audio_url.url,
+                    uuid,
+                }),
+                ContentPart::InputAudio { input_audio, uuid } => Ok(ChatContentPart::InputAudio {
+                    data: input_audio.data,
+                    format: input_audio.format,
+                    uuid,
+                }),
             })
             .try_collect()
             .map(ChatContent::Parts),
@@ -376,6 +417,7 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use axum::http::HeaderMap;
     use expect_test::expect;
@@ -383,19 +425,21 @@ mod tests {
     use serde_json::json;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
-        ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
-        SamplingParams as VllmSamplingParams,
+        ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
+        KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
     };
-    use vllm_text::output::TextDecodeOptions;
+    use vllm_text::{Prompt, output::TextDecodeOptions};
+    use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
     use super::prepare_chat_request;
     use crate::lora::LoraModelResolution;
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
+    use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
-        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
-        StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
+        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -447,6 +491,60 @@ mod tests {
         .expect("request is valid");
 
         assert!(prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_response_format_to_kimi_k3_renderer() {
+        let mut request = base_request();
+        request.model = "moonshotai/Kimi-K3".to_string();
+        let response_format = ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "answer".to_string(),
+                description: None,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": {"type": "string"}
+                    },
+                    "required": ["answer"]
+                }),
+                strict: Some(true),
+            },
+        };
+        request.response_format = Some(response_format.clone());
+        let template_response_format = json!({"type": "json_object"});
+        request.chat_template_kwargs = Some(HashMap::from([(
+            "response_format".to_string(),
+            template_response_format.clone(),
+        )]));
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["moonshotai/Kimi-K3"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.chat_options.response_format.as_ref(),
+            Some(&serde_json::to_value(response_format).unwrap())
+        );
+        assert_eq!(
+            prepared.chat_request.chat_options.template_kwargs.get("response_format"),
+            Some(&template_response_format)
+        );
+
+        let tokenizer = Arc::new(TestTokenizer::new());
+        let prompt = KimiK3ChatRenderer::new(tokenizer.clone())
+            .render(&prepared.chat_request)
+            .expect("Kimi K3 rendering succeeds")
+            .prompt;
+        let Prompt::TokenIds(prompt_token_ids) = prompt else {
+            panic!("Kimi K3 renders token IDs");
+        };
+        let prompt = tokenizer.decode(&prompt_token_ids, false).expect("Kimi K3 prompt decodes");
+        assert!(prompt.contains("response_format=json_schema"));
+        assert!(prompt.contains(r#""answer":{"type":"string"}"#));
     }
 
     #[test]
@@ -772,28 +870,79 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_rejects_video_content_parts() {
+    fn prepare_chat_request_accepts_video_content_parts() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::User {
                 content: MessageContent::Parts(vec![ContentPart::VideoUrl {
                     video_url: VideoUrl {
                         url: "https://example.com/video.mp4".to_string(),
                     },
+                    uuid: Some("video-uuid".to_string()),
                 }]),
                 name: None,
             }],
             ..base_request()
         };
 
-        let error = prepare_chat_request(
+        let prepared = prepare_chat_request(
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
-        .unwrap_err();
+        .expect("request is valid");
 
-        expect!["Only text and image_url content parts are supported."]
-            .assert_eq(&error.to_error_response().error.message);
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![ChatContentPart::VideoUrl {
+                video_url: "https://example.com/video.mp4".to_string(),
+                uuid: Some("video-uuid".to_string()),
+            }])]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_audio_content_parts() {
+        let request = ChatCompletionRequest {
+            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
+            messages: vec![ChatMessage::User {
+                content: MessageContent::Parts(vec![
+                    ContentPart::InputAudio {
+                        input_audio: InputAudio {
+                            data: "dGVzdA==".to_string(),
+                            format: Some("wav".to_string()),
+                        },
+                        uuid: Some("audio-1".to_string()),
+                    },
+                    ContentPart::AudioUrl {
+                        audio_url: AudioUrl {
+                            url: "https://example.com/audio.mp3".to_string(),
+                        },
+                        uuid: None,
+                    },
+                ]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen3-ASR-1.7B"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![
+                ChatContentPart::InputAudio {
+                    data: "dGVzdA==".to_string(),
+                    format: Some("wav".to_string()),
+                    uuid: Some("audio-1".to_string()),
+                },
+                ChatContentPart::audio_url("https://example.com/audio.mp3"),
+            ])]
+        );
     }
 
     #[test]
@@ -997,6 +1146,7 @@ mod tests {
         .expect("request is valid");
 
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Required);
+        assert!(!prepared.options.is_named_tool_choice);
     }
 
     #[test]
@@ -1036,6 +1186,7 @@ mod tests {
                 name: "get_weather".to_string(),
             }
         );
+        assert!(prepared.options.is_named_tool_choice);
     }
 
     #[test]
@@ -1095,6 +1246,49 @@ mod tests {
         )
         .expect("request is valid");
         assert_eq!(prepared.chat_request.data_parallel_rank, Some(7));
+    }
+
+    #[test]
+    fn prepare_chat_request_threads_header_session_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-ID", "header-session".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.session_id.as_deref(),
+            Some("header-session")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_ignores_correlation_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Correlation-ID", "correlation-header".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.session_id, None);
+    }
+
+    #[test]
+    fn prepare_chat_request_ignores_empty_session_header_without_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-ID", "".parse().unwrap());
+        headers.insert("X-Correlation-ID", "correlation-header".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.session_id, None);
     }
 
     #[test]

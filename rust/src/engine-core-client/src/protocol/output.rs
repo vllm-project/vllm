@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 
 use enum_as_inner::EnumAsInner;
@@ -96,6 +99,8 @@ pub struct EngineCoreOutput {
     pub events: Option<Vec<EngineCoreEvent>>,
     #[serde(default)]
     pub kv_transfer_params: Option<serde_json::Value>,
+    #[serde(default)]
+    pub ec_transfer_params: Option<serde_json::Value>,
     #[serde(default)]
     pub trace_headers: Option<OpaqueValue>,
     /// Breakdown of the scheduled prefill computation, set on the first output
@@ -374,6 +379,7 @@ mod tests {
                 stop_reason: Some(StopReason::Text("stop".to_string())),
                 events: None,
                 kv_transfer_params: None,
+                ec_transfer_params: None,
                 trace_headers: None,
                 prefill_stats: None,
                 routed_experts: None,
@@ -426,6 +432,7 @@ mod tests {
                             stop_reason: None,
                             events: None,
                             kv_transfer_params: None,
+                            ec_transfer_params: None,
                             trace_headers: None,
                             prefill_stats: None,
                             routed_experts: None,

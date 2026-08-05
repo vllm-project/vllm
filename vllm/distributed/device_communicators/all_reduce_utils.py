@@ -47,6 +47,12 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
         6: 8 * MiB,  # 8 MB
         8: 4 * MiB,  # 4 MB
     },
+    "10.7": {  # sm_107 (Rubin): reuse 10.3 all-reduce thresholds
+        2: 4 * MiB,  # 4 MB
+        4: 4 * MiB,  # 4 MB
+        6: 8 * MiB,  # 8 MB
+        8: 4 * MiB,  # 4 MB
+    },
 }
 
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
@@ -63,6 +69,12 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         8: 128 * MiB,  # 128 MB
     },
     "10.3": {
+        2: 4 * MiB,  # 4 MB
+        4: 32 * MiB,  # 32 MB
+        6: 32 * MiB,  # 32 MB
+        8: 64 * MiB,  # 64 MB
+    },
+    "10.7": {  # sm_107 (Rubin): reuse 10.3 all-reduce thresholds
         2: 4 * MiB,  # 4 MB
         4: 32 * MiB,  # 32 MB
         6: 32 * MiB,  # 32 MB

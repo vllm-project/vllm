@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::slice;
 
@@ -91,7 +94,23 @@ pub enum ContentPart {
         uuid: Option<String>,
     },
     #[serde(rename = "video_url")]
-    VideoUrl { video_url: VideoUrl },
+    VideoUrl {
+        video_url: VideoUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "audio_url")]
+    AudioUrl {
+        audio_url: AudioUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "input_audio")]
+    InputAudio {
+        input_audio: InputAudio,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
 }
 
 #[serde_with::skip_serializing_none]
@@ -104,6 +123,19 @@ pub struct ImageUrl {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct VideoUrl {
     pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AudioUrl {
+    pub url: String,
+}
+
+/// Base64-encoded audio bytes in OpenAI `input_audio` form.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct InputAudio {
+    pub data: String,
+    pub format: Option<String>,
 }
 
 // ============================================================================
