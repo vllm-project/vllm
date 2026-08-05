@@ -17,6 +17,9 @@ The edges of the build graph represent:
 
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
+The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
+requirements remain cached independently of per-commit vLLM wheels and source.
+
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }
   > </figure>
