@@ -2638,18 +2638,18 @@ class MoRIIOConnectorWorker:
                     break
                 time.sleep(_backoff)
                 _backoff = min(_backoff * 2, 0.05)
-              with self.moriio_wrapper.lock:
-                  self._recving_transfers[request_id][layer_name] = transfer_status
-                  self._recving_transfers_start.setdefault(request_id, time.monotonic())
-                  self._recving_transfers_callback_addr[request_id] = (
-                      remote_host,
-                      str(
-                          remote_notify_port
-                          + get_port_offset(
-                              int(remote_dp_rank),
-                              eff_tp,
-                              remote_tp_size,
-                          )
-                      ),
-                      transfer_id,
-                  )
+            with self.moriio_wrapper.lock:
+                self._recving_transfers[request_id][layer_name] = transfer_status
+                self._recving_transfers_start.setdefault(request_id, time.monotonic())
+                self._recving_transfers_callback_addr[request_id] = (
+                    remote_host,
+                    str(
+                        remote_notify_port
+                        + get_port_offset(
+                            int(remote_dp_rank),
+                            eff_tp,
+                            remote_tp_size,
+                        )
+                    ),
+                    transfer_id,
+                )
