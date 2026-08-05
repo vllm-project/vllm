@@ -253,10 +253,11 @@ RUN mkdir -p /app/install; \
 FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
+ARG AITER_COMMIT
 ARG USE_SCCACHE
 RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
 RUN cd aiter \
-    && git checkout ${AITER_COMMIT}
+    && git checkout ${AITER_COMMIT} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
 RUN pip install pyyaml && cd aiter \
