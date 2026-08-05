@@ -190,20 +190,17 @@ class RMSNormFuser(BaseFuser):
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
         """Fuse the matched RMSNorm pattern into a vLLM fused RMSNorm CustomOp."""
-        model_config = vllm_config.model_config
         weight = getattr(module, "weight", None)
-        hidden_size = (
-            weight.size(0) if weight is not None else model_config.get_hidden_size()
-        )
+        has_weight = weight is not None
+        hidden_size = weight.size(0) if has_weight else 0
         graph = trace(module)
         eps = self._eps_from_graph(graph) if graph is not None else None
         if eps is None:
             # If eps not in graph, match torch behaviour.
-            dtype = weight.dtype if weight is not None else model_config.dtype
+            dtype = weight.dtype if has_weight else vllm_config.model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
             return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
-        has_weight = weight is not None
         return TPAwareRMSNorm(
             hidden_size=hidden_size,
             eps=eps,
