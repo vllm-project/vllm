@@ -121,7 +121,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     # layer per token; warm them across token sizes first so the first real
     # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
     deepseek_v4_mhc_warmup(
-        worker.get_model(),
+        worker.model_runner,
         max_tokens=worker.scheduler_config.max_num_batched_tokens,
         cudagraph_capture_sizes=(
             worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
