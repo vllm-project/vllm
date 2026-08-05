@@ -8,7 +8,6 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -519,6 +518,8 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
                 layer.weight, layer.weight_scale, layer.logical_widths
             )
         layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight.input_dim = 0
+        layer.weight.output_dim = 1
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
@@ -767,15 +768,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             config=self.moe,
             weight_key=kFp8StaticTensorSym,
             activation_key=kFp8StaticTensorSym,
-        )
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
         )
 
     def create_weights(
@@ -1405,15 +1397,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
-        )
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
@@ -2084,15 +2067,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             and envs.VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD
         ):
             self._dequant_mxfp8_weights_to_bf16(layer)
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
