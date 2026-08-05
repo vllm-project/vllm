@@ -344,6 +344,19 @@ def test_reasoning(
         ("<think>reasoning\n</think>\nAnswer", "reasoning", "Answer"),
         # Reasoning not yet ended: prefix becomes the content so far.
         ("before<think>still thinking", "still thinking", "before"),
+        # Unfinished reasoning (e.g. stopped at max_tokens) still trims the
+        # trailing newline, matching the behavior when </think> is present.
+        ("before<think>still thinking\n", "still thinking", "before"),
+        # A newline that belongs to the prefix (right before <think>) is part of
+        # content_before and must survive untouched.
+        ("Intro\n<think>reasoning</think>\nAnswer", "reasoning", "Intro\nAnswer"),
+        # No newline anywhere: prefix and content_after concatenate directly.
+        ("Intro<think>reasoning</think>Answer", "reasoning", "IntroAnswer"),
+        # content_after is only the stray newline: it is dropped, leaving the
+        # prefix as the sole content.
+        ("Intro<think>reasoning</think>\n", "reasoning", "Intro"),
+        # Only a single newline after </think> is stripped, not a run of them.
+        ("<think>reasoning</think>\n\nAnswer", "reasoning", "\nAnswer"),
     ],
 )
 def test_step3p5_preserves_prefix_before_think(

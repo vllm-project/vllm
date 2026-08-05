@@ -107,10 +107,10 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
             content_before, after_start = "", model_output
 
         reasoning, end, content_after = after_start.partition(self.end_token)
+        reasoning = reasoning.removesuffix("\n")
         if not end:
             return reasoning or None, content_before or None
 
-        reasoning = reasoning.removesuffix("\n")
         content_after = content_after.removeprefix("\n")
         content = content_before + content_after
         return reasoning or None, content or None
