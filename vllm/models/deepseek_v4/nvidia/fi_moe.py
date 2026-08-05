@@ -137,13 +137,11 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         vllm_config: VllmConfig,
         *,
         activation_clamp: float | None = None,
-        fast_math: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(vllm_config, **kwargs)
         self._vllm_config = vllm_config
         self._activation_clamp = activation_clamp
-        self._fast_math = fast_math
         self._mega_layer = None
         self._fast_ctx = None
         self._epilogue_alphas: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -270,7 +268,6 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
             top_k=self.top_k,
             activation_clamp=self._activation_clamp,
             weights=weights,
-            fast_math=self._fast_math,
         )
         # Upstream (fi branch >= 888383f5): the layer releases the source
         # MoEWeightPack after preprocess, and workspaces are pooled across
@@ -325,7 +322,6 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         topk_ids: torch.Tensor,
         *,
         activation_clamp: float | None,
-        fast_math: bool = True,
     ) -> torch.Tensor:
         if hidden_states.shape[0] > self.max_num_tokens:
             raise ValueError(

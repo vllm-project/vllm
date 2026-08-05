@@ -277,7 +277,6 @@ def build_fi_mega_config(
     top_k: int,
     activation_clamp: float | None,
     megakernel: str,
-    fast_math: bool = True,
 ):
     from flashinfer.moe_ep import (
         DeepGemmMegaMoeConfig,
@@ -285,19 +284,21 @@ def build_fi_mega_config(
         Nvfp4CutedslMegaMoeConfig,
     )
 
+    # fast_math selects approximate exp/rcp in DeepGEMM's fused SwiGLU
+    # epilogue; the cutedsl kernels accept it for API parity only.
     if megakernel == "deep_gemm_mega":
         mk = DeepGemmMegaMoeConfig(
             intermediate_size=intermediate_size,
             top_k=top_k,
             activation_clamp=activation_clamp,
-            fast_math=fast_math,
+            fast_math=True,
         )
     elif megakernel == "nvfp4_cutedsl":
         mk = Nvfp4CutedslMegaMoeConfig(
             intermediate_size=intermediate_size,
             top_k=top_k,
             activation_clamp=activation_clamp,
-            fast_math=fast_math,
+            fast_math=True,
         )
     else:
         raise ValueError(f"Unsupported fi_moe_ep megakernel {megakernel!r}")
@@ -325,7 +326,6 @@ def build_fi_mega_layer(
     top_k: int,
     activation_clamp: float | None,
     weights,
-    fast_math: bool = True,
 ) -> MoEEpMegaLayer:
     from flashinfer.moe_ep import FleetParams, MoEEpLayer
 
@@ -337,7 +337,6 @@ def build_fi_mega_layer(
         top_k=top_k,
         activation_clamp=activation_clamp,
         megakernel=megakernel,
-        fast_math=fast_math,
     )
     layer = MoEEpLayer(
         bootstrap=bootstrap,
