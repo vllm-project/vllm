@@ -590,12 +590,9 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
     assert [len(group) for group in blocks.blocks] == [3, 2]
 
 
-def test_truncate_computed_blocks_clamps_short_hybrid_group():
-    """Hybrid groups may hold fewer blocks than the truncation point covers
-    (sparse retention / divergent per-group hits): truncate_computed_blocks
-    must clamp to what each group has instead of tripping
-    ``assert num_blocks <= len(group_blocks)`` and killing the engine, and
-    floor token counts that are not aligned to a group's own block size."""
+def test_truncate_computed_blocks_allows_short_mamba_group_only():
+    """External state may replace a short Mamba hit, but other groups must
+    cover the aligned local endpoint."""
     hash_block_size = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=24,
@@ -640,16 +637,18 @@ def test_truncate_computed_blocks_clamps_short_hybrid_group():
     assert num_computed == 6
     assert [len(group) for group in blocks.blocks] == [3, 2]
 
-    # Aligned to both groups but beyond the full-attention group's blocks
-    # (8 tokens -> 4 full-attn blocks, only 3 present): previously a fatal
-    # AssertionError, now clamped to the group's own coverage.
-    clamped = manager.truncate_computed_blocks(blocks, 8)
-    assert [len(group) for group in clamped.blocks] == [3, 2]
+    short_mamba = manager.create_kv_cache_blocks((list(blocks.blocks[0]), []))
+    truncated = manager.truncate_computed_blocks(short_mamba, 4)
+    assert [len(group) for group in truncated.blocks] == [2, 0]
 
-    # Not aligned to the mamba group's block size (6 % 4 != 0): floored to
-    # that group's block boundary instead of asserting.
-    floored = manager.truncate_computed_blocks(blocks, 6)
-    assert [len(group) for group in floored.blocks] == [3, 1]
+    short_full_attention = manager.create_kv_cache_blocks(
+        (list(blocks.blocks[0][:1]), list(blocks.blocks[1]))
+    )
+    with pytest.raises(AssertionError):
+        manager.truncate_computed_blocks(short_full_attention, 4)
+
+    with pytest.raises(AssertionError):
+        manager.truncate_computed_blocks(blocks, 6)
 
     # The lookup result itself is never mutated.
     assert [len(group) for group in blocks.blocks] == [3, 2]

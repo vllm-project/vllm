@@ -5680,15 +5680,23 @@ def test_hybrid_per_group_hit_divergence_with_connector(
     assert replay.num_tokens - num_scheduled == expected_num_computed
 
 
-def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
-    """The opposite divergence: the FA prefix survives deeper than the Mamba
-    state and the connector supplies nothing (ext == 0). Reporting the deep FA
-    hit as locally computed would resume with no valid Mamba state at that
-    boundary (silent bad output). The scheduler must fall back to the
-    convergent boundary that every group agrees on (block 0's surviving state).
+@pytest.mark.parametrize(
+    ("matched_tokens", "replay_blocks", "expected_num_computed"),
+    [
+        (0, 5, 16),
+        (16, 6, 80),
+    ],
+)
+def test_hybrid_fa_deeper_hit_uses_external_mamba_state(
+    matched_tokens: int,
+    replay_blocks: int,
+    expected_num_computed: int,
+):
+    """A positive external hit supplies the Mamba state at the resume
+    boundary; without one, the scheduler falls back to the common local hit.
     """
     block_size = 16
-    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens=0)
+    scheduler = _create_hybrid_mamba_connector_scheduler(matched_tokens)
     manager = scheduler.kv_cache_manager
     assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
 
@@ -5714,7 +5722,7 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
 
     [replay] = create_requests(
         num_requests=1,
-        num_tokens=5 * block_size,
+        num_tokens=replay_blocks * block_size,
         max_tokens=1,
         same_prompt=True,
         block_size=block_size,
@@ -5728,5 +5736,4 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     scheduler.add_request(replay)
     output = scheduler.schedule()
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
-    # Must resume at the convergent boundary (block 0), not the deep FA hit.
-    assert replay.num_tokens - num_scheduled == block_size
+    assert replay.num_tokens - num_scheduled == expected_num_computed

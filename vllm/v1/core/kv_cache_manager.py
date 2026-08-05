@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
+    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -779,29 +780,23 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
+        An external hit can supply the final Mamba state even when the local
+        Mamba group ends before this endpoint. Other groups must cover it.
         Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
-
-        Hybrid KV cache groups can legitimately fall short of the
-        reconciled scheduler-wide hit: a sparse-retention group (e.g.
-        Mamba with a retention interval) may hold fewer blocks than
-        ``num_computed_tokens`` covers, and each group's block size can
-        differ from the alignment unit the caller used. Floor the
-        truncation point to each group's own block boundary and clamp to
-        the blocks that group actually has, rather than asserting global
-        alignment and coverage -- slicing already tolerates the overrun,
-        so the asserts only turned these benign cases into engine-fatal
-        AssertionErrors.
         """
         truncated: list[list[KVCacheBlock]] = []
-        for group_blocks, manager in zip(
+        for group_blocks, manager, group in zip(
             blocks.blocks,
             self.coordinator.single_type_managers,
+            self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
-            num_blocks = min(
-                num_computed_tokens // manager.block_size,
-                len(group_blocks),
-            )
+            assert num_computed_tokens % manager.block_size == 0
+            num_blocks = num_computed_tokens // manager.block_size
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                num_blocks = min(num_blocks, len(group_blocks))
+            else:
+                assert num_blocks <= len(group_blocks)
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
