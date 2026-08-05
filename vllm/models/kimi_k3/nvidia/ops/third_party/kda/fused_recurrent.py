@@ -591,8 +591,14 @@ def fused_recurrent_kda_packed_decode(
     initial_state: torch.Tensor,
     state_indices: torch.Tensor,
     scale: float | None = None,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run one-token KDA decode directly from packed post-conv QKV."""
+    """Run one-token KDA decode directly from packed post-conv QKV.
+
+    Pass ``out`` to write the result into a caller-owned buffer instead of a
+    fresh allocation, which lets the layer skip a copy when its output tensor is
+    already the final destination.
+    """
     if mixed_qkv.ndim != 2 or mixed_qkv.stride(-1) != 1:
         raise ValueError("`mixed_qkv` must be 2D and contiguous in its last dim.")
     if raw_g.ndim != 4 or raw_g.shape[0] != 1:
@@ -639,7 +645,21 @@ def fused_recurrent_kda_packed_decode(
     if scale is None:
         scale = K**-0.5
 
-    out = torch.empty((1, B, H, V), dtype=mixed_qkv.dtype, device=device)
+    if out is None:
+        out = torch.empty((1, B, H, V), dtype=mixed_qkv.dtype, device=device)
+    else:
+        # The kernel addresses the output as one dense [B, H, V] block and takes
+        # no output stride, so a caller-supplied buffer must match that layout.
+        if out.shape != (1, B, H, V):
+            raise ValueError(
+                f"`out` must have shape {(1, B, H, V)}, got {tuple(out.shape)}."
+            )
+        if out.dtype != mixed_qkv.dtype:
+            raise ValueError("`out` must have the same dtype as `mixed_qkv`.")
+        if out.device != device:
+            raise ValueError("`out` must be on the same device as the inputs.")
+        if not out.is_contiguous():
+            raise ValueError("`out` must be contiguous.")
     grid = (cdiv(V, BV), B * H)
     fused_recurrent_kda_packed_decode_kernel[grid](
         mixed_qkv=mixed_qkv,

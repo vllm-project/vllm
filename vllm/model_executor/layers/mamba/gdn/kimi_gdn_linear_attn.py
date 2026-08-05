@@ -517,6 +517,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # ---------- non-spec path (prefill or plain decode) ----------
         core_attn_out_non_spec = None
+        # Set when the decode kernel writes straight into core_attn_out, so the
+        # merge below knows there is nothing left to copy.
+        decode_out: torch.Tensor | None = None
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
@@ -604,6 +607,11 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     validate_data=True,
                     out=packed_conv_out,
                 )
+                # With no spec output to interleave, these tokens already occupy
+                # core_attn_out in order, so the kernel can target it directly
+                # rather than allocating and having the merge copy it across.
+                if core_attn_out_spec is None:
+                    decode_out = core_attn_out[:, :num_actual_tokens]
                 core_attn_out_non_spec, _ = fused_recurrent_kda_packed_decode(
                     mixed_qkv=mixed_qkv_ns,
                     raw_g=g1_ns,
@@ -613,6 +621,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     lower_bound=self.gate_lower_bound,
                     initial_state=recurrent_state,
                     state_indices=decode_conv_indices,
+                    out=decode_out,
                 )
 
         # ---------- merge spec and non-spec outputs ----------
@@ -627,9 +636,10 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
             core_attn_out[0, :num_actual_tokens] = merged[0, :num_actual_tokens]
         elif core_attn_out_non_spec is not None:
-            core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
-                0, :num_actual_tokens
-            ]
+            if decode_out is None:
+                core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+                    0, :num_actual_tokens
+                ]
         else:
             assert core_attn_out_spec is not None
         core_attn_out.copy_(self.o_norm(core_attn_out, g2))
