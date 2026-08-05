@@ -72,6 +72,8 @@ steps:
     commands:
       - bash .buildkite/scripts/rocm/build-test-image.sh
       - bash .buildkite/scripts/rocm/smoke-test-image.sh
+    concurrency: 1
+    concurrency_group: "vllm/rocm/image-build/$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
