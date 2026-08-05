@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import importlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, Final
 
@@ -29,6 +31,26 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 logger = init_logger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _on_gfx942() -> bool:
+    from vllm.platforms.rocm import on_gfx942
+
+    return on_gfx942()
+
+
+@functools.lru_cache(maxsize=1)
+def _get_mla_gluon_gfx942_graph() -> Callable[..., torch.Tensor] | None:
+    """Load the graph-safe gfx942 Gluon MLA entry point when available."""
+    module_name = "aiter.ops.triton.gluon.mla_gluon_gfx942"
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as import_error:
+        if not module_name.startswith(import_error.name or ""):
+            raise
+        return None
+    return getattr(module, "mla_gluon_gfx942_graph", None)
 
 
 @functools.lru_cache(maxsize=1)
@@ -848,6 +870,7 @@ class AiterMLAHelper:
     # fold that reaches a persistent one is gfx950-only.
     _ASM_PADDED_MAX_PS_QLEN: Final = 4
     _AITER_UNSUPPORTED_HEADS: ClassVar[tuple[int, ...]] = ()
+    _GLUON_GFX942_GRAPH_HEADS: Final = 12
 
     @staticmethod
     def check_num_heads_validity(num_heads: int):
@@ -939,6 +962,55 @@ class AiterMLAHelper:
             return False
         # Same arch and mode gating as use_gluon_decode.
         return _aiter_mla_small_head_mode() != "asm" and _gluon_mla_decode_supported()
+
+    @staticmethod
+    def use_gluon_gfx942_graph(
+        num_heads: int,
+        max_qo_len: int,
+        num_reqs: int,
+    ) -> bool:
+        if num_heads != AiterMLAHelper._GLUON_GFX942_GRAPH_HEADS:
+            return False
+        if not 2 <= max_qo_len <= 8:
+            return False
+        if max_qo_len == 4:
+            return 1 <= num_reqs <= 16
+        return num_reqs == 1
+
+
+def _prepare_gluon_gfx942_graph_inputs(
+    q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    kv_c_and_k_pe_cache: torch.Tensor,
+    num_reqs: int,
+    qlen: int,
+    num_heads: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    if type(q) is tuple:
+        q_nope, q_pe = q
+    else:
+        expected_q_dim = kv_lora_rank + qk_rope_head_dim
+        if q.ndim != 3 or q.shape[-1] != expected_q_dim:
+            return None
+        q_nope, q_pe = torch.split(q, [kv_lora_rank, qk_rope_head_dim], dim=-1)
+
+    num_tokens = num_reqs * qlen
+    if (
+        q_nope.shape != (num_tokens, num_heads, kv_lora_rank)
+        or q_pe.shape != (num_tokens, num_heads, qk_rope_head_dim)
+        or q_nope.dtype != torch.bfloat16
+        or q_pe.dtype != torch.bfloat16
+        or kv_c_and_k_pe_cache.dtype != torch.bfloat16
+        or kv_c_and_k_pe_cache.ndim < 2
+        or kv_c_and_k_pe_cache.shape[-1] != kv_lora_rank + qk_rope_head_dim
+    ):
+        return None
+
+    q_nope = q_nope.reshape(num_reqs, qlen, num_heads, kv_lora_rank)
+    q_pe = q_pe.reshape(num_reqs, qlen, num_heads, qk_rope_head_dim)
+    kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
+    return q_nope, q_pe, kv_buffer
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
@@ -1184,6 +1256,50 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert decode.max_qo_len is not None
         assert decode.paged_kv_indptr is not None
         assert decode.paged_kv_indices is not None
+        qlen = int(decode.max_qo_len)
+        num_reqs = decode.paged_kv_indptr.shape[0] - 1
+        # Keep single-token decode on its existing path. This graph-safe kernel
+        # owns only the validated gfx942 BF16 multi-token shapes.
+        if (
+            _on_gfx942()
+            and decode.attn_out_dtype == torch.bfloat16
+            and AiterMLAHelper.use_gluon_gfx942_graph(self.num_heads, qlen, num_reqs)
+        ):
+            mla_gluon_gfx942_graph = _get_mla_gluon_gfx942_graph()
+            graph_inputs = _prepare_gluon_gfx942_graph_inputs(
+                q,
+                kv_c_and_k_pe_cache,
+                num_reqs,
+                qlen,
+                self.num_heads,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+            )
+            if mla_gluon_gfx942_graph is not None and graph_inputs is not None:
+                q_nope, q_pe, kv_buffer = graph_inputs
+                o = torch.empty(
+                    num_reqs,
+                    qlen,
+                    self.num_heads,
+                    self.kv_lora_rank,
+                    dtype=decode.attn_out_dtype,
+                    device=q_nope.device,
+                )
+                mla_gluon_gfx942_graph(
+                    q_nope,
+                    q_pe,
+                    kv_buffer,
+                    o,
+                    decode.paged_kv_indices,
+                    decode.paged_kv_indptr,
+                    self.scale,
+                )
+                return o.reshape(
+                    num_reqs * qlen,
+                    self.num_heads,
+                    self.kv_lora_rank,
+                ), None
+
         if decode.use_gluon_decode:
             if type(q) is tuple:
                 q_nope, q_pe = q
