@@ -173,3 +173,20 @@ def test_sticky_cache_survives_text_subconfig_regeneration():
         side_effect=AssertionError("must not re-query registry"),
     ):
         assert text_config._supports_multimodal_for_mm_prefix() is False
+
+
+@pytest.mark.parametrize("model", ["llava-hf/llava-1.5-7b-hf"])
+def test_renderer_workers_with_mm_cache_rejected(model: str):
+    """The mm processor cache is not thread-safe, so combining
+    ``--renderer-num-workers > 1`` with the cache must be rejected for
+    generation models too (not only pooling): the raw-prompt preprocessing
+    offload runs ``_process_multimodal`` on the multi-worker renderer pool,
+    bypassing the single-worker executor that otherwise serializes cache
+    access.
+    """
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(
+            model,
+            renderer_num_workers=2,
+            mm_processor_cache_gb=4,
+        )
