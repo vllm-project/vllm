@@ -488,7 +488,7 @@ class CommonAttentionMetadata:
     """PrefixLM bidirectional ranges for multimodal tokens. Maps
     request index to list of (start, end) token position ranges
     where bidirectional attention should apply. None for text-only
-    batches or non-PrefixLM models."""
+    batches or non-PrefixLM models. A request's ranges must not overlap."""
 
     rswa_prefix_lens: torch.Tensor | None = None
     """(batch_size,) per-request prefix length (prompt/image token count) for
