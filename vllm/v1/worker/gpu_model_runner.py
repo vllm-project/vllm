@@ -883,6 +883,8 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
 
+
+
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
         """
@@ -927,6 +929,7 @@ class GPUModelRunner(
                         if isinstance(param, torch.Tensor):
                             param.fill_(v_scale_val)
 
+
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
@@ -940,6 +943,8 @@ class GPUModelRunner(
             if self.uses_xdrope_dim > 0:
                 return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
+
+
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True
@@ -1088,6 +1093,20 @@ class GPUModelRunner(
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
+            from vllm.v1.attention.ops.zoomkv.offload import get_cpu_key_pool
+            from vllm.v1.attention.ops.zoomkv.state import (
+                invalidate_block_summaries_for_blocks,
+            )
+
+            invalidate_block_summaries_for_blocks(
+                scheduler_output.new_block_ids_to_zero,
+                allocation_num_blocks=self.kv_cache_config.num_blocks,
+            )
+            pool = get_cpu_key_pool()
+            if pool is not None:
+                pool.free_gpu_blocks_all_layers(
+                    list(scheduler_output.new_block_ids_to_zero)
+                )
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -3565,6 +3584,8 @@ class GPUModelRunner(
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        disable_full_attention_graph: bool = False,
+        attention_chunk_bucket: int | None = None,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -3601,12 +3622,18 @@ class GPUModelRunner(
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
                 num_active_loras=num_active_loras,
+                attention_chunk_bucket=attention_chunk_bucket,
                 valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
                 invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
+            num_tokens_padded,
+            disable_full=(
+                use_cascade_attn
+                or has_encoder_output
+                or disable_full_attention_graph
+            ),
         )
         num_tokens_padded = batch_descriptor.num_tokens
         if self.compilation_config.pass_config.enable_sp:
@@ -3872,6 +3899,25 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
+            # ZoomKV's full graph is the sparse, GPU-only, single-token route.
+            # Decode always uses sparse (no seq_len threshold); only skip the
+            # graph when the active context has no matching chunk bucket.
+            attn_cfg = self.vllm_config.attention_config
+            is_zoomkv = str(attn_cfg.backend).upper().endswith("ZOOMKV")
+            disable_zoomkv_full_graph = False
+            attention_chunk_bucket = None
+            if is_zoomkv:
+                seq_lens_after_step = (
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                    + num_scheduled_tokens_np
+                )
+                attention_chunk_bucket = (
+                    self.cudagraph_dispatcher.get_zoomkv_chunk_bucket(
+                        int(seq_lens_after_step.max())
+                    )
+                )
+                disable_zoomkv_full_graph = attention_chunk_bucket is None
+
             logits_indices, spec_decode_metadata = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
@@ -3900,6 +3946,8 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                disable_full_attention_graph=disable_zoomkv_full_graph,
+                attention_chunk_bucket=attention_chunk_bucket,
             )
 
             logger.debug(
@@ -4024,6 +4072,16 @@ class GPUModelRunner(
         has_encoder_input = (
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
+
+        # A request enters its first decode forward when all prompt tokens were
+        # computed by the previous scheduler step. Make that prefill/decode
+        # boundary explicit so all prefill-side GPU work (including KV-cache
+        # and block-summary updates) is complete before decode starts.
+        num_computed_tokens_np = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        num_prompt_tokens_np = self.input_batch.num_prompt_tokens[:num_reqs]
+
+        if np.any(num_computed_tokens_np == num_prompt_tokens_np):
+            torch.accelerator.synchronize()
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -5262,6 +5320,7 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        attention_chunk_bucket: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5374,6 +5433,7 @@ class GPUModelRunner(
                 # `force_num_active_loras` is used for cudagraph capture; because we
                 # need to capture graphs for specific num_active_loras counts
                 force_num_active_loras=num_active_loras,
+                attention_chunk_bucket=attention_chunk_bucket,
             )
         )
 
@@ -5901,7 +5961,18 @@ class GPUModelRunner(
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+        from vllm.v1.attention.ops.zoomkv.offload import (
+            get_cpu_key_pool,
+            set_cpu_key_pool,
+        )
+        from vllm.v1.attention.ops.zoomkv.state import clear_block_summaries
         from vllm.v1.worker.workspace import reset_workspace_manager
+
+        clear_block_summaries()
+        pool = get_cpu_key_pool()
+        if pool is not None:
+            pool.reset()
+            set_cpu_key_pool(None)
 
         # Calls torch.accelerator.synchronize()
         self._cleanup_profiling_kv_cache()
@@ -6159,6 +6230,7 @@ class GPUModelRunner(
                 remove_lora=False,
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
+                attention_chunk_bucket=desc.attention_chunk_bucket,
             )
         self._dummy_run(
             desc.num_tokens,
@@ -6170,6 +6242,7 @@ class GPUModelRunner(
             num_active_loras=desc.num_active_loras,
             is_graph_capturing=True,
             profile_seq_lens=profile_seq_lens,
+            attention_chunk_bucket=desc.attention_chunk_bucket,
         )
 
     def _capture_cudagraphs(
@@ -6199,6 +6272,12 @@ class GPUModelRunner(
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
+        attn_cfg = self.vllm_config.attention_config
+        zoomkv_full_decode = (
+            str(attn_cfg.backend).upper().endswith("ZOOMKV")
+            and cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and uniform_decode
+        )
         for batch_desc in batch_descriptors:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
@@ -6217,6 +6296,18 @@ class GPUModelRunner(
             self._warmup_and_capture(
                 batch_desc,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                # ZoomKV allocates bucketed retrieval scratch lazily. Warm the
+                # largest context bucket before capture so graph construction
+                # performs no first-use allocations or extension setup.
+                profile_seq_lens=(
+                    min(
+                        self.max_model_len,
+                        batch_desc.attention_chunk_bucket * 16,
+                    )
+                    if zoomkv_full_decode
+                    and batch_desc.attention_chunk_bucket is not None
+                    else None
+                ),
                 allow_microbatching=allow_microbatching,
             )
             torch.accelerator.synchronize()
@@ -6842,6 +6933,7 @@ class GPUModelRunner(
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
+        self._maybe_init_zoomkv_cpu_key_pool(kv_caches)
 
         if (
             self.speculative_config
@@ -6862,6 +6954,65 @@ class GPUModelRunner(
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+    def _maybe_init_zoomkv_cpu_key_pool(self, kv_caches) -> None:
+        """Create the pinned CPU KV pool when ZoomKV K+V offload is enabled."""
+        attn_cfg = self.vllm_config.attention_config
+        if not getattr(attn_cfg, "zoomkv_enable_offload", False):
+            return
+        if getattr(self, "_zoomkv_cpu_key_pool", None) is not None:
+            return
+        from vllm.v1.attention.ops.zoomkv.offload import (
+            ZoomKVCpuKeyPool,
+            set_cpu_key_pool,
+        )
+
+        zoomkv_layers = []
+        for name, cache in kv_caches.items():
+            if not hasattr(cache, "ndim"):
+                continue
+            if cache.ndim >= 4:
+                zoomkv_layers.append(name)
+        if not zoomkv_layers:
+            return
+        sample = kv_caches[zoomkv_layers[0]]
+        if sample.ndim == 5 and sample.shape[1] == 2:
+            block_size = int(sample.shape[2])
+            num_kv_heads = int(sample.shape[3])
+            head_dim = int(sample.shape[4])
+            dtype = sample.dtype
+        elif sample.ndim == 4:
+            # (num_blocks, num_kv_heads, block_size, 2 * head_size)
+            num_kv_heads = int(sample.shape[1])
+            block_size = int(sample.shape[2])
+            head_dim = int(sample.shape[3] // 2)
+            dtype = sample.dtype
+        else:
+            return
+        # Each slot stores both a Key and a Value page (K+V offload), so the
+        # per-slot cost is doubled; num_slots shrinks to keep the same budget.
+        bytes_per_slot = (
+            2 * 16 * num_kv_heads * head_dim * dtype.itemsize * len(zoomkv_layers)
+        )
+        cpu_bytes = int(getattr(attn_cfg, "zoomkv_cpu_bytes_per_rank", 8 * 1024**3))
+        num_slots = max(1, cpu_bytes // max(1, bytes_per_slot))
+        pool = ZoomKVCpuKeyPool(
+            num_slots=num_slots,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim if head_dim in (128, 256) else 256,
+            block_size=16 if block_size == 16 else 16,
+            dtype=dtype if dtype in (torch.float16, torch.bfloat16) else torch.bfloat16,
+            device=sample.device,
+            layer_names=zoomkv_layers,
+            strict=bool(getattr(attn_cfg, "zoomkv_strict_kernels", False)),
+        )
+        set_cpu_key_pool(pool)
+        self._zoomkv_cpu_key_pool = pool
+        logger.info(
+            "ZoomKV K+V CPU pool ready: slots=%d layers=%d",
+            num_slots,
+            len(zoomkv_layers),
+        )
 
     def _get_attention_kv_cache_gid(self) -> int:
         """Find the KV cache group index for attention layers."""

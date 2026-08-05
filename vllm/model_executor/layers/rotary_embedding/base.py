@@ -216,7 +216,17 @@ class RotaryEmbedding(RotaryEmbeddingBase):
 
         from vllm import _custom_ops as ops
 
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        # The CUDA kernel consumes an fp32 cache internally. Keeping the cache
+        # in query dtype makes its C++ launcher cast the entire long-context
+        # table back to fp32 on every invocation.
+        cos_sin_cache = self.cos_sin_cache
+        if (
+            cos_sin_cache.device != query.device
+            or cos_sin_cache.dtype != torch.float32
+        ):
+            cos_sin_cache = cos_sin_cache.to(query.device, dtype=torch.float32)
+            if not torch.compiler.is_compiling():
+                self.cos_sin_cache = cos_sin_cache
 
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
