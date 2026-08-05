@@ -39,7 +39,7 @@ transformers==5.14.1
 tokenizers==0.22.2
 schemathesis>=4.0.0 # Required for openai schema test
 # quantization
-bitsandbytes @ git+https://github.com/rasmith/bitsandbytes.git@release_0_50_0_hip_wheel
+bitsandbytes==0.50.0
 buildkite-test-collector==0.1.9
 tilelang==0.1.10
 

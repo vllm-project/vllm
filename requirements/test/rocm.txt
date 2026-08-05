@@ -72,7 +72,7 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/rocm.in
-bitsandbytes @ git+https://github.com/rasmith/bitsandbytes.git@07fc91bb5ac2a32a50b097c676cff332f90af873
+bitsandbytes==0.50.0
     # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
