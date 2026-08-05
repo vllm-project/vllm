@@ -33,6 +33,13 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.oracle.int8 import (
+    Int8MoeBackend,
+    convert_to_int8_moe_kernel_format,
+    make_int8_moe_kernel,
+    make_int8_moe_quant_config,
+    select_int8_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
@@ -59,6 +66,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt8DynamicTensorSym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
     kMxfp4Dynamic,
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -502,6 +513,35 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         self.weight_qscheme = self.weight_quant.get("qscheme", "per_tensor")
         self.static_input_scales = not self.input_quant.get("is_dynamic", False)
 
+        self.moe_quant_config: FusedMoEQuantConfig | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
+        self.int8_backend: Int8MoeBackend | None = None
+        self.experts_cls: type[mk.FusedMoEExperts] | None = None
+
+        # Dynamic-activation INT8 MoE goes through the oracle + modular kernel.
+        # The modular TritonExperts kernel consumes float activations and
+        # quantizes them to int8 itself, so it cannot apply a loaded static
+        # activation scale (this matches CompressedTensorsW8A8Int8MoEMethod).
+        # TODO: Static-activation INT8 therefore stays on the legacy fused_experts
+        # path (see apply()) for now, preserving pre-refactor behavior.
+        # Needs to be migrated to expert backend.
+        if not self.static_input_scales:
+            # Map the Quark weight scheme to oracle quant keys. Per-channel
+            # weights pair with dynamic per-token activations; per-tensor
+            # weights with dynamic per-tensor activations.
+            if self.weight_qscheme == "per_channel":
+                weight_key = kInt8StaticChannelSym
+                activation_key = kInt8DynamicTokenSym
+            else:
+                weight_key = kInt8StaticTensorSym
+                activation_key = kInt8DynamicTensorSym
+
+            self.int8_backend, self.experts_cls = select_int8_moe_backend(
+                config=moe,
+                weight_key=weight_key,
+                activation_key=activation_key,
+            )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -563,7 +603,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             set_weight_attrs(w13_weight_scale, extra_weight_attrs)
             set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         else:
-            # per-tensor: one scalar per expert
+            # per-tensor: one scalar per expert (two for the fused w1/w3)
             w13_weight_scale = torch.nn.Parameter(
                 torch.ones(num_experts, 2, dtype=torch.float32),
                 requires_grad=False,
@@ -582,6 +622,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
 
         # INPUT_SCALES
         if self.static_input_scales:
+            # Static activations: the per-expert scales are loaded from the
+            # checkpoint (used by the legacy fused_experts path).
             w13_input_scale = torch.nn.Parameter(
                 torch.ones(num_experts, dtype=torch.float32),
                 requires_grad=False,
@@ -596,6 +638,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             layer.register_parameter("w2_input_scale", w2_input_scale)
             set_weight_attrs(w2_input_scale, extra_weight_attrs)
         else:
+            # Dynamic activations are quantized in-kernel (no stored scale).
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
@@ -673,7 +716,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             if hasattr(layer, attr):
                 delattr(layer, attr)
 
-        # For static input scales, collapse per-expert scales to single max
+        # For static input scales, collapse the per-expert scales to a single
+        # value (the legacy fused_experts path expects one scale per layer).
         if self.static_input_scales:
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
                 raise ValueError(
@@ -709,7 +753,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                         ),
                     )
 
-        # For per-tensor weights, merge w1/w3 scales into single per-expert
+        # For per-tensor weights, merge the w1/w3 scales into a single
+        # per-expert scale (dequant -> requant at the max scale).
         if self.weight_qscheme == "per_tensor":
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
@@ -734,10 +779,42 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 max_w13_scales, requires_grad=False
             )
 
+        # Dynamic activations run through the oracle's modular kernel; static
+        # activations use the legacy fused_experts path in apply().
+        if not self.static_input_scales:
+            assert self.int8_backend is not None
+            assert self.experts_cls is not None
+            w13, w2 = convert_to_int8_moe_kernel_format(
+                int8_backend=self.int8_backend,
+                w13=layer.w13_weight,
+                w2=layer.w2_weight,
+                layer=layer,
+                w13_scale=layer.w13_weight_scale,
+            )
+            replace_parameter(layer, "w13_weight", w13)
+            replace_parameter(layer, "w2_weight", w2)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+
+        if not self.static_input_scales:
+            assert self.int8_backend is not None
+            assert self.experts_cls is not None
+            self.moe_kernel = make_int8_moe_kernel(
+                int8_backend=self.int8_backend,
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._expert_routing_tables(),
+                layer=layer,
+            )
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.weight_qscheme == "per_channel" and not self.static_input_scales:
+        # Static-activation INT8 has no oracle backend (it uses the legacy
+        # fused_experts path); build its config directly.
+        if self.int8_backend is None:
             return int8_w8a8_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
@@ -745,21 +822,18 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 a2_scale=layer.w2_input_scale,
                 w1_bias=getattr(layer, "w13_bias", None),
                 w2_bias=getattr(layer, "w2_bias", None),
-                per_act_token_quant=True,
+                per_act_token_quant=False,
             )
-        is_dynamic = not self.static_input_scales
-        is_per_channel = self.weight_qscheme == "per_channel"
-        return FusedMoEQuantConfig.make(
-            torch.int8,
+        return make_int8_moe_quant_config(
+            int8_backend=self.int8_backend,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            per_act_token_quant=is_dynamic,
-            per_out_ch_quant=is_per_channel,
-            block_shape=None,
+            per_act_token_quant=(self.weight_qscheme == "per_channel"),
+            layer=layer,
         )
 
     def apply(
@@ -771,6 +845,22 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.moe_kernel is not None:
+            return self.moe_kernel.apply(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                shared_experts_input=shared_experts_input,
+            )
+
+        # Static-activation INT8 MoE: legacy monolithic path (the modular kernel
+        # quantizes activations dynamically and cannot apply a loaded scale).
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         return fused_experts(

@@ -3,12 +3,12 @@
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -37,16 +37,22 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_num_reqs, dtype=torch.int64, device=device
         )
 
-        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-            self.draft_model_config
-        )
-        if self.supports_mm_inputs:
-            self.inputs_embeds = torch.zeros(
-                self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-            )
+        self.inputs_embeds: torch.Tensor | None = None
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+    def load_model(self, target_model: nn.Module) -> None:
+        super().load_model(target_model)
+        if not self.supports_mm_inputs:
+            return
+
+        self.inputs_embeds = torch.zeros(
+            self.max_num_tokens,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -295,6 +301,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:
+                assert self.inputs_embeds is not None
                 # Merge multimodal embeddings with input ids.
                 mm_embeds, is_mm_embed = mm_inputs or (None, None)
                 num_input_tokens = (
@@ -446,10 +453,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
         last_hidden_states = last_hidden_states[:num_reqs]
 
+        sample_positions = positions
+        if not self.advance_draft_positions:
+            # The forward pass holds positions fixed (Q-only, shared target KV),
+            # but Gumbel sampling still needs the absolute draft position.
+            sample_positions = positions + self.current_draft_step
+
         # Sample the draft tokens.
         draft_tokens = self.sample_draft(
             last_hidden_states,
-            positions,
+            sample_positions,
             idx_mapping,
             self.temperature,
             self.seeds,
@@ -630,6 +643,9 @@ def _prepare_decode_inputs_kernel(
     draft_token = tl.load(draft_tokens_ptr + req_idx * draft_tokens_stride)
     tl.store(input_ids_ptr + req_idx, draft_token)
 
+    target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
+    num_rejected = tl.load(num_rejected_ptr + req_idx)
+    seq_len = target_seq_len - num_rejected
     if ADVANCE_DRAFT_POSITIONS:
         # Compute position and seq_lens.
         # NOTE(woosuk): To prevent out-of-range access, we clamp these values
@@ -637,12 +653,8 @@ def _prepare_decode_inputs_kernel(
         position = tl.load(positions_ptr + req_idx)
         position = tl.minimum(position + 1, max_model_len - 1)
         tl.store(positions_ptr + req_idx, position)
-
-        target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
-        num_rejected = tl.load(num_rejected_ptr + req_idx)
-        seq_len = target_seq_len - num_rejected
         seq_len = tl.minimum(seq_len + 1, max_model_len)
-        tl.store(seq_lens_ptr + req_idx, seq_len)
+    tl.store(seq_lens_ptr + req_idx, seq_len)
 
 
 def prepare_decode_inputs(
