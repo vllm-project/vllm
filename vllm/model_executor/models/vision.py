@@ -597,22 +597,19 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
     rescale_factor = config.get("rescale_factor", 1 / 255)
 
     if None in [do_rescale, do_normalize, image_mean, image_std]:
-        processor = get_processor(model, revision=revision)
+        image_processor = get_processor(model, revision=revision).image_processor
 
         if do_rescale is None:
-            do_rescale = getattr(processor, "do_rescale", None)
+            do_rescale = getattr(image_processor, "do_rescale", None)
 
         if do_normalize is None:
-            do_normalize = getattr(processor, "do_normalize", None)
+            do_normalize = getattr(image_processor, "do_normalize", None)
 
         if image_mean is None:
-            image_mean = getattr(processor, "image_mean", None)
+            image_mean = getattr(image_processor, "image_mean", None)
 
         if image_std is None:
-            image_std = getattr(processor, "image_std", None)
-
-    if not do_rescale and not do_normalize:
-        return nn.Identity()
+            image_std = getattr(image_processor, "image_std", None)
 
     if not do_rescale:
         rescale_factor = 1.0
@@ -622,6 +619,9 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
         image_std = [1.0, 1.0, 1.0]
 
     assert None not in [do_rescale, do_normalize, image_mean, image_std]
+
+    if not do_rescale and not do_normalize:
+        return nn.Identity()
 
     image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
         1.0 / rescale_factor
