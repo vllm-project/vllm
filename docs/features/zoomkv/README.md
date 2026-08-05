@@ -257,6 +257,42 @@ representative long-context quality or performance. The measured sparse wall
 time includes first-use Triton/JIT compilation and must not be treated as a
 benchmark.
 
+### TP=4 65K concurrent benchmark
+
+The fixed Triton paged-gather implementation was also validated end to end
+against full attention with the following configuration:
+
+- Qwen3.6-27B BF16 on four NVIDIA H20 GPUs (`TP=4`)
+- 65,536 input tokens and 1,024 output tokens per request
+- concurrency 8 and 128 total requests
+- `gpu_memory_utilization=0.78`
+- ZoomKV replaces only the model's full-attention layers; GDN layers are
+  unchanged
+
+Both runs processed 8,388,608 input tokens and 131,072 output tokens. The
+ZoomKV run completed all 128 requests without an illegal memory access.
+
+| Metric | Full attention | ZoomKV | ZoomKV change |
+| --- | ---: | ---: | ---: |
+| Benchmark duration | 1,423.88 s | 1,235.22 s | 13.3% lower |
+| Request throughput | 0.09 req/s | 0.10 req/s | 11.1% higher |
+| Output throughput | 92.05 tok/s | 106.11 tok/s | 15.3% higher |
+| Total throughput | 5,983.41 tok/s | 6,897.30 tok/s | 15.3% higher |
+| Mean TTFT | 27,198.38 ms | 30,545.36 ms | 12.3% higher |
+| Median TTFT | 27,370.99 ms | 33,469.65 ms | 22.3% higher |
+| P99 TTFT | 58,339.25 ms | 60,065.94 ms | 3.0% higher |
+| Mean TPOT | 60.38 ms | 45.58 ms | 24.5% lower |
+| Median TPOT | 57.37 ms | 42.74 ms | 25.5% lower |
+| P99 TPOT | 86.06 ms | 66.25 ms | 23.0% lower |
+| Mean ITL | 60.45 ms | 45.70 ms | 24.4% lower |
+| Median ITL | 19.20 ms | 10.45 ms | 45.6% lower |
+| P99 ITL | 1,149.84 ms | 1,105.82 ms | 3.8% lower |
+
+This workload shows higher decode throughput and lower token latency, while
+TTFT is higher. The result is specific to this model, hardware, concurrency,
+and context length and should not be generalized to other workloads without
+additional measurement.
+
 ### Measuring per-decode-step Top-K recall
 
 `VLLM_ZOOMKV_RECALL_LOG=<dir>` enables a debug probe that, at every sparse
