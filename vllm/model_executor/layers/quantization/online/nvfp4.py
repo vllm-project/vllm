@@ -5,7 +5,6 @@ import torch
 from torch.nn import Module
 
 from vllm._custom_ops import scaled_fp4_quant
-from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -21,8 +20,10 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     FLOAT4_E2M1_MAX,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    amax_for_moe_weight_quant,
     kNvfp4Dynamic,
     kNvfp4Static,
+    weight_amax,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -32,7 +33,7 @@ FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 def _quantize_moe_weight_to_nvfp4(
     weight: torch.Tensor,
-    tp_group: torch.distributed.ProcessGroup | None = None,
+    moe_tp_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Quantize stacked MoE expert weights ``(E, N, K)`` to NVFP4.
 
@@ -45,14 +46,8 @@ def _quantize_moe_weight_to_nvfp4(
     num_experts, n, k = weight.shape
     assert k % 16 == 0, f"last dim must be a multiple of 16, got {k}"
 
-    amax = weight.abs().amax(dim=(1, 2)).to(torch.float32)
-    if tp_group is not None:
-        torch.distributed.all_reduce(
-            amax,
-            op=torch.distributed.ReduceOp.MAX,
-            group=tp_group,
-        )
-    amax.clamp_min_(1e-8)
+    amax = weight_amax(weight.flatten(1), dim=-1).to(torch.float32)
+    amax = amax_for_moe_weight_quant(amax, moe_tp_size).clamp_min(1e-8)
     global_scale = (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX) / amax
     weight_scale_2 = (1.0 / global_scale).to(torch.float32)
 
@@ -104,14 +99,12 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         layer._already_called_process_weights_after_loading = True
 
     def _quantize_weights(self, layer: Module) -> None:
-        # The EP group spans the DP x PCP x TP ranks across which non-EP MoE
-        # weights are tensor-sharded. In EP mode, moe.tp_size is 1.
-        tp_group = get_ep_group().device_group if self.moe.tp_size > 1 else None
+        moe_tp_size = self.moe.tp_size
         w13, w13_scale, w13_scale_2 = _quantize_moe_weight_to_nvfp4(
-            layer.w13_weight, tp_group
+            layer.w13_weight, moe_tp_size
         )
         w2, w2_scale, w2_scale_2 = _quantize_moe_weight_to_nvfp4(
-            layer.w2_weight, tp_group
+            layer.w2_weight, moe_tp_size
         )
 
         replace_parameter(layer, "w13_weight", w13)

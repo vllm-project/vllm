@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group, get_tp_group
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
@@ -35,13 +34,17 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    amax_for_moe_weight_quant,
+    amax_for_tp_weight_quant,
     create_fp8_quant_key,
+    get_fp8_min_max,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    weight_amax,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
@@ -58,6 +61,54 @@ from vllm.utils.math_utils import round_up
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods
 # ---------------------------------------------------------------------------
+
+
+def _fp8_max(device: torch.device) -> torch.Tensor:
+    # A 0-d tensor divisor keeps the true division the quant kernels do;
+    # dividing by a Python float lowers to multiply-by-reciprocal instead.
+    return torch.tensor(get_fp8_min_max()[1], device=device, dtype=torch.float32)
+
+
+def _fp8_scale(amax: torch.Tensor) -> torch.Tensor:
+    amax = amax.to(torch.float32)
+    return amax / _fp8_max(amax.device)
+
+
+def _fp8_channel_scale(amax: torch.Tensor) -> torch.Tensor:
+    fp8_max = _fp8_max(amax.device)
+    return _fp8_scale(amax).clamp_min(1.0 / (fp8_max * 512))
+
+
+# Chunk so the fp32 intermediate from the divide stays under ~64 MB, regardless
+# of how wide the weight is.
+_QUANT_CHUNK_ELEMS = 16 * 1024 * 1024
+
+
+def _fp8_quant_per_channel(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    # True division, matching the dynamic per-token kernel; the static kernel
+    # multiplies by the reciprocal instead and can round a value that sits on a
+    # representable midpoint the other way.
+    fp8_min, fp8_max = get_fp8_min_max()
+    out = torch.empty_like(weight, dtype=current_platform.fp8_dtype())
+    chunk_rows = max(1, _QUANT_CHUNK_ELEMS // weight.shape[-1])
+    for start in range(0, weight.shape[0], chunk_rows):
+        rows = slice(start, start + chunk_rows)
+        out[rows] = (weight[rows] / scale[rows]).clamp_(fp8_min, fp8_max).to(out.dtype)
+    return out
+
+
+def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
+    """Whether the weight is sharded along a dim its ``amax`` reduces over.
+
+    Row parallel shards the input dim, column parallel the output dim.
+    Per-output-channel scales only reduce the input dim, so they are already
+    unsharded-equivalent on column-parallel layers.
+    """
+    if layer.tp_size == 1:
+        return False
+    is_row_parallel = layer.input_size != layer.input_size_per_partition
+    is_column_parallel = layer.output_size != layer.output_size_per_partition
+    return is_row_parallel or (reduces_output_dim and is_column_parallel)
 
 
 class _Fp8OnlineLinearBase(LinearMethodBase):
@@ -102,24 +153,6 @@ class _Fp8OnlineLinearBase(LinearMethodBase):
         layer.register_parameter("weight", weight)
 
         initialize_online_processing(layer)
-
-
-def _quantize_linear_weight_per_tensor_fp8(
-    weight: torch.Tensor,
-    tp_group: torch.distributed.ProcessGroup | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a dense weight using a TP-global scale when sharded."""
-    if tp_group is None:
-        return ops.scaled_fp8_quant(weight)
-
-    amax = weight.abs().amax().to(torch.float32).reshape(1)
-    torch.distributed.all_reduce(
-        amax,
-        op=torch.distributed.ReduceOp.MAX,
-        group=tp_group,
-    )
-    scale = amax / torch.finfo(current_platform.fp8_dtype()).max
-    return ops.scaled_fp8_quant(weight, scale=scale)
 
 
 class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
@@ -175,16 +208,10 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
             return
 
         layer.input_scale = None
-        is_tp_sharded = (
-            layer.input_size_per_partition != layer.input_size
-            or layer.output_size_per_partition != layer.output_size
-        )
-        tp_group = (
-            get_tp_group().device_group if is_tp_sharded and layer.tp_size > 1 else None
-        )
-        qweight, weight_scale = _quantize_linear_weight_per_tensor_fp8(
-            layer.weight, tp_group
-        )
+        amax = weight_amax(layer.weight).reshape(1)
+        amax = amax_for_tp_weight_quant(amax, _is_tp_sharded(layer))
+        weight_scale = _fp8_scale(amax)
+        qweight, _ = ops.scaled_fp8_quant(layer.weight, scale=weight_scale)
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)
@@ -363,9 +390,12 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
             return
 
         layer.input_scale = None
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            layer.weight, scale=None, use_per_token_if_dynamic=True
+        amax = weight_amax(layer.weight, dim=-1, keepdim=True)
+        amax = amax_for_tp_weight_quant(
+            amax, _is_tp_sharded(layer, reduces_output_dim=False)
         )
+        weight_scale = _fp8_channel_scale(amax)
+        qweight = _fp8_quant_per_channel(layer.weight, weight_scale)
 
         replace_parameter(layer, "weight", qweight.t())
         replace_parameter(layer, "weight_scale", weight_scale)
@@ -395,31 +425,6 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
 # ---------------------------------------------------------------------------
 # Online FP8 MoE Methods
 # ---------------------------------------------------------------------------
-
-
-def _quantize_moe_weight_per_tensor_fp8(
-    weight: torch.Tensor,
-    tp_group: torch.distributed.ProcessGroup | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    fp8_dtype = current_platform.fp8_dtype()
-    qweight = torch.empty_like(weight, dtype=fp8_dtype)
-    scale = torch.empty(weight.shape[0], device=weight.device, dtype=torch.float32)
-
-    if tp_group is None:
-        for expert in range(weight.shape[0]):
-            qweight[expert], scale[expert] = ops.scaled_fp8_quant(weight[expert])
-        return qweight, scale
-
-    amax = weight.abs().amax(dim=(1, 2)).to(torch.float32)
-    torch.distributed.all_reduce(
-        amax,
-        op=torch.distributed.ReduceOp.MAX,
-        group=tp_group,
-    )
-    scale.copy_(amax / torch.finfo(fp8_dtype).max)
-    for expert in range(weight.shape[0]):
-        qweight[expert], _ = ops.scaled_fp8_quant(weight[expert], scale=scale[expert])
-    return qweight, scale
 
 
 class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
@@ -563,14 +568,28 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        # If checkpoint is fp16, quantize in place.
+        fp8_dtype = current_platform.fp8_dtype()
+        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        # The EP group spans the DP x PCP x TP ranks across which non-EP MoE
-        # weights are tensor-sharded. In EP mode, moe.tp_size is 1.
-        tp_group = get_ep_group().device_group if self.moe.tp_size > 1 else None
-        w13, w13_scale = _quantize_moe_weight_per_tensor_fp8(layer.w13_weight, tp_group)
-        w2, w2_scale = _quantize_moe_weight_per_tensor_fp8(layer.w2_weight, tp_group)
+        moe_tp_size = self.moe.tp_size
+        w13_amax = weight_amax(layer.w13_weight.flatten(1), dim=-1)
+        w13_amax = amax_for_moe_weight_quant(w13_amax, moe_tp_size)
+        w13_scale = _fp8_scale(w13_amax)
+        w2_amax = weight_amax(layer.w2_weight.flatten(1), dim=-1)
+        w2_amax = amax_for_moe_weight_quant(w2_amax, moe_tp_size)
+        w2_scale = _fp8_scale(w2_amax)
+
+        for expert in range(layer.local_num_experts):
+            w13[expert, :, :], _ = ops.scaled_fp8_quant(
+                layer.w13_weight[expert, :, :], scale=w13_scale[expert]
+            )
+            w2[expert, :, :], _ = ops.scaled_fp8_quant(
+                layer.w2_weight[expert, :, :], scale=w2_scale[expert]
+            )
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
@@ -768,15 +787,15 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         # construction, so it cannot drift from the weight's expert count
         # under EP / padded MoE.
         n_w13 = layer.w13_weight.shape[1]
-        n_w2 = layer.w2_weight.shape[1]
         w13_scale = torch.ones(
             w13.shape[0], n_w13, 1, device=w13.device, dtype=torch.float32
         )
-        w2_scale = torch.ones(
-            w2.shape[0], n_w2, 1, device=w2.device, dtype=torch.float32
-        )
         layer.w13_input_scale = None
         layer.w2_input_scale = None
+
+        w2_amax = weight_amax(layer.w2_weight, dim=-1, keepdim=True)
+        w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
+        w2_scale = _fp8_channel_scale(w2_amax)
 
         for expert in range(layer.local_num_experts):
             w13[expert], w13_scale[expert] = ops.scaled_fp8_quant(
@@ -784,10 +803,8 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
                 scale=None,
                 use_per_token_if_dynamic=True,
             )
-            w2[expert], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert],
-                scale=None,
-                use_per_token_if_dynamic=True,
+            w2[expert] = _fp8_quant_per_channel(
+                layer.w2_weight[expert], w2_scale[expert]
             )
 
         self._setup_kernel(
