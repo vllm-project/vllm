@@ -38,7 +38,7 @@ class TestSetting:
         ),
         # MoE model
         TestSetting(
-            model="ibm-granite/granite-3.0-1b-a400m",
+            model="ibm-granite/granite-3.0-1b-a400m-instruct",
             model_args=["--max-model-len", "2048"],
             pp_size=1,
             tp_size=1,
