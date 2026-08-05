@@ -62,17 +62,14 @@ def _topk_mask_shape(
 def _masked_mha_workspace_fits(
     batch_size: int,
     max_query_len: int,
-    context_chunk_max_seq_lens: list[int] | None,
+    max_context_chunk_seq_len: int,
     workspace_numel: int,
 ) -> bool:
     """Return whether the suffix and per-context-chunk masks fit the workspace.
 
     The global mask is excluded: it always needs more, and has its own check.
     """
-    max_key_len = max(
-        max_query_len,
-        max(context_chunk_max_seq_lens or (), default=0),
-    )
+    max_key_len = max(max_query_len, max_context_chunk_seq_len)
     needed = math.prod(_topk_mask_shape(batch_size, max_query_len, max_key_len))
     return needed <= workspace_numel
 
@@ -543,10 +540,13 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         fits = _masked_mha_workspace_fits(
             batch_size=len(prefill.query_lens_cpu),
             max_query_len=prefill.max_query_len,
-            context_chunk_max_seq_lens=(
-                None
+            max_context_chunk_seq_len=(
+                0
                 if prefill.chunked_context is None
-                else [chunk.max_seq_len for chunk in prefill.chunked_context.chunks]
+                else max(
+                    (chunk.max_seq_len for chunk in prefill.chunked_context.chunks),
+                    default=0,
+                )
             ),
             workspace_numel=workspace.numel(),
         )
