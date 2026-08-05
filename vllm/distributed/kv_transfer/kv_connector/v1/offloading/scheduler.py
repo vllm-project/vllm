@@ -273,6 +273,10 @@ class SchedulerOffloadConfig(NamedTuple):
             spec.blocks_per_chunk == 1
             and len(group_block_sizes) == 1
             and has_partial_recurrent_group
+            and not (
+                spec.kv_events_config.enable_kv_cache_events
+                and spec.kv_events_config.self_describing_kv_events
+            )
             and all(
                 config.sliding_window_size_in_chunks is None
                 or config.requires_cow_source
