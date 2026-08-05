@@ -24,7 +24,7 @@ use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
     ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
-    DynChatRenderer, NewChatOutputProcessorOptions,
+    DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
@@ -691,6 +691,8 @@ fn test_render_app() -> axum::Router {
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
+        tool_call_parser: ParserSelection::Auto,
+        reasoning_parser: ParserSelection::Auto,
         text: TextRequestProcessor::new(backend.clone(), 128),
         chat: ChatRequestProcessor::render_only(backend),
     }))

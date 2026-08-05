@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use vllm_chat::{
     ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
-    RendererSelection, load_model_backends,
+    ParserSelection, RendererSelection, load_model_backends,
 };
 use vllm_text::TextRequestProcessor;
 
@@ -23,6 +23,8 @@ pub struct RenderConfig {
     pub served_model_name: Vec<String>,
     pub host: String,
     pub port: u16,
+    pub tool_call_parser: ParserSelection,
+    pub reasoning_parser: ParserSelection,
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
@@ -34,6 +36,8 @@ pub struct RenderConfig {
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: Vec<String>,
+    pub(crate) tool_call_parser: ParserSelection,
+    pub(crate) reasoning_parser: ParserSelection,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
 }
@@ -60,6 +64,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
+        tool_call_parser: config.tool_call_parser.clone(),
+        reasoning_parser: config.reasoning_parser.clone(),
         text,
         chat,
     }))

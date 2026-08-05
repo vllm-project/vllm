@@ -56,6 +56,8 @@ fn render_args_build_supported_config() {
     assert_eq!(config.port, 8080);
     assert_eq!(config.max_model_len, 32768);
     assert_eq!(config.served_model_name, ["qwen"]);
+    assert_eq!(config.tool_call_parser, ParserSelection::Auto);
+    assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
 }

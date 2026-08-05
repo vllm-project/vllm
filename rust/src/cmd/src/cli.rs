@@ -116,6 +116,14 @@ pub struct RenderArgs {
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
+    /// Select the tool-call parser. Use `auto` to infer from the model or
+    /// `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    tool_call_parser: ParserSelection,
+    /// Select the reasoning parser. Use `auto` to infer from the model or
+    /// `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    reasoning_parser: ParserSelection,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -143,6 +151,8 @@ impl RenderArgs {
             served_model_name: self.served_model_name,
             host: self.host,
             port: self.port,
+            tool_call_parser: self.tool_call_parser,
+            reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),

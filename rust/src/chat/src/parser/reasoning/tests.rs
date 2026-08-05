@@ -38,6 +38,19 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
 }
 
 #[test]
+fn factory_does_not_route_qwen2_5_to_qwen3_parser() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen3-8B"),
+        Some(names::QWEN3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen2.5-0.5B-Instruct"),
+        None
+    );
+}
+
+#[test]
 fn factory_routes_step3p5_models_to_dedicated_parser() {
     let factory = ReasoningParserFactory::new();
     // step3p5 patterns must beat the bare `step3` substring.

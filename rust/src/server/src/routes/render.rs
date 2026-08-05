@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use thiserror_ext::AsReport as _;
-use vllm_chat::{NewChatOutputProcessorOptions, ParserSelection};
+use vllm_chat::NewChatOutputProcessorOptions;
 use vllm_llm::GenerateRequest;
 use vllm_text::TextRequest;
 
@@ -85,15 +85,13 @@ async fn render_chat(
 ) -> Result<Json<GenerateRequest>, ApiError> {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
-    let tool_call_parser = ParserSelection::Auto;
-    let reasoning_parser = ParserSelection::None;
     let (text_request, _) = state
         .chat
         .prepare(
             chat_request,
             NewChatOutputProcessorOptions {
-                tool_call_parser: &tool_call_parser,
-                reasoning_parser: &reasoning_parser,
+                tool_call_parser: &state.tool_call_parser,
+                reasoning_parser: &state.reasoning_parser,
             },
         )
         .await
