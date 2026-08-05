@@ -135,10 +135,10 @@ class CacheConfig:
     """The cache strategy for Mamba layers:
 
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size.
+    - "all": cache the mamba state of all tokens at position i * block_size. This is
+      the default behavior (for models that support it) when prefix caching is enabled.
     - "align": only cache the mamba state of the last token of each scheduler step and
-      when the token is at position i * block_size. This is the default when prefix
-      caching is enabled.
+      when the token is at position i * block_size.
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM history buffer length B: with use_replayssm, standard decode
