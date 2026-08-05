@@ -196,6 +196,14 @@ class Request:
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
 
+    @property
+    def ec_transfer_params(self) -> Any:
+        return self.kv_transfer_params
+
+    @ec_transfer_params.setter
+    def ec_transfer_params(self, value: Any) -> None:
+        self.kv_transfer_params = value
+
     @classmethod
     def from_engine_core_request(
         cls,
