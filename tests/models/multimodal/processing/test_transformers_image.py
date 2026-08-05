@@ -80,14 +80,17 @@ def test_image_multiple_inputs():
     assert len(result["mm_kwargs"]["image"]) == 2
 
 
-def test_image_cached_apply_gemma3():
-    model_id = "google/gemma-3-4b-it"
+@pytest.mark.parametrize(
+    "model_id",
+    ["google/gemma-3-4b-it", "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
+)
+def test_image_cached_apply(model_id):
     model_config = ModelConfig(model=model_id, model_impl="transformers")
     cache = MultiModalProcessorOnlyCache(model_config)
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config, cache=cache)
 
     image = ImageAsset("cherry_blossom").pil_image
-    image_token = mm_processor.info.get_hf_processor().boi_token
+    image_token = mm_processor.info.get_hf_processor().image_token
     prompt = f"{image_token} What is the content of this image?"
 
     for _ in range(2):
