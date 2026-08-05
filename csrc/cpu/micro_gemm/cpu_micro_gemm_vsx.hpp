@@ -73,56 +73,77 @@ class TileGemmVSX {
         __vector unsigned int vA_6[tiles_m];
         
         if constexpr (M >= 1) {
-            __vector unsigned short v0;
-            if constexpr (M >= 1) v0 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[0 * lda + k_idx]); else v0 = vzero;
-            __vector unsigned short v1;
-            if constexpr (M >= 2) v1 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[1 * lda + k_idx]); else v1 = vzero;
-            __vector unsigned short v2;
-            if constexpr (M >= 3) v2 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[2 * lda + k_idx]); else v2 = vzero;
-            __vector unsigned short v3;
-            if constexpr (M >= 4) v3 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[3 * lda + k_idx]); else v3 = vzero;
-            __vector unsigned int w0 = (__vector unsigned int)v0;
-            __vector unsigned int w1 = (__vector unsigned int)v1;
-            __vector unsigned int w2 = (__vector unsigned int)v2;
-            __vector unsigned int w3 = (__vector unsigned int)v3;
+            uint32_t val0_0 = 0, val1_0 = 0, val2_0 = 0, val3_0 = 0;
+            uint32_t val0_2 = 0, val1_2 = 0, val2_2 = 0, val3_2 = 0;
+            uint32_t val0_4 = 0, val1_4 = 0, val2_4 = 0, val3_4 = 0;
+            uint32_t val0_6 = 0, val1_6 = 0, val2_6 = 0, val3_6 = 0;
             
-            __vector unsigned int w01_h = vec_mergeh(w0, w1);
-            __vector unsigned int w23_h = vec_mergeh(w2, w3);
-            __vector unsigned int w01_l = vec_mergel(w0, w1);
-            __vector unsigned int w23_l = vec_mergel(w2, w3);
+            if constexpr (M >= 1) {
+                std::memcpy(&val0_0, &a_ptr[0 * lda + k_idx + 0], 4);
+                std::memcpy(&val0_2, &a_ptr[0 * lda + k_idx + 2], 4);
+                std::memcpy(&val0_4, &a_ptr[0 * lda + k_idx + 4], 4);
+                std::memcpy(&val0_6, &a_ptr[0 * lda + k_idx + 6], 4);
+            }
+            if constexpr (M >= 2) {
+                std::memcpy(&val1_0, &a_ptr[1 * lda + k_idx + 0], 4);
+                std::memcpy(&val1_2, &a_ptr[1 * lda + k_idx + 2], 4);
+                std::memcpy(&val1_4, &a_ptr[1 * lda + k_idx + 4], 4);
+                std::memcpy(&val1_6, &a_ptr[1 * lda + k_idx + 6], 4);
+            }
+            if constexpr (M >= 3) {
+                std::memcpy(&val2_0, &a_ptr[2 * lda + k_idx + 0], 4);
+                std::memcpy(&val2_2, &a_ptr[2 * lda + k_idx + 2], 4);
+                std::memcpy(&val2_4, &a_ptr[2 * lda + k_idx + 4], 4);
+                std::memcpy(&val2_6, &a_ptr[2 * lda + k_idx + 6], 4);
+            }
+            if constexpr (M >= 4) {
+                std::memcpy(&val3_0, &a_ptr[3 * lda + k_idx + 0], 4);
+                std::memcpy(&val3_2, &a_ptr[3 * lda + k_idx + 2], 4);
+                std::memcpy(&val3_4, &a_ptr[3 * lda + k_idx + 4], 4);
+                std::memcpy(&val3_6, &a_ptr[3 * lda + k_idx + 6], 4);
+            }
             
-            typedef __vector unsigned long long v_ull_t;
-            vA_0[0] = (__vector unsigned int)vec_mergeh((v_ull_t)w01_h, (v_ull_t)w23_h);
-            vA_2[0] = (__vector unsigned int)vec_mergel((v_ull_t)w01_h, (v_ull_t)w23_h);
-            vA_4[0] = (__vector unsigned int)vec_mergeh((v_ull_t)w01_l, (v_ull_t)w23_l);
-            vA_6[0] = (__vector unsigned int)vec_mergel((v_ull_t)w01_l, (v_ull_t)w23_l);
+            vA_0[0] = (__vector unsigned int){val0_0, val1_0, val2_0, val3_0};
+            vA_2[0] = (__vector unsigned int){val0_2, val1_2, val2_2, val3_2};
+            vA_4[0] = (__vector unsigned int){val0_4, val1_4, val2_4, val3_4};
+            vA_6[0] = (__vector unsigned int){val0_6, val1_6, val2_6, val3_6};
         }
         
         if constexpr (M >= 5) {
-            __vector unsigned short v4;
-            if constexpr (M >= 5) v4 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[4 * lda + k_idx]); else v4 = vzero;
-            __vector unsigned short v5;
-            if constexpr (M >= 6) v5 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[5 * lda + k_idx]); else v5 = vzero;
-            __vector unsigned short v6;
-            if constexpr (M >= 7) v6 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[6 * lda + k_idx]); else v6 = vzero;
-            __vector unsigned short v7;
-            if constexpr (M >= 8) v7 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[7 * lda + k_idx]); else v7 = vzero;
+            uint32_t val4_0 = 0, val5_0 = 0, val6_0 = 0, val7_0 = 0;
+            uint32_t val4_2 = 0, val5_2 = 0, val6_2 = 0, val7_2 = 0;
+            uint32_t val4_4 = 0, val5_4 = 0, val6_4 = 0, val7_4 = 0;
+            uint32_t val4_6 = 0, val5_6 = 0, val6_6 = 0, val7_6 = 0;
             
-            __vector unsigned int w4 = (__vector unsigned int)v4;
-            __vector unsigned int w5 = (__vector unsigned int)v5;
-            __vector unsigned int w6 = (__vector unsigned int)v6;
-            __vector unsigned int w7 = (__vector unsigned int)v7;
+            if constexpr (M >= 5) {
+                std::memcpy(&val4_0, &a_ptr[4 * lda + k_idx + 0], 4);
+                std::memcpy(&val4_2, &a_ptr[4 * lda + k_idx + 2], 4);
+                std::memcpy(&val4_4, &a_ptr[4 * lda + k_idx + 4], 4);
+                std::memcpy(&val4_6, &a_ptr[4 * lda + k_idx + 6], 4);
+            }
+            if constexpr (M >= 6) {
+                std::memcpy(&val5_0, &a_ptr[5 * lda + k_idx + 0], 4);
+                std::memcpy(&val5_2, &a_ptr[5 * lda + k_idx + 2], 4);
+                std::memcpy(&val5_4, &a_ptr[5 * lda + k_idx + 4], 4);
+                std::memcpy(&val5_6, &a_ptr[5 * lda + k_idx + 6], 4);
+            }
+            if constexpr (M >= 7) {
+                std::memcpy(&val6_0, &a_ptr[6 * lda + k_idx + 0], 4);
+                std::memcpy(&val6_2, &a_ptr[6 * lda + k_idx + 2], 4);
+                std::memcpy(&val6_4, &a_ptr[6 * lda + k_idx + 4], 4);
+                std::memcpy(&val6_6, &a_ptr[6 * lda + k_idx + 6], 4);
+            }
+            if constexpr (M >= 8) {
+                std::memcpy(&val7_0, &a_ptr[7 * lda + k_idx + 0], 4);
+                std::memcpy(&val7_2, &a_ptr[7 * lda + k_idx + 2], 4);
+                std::memcpy(&val7_4, &a_ptr[7 * lda + k_idx + 4], 4);
+                std::memcpy(&val7_6, &a_ptr[7 * lda + k_idx + 6], 4);
+            }
             
-            __vector unsigned int w45_h = vec_mergeh(w4, w5);
-            __vector unsigned int w67_h = vec_mergeh(w6, w7);
-            __vector unsigned int w45_l = vec_mergel(w4, w5);
-            __vector unsigned int w67_l = vec_mergel(w6, w7);
-            
-            typedef __vector unsigned long long v_ull_t;
-            vA_0[1] = (__vector unsigned int)vec_mergeh((v_ull_t)w45_h, (v_ull_t)w67_h);
-            vA_2[1] = (__vector unsigned int)vec_mergel((v_ull_t)w45_h, (v_ull_t)w67_h);
-            vA_4[1] = (__vector unsigned int)vec_mergeh((v_ull_t)w45_l, (v_ull_t)w67_l);
-            vA_6[1] = (__vector unsigned int)vec_mergel((v_ull_t)w45_l, (v_ull_t)w67_l);
+            vA_0[1] = (__vector unsigned int){val4_0, val5_0, val6_0, val7_0};
+            vA_2[1] = (__vector unsigned int){val4_2, val5_2, val6_2, val7_2};
+            vA_4[1] = (__vector unsigned int){val4_4, val5_4, val6_4, val7_4};
+            vA_6[1] = (__vector unsigned int){val4_6, val5_6, val6_6, val7_6};
         }
         
         // Load B and GER for k_idx + 0

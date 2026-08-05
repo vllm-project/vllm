@@ -342,36 +342,31 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
                                          actual_token_num, input_size_13);
             curr_expand_token_id_buffer += actual_token_num;
           } else {
-            if (actual_token_num == 1) {
-              curr_w13_gemm_input_buffer = input + curr_expand_token_id_buffer[0] * input_size_13;
-              curr_expand_token_id_buffer++;
-            } else {
-              // copy inputs
-              curr_w13_gemm_input_buffer = curr_w13_input_buffer;
-              scalar_t* __restrict__ curr_w13_input_buffer_iter =
-                  curr_w13_input_buffer;
-              for (int32_t i = 0; i < actual_token_num; ++i) {
-                const int32_t curr_token_id = curr_expand_token_id_buffer[i];
-                int8_t* __restrict__ curr_input_iter = reinterpret_cast<int8_t*>(
-                    input + curr_token_id * input_size_13);
-                int8_t* __restrict__ curr_output_iter =
-                    reinterpret_cast<int8_t*>(curr_w13_input_buffer_iter);
-                int32_t j = 0;
-                for (; j < input_size_13_bytes - 64; j += 64) {
-                  vec_op::INT8Vec64 vec(curr_input_iter);
-                  vec.save(curr_output_iter);
-                  curr_input_iter += 64;
-                  curr_output_iter += 64;
-                }
+            // copy inputs
+            curr_w13_gemm_input_buffer = curr_w13_input_buffer;
+            scalar_t* __restrict__ curr_w13_input_buffer_iter =
+                curr_w13_input_buffer;
+            for (int32_t i = 0; i < actual_token_num; ++i) {
+              const int32_t curr_token_id = curr_expand_token_id_buffer[i];
+              int8_t* __restrict__ curr_input_iter = reinterpret_cast<int8_t*>(
+                  input + curr_token_id * input_size_13);
+              int8_t* __restrict__ curr_output_iter =
+                  reinterpret_cast<int8_t*>(curr_w13_input_buffer_iter);
+              int32_t j = 0;
+              for (; j < input_size_13_bytes - 64; j += 64) {
                 vec_op::INT8Vec64 vec(curr_input_iter);
-                vec.save(curr_output_iter, input_size_13_bytes - j);
-
-                // update
-                curr_w13_input_buffer_iter += input_size_13;
+                vec.save(curr_output_iter);
+                curr_input_iter += 64;
+                curr_output_iter += 64;
               }
+              vec_op::INT8Vec64 vec(curr_input_iter);
+              vec.save(curr_output_iter, input_size_13_bytes - j);
+
               // update
-              curr_expand_token_id_buffer += actual_token_num;
+              curr_w13_input_buffer_iter += input_size_13;
             }
+            // update
+            curr_expand_token_id_buffer += actual_token_num;
           }
 
           // gemm + act
