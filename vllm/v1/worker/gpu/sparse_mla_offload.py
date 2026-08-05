@@ -39,14 +39,13 @@ def _names(value: str) -> tuple[str, ...]:
 _PER_LAYER_BUFFERS = frozenset(
     _names(
         "resident_main_kv resident_logical_ids resident_last_access "
-        "resident_generation newest_main_kv newest_logical_ids "
-        "newest_generation provisional_slots"
+        "newest_main_kv newest_logical_ids provisional_slots"
     )
 )
 _LOCAL_BUFFER_NAMES = _names(
     "resident_main_kv resident_logical_ids resident_last_access "
-    "resident_generation newest_main_kv newest_logical_ids newest_generation "
-    "request_block_ids request_num_blocks request_num_tokens request_generation "
+    "newest_main_kv newest_logical_ids request_block_ids request_num_blocks "
+    "request_num_tokens "
     "request_active topk_logical_ids topk_physical_ids topk_hit_mask "
     "miss_logical_ids miss_victim_slots miss_counts provisional_slots "
     "accepted_counts hit_output hit_lse miss_output miss_lse tp_fence_token"
@@ -343,8 +342,10 @@ class SparseMLAOffloadManager:
         request_block_ids = self._local_buffers["request_block_ids"]
         request_num_blocks = self._local_buffers["request_num_blocks"]
         request_num_tokens = self._local_buffers["request_num_tokens"]
-        request_generation = self._local_buffers["request_generation"]
         request_active = self._local_buffers["request_active"]
+        resident_logical_ids = self._local_buffers["resident_logical_ids"]
+        newest_logical_ids = self._local_buffers["newest_logical_ids"]
+        resident_last_access = self._local_buffers["resident_last_access"]
         max_num_reqs, request_block_width = request_block_ids.shape
         num_reqs = len(req_ids)
         device = request_block_ids.device
@@ -386,23 +387,12 @@ class SparseMLAOffloadManager:
                 invalidate = previous_req_id != req_id or req_id in reset_ids
                 self._row_request_ids[row] = req_id
             else:
-                invalidate = True
+                invalidate = previous_req_id is not None
                 self._row_request_ids[row] = None
-            if row >= num_reqs and previous_req_id is None:
-                increment_generation = False
-            else:
-                increment_generation = invalidate
-            if increment_generation:
-                request_generation[row].add_(1)
             if invalidate:
-                for name in (
-                    "resident_logical_ids",
-                    "resident_generation",
-                    "newest_logical_ids",
-                    "newest_generation",
-                ):
-                    self._local_buffers[name][:, row].fill_(-1)
-                self._local_buffers["resident_last_access"][:, row].zero_()
+                resident_logical_ids[:, row].fill_(-1)
+                newest_logical_ids[:, row].fill_(-1)
+                resident_last_access[:, row].zero_()
 
         request_block_ids.fill_(-1)
         request_num_blocks.zero_()
@@ -634,9 +624,7 @@ class SparseMLAOffloadManager:
         self._row_request_ids = [None] * local_buffers["request_active"].shape[0]
         for name in (
             "resident_logical_ids",
-            "resident_generation",
             "newest_logical_ids",
-            "newest_generation",
             "request_block_ids",
             "topk_logical_ids",
             "topk_physical_ids",
@@ -649,7 +637,6 @@ class SparseMLAOffloadManager:
             "resident_last_access",
             "request_num_blocks",
             "request_num_tokens",
-            "request_generation",
             "miss_counts",
             "accepted_counts",
             "tp_fence_token",

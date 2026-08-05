@@ -23,18 +23,15 @@ __device__ bool slot_reserved(int slot, int topk, const int32_t* resident_hits,
 }
 
 __device__ int choose_victim(const int64_t* resident_ids,
-                             const int64_t* resident_access,
-                             const int64_t* resident_generation,
-                             int resident_rows, int64_t generation, int topk,
-                             const int32_t* resident_hits,
+                             const int64_t* resident_access, int resident_rows,
+                             int topk, const int32_t* resident_hits,
                              const int32_t* chosen_slots) {
   int best_slot = -1;
   int best_valid = 2;
   int64_t best_access = std::numeric_limits<int64_t>::max();
   for (int slot = 0; slot < resident_rows; ++slot) {
     if (slot_reserved(slot, topk, resident_hits, chosen_slots)) continue;
-    const bool valid =
-        resident_ids[slot] >= 0 && resident_generation[slot] == generation;
+    const bool valid = resident_ids[slot] >= 0;
     const int valid_key = valid ? 1 : 0;
     const int64_t access_key = valid ? resident_access[slot] : 0;
     if (valid_key < best_valid ||
@@ -84,15 +81,13 @@ __global__ void validate_rows_kernel(
 
 __global__ void plan_rows_kernel(
     const uint16_t* current_main_kv, const int32_t* request_num_tokens,
-    const int64_t* request_generation, const int32_t* req_id_per_token,
-    const int32_t* topk_logical_ids, uint16_t* resident_main_kv,
-    int64_t* resident_logical_ids, int64_t* resident_last_access,
-    int64_t* resident_generation, uint16_t* newest_main_kv,
-    int64_t* newest_logical_ids, int64_t* newest_generation,
-    int32_t* topk_physical_ids, bool* topk_hit_mask, int32_t* miss_logical_ids,
-    int32_t* miss_victim_slots, int32_t* miss_counts, int32_t* hit_counts,
-    int token_rows, int scratch_rows, int topk, int resident_rows,
-    int head_dim) {
+    const int32_t* req_id_per_token, const int32_t* topk_logical_ids,
+    uint16_t* resident_main_kv, int64_t* resident_logical_ids,
+    int64_t* resident_last_access, uint16_t* newest_main_kv,
+    int64_t* newest_logical_ids, int32_t* topk_physical_ids,
+    bool* topk_hit_mask, int32_t* miss_logical_ids, int32_t* miss_victim_slots,
+    int32_t* miss_counts, int32_t* hit_counts, int token_rows, int scratch_rows,
+    int topk, int resident_rows, int head_dim) {
   const int row = blockIdx.x;
   if (row >= scratch_rows || threadIdx.x != 0) return;
   int32_t* hit_indices = topk_physical_ids + row * topk;
@@ -111,21 +106,18 @@ __global__ void plan_rows_kernel(
   if (!valid) return;
 
   const int request = req_id_per_token[row];
-  const int64_t generation = request_generation[request];
   const int64_t access = request_num_tokens[request];
   const int64_t current_id = access - 1;
   const int resident_base = request * resident_rows;
   const int64_t previous_newest_id = newest_logical_ids[request];
-  const bool previous_newest_valid =
-      previous_newest_id >= 0 && newest_generation[request] == generation;
+  const bool previous_newest_valid = previous_newest_id >= 0;
 
   for (int item = 0; item < topk; ++item) {
     const int logical = topk_logical_ids[row * topk + item];
     if (logical < 0) continue;
     for (int slot = 0; slot < resident_rows; ++slot) {
       const int index = resident_base + slot;
-      if (resident_logical_ids[index] == logical &&
-          resident_generation[index] == generation) {
+      if (resident_logical_ids[index] == logical) {
         hit_indices[item] = slot;
         break;
       }
@@ -156,9 +148,8 @@ __global__ void plan_rows_kernel(
     const bool current_hit = logical == current_id;
     if (!newest_hit && !current_hit) continue;
     slot = choose_victim(resident_logical_ids + resident_base,
-                         resident_last_access + resident_base,
-                         resident_generation + resident_base, resident_rows,
-                         generation, topk, hit_indices, victim_slots);
+                         resident_last_access + resident_base, resident_rows,
+                         topk, hit_indices, victim_slots);
     if (slot < 0) continue;
     victim_slots[item] = slot;
 
@@ -168,7 +159,6 @@ __global__ void plan_rows_kernel(
     for (int dim = 0; dim < head_dim; ++dim) target[dim] = source[dim];
     resident_logical_ids[resident_base + slot] = logical;
     resident_last_access[resident_base + slot] = access;
-    resident_generation[resident_base + slot] = generation;
     hit_mask[item] = true;
   }
 
@@ -182,9 +172,8 @@ __global__ void plan_rows_kernel(
     if (duplicate) continue;
     victim_slots[item] =
         choose_victim(resident_logical_ids + resident_base,
-                      resident_last_access + resident_base,
-                      resident_generation + resident_base, resident_rows,
-                      generation, topk, hit_indices, victim_slots);
+                      resident_last_access + resident_base, resident_rows, topk,
+                      hit_indices, victim_slots);
   }
 
   int hit_count = 0;
@@ -215,7 +204,6 @@ __global__ void plan_rows_kernel(
   uint16_t* newest = newest_main_kv + request * head_dim;
   for (int dim = 0; dim < head_dim; ++dim) newest[dim] = current[dim];
   newest_logical_ids[request] = current_id;
-  newest_generation[request] = generation;
   hit_counts[row] = hit_count;
   miss_counts[row] = miss_count;
 }
@@ -223,13 +211,12 @@ __global__ void plan_rows_kernel(
 __global__ void transfer_misses_kernel(
     const uint16_t* main_host_kv, const int32_t* request_block_ids,
     const int32_t* request_num_blocks, const int32_t* request_num_tokens,
-    const int64_t* request_generation, const bool* request_active,
-    const int32_t* req_id_per_token, const int32_t* miss_logical_ids,
-    const int32_t* miss_victim_slots, const int32_t* miss_counts,
-    uint16_t* resident_main_kv, int64_t* resident_logical_ids,
-    int64_t* resident_last_access, int64_t* resident_generation, int token_rows,
-    int topk, int request_slots, int request_block_width, int resident_rows,
-    int num_host_blocks, int block_size, int head_dim) {
+    const bool* request_active, const int32_t* req_id_per_token,
+    const int32_t* miss_logical_ids, const int32_t* miss_victim_slots,
+    const int32_t* miss_counts, uint16_t* resident_main_kv,
+    int64_t* resident_logical_ids, int64_t* resident_last_access,
+    int token_rows, int topk, int request_slots, int request_block_width,
+    int resident_rows, int num_host_blocks, int block_size, int head_dim) {
   const int work = blockIdx.x;
   const int row = work / topk;
   const int miss = work % topk;
@@ -261,7 +248,6 @@ __global__ void transfer_misses_kernel(
   if (threadIdx.x == 0) {
     resident_logical_ids[global_slot] = logical;
     resident_last_access[global_slot] = request_num_tokens[request];
-    resident_generation[global_slot] = request_generation[request];
   }
 }
 
@@ -318,17 +304,14 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
                            const torch::stable::Tensor& request_block_ids,
                            const torch::stable::Tensor& request_num_blocks,
                            const torch::stable::Tensor& request_num_tokens,
-                           const torch::stable::Tensor& request_generation,
                            const torch::stable::Tensor& request_active,
                            const torch::stable::Tensor& req_id_per_token,
                            const torch::stable::Tensor& topk_logical_ids,
                            torch::stable::Tensor& resident_main_kv,
                            torch::stable::Tensor& resident_logical_ids,
                            torch::stable::Tensor& resident_last_access,
-                           torch::stable::Tensor& resident_generation,
                            torch::stable::Tensor& newest_main_kv,
                            torch::stable::Tensor& newest_logical_ids,
-                           torch::stable::Tensor& newest_generation,
                            torch::stable::Tensor& topk_physical_ids,
                            torch::stable::Tensor& topk_hit_mask,
                            torch::stable::Tensor& miss_logical_ids,
@@ -344,8 +327,6 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
                                   device_index);
   check_cuda_contiguous_on_device(request_num_tokens, "request_num_tokens",
                                   device_index);
-  check_cuda_contiguous_on_device(request_generation, "request_generation",
-                                  device_index);
   check_cuda_contiguous_on_device(request_active, "request_active",
                                   device_index);
   check_cuda_contiguous_on_device(req_id_per_token, "req_id_per_token",
@@ -358,13 +339,9 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
                                   device_index);
   check_cuda_contiguous_on_device(resident_last_access, "resident_last_access",
                                   device_index);
-  check_cuda_contiguous_on_device(resident_generation, "resident_generation",
-                                  device_index);
   check_cuda_contiguous_on_device(newest_main_kv, "newest_main_kv",
                                   device_index);
   check_cuda_contiguous_on_device(newest_logical_ids, "newest_logical_ids",
-                                  device_index);
-  check_cuda_contiguous_on_device(newest_generation, "newest_generation",
                                   device_index);
   check_cuda_contiguous_on_device(topk_physical_ids, "topk_physical_ids",
                                   device_index);
@@ -390,12 +367,9 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
                       miss_counts.scalar_type() == ScalarType::Int &&
                       hit_counts.scalar_type() == ScalarType::Int,
                   "sparse MLA indices and counts must be int32");
-  STD_TORCH_CHECK(request_generation.scalar_type() == ScalarType::Long &&
-                      resident_logical_ids.scalar_type() == ScalarType::Long &&
+  STD_TORCH_CHECK(resident_logical_ids.scalar_type() == ScalarType::Long &&
                       resident_last_access.scalar_type() == ScalarType::Long &&
-                      resident_generation.scalar_type() == ScalarType::Long &&
-                      newest_logical_ids.scalar_type() == ScalarType::Long &&
-                      newest_generation.scalar_type() == ScalarType::Long,
+                      newest_logical_ids.scalar_type() == ScalarType::Long,
                   "sparse MLA persistent metadata must be int64");
   STD_TORCH_CHECK(request_active.scalar_type() == ScalarType::Bool &&
                       topk_hit_mask.scalar_type() == ScalarType::Bool,
@@ -403,15 +377,13 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
   STD_TORCH_CHECK(
       current_main_kv.dim() == 2 && request_block_ids.dim() == 2 &&
           request_num_blocks.dim() == 1 && request_num_tokens.dim() == 1 &&
-          request_generation.dim() == 1 && request_active.dim() == 1 &&
-          req_id_per_token.dim() == 1 && topk_logical_ids.dim() == 3 &&
-          resident_main_kv.dim() == 3 && resident_logical_ids.dim() == 2 &&
-          resident_last_access.dim() == 2 && resident_generation.dim() == 2 &&
+          request_active.dim() == 1 && req_id_per_token.dim() == 1 &&
+          topk_logical_ids.dim() == 3 && resident_main_kv.dim() == 3 &&
+          resident_logical_ids.dim() == 2 && resident_last_access.dim() == 2 &&
           newest_main_kv.dim() == 3 && newest_logical_ids.dim() == 2 &&
-          newest_generation.dim() == 2 && topk_physical_ids.dim() == 3 &&
-          topk_hit_mask.dim() == 3 && miss_logical_ids.dim() == 3 &&
-          miss_victim_slots.dim() == 3 && miss_counts.dim() == 2 &&
-          hit_counts.dim() == 1,
+          topk_physical_ids.dim() == 3 && topk_hit_mask.dim() == 3 &&
+          miss_logical_ids.dim() == 3 && miss_victim_slots.dim() == 3 &&
+          miss_counts.dim() == 2 && hit_counts.dim() == 1,
       "invalid sparse MLA tensor rank");
   const int token_rows = current_main_kv.size(0);
   const int request_slots = resident_main_kv.size(0);
@@ -428,7 +400,6 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
           request_block_ids.size(0) == request_slots &&
           request_num_blocks.size(0) == request_slots &&
           request_num_tokens.size(0) == request_slots &&
-          request_generation.size(0) == request_slots &&
           request_active.size(0) == request_slots &&
           req_id_per_token.size(0) == token_rows &&
           topk_logical_ids.size(0) == request_slots &&
@@ -438,11 +409,9 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
           resident_logical_ids.size(0) == request_slots &&
           resident_logical_ids.size(1) == resident_rows &&
           resident_last_access.sizes().equals(resident_logical_ids.sizes()) &&
-          resident_generation.sizes().equals(resident_logical_ids.sizes()) &&
           newest_logical_ids.size(0) == request_slots &&
-          newest_logical_ids.size(1) == 1 &&
-          newest_generation.sizes().equals(newest_logical_ids.sizes()) &&
-          topk_physical_ids.size(1) == 1 && topk_physical_ids.size(2) == topk &&
+          newest_logical_ids.size(1) == 1 && topk_physical_ids.size(1) == 1 &&
+          topk_physical_ids.size(2) == topk &&
           topk_hit_mask.sizes().equals(topk_physical_ids.sizes()) &&
           miss_logical_ids.sizes().equals(topk_physical_ids.sizes()) &&
           miss_victim_slots.sizes().equals(topk_physical_ids.sizes()) &&
@@ -464,16 +433,13 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
   plan_rows_kernel<<<scratch_rows, 1, 0, stream>>>(
       static_cast<const uint16_t*>(current_main_kv.const_data_ptr()),
       request_num_tokens.const_data_ptr<int32_t>(),
-      request_generation.const_data_ptr<int64_t>(),
       req_id_per_token.const_data_ptr<int32_t>(),
       topk_logical_ids.const_data_ptr<int32_t>(),
       static_cast<uint16_t*>(resident_main_kv.mutable_data_ptr()),
       resident_logical_ids.mutable_data_ptr<int64_t>(),
       resident_last_access.mutable_data_ptr<int64_t>(),
-      resident_generation.mutable_data_ptr<int64_t>(),
       static_cast<uint16_t*>(newest_main_kv.mutable_data_ptr()),
       newest_logical_ids.mutable_data_ptr<int64_t>(),
-      newest_generation.mutable_data_ptr<int64_t>(),
       topk_physical_ids.mutable_data_ptr<int32_t>(),
       topk_hit_mask.mutable_data_ptr<bool>(),
       miss_logical_ids.mutable_data_ptr<int32_t>(),
@@ -491,7 +457,6 @@ void sparse_mla_offload_transfer(
     const torch::stable::Tensor& request_block_ids,
     const torch::stable::Tensor& request_num_blocks,
     const torch::stable::Tensor& request_num_tokens,
-    const torch::stable::Tensor& request_generation,
     const torch::stable::Tensor& request_active,
     const torch::stable::Tensor& req_id_per_token,
     const torch::stable::Tensor& newest_main_kv,
@@ -502,8 +467,7 @@ void sparse_mla_offload_transfer(
     const torch::stable::Tensor& hit_counts,
     torch::stable::Tensor& resident_main_kv,
     torch::stable::Tensor& resident_logical_ids,
-    torch::stable::Tensor& resident_last_access,
-    torch::stable::Tensor& resident_generation, bool is_host_writer,
+    torch::stable::Tensor& resident_last_access, bool is_host_writer,
     int64_t block_size) {
   check_cuda_contiguous(resident_main_kv, "resident_main_kv");
   const int device_index = resident_main_kv.get_device_index();
@@ -514,8 +478,6 @@ void sparse_mla_offload_transfer(
   check_cuda_contiguous_on_device(request_num_blocks, "request_num_blocks",
                                   device_index);
   check_cuda_contiguous_on_device(request_num_tokens, "request_num_tokens",
-                                  device_index);
-  check_cuda_contiguous_on_device(request_generation, "request_generation",
                                   device_index);
   check_cuda_contiguous_on_device(request_active, "request_active",
                                   device_index);
@@ -535,8 +497,6 @@ void sparse_mla_offload_transfer(
                                   device_index);
   check_cuda_contiguous_on_device(resident_last_access, "resident_last_access",
                                   device_index);
-  check_cuda_contiguous_on_device(resident_generation, "resident_generation",
-                                  device_index);
   STD_TORCH_CHECK(main_host_kv_uva.scalar_type() == ScalarType::BFloat16 &&
                       newest_main_kv.scalar_type() == ScalarType::BFloat16 &&
                       resident_main_kv.scalar_type() == ScalarType::BFloat16,
@@ -550,24 +510,21 @@ void sparse_mla_offload_transfer(
                       miss_counts.scalar_type() == ScalarType::Int &&
                       hit_counts.scalar_type() == ScalarType::Int,
                   "sparse MLA indices and counts must be int32");
-  STD_TORCH_CHECK(request_generation.scalar_type() == ScalarType::Long &&
-                      newest_logical_ids.scalar_type() == ScalarType::Long &&
+  STD_TORCH_CHECK(newest_logical_ids.scalar_type() == ScalarType::Long &&
                       resident_logical_ids.scalar_type() == ScalarType::Long &&
-                      resident_last_access.scalar_type() == ScalarType::Long &&
-                      resident_generation.scalar_type() == ScalarType::Long,
+                      resident_last_access.scalar_type() == ScalarType::Long,
                   "sparse MLA persistent metadata must be int64");
   STD_TORCH_CHECK(request_active.scalar_type() == ScalarType::Bool,
                   "request_active must be bool");
   STD_TORCH_CHECK(
       main_host_kv_uva.dim() == 3 && request_block_ids.dim() == 2 &&
           request_num_blocks.dim() == 1 && request_num_tokens.dim() == 1 &&
-          request_generation.dim() == 1 && request_active.dim() == 1 &&
-          req_id_per_token.dim() == 1 && newest_main_kv.dim() == 3 &&
-          newest_logical_ids.dim() == 2 && miss_logical_ids.dim() == 3 &&
-          miss_victim_slots.dim() == 3 && miss_counts.dim() == 2 &&
-          hit_counts.dim() == 1 && resident_main_kv.dim() == 3 &&
-          resident_logical_ids.dim() == 2 && resident_last_access.dim() == 2 &&
-          resident_generation.dim() == 2,
+          request_active.dim() == 1 && req_id_per_token.dim() == 1 &&
+          newest_main_kv.dim() == 3 && newest_logical_ids.dim() == 2 &&
+          miss_logical_ids.dim() == 3 && miss_victim_slots.dim() == 3 &&
+          miss_counts.dim() == 2 && hit_counts.dim() == 1 &&
+          resident_main_kv.dim() == 3 && resident_logical_ids.dim() == 2 &&
+          resident_last_access.dim() == 2,
       "invalid sparse MLA transfer tensor rank");
   const int token_rows = req_id_per_token.size(0);
   const int topk = miss_logical_ids.size(2);
@@ -586,7 +543,6 @@ void sparse_mla_offload_transfer(
           request_block_ids.size(0) == request_slots &&
           request_num_blocks.size(0) == request_slots &&
           request_num_tokens.size(0) == request_slots &&
-          request_generation.size(0) == request_slots &&
           request_active.size(0) == request_slots &&
           newest_main_kv.size(0) == request_slots &&
           newest_main_kv.size(1) == 1 && newest_main_kv.size(2) == head_dim &&
@@ -599,8 +555,7 @@ void sparse_mla_offload_transfer(
           hit_counts.size(0) == request_slots &&
           resident_logical_ids.size(0) == request_slots &&
           resident_logical_ids.size(1) == resident_rows &&
-          resident_last_access.sizes().equals(resident_logical_ids.sizes()) &&
-          resident_generation.sizes().equals(resident_logical_ids.sizes()),
+          resident_last_access.sizes().equals(resident_logical_ids.sizes()),
       "invalid sparse MLA transfer static shape");
   const torch::stable::accelerator::DeviceGuard guard(device_index);
   const cudaStream_t stream = get_current_cuda_stream(device_index);
@@ -609,7 +564,6 @@ void sparse_mla_offload_transfer(
       request_block_ids.const_data_ptr<int32_t>(),
       request_num_blocks.const_data_ptr<int32_t>(),
       request_num_tokens.const_data_ptr<int32_t>(),
-      request_generation.const_data_ptr<int64_t>(),
       request_active.const_data_ptr<bool>(),
       req_id_per_token.const_data_ptr<int32_t>(),
       miss_logical_ids.const_data_ptr<int32_t>(),
@@ -617,8 +571,7 @@ void sparse_mla_offload_transfer(
       miss_counts.const_data_ptr<int32_t>(),
       static_cast<uint16_t*>(resident_main_kv.mutable_data_ptr()),
       resident_logical_ids.mutable_data_ptr<int64_t>(),
-      resident_last_access.mutable_data_ptr<int64_t>(),
-      resident_generation.mutable_data_ptr<int64_t>(), token_rows, topk,
+      resident_last_access.mutable_data_ptr<int64_t>(), token_rows, topk,
       request_slots, request_block_width, resident_rows, num_host_blocks,
       block_size, head_dim);
   if (is_host_writer) {

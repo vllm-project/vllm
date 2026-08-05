@@ -34,7 +34,6 @@ def _make_sparse_mla_offload_case(num_heads: int, *, writer: bool):
     request_num_tokens = torch.full(
         (_OFFLOAD_REQUESTS,), 128, dtype=torch.int32, device=device
     )
-    generation = torch.full((_OFFLOAD_REQUESTS,), 7, dtype=torch.int64, device=device)
     resident_kv = torch.zeros(
         _OFFLOAD_REQUESTS,
         _OFFLOAD_RESIDENT,
@@ -48,13 +47,11 @@ def _make_sparse_mla_offload_case(num_heads: int, *, writer: bool):
         dtype=torch.int64,
         device=device,
     )
-    resident_generation = torch.full_like(resident_ids, -1)
     resident_access = torch.zeros_like(resident_ids)
     for request in range(_OFFLOAD_REQUESTS):
         physical = request_block_ids[request, 0].item()
         resident_kv[request, :32].copy_(host[physical, :32])
     resident_ids[:, :32] = torch.arange(32, dtype=torch.int64, device=device)
-    resident_generation[:, :32] = 7
     newest_kv = torch.empty(
         _OFFLOAD_REQUESTS,
         1,
@@ -68,7 +65,6 @@ def _make_sparse_mla_offload_case(num_heads: int, *, writer: bool):
     newest_ids = torch.full(
         (_OFFLOAD_REQUESTS, 1), 126, dtype=torch.int64, device=device
     )
-    newest_generation = torch.full_like(newest_ids, 7)
     current = torch.randn(
         _OFFLOAD_REQUESTS,
         _OFFLOAD_QK_DIM,
@@ -95,16 +91,13 @@ def _make_sparse_mla_offload_case(num_heads: int, *, writer: bool):
         "resident_main_kv": resident_kv,
         "resident_logical_ids": resident_ids,
         "resident_last_access": resident_access,
-        "resident_generation": resident_generation,
         "newest_main_kv": newest_kv,
         "newest_logical_ids": newest_ids,
-        "newest_generation": newest_generation,
         "request_block_ids": request_block_ids,
         "request_num_blocks": torch.full(
             (_OFFLOAD_REQUESTS,), 2, dtype=torch.int32, device=device
         ),
         "request_num_tokens": request_num_tokens,
-        "request_generation": generation,
         "request_active": torch.ones(
             _OFFLOAD_REQUESTS, dtype=torch.bool, device=device
         ),
@@ -234,10 +227,8 @@ def _snapshot_sparse_mla_case(case):
             "resident_main_kv",
             "resident_logical_ids",
             "resident_last_access",
-            "resident_generation",
             "newest_main_kv",
             "newest_logical_ids",
-            "newest_generation",
         }
     }
     return state, case.host.clone()
@@ -585,20 +576,109 @@ def test_flashinfer_sparse_indices_cache(monkeypatch):
 
 
 def test_sparse_mla_offload_operator_path_schema_and_fake():
+    from inspect import signature
+
     from torch._subclasses.fake_tensor import FakeTensorMode
     from torch.fx.experimental.proxy_tensor import make_fx
 
     import vllm.v1.attention.ops.flashmla  # noqa: F401
+    from vllm import _custom_ops as ops
     from vllm.config.compilation import CompilationConfig
 
-    plan_schema = torch._C._dispatch_find_schema_or_throw(
-        "_C::sparse_mla_cache_plan", ""
-    ).schema()
-    transfer_schema = torch._C._dispatch_find_schema_or_throw(
-        "_C::sparse_mla_offload_transfer", ""
-    ).schema()
-    assert "int num_host_blocks" in str(plan_schema)
-    assert "num_host_blocks" not in str(transfer_schema)
+    plan_parameters = (
+        "current_main_kv",
+        "request_block_ids",
+        "request_num_blocks",
+        "request_num_tokens",
+        "request_active",
+        "req_id_per_token",
+        "topk_logical_ids",
+        "resident_main_kv",
+        "resident_logical_ids",
+        "resident_last_access",
+        "newest_main_kv",
+        "newest_logical_ids",
+        "topk_physical_ids",
+        "topk_hit_mask",
+        "miss_logical_ids",
+        "miss_victim_slots",
+        "miss_counts",
+        "hit_counts",
+        "num_host_blocks",
+    )
+    transfer_parameters = (
+        "main_host_kv_uva",
+        "request_block_ids",
+        "request_num_blocks",
+        "request_num_tokens",
+        "request_active",
+        "req_id_per_token",
+        "newest_main_kv",
+        "newest_logical_ids",
+        "miss_logical_ids",
+        "miss_victim_slots",
+        "miss_counts",
+        "hit_counts",
+        "resident_main_kv",
+        "resident_logical_ids",
+        "resident_last_access",
+        "is_host_writer",
+        "block_size",
+    )
+    assert tuple(signature(ops.sparse_mla_cache_plan).parameters) == plan_parameters
+    assert tuple(signature(ops.sparse_mla_offload_transfer).parameters) == (
+        transfer_parameters
+    )
+    with pytest.raises(
+        TypeError, match="takes 19 positional arguments but 22 were given"
+    ):
+        ops.sparse_mla_cache_plan(*(None,) * 22)
+    with pytest.raises(
+        TypeError, match="takes 17 positional arguments but 19 were given"
+    ):
+        ops.sparse_mla_offload_transfer(*(None,) * 19)
+
+    for op_name, parameters, mutated_parameters in (
+        (
+            "sparse_mla_cache_plan",
+            plan_parameters,
+            {
+                "resident_main_kv",
+                "resident_logical_ids",
+                "resident_last_access",
+                "newest_main_kv",
+                "newest_logical_ids",
+                "topk_physical_ids",
+                "topk_hit_mask",
+                "miss_logical_ids",
+                "miss_victim_slots",
+                "miss_counts",
+                "hit_counts",
+            },
+        ),
+        (
+            "sparse_mla_offload_transfer",
+            transfer_parameters,
+            {
+                "main_host_kv_uva",
+                "resident_main_kv",
+                "resident_logical_ids",
+                "resident_last_access",
+            },
+        ),
+    ):
+        if not hasattr(torch.ops._C, op_name):
+            continue
+        schema = torch._C._dispatch_find_schema_or_throw(f"_C::{op_name}", "").schema()
+        assert tuple(argument.name for argument in schema.arguments) == parameters
+        schema_text = str(schema)
+        for parameter in parameters:
+            expected = (
+                f"Tensor! {parameter}"
+                if parameter in mutated_parameters
+                else f"Tensor {parameter}"
+            )
+            assert expected in schema_text
 
     with FakeTensorMode():
         current = torch.empty(2, _OFFLOAD_QK_DIM, dtype=torch.bfloat16)
@@ -669,6 +749,40 @@ def test_sparse_mla_offload_operator_path_eager_writer_and_follower():
         follower.buffers["miss_victim_slots"][0, 0, :94],
         torch.arange(34, 128, dtype=torch.int32, device="cuda"),
     )
+    assert torch.equal(
+        follower.buffers["resident_logical_ids"][:, :34],
+        torch.cat(
+            (
+                torch.arange(32, dtype=torch.int64, device="cuda"),
+                torch.tensor((126, 127), dtype=torch.int64, device="cuda"),
+            )
+        ).expand(_OFFLOAD_REQUESTS, -1),
+    )
+    assert torch.equal(
+        follower.buffers["resident_logical_ids"][:, 34:],
+        torch.arange(32, 126, dtype=torch.int64, device="cuda").expand(
+            _OFFLOAD_REQUESTS, -1
+        ),
+    )
+    assert torch.equal(
+        follower.buffers["resident_last_access"],
+        torch.full_like(follower.buffers["resident_last_access"], 128),
+    )
+    assert torch.equal(
+        follower.buffers["newest_logical_ids"],
+        torch.full_like(follower.buffers["newest_logical_ids"], 127),
+    )
+    assert torch.equal(follower.buffers["newest_main_kv"][:, 0], follower.current)
+    for request, physical_blocks in enumerate(((0, 1), (2, 3))):
+        expected_payload = torch.cat(
+            (
+                follower.host[physical_blocks[0], 32:],
+                follower.host[physical_blocks[1], :62],
+            )
+        )
+        assert torch.equal(
+            follower.buffers["resident_main_kv"][request, 34:], expected_payload
+        )
     torch.testing.assert_close(
         follower.output, follower_reference, rtol=2e-2, atol=2e-2
     )
@@ -683,13 +797,40 @@ def test_sparse_mla_offload_operator_path_eager_writer_and_follower():
         "resident_main_kv",
         "resident_logical_ids",
         "resident_last_access",
-        "resident_generation",
         "newest_main_kv",
         "newest_logical_ids",
-        "newest_generation",
     ):
         assert torch.equal(writer.buffers[name], follower.buffers[name])
     torch.testing.assert_close(writer.output, writer_reference, rtol=2e-2, atol=2e-2)
+
+    victims = _make_sparse_mla_offload_case(64, writer=False)
+    victims.buffers["resident_logical_ids"].copy_(
+        torch.arange(
+            1000,
+            1000 + _OFFLOAD_RESIDENT,
+            dtype=torch.int64,
+            device="cuda",
+        ).expand(_OFFLOAD_REQUESTS, -1)
+    )
+    victims.buffers["resident_logical_ids"][:, 3] = -1
+    victims.buffers["resident_last_access"].fill_(17)
+    victims.buffers["resident_last_access"][:, 4:6] = 3
+    victims.topk.fill_(-1)
+    victims.topk[:, 0, :2] = torch.tensor((126, 127), dtype=torch.int32, device="cuda")
+    _run_sparse_mla_offload(victims)
+    torch.accelerator.synchronize()
+    assert torch.equal(
+        victims.buffers["topk_physical_ids"][:, 0, :2],
+        torch.tensor(((3, 4), (131, 132)), dtype=torch.int32, device="cuda"),
+    )
+    assert torch.equal(
+        victims.buffers["resident_logical_ids"][:, 3:5],
+        torch.tensor(((126, 127), (126, 127)), dtype=torch.int64, device="cuda"),
+    )
+    assert torch.equal(
+        victims.buffers["miss_counts"],
+        torch.zeros_like(victims.buffers["miss_counts"]),
+    )
 
     malformed = _make_sparse_mla_offload_case(64, writer=True)
     malformed.buffers["request_block_ids"][0, 0] = _OFFLOAD_BLOCKS
