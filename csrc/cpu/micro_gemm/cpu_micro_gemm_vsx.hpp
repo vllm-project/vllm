@@ -51,7 +51,7 @@ class TileGemmVSX {
           __vector float B_k1[4];
           
           for (int j = 0; j < 4; j++) {
-              __vector unsigned short vB_short = (__vector unsigned short)vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + k_idx * 4]);
+              __vector unsigned short vB_short = (__vector unsigned short)vec_xl(0, (const unsigned char*)&b_ptr[k_idx * 16 + j * 8]);
               __vector unsigned int vB_f32_01 = (__vector unsigned int)vec_mergeh(vzero, vB_short);
               __vector unsigned int vB_f32_23 = (__vector unsigned int)vec_mergel(vzero, vB_short);
               
@@ -183,22 +183,22 @@ class TileGemmVSX {
         
         // Load B and GER for k_idx + 0
         __vector unsigned char vB_vec_0[tiles_n];
-        for (int j = 0; j < tiles_n; j++) vB_vec_0[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 0) * 4]);
+        for (int j = 0; j < tiles_n; j++) vB_vec_0[j] = vec_xl(0, (const unsigned char*)&b_ptr[(k_idx + 0) * 16 + j * 8]);
         for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_0[i], vB_vec_0[j]);
         
         // Load B and GER for k_idx + 2
         __vector unsigned char vB_vec_2[tiles_n];
-        for (int j = 0; j < tiles_n; j++) vB_vec_2[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 2) * 4]);
+        for (int j = 0; j < tiles_n; j++) vB_vec_2[j] = vec_xl(0, (const unsigned char*)&b_ptr[(k_idx + 2) * 16 + j * 8]);
         for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_2[i], vB_vec_2[j]);
         
         // Load B and GER for k_idx + 4
         __vector unsigned char vB_vec_4[tiles_n];
-        for (int j = 0; j < tiles_n; j++) vB_vec_4[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 4) * 4]);
+        for (int j = 0; j < tiles_n; j++) vB_vec_4[j] = vec_xl(0, (const unsigned char*)&b_ptr[(k_idx + 4) * 16 + j * 8]);
         for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_4[i], vB_vec_4[j]);
         
         // Load B and GER for k_idx + 6
         __vector unsigned char vB_vec_6[tiles_n];
-        for (int j = 0; j < tiles_n; j++) vB_vec_6[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 6) * 4]);
+        for (int j = 0; j < tiles_n; j++) vB_vec_6[j] = vec_xl(0, (const unsigned char*)&b_ptr[(k_idx + 6) * 16 + j * 8]);
         for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_6[i], vB_vec_6[j]);
     }
     
@@ -274,7 +274,7 @@ class TileGemmVSX {
         // Load packed B
         __vector unsigned char vB_vec[tiles_n];
         for (int j = 0; j < tiles_n; j++) {
-            vB_vec[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + k_idx * 4]);
+            vB_vec[j] = vec_xl(0, (const unsigned char*)&b_ptr[k_idx * 16 + j * 8]);
         }
 
         for (int i = 0; i < tiles_m; i++) {
@@ -339,39 +339,27 @@ class MicroGemm<cpu_utils::ISA::VSX, scalar_t> {
           
           __vector unsigned int w0 = (__vector unsigned int)row0;
           __vector unsigned int w1 = (__vector unsigned int)row1;
-          __vector unsigned int w2 = (__vector unsigned int)row2;
-          __vector unsigned int w3 = (__vector unsigned int)row3;
-          
-          __vector unsigned int w01_h = vec_mergeh(w0, w1);
-          __vector unsigned int w23_h = vec_mergeh(w2, w3);
-          __vector unsigned int w01_l = vec_mergel(w0, w1);
-          __vector unsigned int w23_l = vec_mergel(w2, w3);
-          
-          typedef __vector unsigned long long v_ull_t;
-          __vector unsigned short out0 = (__vector unsigned short)vec_mergeh((v_ull_t)w01_h, (v_ull_t)w23_h);
-          __vector unsigned short out1 = (__vector unsigned short)vec_mergel((v_ull_t)w01_h, (v_ull_t)w23_h);
-          __vector unsigned short out2 = (__vector unsigned short)vec_mergeh((v_ull_t)w01_l, (v_ull_t)w23_l);
-          __vector unsigned short out3 = (__vector unsigned short)vec_mergel((v_ull_t)w01_l, (v_ull_t)w23_l);
-          
-          vec_xst(out0, 0, pw); pw += 8;
-          vec_xst(out1, 0, pw); pw += 8;
-          vec_xst(out2, 0, pw); pw += 8;
-          vec_xst(out3, 0, pw); pw += 8;
+      TORCH_CHECK_EQ(output_size % NSize, 0);
+      TORCH_CHECK_EQ(input_size % 2, 0);
+
+      scalar_t* pw = packed_weight;
+      for (int32_t o_block = 0; o_block < output_size; o_block += NSize) {
+          for (int32_t i_idx = 0; i_idx < input_size; i_idx += 2) {
+              for (int32_t o_idx = o_block; o_idx < o_block + NSize; o_idx += 4) {
+                  *pw++ = weight[(o_idx+0)*input_size + i_idx];
+                  *pw++ = weight[(o_idx+0)*input_size + i_idx+1];
+                  
+                  *pw++ = weight[(o_idx+1)*input_size + i_idx];
+                  *pw++ = weight[(o_idx+1)*input_size + i_idx+1];
+                  
+                  *pw++ = weight[(o_idx+2)*input_size + i_idx];
+                  *pw++ = weight[(o_idx+2)*input_size + i_idx+1];
+                  
+                  *pw++ = weight[(o_idx+3)*input_size + i_idx];
+                  *pw++ = weight[(o_idx+3)*input_size + i_idx+1];
+              }
+          }
       }
-      for (; i_idx < input_size; i_idx += 2) {
-        *pw++ = w[(o_idx+0)*input_size + i_idx];
-        *pw++ = w[(o_idx+0)*input_size + i_idx+1];
-        
-        *pw++ = w[(o_idx+1)*input_size + i_idx];
-        *pw++ = w[(o_idx+1)*input_size + i_idx+1];
-        
-        *pw++ = w[(o_idx+2)*input_size + i_idx];
-        *pw++ = w[(o_idx+2)*input_size + i_idx+1];
-        
-        *pw++ = w[(o_idx+3)*input_size + i_idx];
-        *pw++ = w[(o_idx+3)*input_size + i_idx+1];
-      }
-    }
   }
 };
 }  // namespace cpu_micro_gemm
