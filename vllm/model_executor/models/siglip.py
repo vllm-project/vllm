@@ -148,9 +148,6 @@ class SiglipProcessingInfo(BaseProcessingInfo):
             image_width=target_width, image_height=target_height
         )
 
-    def get_text_max_length(self) -> int:
-        return self.get_hf_config().text_config.max_position_embeddings
-
     def get_default_tok_params(self) -> "TokenizeParams":
         """Pad text prompts to the length the text tower was trained with.
 
@@ -158,9 +155,20 @@ class SiglipProcessingInfo(BaseProcessingInfo):
         mask, so padding tokens are part of the input and the pooled embedding
         is taken from the last position. Text embeddings computed without
         padding are not aligned with the image embeddings.
+
+        A checkpoint that does consume an attention mask says so in its
+        `tokenizer_config.json` and is left unpadded. The declared value is
+        read rather than `tokenizer.model_input_names`, because the latter
+        falls back to a class default that already contains `attention_mask`.
         """
         tok_params = super().get_default_tok_params()
-        return tok_params.with_kwargs(pad_prompt_tokens=self.get_text_max_length())
+
+        tokenizer = self.get_tokenizer()
+        declared_inputs = getattr(tokenizer, "init_kwargs", {}).get("model_input_names")
+        if declared_inputs is not None and "attention_mask" in declared_inputs:
+            return tok_params
+
+        return tok_params.with_kwargs(pad_prompt_tokens=-1)
 
 
 class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):
