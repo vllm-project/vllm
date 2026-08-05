@@ -12,9 +12,7 @@ from torch_abi_audit.report import ExtensionReport, PackageReport
 
 # Temporary allowlist of extensions not yet on the stable ABI.
 # Shrink and remove over time.
-ALLOWED_UNSTABLE_LIBRARIES: tuple[str, ...] = (
-    "third_party/deep_gemm/_C*.so",
-)
+ALLOWED_UNSTABLE_LIBRARIES: tuple[str, ...] = ("third_party/deep_gemm/_C*.so",)
 
 
 def _relative_path(lib: ExtensionReport, package_root: Path) -> str:
