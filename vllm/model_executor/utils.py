@@ -47,14 +47,14 @@ def set_weight_attrs(
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
-    new_data: torch.Tensor | None,
+    new_tensor: torch.Tensor | None,
     prefer_copy: bool = False,
 ):
     """
     Replace a parameter of a layer while maintaining the ability to reload the weight.
     Called within implementations of the `process_weights_after_loading` method.
 
-    Custom attributes set on ``new_data`` (e.g. kernel dispatch flags such as
+    Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
     ``is_shuffled``) are carried over to the replacement parameter, except
     ``weight_loader``, which is always taken from the existing parameter.
 
@@ -66,9 +66,10 @@ def replace_parameter(
     Args:
         layer: Layer containing parameter to replace
         param_name: Name of parameter to replace
-        new_data: New data of the new parameter, or None to set the parameter to None
+        new_tensor: New data of the new parameter, or None to set the parameter
+            to None
         prefer_copy: If True and the existing parameter is compatible with
-            ``new_data`` (same shape, dtype, and device), copy ``new_data``
+            ``new_tensor`` (same shape, dtype, and device), copy ``new_tensor``
             into the existing parameter in place rather than re-registering
             a new parameter. This preserves the parameter's storage address
             (``data_ptr``), which is required for captured CUDA graphs to
@@ -76,40 +77,40 @@ def replace_parameter(
     """
     # should not be used on a tied/shared param
 
-    # If new_data is None, set the parameter to None
-    if new_data is None:
+    # If new_tensor is None, set the parameter to None
+    if new_tensor is None:
         setattr(layer, param_name, None)
         return
 
     old_param: torch.nn.Parameter | None = getattr(layer, param_name, None)
 
-    new_data_attrs = dict(new_data.__dict__)
+    new_tensor_attrs = dict(new_tensor.__dict__)
 
-    # `weight_loader` is the only attribute not ported over from new_data,
+    # `weight_loader` is the only attribute not ported over from new_tensor,
     # old_param.weight_loader only is supported. `_weight_loader` is
     # `BasevLLMParameter`'s backing field for its `weight_loader` property, so
     # a loader riding along under that name has to be dropped as well.
-    new_data_attrs.pop("weight_loader", None)
-    new_data_attrs.pop("_weight_loader", None)
+    new_tensor_attrs.pop("weight_loader", None)
+    new_tensor_attrs.pop("_weight_loader", None)
 
-    if isinstance(new_data, torch.nn.Parameter):
-        new_data = new_data.data
+    if isinstance(new_tensor, torch.nn.Parameter):
+        new_tensor = new_tensor.data
 
     if (
         prefer_copy
         and old_param is not None
-        and old_param.shape == new_data.shape
-        and old_param.dtype == new_data.dtype
-        and old_param.device == new_data.device
+        and old_param.shape == new_tensor.shape
+        and old_param.dtype == new_tensor.dtype
+        and old_param.device == new_tensor.device
     ):
-        old_param.copy_(new_data)
-        for attr_name, attr in new_data_attrs.items():
+        old_param.copy_(new_tensor)
+        for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
         return
 
-    new_param = torch.nn.Parameter(new_data, requires_grad=False)
+    new_param = torch.nn.Parameter(new_tensor, requires_grad=False)
 
-    for attr_name, attr in new_data_attrs.items():
+    for attr_name, attr in new_tensor_attrs.items():
         setattr(new_param, attr_name, attr)
 
     if old_param is not None and hasattr(old_param, "weight_loader"):
