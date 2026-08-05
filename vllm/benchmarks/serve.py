@@ -357,6 +357,9 @@ class BenchmarkMetrics:
     max_output_tokens_per_s: float
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
+    # Only set when the server reports usage.prompt_tokens_details.cached_tokens
+    # (requires --enable-prompt-tokens-details on the vLLM server).
+    total_cached: int | None = None
 
 
 @dataclass
@@ -594,6 +597,7 @@ def calculate_metrics(
     """
     actual_output_lens: list[int] = []
     total_input = 0
+    total_cached: int | None = None
     completed = 0
     good_completed = 0
     itls: list[float] = []
@@ -622,6 +626,8 @@ def calculate_metrics(
                     )
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
+            if (cached := outputs[i].cached_tokens) is not None:
+                total_cached = (total_cached or 0) + cached
             tpot = 0.0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
@@ -778,6 +784,7 @@ def calculate_metrics(
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
         rtfx=input_audio_duration / dur_s,
+        total_cached=total_cached,
     )
 
     return metrics, actual_output_lens
@@ -1197,6 +1204,8 @@ async def benchmark(
         print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
+    if isinstance(metrics, BenchmarkMetrics) and metrics.total_cached is not None:
+        print("{:<40} {:<10}".format("Total cached tokens:", metrics.total_cached))
     if isinstance(metrics, BenchmarkMetrics) and tokenizer:
         print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
     print(
@@ -1324,6 +1333,9 @@ async def benchmark(
             "queue_times": [output.client_queue_time for output in outputs],
             "errors": [output.error for output in outputs],
         }
+
+    if isinstance(metrics, BenchmarkMetrics) and metrics.total_cached is not None:
+        result["total_cached_tokens"] = metrics.total_cached
 
     queue_times: list[float] | None = None
     e2els_including_queue: list[float] | None = None
