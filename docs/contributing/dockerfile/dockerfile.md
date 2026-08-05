@@ -31,6 +31,7 @@ requirements remain cached independently of per-commit vLLM wheels and source.
   > ```bash
   > dockerfilegraph \
   >   -o png \
+  >   --concentrate \
   >   --legend \
   >   --dpi 200 \
   >   --max-label-length 50 \
@@ -50,6 +51,7 @@ requirements remain cached independently of per-commit vLLM wheels and source.
   >    --dpi 200 \
   >    --max-label-length 50 \
   >    --filename docker/Dockerfile \
+  >    --concentrate \
   >    --legend
   > ```
   >
