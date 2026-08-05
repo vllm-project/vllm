@@ -14,11 +14,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
+from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
-from vllm.models.deepseek_v4.common.ops import (
-    dequantize_and_gather_k_cache,
-    fused_q_kv_rmsnorm,
-)
+from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
