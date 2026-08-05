@@ -248,6 +248,12 @@ def test_sampling_params_validation():
         SamplingParams(dry_allowed_length=-1)
     with pytest.raises((VLLMValidationError, ValueError)):
         SamplingParams(dry_sequence_breakers=[1, 2])
+    with pytest.raises((VLLMValidationError, ValueError)):
+        SamplingParams(dry_allowed_length=1.5)
+    with pytest.raises((VLLMValidationError, ValueError)):
+        SamplingParams(dry_penalty_last_n=2.5)
+    with pytest.raises((VLLMValidationError, ValueError)):
+        SamplingParams(dry_sequence_breakers=[f"b{i}" for i in range(65)])
     # Valid corner values pass.
     SamplingParams(dry_multiplier=0.0)
     SamplingParams(dry_multiplier=1.0, dry_penalty_last_n=-1)
@@ -712,10 +718,11 @@ def test_breaker_resolution_covers_added_tokens():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_batched_peak_memory_bounded():
     # base=1.1 gives max_exponent=930, a large J for the batched path
-    # (the cap is allowed_length + max_exponent <= _J_BUDGET = 2048). The chunk budget is denominated in bytes and the gather is
-    # int32, so peak transient memory stays near _CHUNK_BYTE_BUDGET even
-    # at large batch x window; an element-denominated budget with an
-    # int64 gather allocated ~8x more and OOMed 8 GB GPUs.
+    # (the cap is allowed_length + max_exponent <= _J_BUDGET = 2048).
+    # The chunk budget is denominated in bytes and the gather is int32,
+    # so peak transient memory stays near _CHUNK_BYTE_BUDGET even at
+    # large batch x window; an element-denominated budget with an int64
+    # gather allocated ~8x more and OOMed 8 GB GPUs.
     from vllm.v1.sample.logits_processor.dry_batched import _CHUNK_BYTE_BUDGET
 
     device = torch.device("cuda")
