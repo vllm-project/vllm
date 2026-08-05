@@ -8,6 +8,9 @@ token IDs. The replay step for a request is derived from GPU state as
 overwrites the sampled token in place before logprobs are computed.
 """
 
+from types import SimpleNamespace
+from typing import cast
+
 import numpy as np
 import pytest
 import torch
@@ -21,6 +24,7 @@ from vllm.v1.worker.gpu.sample.trace_replay import (
     TraceReplayState,
     apply_trace_tokens,
 )
+from vllm.v1.worker.gpu.states import RequestState
 
 DEVICE = "cuda"
 TEST_MAX_MODEL_LEN = 2048
@@ -32,6 +36,18 @@ def _i32(x) -> torch.Tensor:
 
 def _i64(x) -> torch.Tensor:
     return torch.tensor(x, dtype=torch.int64, device=DEVICE)
+
+
+def _trace_state(max_num_reqs: int) -> TraceReplayState:
+    req_states = cast(
+        RequestState,
+        SimpleNamespace(
+            max_num_reqs=max_num_reqs,
+            max_model_len=TEST_MAX_MODEL_LEN,
+            device=torch.device(DEVICE),
+        ),
+    )
+    return TraceReplayState(req_states)
 
 
 # ------------------------------ Kernel ------------------------------------
@@ -120,11 +136,7 @@ def test_idx_mapping_indirection_and_negative_skip():
 
 def test_state_end_to_end():
     """add_request -> apply_staged_writes -> apply_trace overwrites correctly."""
-    state = TraceReplayState(
-        max_num_reqs=4,
-        max_model_len=TEST_MAX_MODEL_LEN,
-        device=torch.device(DEVICE),
-    )
+    state = _trace_state(4)
     state.add_request(0, SamplingParams(trace_decode_token_ids=[11, 22, 33]))
     state.add_request(1, SamplingParams())  # no trace
     state.apply_staged_writes()
@@ -140,11 +152,7 @@ def test_state_end_to_end():
 
 def test_state_skips_when_no_trace_in_batch():
     """apply_trace is a no-op when no batched request replays a trace."""
-    state = TraceReplayState(
-        max_num_reqs=4,
-        max_model_len=TEST_MAX_MODEL_LEN,
-        device=torch.device(DEVICE),
-    )
+    state = _trace_state(4)
     state.add_request(0, SamplingParams(trace_decode_token_ids=[11, 22]))
     state.add_request(1, SamplingParams())
     state.apply_staged_writes()
@@ -161,11 +169,7 @@ def test_state_skips_when_no_trace_in_batch():
 
 def test_slot_reuse_clears_trace():
     """Reusing a slot for a non-trace request must not replay stale tokens."""
-    state = TraceReplayState(
-        max_num_reqs=2,
-        max_model_len=TEST_MAX_MODEL_LEN,
-        device=torch.device(DEVICE),
-    )
+    state = _trace_state(2)
     state.add_request(0, SamplingParams(trace_decode_token_ids=[11, 22]))
     state.apply_staged_writes()
     # Slot 0 reused by a request without a trace.

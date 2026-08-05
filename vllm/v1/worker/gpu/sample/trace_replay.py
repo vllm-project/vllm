@@ -6,6 +6,7 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.states import RequestState
 
 
 class TraceReplayState:
@@ -19,18 +20,18 @@ class TraceReplayState:
     synchronization or async placeholder handling is needed.
     """
 
-    def __init__(self, max_num_reqs: int, max_model_len: int, device: torch.device):
-        self.max_num_reqs = max_num_reqs
-        self.device = device
+    def __init__(self, req_states: RequestState):
+        self.max_num_reqs = req_states.max_num_reqs
+        self.device = req_states.device
         self.trace_token_ids = StagedWriteTensor(
-            (max_num_reqs, max_model_len),
+            (self.max_num_reqs, req_states.max_model_len),
             dtype=torch.int32,
-            device=device,
+            device=self.device,
             uva_instead_of_gpu=True,
         )
-        self.trace_len = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.trace_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         # CPU mirror used to skip the kernel launch when no request replays.
-        self.use_trace = np.zeros(max_num_reqs, dtype=bool)
+        self.use_trace = np.zeros(self.max_num_reqs, dtype=bool)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         trace = sampling_params.trace_decode_token_ids

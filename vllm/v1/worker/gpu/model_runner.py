@@ -356,7 +356,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.decode_query_len,
                 use_fp64_gumbel=self.model_config.use_fp64_gumbel,
-                max_model_len=self.model_config.max_model_len,
             )
             custom = self.model_state.custom_sampler(self.sampler)
 
