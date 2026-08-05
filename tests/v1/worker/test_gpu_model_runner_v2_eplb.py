@@ -102,7 +102,6 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
         "get_model_loader",
         lambda load_config: SimpleNamespace(load_model=lambda **_: model),
     )
-    monkeypatch.setattr(mrv2, "prepare_communication_buffer_for_model", prepared.append)
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
@@ -137,7 +136,6 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
         "get_model_loader",
         lambda load_config: SimpleNamespace(load_model=lambda **_: model),
     )
-    monkeypatch.setattr(mrv2, "prepare_communication_buffer_for_model", prepared.append)
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
