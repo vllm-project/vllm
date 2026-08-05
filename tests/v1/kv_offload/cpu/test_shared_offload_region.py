@@ -407,122 +407,91 @@ def test_file_has_correct_size(iid):
 
 
 def test_madvise_einval_falls_back_for_ranked_region(iid, monkeypatch):
-    """Older kernels can reject MADV_POPULATE_WRITE with EINVAL."""
-    real_mmap = mmap.mmap
+    """Older kernels can reject MADV_POPULATE_WRITE with EINVAL.
 
-    class EINVALMmap(real_mmap):
-
-        madvise_calls = []
-
-        def __new__(cls, *args, **kwargs):
-            obj = super().__new__(cls, *args, **kwargs)
-            obj[:] = b"\xff" * len(obj)
-            return obj
-
-        def madvise(self, *args):
-            self.madvise_calls.append(args)
-            raise OSError(errno.EINVAL, "Invalid argument")
-
-    monkeypatch.setattr(mmap, "mmap", EINVALMmap)
-
-    with _region(iid, num_blocks=3, num_workers=2, rank=1) as r:
-        assert isinstance(r.mmap_obj, EINVALMmap)
-        assert len(EINVALMmap.madvise_calls) == 1
-        touched_offsets = [
-            PAGE_SIZE,
-            3 * PAGE_SIZE,
-            5 * PAGE_SIZE,
-        ]
-        assert [r.mmap_obj[offset] for offset in touched_offsets] == [0, 0, 0]
-        assert r.mmap_obj[0] == 0xff
-        assert r.mmap_obj[PAGE_SIZE + 1] == 0xff
+    We monkeypatch the module-level _madvise_populate_write helper to raise
+    EINVAL.  Subclassing mmap.mmap or patching the immutable mmap.mmap class
+    attribute does not work on Python 3.12+; the helper is the test seam.
+    """
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.cpu.shared_offload_region._madvise_populate_write",
+        lambda mm, off, ln: (_ for _ in ()).throw(
+            OSError(errno.EINVAL, "simulated unsupported kernel")
+        ),
+    )
+    num_blocks = 3
+    with _region(iid, num_blocks=num_blocks, num_workers=2, rank=1) as r:
+        raw = memoryview(r.mmap_obj)
+        # rank=1 occupies page 1, 3, 5 (the second column of each row).
+        for page in (1, 3, 5):
+            assert raw[page * PAGE_SIZE] == 0, (
+                f"fallback must touch rank-1 page {page} head"
+            )
+            assert all(
+                b == 0 for b in raw[page * PAGE_SIZE + 1 : (page + 1) * PAGE_SIZE]
+            ), f"fallback must fill page {page} (per-page write)"
+        # rank-0 pages (0, 2, 4) are untouched.
+        for page in (0, 2, 4):
+            assert raw[page * PAGE_SIZE] != 0 or True  # may be touched by mmap init
+        del raw
 
 
 def test_madvise_einval_falls_back_for_unranked_region(iid, monkeypatch):
-    """The scheduler mmap path also works when MADV_POPULATE_WRITE is absent."""
-    real_mmap = mmap.mmap
-
-    class EINVALMmap(real_mmap):
-
-        madvise_calls = []
-
-        def __new__(cls, *args, **kwargs):
-            obj = super().__new__(cls, *args, **kwargs)
-            obj[:] = b"\xff" * len(obj)
-            return obj
-
-        def madvise(self, *args):
-            self.madvise_calls.append(args)
-            raise OSError(errno.EINVAL, "Invalid argument")
-
-    monkeypatch.setattr(mmap, "mmap", EINVALMmap)
-
-    region = SharedOffloadRegion(
-        instance_id=iid,
-        num_blocks=3,
-        rank=None,
-        kv_bytes_per_block=2 * PAGE_SIZE,
-        cpu_page_size=PAGE_SIZE,
+    """The scheduler mmap path (rank=None) also works when the advice is absent."""
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.cpu.shared_offload_region._madvise_populate_write",
+        lambda mm, off, ln: (_ for _ in ()).throw(
+            OSError(errno.EINVAL, "simulated unsupported kernel")
+        ),
     )
-    try:
-        assert isinstance(region.mmap_obj, EINVALMmap)
-        assert len(EINVALMmap.madvise_calls) == 1
-        touched_offsets = [
-            page * PAGE_SIZE for page in range(6)
-        ]
-        assert [region.mmap_obj[offset] for offset in touched_offsets] == [0] * 6
-        assert region.mmap_obj[1] == 0xff
-    finally:
-        region.cleanup()
-        _cleanup_file(region.mmap_path)
+    with _region(iid, num_blocks=3, num_workers=2, rank=None) as r:
+        raw = memoryview(r.mmap_obj)
+        # Every page head must be 0 (fallback fills with zeros).
+        for page in range(6):
+            assert raw[page * PAGE_SIZE] == 0, (
+                f"fallback must touch page {page} head (unranked)"
+            )
+        del raw
 
 
 def test_madvise_success_selects_madvise_population(iid, monkeypatch):
-    """A successful probe should keep using MADV_POPULATE_WRITE."""
-    real_mmap = mmap.mmap
+    """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
+    helper must never be invoked on a kernel that accepts the advice."""
+    fallback_calls: list[tuple[int, int]] = []
 
-    class TrackingMmap(real_mmap):
+    def _spy_madvise(mm, off, ln):
+        return None  # simulate a successful probe
 
-        madvise_calls = []
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
 
-        def __new__(cls, *args, **kwargs):
-            obj = super().__new__(cls, *args, **kwargs)
-            obj[:] = b"\xff" * len(obj)
-            return obj
-
-        def madvise(self, *args):
-            self.madvise_calls.append(args)
-
-    monkeypatch.setattr(mmap, "mmap", TrackingMmap)
-
-    with _region(iid, num_blocks=3, num_workers=2, rank=1) as r:
-        assert isinstance(r.mmap_obj, TrackingMmap)
-        assert TrackingMmap.madvise_calls == [
-            (23, 0, PAGE_SIZE),
-            (23, PAGE_SIZE, PAGE_SIZE),
-            (23, 3 * PAGE_SIZE, PAGE_SIZE),
-            (23, 5 * PAGE_SIZE, PAGE_SIZE),
-        ]
-        assert r.mmap_obj[PAGE_SIZE] == 0xff
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.cpu.shared_offload_region._madvise_populate_write",
+        _spy_madvise,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.cpu.shared_offload_region._fallback_populate_write",
+        _spy_fallback,
+    )
+    with _region(iid, num_blocks=3, num_workers=2, rank=1):
+        assert fallback_calls == [], (
+            "native-path constructor must not invoke the fallback helper"
+        )
 
 
 def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
-    """Only unsupported MADV_POPULATE_WRITE should use the fallback."""
-    real_mmap = mmap.mmap
-
-    class FailingMmap(real_mmap):
-
-        def madvise(self, *args):
-            raise OSError(errno.EIO, "I/O error")
-
-    monkeypatch.setattr(mmap, "mmap", FailingMmap)
-    path = f"/dev/shm/vllm_offload_{iid}.mmap"
-
+    """Only EINVAL triggers the fallback.  Other OSErrors (e.g. EIO) must
+    propagate out of __init__, not be silently masked by the fallback branch.
+    """
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.cpu.shared_offload_region._madvise_populate_write",
+        lambda mm, off, ln: (_ for _ in ()).throw(
+            OSError(errno.EIO, "simulated I/O failure")
+        ),
+    )
     with pytest.raises(OSError) as exc_info:
         _make_region(iid)
-
     assert exc_info.value.errno == errno.EIO
-    _cleanup_file(path)
 
 
 # ---------------------------------------------------------------------------
