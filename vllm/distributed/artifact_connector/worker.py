@@ -238,6 +238,9 @@ class ArtifactWorkerConnector:
         invalid_block_ids: set[int],
     ) -> ArtifactConnectorOutput:
         assert self._store is not None and self._buffer is not None
+        if routed_experts.shape[1:] != self._shape_per_token:
+            raise RuntimeError("routed-experts capture profile changed")
+        routed_experts = routed_experts.astype(self._dtype, copy=False)
         by_request = {request.request_id: request for request in metadata.requests}
         captured: list[
             tuple[
@@ -250,6 +253,7 @@ class ArtifactWorkerConnector:
         ] = []
         commit_batches: list[tuple[Sequence[str], list[tuple[int, np.ndarray]]]] = []
         committed_rows: list[np.ndarray] = []
+        outputs: dict[str, ArtifactRequestOutput] = {}
         invalid_requests: set[tuple[str, int]] = set()
         if invalid_block_ids:
             for state in self._requests.values():
@@ -268,12 +272,9 @@ class ArtifactWorkerConnector:
                 invalid_requests.add(key)
                 offset = end
                 continue
-            block_hashes = state.block_hashes
             artifact_keys = state.artifact_keys
             valid_end = end - int(num_rejected[request_index])
-            rows: np.ndarray = routed_experts[offset:valid_end].astype(
-                self._dtype, copy=False
-            )
+            rows = routed_experts[offset:valid_end]
             capture_start = min(
                 request.token_start,
                 state.capture_cursor
@@ -286,7 +287,7 @@ class ArtifactWorkerConnector:
                 if state.emit_cursor is not None
                 else request.emit_start,
             )
-            completed = self._buffer.capture(key, capture_start, rows)
+            completed = self._buffer._capture(key, capture_start, rows)
             state.capture_cursor = capture_start + len(rows)
             pending, ready = self._take_available_blocks(
                 state,
@@ -296,9 +297,24 @@ class ArtifactWorkerConnector:
             if ready:
                 commit_batches.append((artifact_keys, ready))
                 committed_rows.extend(rows for _, rows in ready)
-            captured.append(
-                (request, capture_start, rows, [*ready, *pending], emit_start)
-            )
+            token_end = capture_start + len(rows)
+            if request.emit_output and emit_start < token_end:
+                if emit_start >= capture_start:
+                    outputs[request_id] = ArtifactRequestOutput(
+                        emit_start,
+                        rows[emit_start - capture_start :],
+                    )
+                    state.emit_cursor = token_end
+                else:
+                    captured.append(
+                        (
+                            request,
+                            capture_start,
+                            rows,
+                            [*ready, *pending],
+                            emit_start,
+                        )
+                    )
             offset = end
         if offset != len(routed_experts):
             raise RuntimeError("artifact capture output has an invalid row count")
@@ -307,62 +323,54 @@ class ArtifactWorkerConnector:
             batches=commit_batches,
             block_size=metadata.block_size,
         )
-        outputs: dict[str, ArtifactRequestOutput] = {}
         for request, capture_start, rows, local_segments, emit_start in captured:
             key = (request.request_id, request.epoch)
             state = self._requests[key]
             block_hashes = state.block_hashes
             artifact_keys = state.artifact_keys
             token_end = capture_start + len(rows)
-            if not request.emit_output or emit_start >= token_end:
-                continue
             stored_end = min(
                 capture_start // metadata.block_size * metadata.block_size,
                 len(block_hashes) * metadata.block_size,
             )
-            if emit_start >= capture_start:
-                # The D2H allocation stays owned by this output. Only history
-                # read from reusable tail slots needs the copying path below.
-                output_rows = rows[emit_start - capture_start :]
-            else:
-                segments: list[tuple[int, np.ndarray]] = []
-                if emit_start < stored_end:
-                    segments.append(
-                        (
+            segments: list[tuple[int, np.ndarray]] = []
+            if emit_start < stored_end:
+                segments.append(
+                    (
+                        emit_start,
+                        self._materialize(
                             emit_start,
-                            self._materialize(
-                                emit_start,
-                                stored_end,
-                                artifact_keys,
-                                metadata.block_size,
-                            ),
-                        )
+                            stored_end,
+                            artifact_keys,
+                            metadata.block_size,
+                        ),
                     )
-                segments.extend(local_segments)
-                tail_cursor = emit_start
-                for start, segment in sorted(segments, key=lambda item: item[0]):
-                    if tail_cursor >= capture_start:
-                        break
-                    if start > tail_cursor:
-                        gap_end = min(start, capture_start)
-                        segments.append(
-                            (
-                                tail_cursor,
-                                self._buffer.read(key, tail_cursor, gap_end),
-                            )
-                        )
-                        tail_cursor = gap_end
-                    if start <= tail_cursor:
-                        tail_cursor = max(tail_cursor, start + len(segment))
-                if tail_cursor < capture_start:
+                )
+            segments.extend(local_segments)
+            tail_cursor = emit_start
+            for start, segment in sorted(segments, key=lambda item: item[0]):
+                if tail_cursor >= capture_start:
+                    break
+                if start > tail_cursor:
+                    gap_end = min(start, capture_start)
                     segments.append(
                         (
                             tail_cursor,
-                            self._buffer.read(key, tail_cursor, capture_start),
+                            self._buffer.read(key, tail_cursor, gap_end),
                         )
                     )
-                segments.append((capture_start, rows))
-                output_rows = self._assemble_segments(emit_start, token_end, segments)
+                    tail_cursor = gap_end
+                if start <= tail_cursor:
+                    tail_cursor = max(tail_cursor, start + len(segment))
+            if tail_cursor < capture_start:
+                segments.append(
+                    (
+                        tail_cursor,
+                        self._buffer.read(key, tail_cursor, capture_start),
+                    )
+                )
+            segments.append((capture_start, rows))
+            output_rows = self._assemble_segments(emit_start, token_end, segments)
             outputs[request.request_id] = ArtifactRequestOutput(
                 emit_start,
                 output_rows,

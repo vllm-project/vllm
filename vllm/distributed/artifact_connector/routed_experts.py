@@ -80,6 +80,11 @@ class RoutedExpertsArtifactBuffer:
         if rows.shape[1:] != self.shape_per_token:
             raise RuntimeError("routed-experts capture profile changed")
         rows = rows.astype(self.dtype, copy=False)
+        return self._capture(request_id, token_start, rows)
+
+    def _capture(
+        self, request_id: Hashable, token_start: int, rows: np.ndarray
+    ) -> list[tuple[int, np.ndarray]]:
         if token_start < 0:
             raise ValueError("artifact token start must be non-negative")
 
@@ -114,9 +119,12 @@ class RoutedExpertsArtifactBuffer:
                     f"actual={position}"
                 )
             count = min(self.block_size - local_start, len(rows) - offset)
-            self._rows[tail.slot, local_start : local_start + count] = rows[
-                offset : offset + count
-            ]
+            if count == 1:
+                self._rows[tail.slot, local_start] = rows[offset]
+            else:
+                self._rows[tail.slot, local_start : local_start + count] = rows[
+                    offset : offset + count
+                ]
             tail.length = max(tail.length, local_start + count)
             offset += count
             if tail.length == self.block_size:

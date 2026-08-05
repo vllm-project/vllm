@@ -183,6 +183,26 @@ def _process_output(worker, metadata, rows, request_ids, num_rejected):
     return worker.process_output(metadata, rows, request_ids, num_rejected)
 
 
+def test_worker_rejects_mismatched_capture_shape(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    metadata = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 0, 1, 0, True, [])],
+        {},
+    )
+
+    with pytest.raises(RuntimeError, match="capture profile changed"):
+        _process_output(
+            worker,
+            metadata,
+            np.zeros((1, _SHAPE[0], _SHAPE[1] + 1), dtype=_DTYPE),
+            ["request"],
+            np.array([0]),
+        )
+    worker.close()
+
+
 def test_materialize_rejects_invalid_object_size(tmp_path):
     array = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
     payload = array.tobytes()
@@ -216,6 +236,18 @@ def test_logical_buffer_handles_overlap_and_release():
     )
     buffer.release_block(completed[0][1])
     np.testing.assert_array_equal(buffer.read("request", 8, 9).ravel(), [80])
+
+
+def test_logical_buffer_captures_one_row_per_decode_step():
+    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8)
+    logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=_DTYPE).reshape(_BLOCK_SIZE, 3, 2)
+
+    completed = []
+    for step in range(_BLOCK_SIZE):
+        completed += buffer.capture("request", step, logical[step : step + 1])
+
+    assert len(completed) == 1
+    np.testing.assert_array_equal(completed[0][1], logical)
 
 
 def _make_store(tmp_path, *, max_bytes: int = 1 << 20, instance="instance"):
