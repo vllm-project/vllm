@@ -1360,3 +1360,351 @@ def test_gpu_model_runner_v2_sparse_mla_manager_failure_unwind_and_shutdown(
             for record in records
         )
         assert not _backing_path(records[0]["backing"]).exists()
+
+
+def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
+    import vllm.v1.worker.gpu.model_runner as model_runner_module
+
+    manager = SparseMLAOffloadManager.__new__(SparseMLAOffloadManager)
+    manager._closing = manager._closed = False
+    manager._row_request_ids = [None, None, None]
+    manager._local_buffers = {
+        "resident_logical_ids": torch.full((2, 3, 2), 41, dtype=torch.int64),
+        "resident_last_access": torch.full((2, 3, 2), 42, dtype=torch.int64),
+        "resident_generation": torch.full((2, 3, 2), 43, dtype=torch.int64),
+        "newest_logical_ids": torch.full((2, 3, 2), 44, dtype=torch.int64),
+        "newest_generation": torch.full((2, 3, 2), 45, dtype=torch.int64),
+        "request_block_ids": torch.full((3, 2), -1, dtype=torch.int32),
+        "request_num_blocks": torch.zeros(3, dtype=torch.int32),
+        "request_num_tokens": torch.zeros(3, dtype=torch.int32),
+        "request_generation": torch.zeros(3, dtype=torch.int64),
+        "request_active": torch.zeros(3, dtype=torch.bool),
+    }
+
+    runner = model_runner_module.GPUModelRunner.__new__(
+        model_runner_module.GPUModelRunner
+    )
+    runner.sparse_mla_offload_manager = manager
+    runner.update_pp_decode_requests = lambda: None
+    runner.finish_requests = lambda output: None
+    runner.free_states = lambda output: None
+    runner.add_requests = lambda output: None
+    runner.update_requests = lambda output: None
+    runner.block_tables = SimpleNamespace(
+        apply_staged_writes=lambda: None,
+        blocks_per_kv_block=[1],
+        num_blocks=SimpleNamespace(gpu=torch.tensor([[2, 1, 2]], dtype=torch.int32)),
+    )
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens=SimpleNamespace(
+            gpu=torch.tensor([8, 9, 10], dtype=torch.int32)
+        )
+    )
+    runner.cudagraph_manager = None
+    runner.dp_size = runner.dp_rank = 1
+    runner.lora_config = None
+    runner.is_encoder_decoder = False
+    runner.kv_cache_config = SimpleNamespace()
+    input_batch = SimpleNamespace(
+        req_ids=["request-a", "request-b"],
+        idx_mapping=torch.tensor([1, 0], dtype=torch.int32),
+        num_reqs_after_padding=3,
+    )
+    runner.prepare_inputs = lambda output, desc: input_batch
+    gathered = torch.tensor(
+        [[11, 12, 999], [21, 22, 998], [0, 0, 0]], dtype=torch.int32
+    )
+    runner.prepare_attn = lambda batch: ((gathered,), torch.zeros(1, dtype=torch.int64))
+    runner.model_state = SimpleNamespace(
+        preprocess_state=lambda *args: (_ for _ in ()).throw(
+            RuntimeError("stop after publication")
+        )
+    )
+    runner.kv_connector = SimpleNamespace(no_forward=lambda output: "no-forward")
+    monkeypatch.setattr(
+        model_runner_module,
+        "dispatch_cg_and_sync_dp",
+        lambda *args, **kwargs: (SimpleNamespace(num_tokens=2), None),
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(req_id="request-a"),
+            SimpleNamespace(req_id="request-b"),
+        ],
+        num_scheduled_tokens={"request-a": 1, "request-b": 1},
+        total_num_scheduled_tokens=2,
+        scheduled_encoder_inputs={},
+    )
+
+    with pytest.raises(RuntimeError, match="stop after publication"):
+        runner.execute_model(scheduler_output)
+    buffers = manager._local_buffers
+    assert torch.equal(
+        buffers["request_block_ids"],
+        torch.tensor([[11, 12], [21, 22], [-1, -1]], dtype=torch.int32),
+    )
+    assert buffers["request_num_blocks"].tolist() == [1, 2, 0]
+    assert buffers["request_num_tokens"].tolist() == [9, 8, 0]
+    assert buffers["request_generation"].tolist() == [1, 1, 0]
+    assert buffers["request_active"].tolist() == [True, True, False]
+
+    for name in (
+        "resident_logical_ids",
+        "resident_generation",
+        "newest_logical_ids",
+        "newest_generation",
+    ):
+        buffers[name].fill_(71)
+    buffers["resident_last_access"].fill_(72)
+    manager._prepare_decode_batch(
+        ["request-a", "request-b"],
+        (),
+        torch.tensor([0, 2], dtype=torch.int32),
+        (torch.tensor([[31, 32], [41, 42]], dtype=torch.int32),),
+        torch.tensor([[1, 0, 2]], dtype=torch.int32),
+        torch.tensor([18, 0, 20], dtype=torch.int32),
+        2,
+    )
+    assert buffers["request_generation"].tolist() == [1, 1, 0]
+    assert torch.all(buffers["resident_logical_ids"][:, :2] == 71)
+    assert buffers["request_num_tokens"].tolist() == [18, 20, 0]
+
+    manager._prepare_decode_batch(
+        ["request-b", "request-a"],
+        (),
+        torch.tensor([2, 0], dtype=torch.int32),
+        (torch.tensor([[51, 52], [61, 62]], dtype=torch.int32),),
+        torch.tensor([[1, 0, 2]], dtype=torch.int32),
+        torch.tensor([28, 0, 30], dtype=torch.int32),
+        2,
+    )
+    assert buffers["request_generation"].tolist() == [2, 2, 0]
+    assert torch.all(buffers["resident_logical_ids"][:, :2] == -1)
+    assert torch.all(buffers["resident_last_access"][:, :2] == 0)
+
+    manager._prepare_decode_batch(
+        ["request-a"],
+        (),
+        torch.tensor([0], dtype=torch.int32),
+        (torch.tensor([[61, 62], [0, 0], [0, 0]], dtype=torch.int32),),
+        torch.tensor([[1, 0, 0]], dtype=torch.int32),
+        torch.tensor([38, 0, 0], dtype=torch.int32),
+        3,
+    )
+    assert buffers["request_generation"].tolist() == [3, 3, 0]
+    assert buffers["request_active"].tolist() == [True, False, False]
+    assert manager._row_request_ids == ["request-a", None, None]
+
+    unchanged = buffers["request_generation"].clone()
+    scheduler_output.total_num_scheduled_tokens = 0
+    scheduler_output.num_scheduled_tokens = {}
+    assert runner.execute_model(scheduler_output) == "no-forward"
+    assert torch.equal(buffers["request_generation"], unchanged)
+
+    scheduler_output.total_num_scheduled_tokens = 1
+    scheduler_output.num_scheduled_tokens = {"request-a": 1}
+    scheduler_output.scheduled_new_reqs = [SimpleNamespace(req_id="request-a")]
+    input_batch.req_ids = ["request-a"]
+    input_batch.idx_mapping = torch.tensor([0], dtype=torch.int32)
+    input_batch.num_reqs_after_padding = 1
+    runner.prepare_attn = lambda batch: (
+        (torch.tensor([[71, 72]], dtype=torch.int32),),
+        torch.zeros(1, dtype=torch.int64),
+    )
+    with pytest.raises(RuntimeError, match="stop after publication"):
+        runner.execute_model(scheduler_output)
+    assert buffers["request_generation"].tolist() == [4, 3, 0]
+    assert torch.all(buffers["resident_logical_ids"][:, 0] == -1)
+
+
+def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
+    import vllm.v1.worker.gpu.model_runner as model_runner_module
+
+    manager = SparseMLAOffloadManager.__new__(SparseMLAOffloadManager)
+    manager._closing = manager._closed = False
+    manager._row_request_ids = [None, None]
+    manager._local_buffers = {
+        "resident_logical_ids": torch.full((1, 2, 2), 1, dtype=torch.int64),
+        "resident_last_access": torch.full((1, 2, 2), 2, dtype=torch.int64),
+        "resident_generation": torch.full((1, 2, 2), 3, dtype=torch.int64),
+        "newest_logical_ids": torch.full((1, 2, 2), 4, dtype=torch.int64),
+        "newest_generation": torch.full((1, 2, 2), 5, dtype=torch.int64),
+        "request_block_ids": torch.full((2, 2), -1, dtype=torch.int32),
+        "request_num_blocks": torch.zeros(2, dtype=torch.int32),
+        "request_num_tokens": torch.zeros(2, dtype=torch.int32),
+        "request_generation": torch.zeros(2, dtype=torch.int64),
+        "request_active": torch.zeros(2, dtype=torch.bool),
+    }
+    inventory = {
+        name: (tensor.data_ptr(), tensor.shape, tensor.stride())
+        for name, tensor in manager._local_buffers.items()
+    }
+    inventory_names = set(manager._local_buffers)
+    with monkeypatch.context() as no_readback:
+        no_readback.setattr(
+            torch.Tensor,
+            "cpu",
+            lambda self: (_ for _ in ()).throw(AssertionError("CPU readback")),
+        )
+        no_readback.setattr(
+            torch.Tensor,
+            "item",
+            lambda self: (_ for _ in ()).throw(AssertionError("CPU readback")),
+        )
+        no_readback.setattr(
+            torch.Tensor,
+            "tolist",
+            lambda self: (_ for _ in ()).throw(AssertionError("CPU readback")),
+        )
+        no_readback.setattr(
+            torch.cuda,
+            "synchronize",
+            lambda *args: (_ for _ in ()).throw(AssertionError("synchronization")),
+        )
+        manager._prepare_decode_batch(
+            ["request-a", "request-b"],
+            (),
+            torch.tensor([1, 0], dtype=torch.int32),
+            (torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]], dtype=torch.int32),),
+            torch.tensor([[2, 1]], dtype=torch.int32),
+            torch.tensor([7, 8], dtype=torch.int32),
+            2,
+        )
+    assert torch.equal(
+        manager._local_buffers["request_block_ids"],
+        torch.tensor([[10, 11], [20, 21]], dtype=torch.int32),
+    )
+    assert manager._local_buffers["request_num_blocks"].tolist() == [1, 2]
+    assert manager._local_buffers["request_num_tokens"].tolist() == [8, 7]
+    assert manager._local_buffers["request_generation"].tolist() == [1, 1]
+    assert manager._local_buffers["request_active"].tolist() == [True, True]
+    assert set(manager._local_buffers) == inventory_names
+    assert {
+        name: (tensor.data_ptr(), tensor.shape, tensor.stride())
+        for name, tensor in manager._local_buffers.items()
+    } == inventory
+
+    valid_idx = torch.tensor([0], dtype=torch.int32)
+    valid_table = torch.tensor([[1, 2]], dtype=torch.int32)
+    valid_counts = torch.tensor([[1, 0]], dtype=torch.int32)
+    valid_tokens = torch.tensor([1, 0], dtype=torch.int32)
+    generation_before_rejection = manager._local_buffers["request_generation"].clone()
+    malformed = (
+        ((), valid_idx, (valid_table,), valid_counts, valid_tokens, 1),
+        (("a",), valid_idx, (valid_table, valid_table), valid_counts, valid_tokens, 1),
+        (
+            ("a",),
+            valid_idx.to(torch.int64),
+            (valid_table,),
+            valid_counts,
+            valid_tokens,
+            1,
+        ),
+        (
+            ("a",),
+            valid_idx,
+            (valid_table.to(torch.int64),),
+            valid_counts,
+            valid_tokens,
+            1,
+        ),
+        (
+            ("a",),
+            valid_idx,
+            (valid_table.reshape(1, 1, 2),),
+            valid_counts,
+            valid_tokens,
+            1,
+        ),
+        (
+            ("a",),
+            valid_idx,
+            (valid_table[:, :1],),
+            valid_counts,
+            valid_tokens,
+            1,
+        ),
+        (
+            ("a",),
+            valid_idx,
+            (valid_table,),
+            valid_counts[:, :1],
+            valid_tokens,
+            1,
+        ),
+        (
+            ("a",),
+            valid_idx,
+            (valid_table,),
+            valid_counts,
+            valid_tokens[:1],
+            1,
+        ),
+        (("a",), valid_idx, (valid_table,), valid_counts, valid_tokens, 0),
+        (("a",), valid_idx, (valid_table,), valid_counts, valid_tokens, 3),
+    )
+    for req_ids, idx, tables, counts, tokens, padded in malformed:
+        with pytest.raises(ValueError):
+            manager._prepare_decode_batch(
+                req_ids, (), idx, tables, counts, tokens, padded
+            )
+    with pytest.raises(ValueError):
+        manager._prepare_decode_batch(
+            ("a",),
+            (),
+            valid_idx.to(device="meta"),
+            (valid_table,),
+            valid_counts,
+            valid_tokens,
+            1,
+        )
+    assert torch.equal(
+        manager._local_buffers["request_generation"], generation_before_rejection
+    )
+
+    runner = model_runner_module.GPUModelRunner.__new__(
+        model_runner_module.GPUModelRunner
+    )
+    runner.sparse_mla_offload_manager = manager
+    runner.update_pp_decode_requests = lambda: None
+    runner.finish_requests = lambda output: None
+    runner.free_states = lambda output: None
+    runner.add_requests = lambda output: None
+    runner.update_requests = lambda output: None
+    runner.block_tables = SimpleNamespace(
+        apply_staged_writes=lambda: None,
+        blocks_per_kv_block=[2],
+        num_blocks=SimpleNamespace(gpu=valid_counts),
+    )
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens=SimpleNamespace(gpu=valid_tokens)
+    )
+    runner.cudagraph_manager = None
+    runner.dp_size = runner.dp_rank = 1
+    runner.lora_config = None
+    runner.is_encoder_decoder = False
+    runner.kv_cache_config = SimpleNamespace()
+    runner.prepare_inputs = lambda output, desc: SimpleNamespace(
+        req_ids=["a"], idx_mapping=valid_idx, num_reqs_after_padding=1
+    )
+    runner.prepare_attn = lambda batch: (
+        (valid_table,),
+        torch.zeros(1, dtype=torch.int64),
+    )
+    runner.model_state = SimpleNamespace(preprocess_state=lambda *args: None)
+    monkeypatch.setattr(
+        model_runner_module,
+        "dispatch_cg_and_sync_dp",
+        lambda *args, **kwargs: (SimpleNamespace(num_tokens=1), None),
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[SimpleNamespace(req_id="a")],
+        num_scheduled_tokens={"a": 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+    )
+    with pytest.raises(ValueError, match="blocks_per_kv_block"):
+        runner.execute_model(scheduler_output)
+    assert torch.equal(
+        manager._local_buffers["request_generation"], generation_before_rejection
+    )

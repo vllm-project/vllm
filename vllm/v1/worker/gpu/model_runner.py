@@ -1377,6 +1377,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+            manager = self.sparse_mla_offload_manager
+            if manager is not None:
+                if self.block_tables.blocks_per_kv_block != [1]:
+                    raise ValueError(
+                        "sparse MLA offload requires blocks_per_kv_block == [1]"
+                    )
+                manager._prepare_decode_batch(
+                    input_batch.req_ids,
+                    tuple(
+                        new_req.req_id
+                        for new_req in scheduler_output.scheduled_new_reqs
+                    ),
+                    input_batch.idx_mapping,
+                    block_tables,
+                    self.block_tables.num_blocks.gpu,
+                    self.req_states.num_computed_tokens.gpu,
+                    input_batch.num_reqs_after_padding,
+                )
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
