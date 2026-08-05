@@ -78,6 +78,20 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
+        # ​cudaError_t cudaGetLastError ( void )
+        Function("cudaGetLastError", cudaError_t, []),
+        # cudaError_t cudaHostRegister ( void* ptr, size_t size, unsigned int flags )
+        Function(
+            "cudaHostRegister",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint],
+        ),
+        # cudaError_t cudaHostUnregister ( void* ptr )
+        Function(
+            "cudaHostUnregister",
+            cudaError_t,
+            [ctypes.c_void_p],
+        ),
     ]
 
     # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
@@ -92,6 +106,9 @@ class CudaRTLibrary:
         "cudaMemcpy": "hipMemcpy",
         "cudaIpcGetMemHandle": "hipIpcGetMemHandle",
         "cudaIpcOpenMemHandle": "hipIpcOpenMemHandle",
+        "cudaGetLastError": "hipGetLastError",
+        "cudaHostRegister": "hipHostRegister",
+        "cudaHostUnregister": "hipHostUnregister",
     }
 
     # class attribute to store the mapping from the path to the library
@@ -137,6 +154,10 @@ class CudaRTLibrary:
     def CUDART_CHECK(self, result: cudaError_t) -> None:
         if result != 0:
             error_str = self.cudaGetErrorString(result)
+            # Drain any thread-local pending CUDA error so subsequent API
+            # calls are not poisoned by a stale error (e.g. from a previous
+            # best-effort cudaHostRegister that deliberately did not raise).
+            self.drain_pending_error()
             raise RuntimeError(f"CUDART error: {error_str}")
 
     def cudaGetErrorString(self, error: cudaError_t) -> str:
@@ -185,3 +206,42 @@ class CudaRTLibrary:
             )
         )
         return devPtr
+
+    def cudaGetLastError(self) -> int:
+        """Return (and clear) the thread-local pending CUDA runtime error.
+
+        Unlike other methods this deliberately does **not** call
+        ``CUDART_CHECK`` because a nonzero value is the expected/consumed
+        state (e.g. consuming a stale error left by a failed best-effort
+        ``cudaHostRegister``).  Returns the prior error code as a plain
+        Python int.
+        """
+        return int(self.funcs["cudaGetLastError"]())
+
+    def drain_pending_error(self) -> int:
+        """Canonical same-handle drain helper.
+
+        Drains and returns the thread-local pending CUDA runtime error
+        through this library handle.  Unlike ``CUDART_CHECK``, does not
+        raise — a nonzero return is the expected consumed state for
+        best-effort paths (e.g. after a failed ``cudaHostRegister``).
+        """
+        return self.cudaGetLastError()
+
+    def cudaHostRegister(self, ptr: int, size: int, flags: int = 0) -> int:
+        """Register host memory for CUDA DMA access (best-effort safe).
+
+        Returns the raw ``cudaError_t`` as a plain Python int — does
+        **not** call ``CUDART_CHECK`` so callers on best-effort paths
+        can inspect the result without raising.  Use ``drain_pending_error``
+        on the same instance to consume any thread-local pending error
+        after a nonzero return.
+        """
+        return int(self.funcs["cudaHostRegister"](ctypes.c_void_p(ptr), size, flags))
+
+    def cudaHostUnregister(self, ptr: int) -> int:
+        """Unregister host memory previously registered with cudaHostRegister.
+
+        Returns the raw ``cudaError_t`` as a plain Python int.
+        """
+        return int(self.funcs["cudaHostUnregister"](ctypes.c_void_p(ptr)))
