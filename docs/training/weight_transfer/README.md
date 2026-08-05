@@ -18,6 +18,7 @@ The weight transfer system follows a **four-phase protocol** with a pluggable ba
 | [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Sparse flat-index weight patches (TP=1/PP=1) |
+| [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 
 ## Configuration
 
@@ -42,7 +43,7 @@ vllm serve my-model \
     --weight-transfer-config '{"backend": "nccl"}'
 ```
 
-The `backend` field accepts `"nccl"` (default), `"ipc"`, or `"sparse_nccl"`.
+The `backend` field accepts `"nccl"` (default), `"ipc"`, `"sparse_nccl"`, or `"sharded_rdt"`.
 
 ## API Endpoints
 
