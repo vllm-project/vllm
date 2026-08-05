@@ -86,16 +86,13 @@ fn tokenize_completion(
 ) -> Result<(Vec<u32>, bool), ApiError> {
     check_model(state, req.model.as_deref())?;
     let return_token_strs = req.return_token_strs;
-    let prepared = state
+    let tokens = state
         .chat
         .text()
         .request_processor()
-        .prepare(req.into_text_request(request_id.to_string()))
+        .tokenize(req.into_text_request(request_id.to_string()))
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
-    Ok((
-        prepared.generate_request.prompt_token_ids,
-        return_token_strs,
-    ))
+    Ok((tokens, return_token_strs))
 }
 
 /// HTTP adapter for the chat-shaped `/tokenize` body.
@@ -117,16 +114,13 @@ async fn tokenize_chat(
         .prepare_for_tokenization(req.into_chat_request(request_id.to_string())?)
         .await
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
-    let prepared = state
+    let tokens = state
         .chat
         .text()
         .request_processor()
-        .prepare(text_request)
+        .tokenize(text_request)
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
-    Ok((
-        prepared.generate_request.prompt_token_ids,
-        return_token_strs,
-    ))
+    Ok((tokens, return_token_strs))
 }
 
 pub async fn detokenize(

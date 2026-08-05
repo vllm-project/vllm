@@ -6101,6 +6101,45 @@ async fn tokenize_chat_with_tools_does_not_require_output_parser() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_allows_prompts_at_or_above_max_model_len() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        max_model_len: 4,
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+
+    let (completion_status, completion_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    assert_eq!(completion_status, StatusCode::OK);
+    assert_eq!(completion_json["count"], 5);
+    assert_eq!(completion_json["max_model_len"], 4);
+
+    let (chat_status, chat_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "add_generation_prompt": false,
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    assert_eq!(chat_status, StatusCode::OK);
+    assert!(chat_json["count"].as_u64().expect("count") > 4);
+    assert_eq!(chat_json["max_model_len"], 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tokenize_chat_conflicting_generation_flags_returns_400() {
     let mut app = test_app().await;
 
