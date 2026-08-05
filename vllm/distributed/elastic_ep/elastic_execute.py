@@ -85,16 +85,20 @@ def batch_transfer_weights(
     assert len(all_params) > 0
     p2p_ops = []
     for param in all_params:
+        # PyNccl transfers flat memory and does not honor tensor strides.
+        transfer_param = param.contiguous()
         op = object.__new__(P2POp)
-        if is_sender:
-            op.op = torch.distributed.isend
-            op.tensor = param
-        else:
-            op.op = torch.distributed.irecv
-            op.tensor = param
+        op.op = torch.distributed.isend if is_sender else torch.distributed.irecv
+        op.tensor = transfer_param
         op.group_peer = peer_rank
         p2p_ops.append(op)
-    device_comm.batch_isend_irecv(p2p_ops)
+        if transfer_param is not param:
+            device_comm.batch_isend_irecv(p2p_ops)
+            p2p_ops.clear()
+            if not is_sender:
+                param.copy_(transfer_param)
+    if p2p_ops:
+        device_comm.batch_isend_irecv(p2p_ops)
 
 
 def broadcast_expert_mapping(
