@@ -3,6 +3,7 @@
 """Low-level CUDA/HIP memory helpers: pinning and batch DMA transfers."""
 
 import ctypes
+import os
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -60,6 +61,48 @@ _BATCH_MEMCPY_FUNC_TYPE = ctypes.CFUNCTYPE(
 
 # Resolved lazily on first use: (entry point, numAttrs to pass).
 _batch_memcpy: tuple[Any, int] | None = None
+
+# Max copy descriptors per batch call, resolved lazily on first use.
+_max_batch_descriptors: int | None = None
+
+# Safe default descriptor cap on ROCm. hipMemcpyBatchAsync GPU-faults (memory
+# access fault in __amd_rocclr_copyBufferBatch, process abort/segfault) for any
+# call with count > 8192 on ROCm 7.15 / MI350X (gfx950) — independent of copy
+# size, direction, and numAttrs.
+# 4096 keeps a 2x margin below the ceiling; the ~10% lower
+# per-batch bandwidth vs 8192 is negligible since the copy is overlapped.
+_ROCM_DEFAULT_MAX_BATCH_DESCRIPTORS = 4096
+
+
+def _resolve_max_batch_descriptors() -> int:
+    """Max copy descriptors to pass to one batch-memcpy call (0 = unlimited).
+
+    ROCm's ``hipMemcpyBatchAsync`` faults above 8192 descriptors per call, so
+    on ROCm we cap and chunk larger transfers. CUDA's ``cuMemcpyBatchAsync``
+    handles arbitrary counts and is left uncapped. Set
+    ``VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS`` (>0) to override on any platform.
+    """
+    global _max_batch_descriptors
+    if _max_batch_descriptors is None:
+        override = os.getenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS")
+        val: int | None = None
+        if override is not None:
+            try:
+                parsed = int(override)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS=%r",
+                    override,
+                )
+            else:
+                if parsed > 0:
+                    val = parsed
+        if val is None:
+            val = (
+                _ROCM_DEFAULT_MAX_BATCH_DESCRIPTORS if current_platform.is_rocm() else 0
+            )
+        _max_batch_descriptors = val
+    return _max_batch_descriptors
 
 
 def _resolve_batch_memcpy() -> tuple[Any, int]:
@@ -221,18 +264,24 @@ def copy_blocks(
     sz_all = np.repeat(params.bpb, n)
     total = n * params.num_layers
 
-    err = fn(
-        dst_all.ctypes.data,
-        src_all.ctypes.data,
-        sz_all.ctypes.data,
-        total,
-        ctypes.addressof(params.attrs),
-        ctypes.byref(params.attrs_idx),
-        params.num_attrs,
-        ctypes.byref(params.fail_idx),
-        params.stream_handle,
-    )
-    if err != 0:
-        raise RuntimeError(
-            f"batch memcpy failed: err={err} failIdx={params.fail_idx.value}"
+    # Chunk on ROCm (hipMemcpyBatchAsync faults above 8192 descriptors/call);
+    # CUDA is uncapped (max_desc == 0), so it issues a single call as before.
+    max_desc = _resolve_max_batch_descriptors()
+    step = total if max_desc <= 0 else max_desc
+    for off in range(0, total, step):
+        cnt = min(step, total - off)
+        err = fn(
+            dst_all[off : off + cnt].ctypes.data,
+            src_all[off : off + cnt].ctypes.data,
+            sz_all[off : off + cnt].ctypes.data,
+            cnt,
+            ctypes.addressof(params.attrs),
+            ctypes.byref(params.attrs_idx),
+            params.num_attrs,
+            ctypes.byref(params.fail_idx),
+            params.stream_handle,
         )
+        if err != 0:
+            raise RuntimeError(
+                f"batch memcpy failed: err={err} failIdx={params.fail_idx.value}"
+            )
