@@ -309,10 +309,22 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     threads and serialize the pipeline. Such an engine sets this True, omits the
     per-update sync, and guarantees completion in `finish_weight_update` instead.
 
-    Callers that drive the update protocol themselves must read this: with it set,
-    a returned `update_weights` means "queued", not "applied", so any state that
-    depends on the weights being resident has to wait for `finish_weight_update`.
+    Callers that go through `finish_weight_update` need do nothing: the engine
+    drains there. A caller that instead drives the tail itself — running its own
+    `finalize_layerwise_reload`, say — must read this flag and call
+    `drain_pending()` first, because with it set a returned `update_weights` means
+    "queued", not "applied".
     """
+
+    def drain_pending(self) -> None:
+        """Block until every deferred update has been applied to the model.
+
+        The companion to `defers_processing`: a caller that has taken over the
+        update tail calls this to re-establish the guarantee that
+        `finish_weight_update` would otherwise have given it. Idempotent, and a
+        no-op by default — an engine that processes synchronously has nothing to
+        drain, so this is always safe to call.
+        """
 
     def __init__(
         self,
