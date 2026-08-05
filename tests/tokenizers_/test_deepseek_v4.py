@@ -15,8 +15,16 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
-from vllm.tokenizers.deepseek_v4_encoding import encode_arguments_to_dsml
+from vllm.tokenizers.deepseek_v4_encoding import (
+    REASONING_EFFORT_PROMPTS,
+    encode_arguments_to_dsml,
+)
 from vllm.tokenizers.registry import TokenizerRegistry
+
+# Thinking defaults on and, when on, reasoning effort defaults to "high", so an
+# unqualified request now carries this preamble at message index 0. Tests below
+# reference the table rather than the wording: the tier is the contract.
+_DEFAULT_EFFORT_PREAMBLE = REASONING_EFFORT_PROMPTS["high"]
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "deepseek_v4"
 
@@ -139,7 +147,11 @@ def test_deepseek_v4_honors_official_thinking_request_field():
 
     assert chat_kwargs["thinking"] is True
     assert chat_kwargs["enable_thinking"] is True
-    assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>")
+    assert prompt == (
+        "<｜begin▁of▁sentence｜>"
+        + _DEFAULT_EFFORT_PREAMBLE
+        + "<｜User｜>Hello<｜Assistant｜><think>"
+    )
 
 
 def test_deepseek_v4_defaults_to_official_thinking_for_openai_request():
@@ -209,7 +221,9 @@ def test_deepseek_v4_preserves_official_prefix_assistant_message():
 
     assert conversation[1]["prefix"] is True
     assert conversation[1]["wo_eos"] is True
-    assert prompt.endswith("<｜Assistant｜></think>```python\n")
+    # Thinking is on by default now, so the prefix turn opens and closes an
+    # empty thinking block before the prefix content instead of only closing one.
+    assert prompt.endswith("<｜Assistant｜><think></think>```python\n")
     assert not prompt.endswith("<｜end▁of▁sentence｜>")
 
 
@@ -729,7 +743,9 @@ def test_deepseek_v4_merges_consecutive_assistant_messages_drop_thinking():
     # Without request tools, reasoning from earlier turns is dropped, but the
     # split turn still renders as a single assistant turn (one EOS).
     assert prompt == (
-        "<｜begin▁of▁sentence｜><｜User｜>Check the server<｜Assistant｜></think>"
+        "<｜begin▁of▁sentence｜>"
+        + _DEFAULT_EFFORT_PREAMBLE
+        + "<｜User｜>Check the server<｜Assistant｜></think>"
         "Let me check the server status.\n\n<｜DSML｜tool_calls>\n"
         '<｜DSML｜invoke name="shell_exec">\n'
         '<｜DSML｜parameter name="command" string="true">'
