@@ -156,11 +156,6 @@ def _log_gdn_backend_decision(
         requested_backend,
         head_k_dim,
     )
-    if active_backend == "flashinfer" and current_platform.is_device_capability(90):
-        logger.warning_once(
-            "FlashInfer GDN prefill is JIT-compiled; first run may take a "
-            "while. Set --gdn-prefill-backend triton to skip JIT.",
-        )
 
 
 def fi_chunk_gated_delta_rule(
