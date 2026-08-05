@@ -251,6 +251,84 @@ def test_cpu_mm_processor_needs_no_ec_role():
         _validate_mm_processor_device(device="cpu", ec_role=None)
 
 
+@pytest.mark.parametrize(
+    ("flag", "kwargs", "expected"),
+    [
+        # "auto" is only settled once the EC role is known, so it must leave no
+        # device behind for `VllmConfig` to mistake for an explicit request.
+        ("auto", None, None),
+        (None, None, None),
+        ("cpu", None, "cpu"),
+        ("cuda", None, "cuda"),
+        # Any explicit value other than "cpu" means "whatever this platform
+        # calls its accelerator".
+        ("gpu", None, "cuda"),
+        # An explicit device in the kwargs wins over the convenience flag.
+        ("cpu", {"device": "cuda"}, "cuda"),
+        ("cuda", {"device": "cpu"}, "cpu"),
+    ],
+)
+def test_fold_mm_processor_device(
+    flag: str | None, kwargs: dict | None, expected: str | None
+):
+    with patch("vllm.platforms.current_platform.device_type", "cuda"):
+        folded = MultiModalConfig.fold_mm_processor_device(kwargs, flag)
+
+    config = MultiModalConfig(mm_processor_kwargs=folded or {})
+    assert config.get_mm_processor_device_type() == expected
+
+
+def _resolve_mm_processor_device(
+    *,
+    ec_role: ECRole | None,
+    mm_tensor_ipc: str = "torch_shm",
+    device: str | None = None,
+) -> str | None:
+    """Run the `auto` resolution and report where the processor ended up."""
+    mm_config = MultiModalConfig(
+        mm_processor_kwargs={} if device is None else {"device": device},
+        mm_tensor_ipc=mm_tensor_ipc,  # type: ignore[arg-type]
+    )
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = mm_config
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = (
+        None
+        if ec_role is None
+        else ECTransferConfig(ec_connector="ECExampleConnector", ec_role=ec_role)
+    )
+
+    with patch("vllm.platforms.current_platform.device_type", "cuda"):
+        VllmConfig._resolve_mm_processor_device(vllm_config)
+    return mm_config.get_mm_processor_device_type()
+
+
+def test_auto_mm_processor_device_uses_accelerator_on_encoder_instance():
+    """The one deployment that has the device to itself and can hand it over."""
+    assert _resolve_mm_processor_device(ec_role="ec_producer") == "cuda"
+
+
+@pytest.mark.parametrize("ec_role", [None, "ec_consumer", "ec_both"])
+def test_auto_mm_processor_device_stays_on_cpu_off_encoder_instance(
+    ec_role: ECRole | None,
+):
+    """Every other role runs the language model in the same process."""
+    assert _resolve_mm_processor_device(ec_role=ec_role) is None
+
+
+def test_auto_mm_processor_device_needs_a_device_capable_transport():
+    """Other transports serialize host bytes, so the output is copied back."""
+    assert (
+        _resolve_mm_processor_device(ec_role="ec_producer", mm_tensor_ipc="direct_rpc")
+        is None
+    )
+
+
+def test_auto_mm_processor_device_leaves_an_explicit_request_alone():
+    assert _resolve_mm_processor_device(ec_role="ec_producer", device="cpu") == "cpu"
+
+
 def test_vllm_config_runs_the_mm_processor_device_check():
     """Startup must reach the check; the rule itself is covered above.
 

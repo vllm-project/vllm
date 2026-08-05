@@ -18,6 +18,7 @@ from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
     MMHasherAlgorithm,
+    MMProcessorDevice,
     MMTensorIPC,
     MultiModalConfig,
 )
@@ -394,6 +395,7 @@ class ModelConfig:
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -524,6 +526,7 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        mm_processor_device: MMProcessorDevice | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -735,6 +738,10 @@ class ModelConfig:
                     "Falling back to `--mm-encoder-tp-mode weights`."
                 )
                 mm_encoder_tp_mode = "weights"
+
+            mm_processor_kwargs = MultiModalConfig.fold_mm_processor_device(
+                mm_processor_kwargs, mm_processor_device
+            )
 
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,

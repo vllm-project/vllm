@@ -1695,52 +1695,6 @@ class EngineArgs:
         )
         return engine_args
 
-    def _resolve_mm_processor_device(self) -> None:
-        """Fold `--mm-processor-device` into `mm_processor_kwargs["device"]`.
-
-        The flag is convenience only: no state is kept for it, so this runs once
-        while translating args into configs. "auto" needs both the EC role and
-        the tensor transport, which are only available together here.
-
-        An explicit `device` in `--mm-processor-kwargs` always wins. Validating
-        the result is `MultiModalConfig`'s job, so entry points that never build
-        `EngineArgs` are covered too.
-        """
-        original = self.mm_processor_kwargs or {}
-        kwargs = dict(original)
-
-        # `device_type` is the accelerator torch itself names, so this stays
-        # correct on ROCm ("cuda") and XPU ("xpu") without enumerating platforms.
-        device_type = current_platform.device_type
-        has_accelerator = device_type not in ("", "cpu")
-
-        ec_config = self.ec_transfer_config
-        is_encoder_instance = ec_config is not None and ec_config.is_encode_only
-
-        if "device" not in kwargs and has_accelerator:
-            # Any explicit value other than "cpu" means "the accelerator", so a
-            # programmatically-set "cuda" still works on a platform whose device
-            # type is named differently.
-            if self.mm_processor_device not in ("auto", "cpu"):
-                kwargs["device"] = device_type
-            elif self.mm_processor_device == "auto" and is_encoder_instance:
-                # Any other transport serializes host bytes, so the output would
-                # be copied back, and that copy costs more than running the
-                # transform on device saves.
-                if self.mm_tensor_ipc != "torch_shm":
-                    logger.info_once(
-                        "EPD encoder instance: keeping the multi-modal "
-                        "processor on CPU because mm_tensor_ipc=%s cannot carry "
-                        "device tensors. Add --mm-tensor-ipc=torch_shm to run "
-                        "it on the accelerator.",
-                        self.mm_tensor_ipc,
-                    )
-                else:
-                    kwargs["device"] = device_type
-
-        if kwargs != original:
-            self.mm_processor_kwargs = kwargs
-
     def create_model_config(self) -> ModelConfig:
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(
@@ -1750,8 +1704,6 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
-
-        self._resolve_mm_processor_device()
 
         return ModelConfig(
             model=self.model,
@@ -1817,6 +1769,7 @@ class EngineArgs:
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
+            mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
         )

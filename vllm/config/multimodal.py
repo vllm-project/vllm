@@ -342,6 +342,43 @@ class MultiModalConfig:
                 )
         return self
 
+    @staticmethod
+    def fold_mm_processor_device(
+        mm_processor_kwargs: dict[str, Any] | None,
+        mm_processor_device: MMProcessorDevice | None,
+    ) -> dict[str, Any] | None:
+        """Fold the `mm_processor_device` convenience flag into the kwargs.
+
+        The flag keeps no state of its own: `mm_processor_kwargs["device"]` is
+        the only representation of where the processor runs, so an explicit
+        `device` there always wins and `"auto"` stays unresolved for
+        `VllmConfig`, which is where the EC role needed to resolve it lives.
+
+        Args:
+            mm_processor_kwargs: The kwargs as given, or None.
+            mm_processor_device: The flag's value, or None when unset.
+
+        Returns:
+            The kwargs to build the config with, unchanged unless the flag adds
+            a `device`.
+        """
+        if mm_processor_device in (None, "auto"):
+            return mm_processor_kwargs
+        if (mm_processor_kwargs or {}).get("device") is not None:
+            return mm_processor_kwargs
+
+        from vllm.platforms import current_platform
+
+        # Any explicit value other than "cpu" means "the accelerator", so a
+        # programmatically-set "cuda" still works on a platform whose device type
+        # is named differently ("xpu"), and degrades to CPU where there is none.
+        device = (
+            "cpu"
+            if mm_processor_device == "cpu"
+            else (current_platform.device_type or "cpu")
+        )
+        return {**(mm_processor_kwargs or {}), "device": device}
+
     def get_mm_processor_device_type(self) -> str | None:
         """The torch device type `mm_processor_kwargs["device"]` names.
 
