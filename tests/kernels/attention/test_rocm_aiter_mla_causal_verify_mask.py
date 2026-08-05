@@ -186,9 +186,15 @@ def _run_verify_block():
 
     # The Gluon kernel only reads the metadata this test is about, so a spy in
     # its place keeps the assertions independent of the AITER build.
-    with patch(
-        "vllm.v1.attention.backends.mla.rocm_aiter_mla._get_mla_gluon",
-        lambda: spy,
+    with (
+        patch(
+            "vllm.v1.attention.backends.mla.rocm_aiter_mla._gluon_mla_decode_supported",
+            lambda: True,
+        ),
+        patch(
+            "vllm.v1.attention.backends.mla.rocm_aiter_mla._get_mla_gluon",
+            lambda: spy,
+        ),
     ):
         impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=None)
 
