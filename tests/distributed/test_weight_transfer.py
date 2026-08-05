@@ -1679,6 +1679,10 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
     }
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the sparse patch path moves tensors to the device",
+)
 def test_sparse_nccl_trainer_send_weights_drives_client_in_order():
     """send_weights takes the round's patches and ships per-patch metadata
     (names / shapes / num_updates_list) + broadcasts indices + values each."""
@@ -1908,6 +1912,10 @@ def test_sharded_rdt_worker_init_info_is_group_major(monkeypatch):
     assert sum(worker_init.group_lens) == len(worker_init.names)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the gather loop's CUDA-IPC export needs a device",
+)
 def test_sharded_rdt_send_weights_drives_client_in_order(monkeypatch):
     server = _FakeProducerServer(auto_free=True)
     client = RecordingClient()
@@ -1949,6 +1957,10 @@ def test_sharded_rdt_send_weights_group_order_mismatch_raises(monkeypatch):
     assert "error" in server.order  # gather error propagated to the server
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the gather loop's CUDA-IPC export needs a device",
+)
 def test_sharded_rdt_non_sender_skips_client(monkeypatch):
     class _RaisingClient(RecordingClient):
         def start_weight_update(self):
@@ -1974,6 +1986,10 @@ def test_sharded_rdt_non_sender_skips_client(monkeypatch):
     assert server.order == ["begin", "publish", "publish", "publish", "publish", "end"]
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the gather loop's CUDA-IPC export needs a device",
+)
 def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
     class _FailingUpdateClient(RecordingClient):
         def update_weights(self, update_info):
@@ -2085,6 +2101,10 @@ class _OwnedSource(_ListSource):
         return iter([(n, by_name[n]) for n in self._owned_names])
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the gather loop's CUDA-IPC export needs a device",
+)
 def test_sharded_rdt_publishes_only_owned_groups(monkeypatch):
     server = _FakeProducerServer(auto_free=True)
     engine = _rdt_engine_with_fake_server(
@@ -2122,6 +2142,10 @@ def test_sharded_rdt_owned_group_order_mismatch_raises(monkeypatch):
     assert "error" in server.order
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the gather loop's CUDA-IPC export needs a device",
+)
 def test_sharded_rdt_skips_publishing_a_group_no_consumer_pulls(monkeypatch):
     """A group gathered but routed to nobody must not be published: it would
     hold a backpressure slot that no free ever releases."""
@@ -2142,6 +2166,10 @@ def test_sharded_rdt_skips_publishing_a_group_no_consumer_pulls(monkeypatch):
     assert server.order.count("publish") == 3
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the gather loop's CUDA-IPC export needs a device",
+)
 def test_sharded_rdt_publish_carries_the_group_free_target(monkeypatch):
     server = _FakeProducerServer(auto_free=True)
     engine = _rdt_engine_with_fake_server(
