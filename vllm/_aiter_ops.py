@@ -2713,6 +2713,111 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def fused_qk_norm_mrope_and_cache(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        head_dim: int,
+        is_neox: bool,
+        mrope_section: list[int],
+        is_interleaved: bool,
+        rms_norm_eps: float,
+        q_out: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        block_size: int,
+        x: int,
+    ) -> None:
+        from aiter.ops.fused_qk_norm_mrope_cache_quant import (
+            fused_qk_norm_mrope_3d_cache_pts_quant_shuffle,
+        )
+
+        fused_qk_norm_mrope_3d_cache_pts_quant_shuffle(
+            qkv,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+            positions,
+            qkv.size(0),
+            num_heads_q,
+            num_heads_k,
+            num_heads_k,
+            head_dim,
+            is_neox,
+            mrope_section,
+            is_interleaved,
+            rms_norm_eps,
+            q_out,
+            k_cache,
+            v_cache,
+            slot_mapping,
+            k_scale,
+            v_scale,
+            None,
+            None,
+            False,
+            False,
+            block_size,
+            x,
+        )
+
+    @staticmethod
+    def do_qk_norm_mrope_kvcache_update(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        head_dim: int,
+        is_neox: bool,
+        mrope_section: list[int],
+        is_interleaved: bool,
+        rms_norm_eps: float,
+        q_out: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        kv_cache_dtype: str,
+    ) -> None:
+        if kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
+
+        rocm_aiter_ops.fused_qk_norm_mrope_and_cache(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=num_heads_q,
+            num_heads_k=num_heads_k,
+            head_dim=head_dim,
+            is_neox=is_neox,
+            mrope_section=mrope_section,
+            is_interleaved=is_interleaved,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            slot_mapping=slot_mapping,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            block_size=key_cache.shape[1],
+            x=16 // key_cache.element_size(),
+        )
+
+    @staticmethod
     def triton_rope_and_cache(
         query: torch.Tensor,
         key: torch.Tensor,

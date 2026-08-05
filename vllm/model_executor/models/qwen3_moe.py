@@ -31,6 +31,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm import envs
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -42,6 +44,9 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.qk_norm_mrope_kvcache import (
+    fused_qk_norm_mrope_and_unified_kv_cache_update,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -59,6 +64,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import _encode_layer_name
 
 from .interfaces import (
     EagleModelMixin,
@@ -80,101 +86,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-import os as _os
-
-# MLPerf Q3VL fusion #1: fuse qk-RMSNorm + 3D-mrope + fp8 KV-quant + flash KV-cache write into one
-# aiter kernel (fused_qk_norm_mrope_3d_cache_pts_quant_shuffle, patched for the flash layout).
-# Opt-in via VLLM_Q3VL_FUSE_ATTN_PROLOGUE=1 (default off -> baseline path unchanged).
-_Q3VL_FUSE_ATTN_PROLOGUE = _os.environ.get("VLLM_Q3VL_FUSE_ATTN_PROLOGUE", "0") == "1"
-_Q3VL_ATTN_LOGGED = False
-_Q3VL_CS_BF16: dict = {}
-try:
-    from aiter import (
-        fused_qk_norm_mrope_3d_cache_pts_quant_shuffle as _q3vl_aiter_mrope,
-    )
-    from vllm.model_executor.layers.attention.attention import get_attention_context
-    from vllm.utils.torch_utils import (
-        is_quantized_kv_cache as _q3vl_is_quant_kv,
-        direct_register_custom_op as _q3vl_reg_op,
-        _encode_layer_name as _q3vl_encode,
-        _resolve_layer_name as _q3vl_resolve,
-        LayerNameType as _Q3VLLayerName,
-    )
-except Exception:  # pragma: no cover - aiter/op missing -> feature disabled
-    _q3vl_aiter_mrope = None
-    _Q3VL_FUSE_ATTN_PROLOGUE = False
-
-
-if _q3vl_aiter_mrope is not None:
-
-    def _q3vl_norm_mrope_kv_impl(
-        qkv: torch.Tensor,
-        q_out: torch.Tensor,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        qw: torch.Tensor,
-        kw: torch.Tensor,
-        num_heads_q: int,
-        num_heads_k: int,
-        head_size: int,
-        eps: float,
-        is_neox: bool,
-        is_interleaved: bool,
-        mrope_section: list[int],
-        layer_name: _Q3VLLayerName,
-    ) -> None:
-        global _Q3VL_ATTN_LOGGED
-        layer_name = _q3vl_resolve(layer_name)
-        try:
-            _, attn_layer, kv_cache, slot_mapping = get_attention_context(layer_name)
-        except Exception:
-            return
-        if slot_mapping is None or kv_cache is None or kv_cache.numel() == 0:
-            return  # profiling / no cache this pass
-        # mrope wants [3, num_tokens]; capture/text passes 1D -> expand (t=h=w == standard rope).
-        if positions.dim() == 1:
-            positions = positions.unsqueeze(0).expand(3, -1).contiguous()
-        if not _Q3VL_ATTN_LOGGED:
-            from vllm.logger import init_logger as _il
-            _il(__name__).warning(
-                "[Q3VL] fused attention prologue ACTIVE (fusion #1); positions=%s kv=%s",
-                tuple(positions.shape), tuple(kv_cache.shape))
-            _Q3VL_ATTN_LOGGED = True
-        impl = attn_layer.impl
-        key_cache, value_cache = impl._split_kv_cache(kv_cache)
-        if _q3vl_is_quant_kv(impl.kv_cache_dtype):
-            key_cache = key_cache.view(impl.fp8_dtype)
-            value_cache = value_cache.view(impl.fp8_dtype)
-        cs = _Q3VL_CS_BF16.get(layer_name)
-        if cs is None or cs.device != qkv.device or cs.dtype != qkv.dtype:
-            cs = cos_sin_cache.to(qkv.dtype).contiguous()
-            _Q3VL_CS_BF16[layer_name] = cs
-        block_size = int(key_cache.shape[1])
-        _q3vl_aiter_mrope(
-            qkv.contiguous(), qw, kw, cs, positions, qkv.shape[0],
-            num_heads_q, num_heads_k, num_heads_k, head_size, is_neox,
-            list(mrope_section), is_interleaved, eps,
-            q_out, key_cache, value_cache, slot_mapping,
-            attn_layer._k_scale, attn_layer._v_scale, None, None,
-            False, False, block_size, 16, 0,
-        )
-
-    def _q3vl_norm_mrope_kv_fake(
-        qkv: torch.Tensor, q_out: torch.Tensor, positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor, qw: torch.Tensor, kw: torch.Tensor,
-        num_heads_q: int, num_heads_k: int, head_size: int, eps: float,
-        is_neox: bool, is_interleaved: bool, mrope_section: list[int],
-        layer_name: _Q3VLLayerName,
-    ) -> None:
-        return
-
-    _q3vl_reg_op(
-        op_name="q3vl_norm_mrope_kv",
-        op_func=_q3vl_norm_mrope_kv_impl,
-        mutates_args=["q_out"],
-        fake_impl=_q3vl_norm_mrope_kv_fake,
-    )
 
 
 class Qwen3MoeMLP(nn.Module):
@@ -427,9 +338,9 @@ class Qwen3MoeAttention(nn.Module):
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self._q3vl_ok = bool(
-            _Q3VL_FUSE_ATTN_PROLOGUE
-            and _q3vl_aiter_mrope is not None
+        self.use_fused_mrope = bool(
+            envs.VLLM_Q3VL_FUSE_ATTN_PROLOGUE
+            and is_aiter_found_and_supported()
             and getattr(self.rotary_emb, "mrope_section", None)
         )
 
@@ -438,21 +349,29 @@ class Qwen3MoeAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if self._q3vl_ok:
+        if self.use_fused_mrope:
             qkv, _ = self.qkv_proj(hidden_states)
             q_out = torch.empty(
-                qkv.shape[0], self.num_heads * self.head_dim,
-                dtype=qkv.dtype, device=qkv.device,
+                qkv.shape[0],
+                self.num_heads * self.head_dim,
+                dtype=qkv.dtype,
+                device=qkv.device,
             )
-            torch.ops.vllm.q3vl_norm_mrope_kv(
-                qkv, q_out, positions, self.rotary_emb.cos_sin_cache,
-                self.q_norm.weight, self.k_norm.weight,
-                self.num_heads, self.num_kv_heads, self.head_dim,
+            fused_qk_norm_mrope_and_unified_kv_cache_update(
+                qkv,
+                q_out,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
                 self.q_norm.variance_epsilon,
                 bool(getattr(self.rotary_emb, "is_neox_style", True)),
                 bool(self.rotary_emb.mrope_interleaved),
                 list(self.rotary_emb.mrope_section),
-                _q3vl_encode(self.attn.layer_name),
+                _encode_layer_name(self.attn.layer_name),
             )
             attn_output = self.attn(q_out, None, None)
             output, _ = self.o_proj(attn_output)
