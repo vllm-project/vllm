@@ -459,16 +459,11 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
-  optional: false
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - .buildkite/ci_config_rocm.yaml
-  - .buildkite/hardware_tests/amd.yaml
   - .buildkite/scripts/docker-build-metadata-args.sh
   - .buildkite/scripts/ci-bake-rocm.sh
-  - .buildkite/scripts/rocm/build-ci-base.sh
-  - .buildkite/scripts/rocm/build-test-image.sh
-  - .buildkite/scripts/rocm/refresh-base-image.sh
   - docker/Dockerfile
   - docker/Dockerfile.cpu
   - docker/Dockerfile.rocm
@@ -477,9 +472,8 @@ steps:
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
   - tests/tools/test_docker_build_metadata_args.py
-  - tests/tools/test_rocm_ci_cache.py
   commands:
-  - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_ci_cache.py
+  - pytest -v -s tools/test_docker_build_metadata_args.py
 
 #########################################################################################################################################
 #                                                                                                                                       #

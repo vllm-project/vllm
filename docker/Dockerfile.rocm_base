@@ -160,6 +160,7 @@ RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install
 ### Shared PyTorch runtime for dependent builds
 ###
 FROM base AS build_pytorch_runtime
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install,ro \
     pip install /install/*.whl
 

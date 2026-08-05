@@ -113,26 +113,16 @@ variable "DEEPEP_CACHE_KEY" {
 # manifest, including inherited base layers (~7.25GB ROCm runtime).
 # Docker Hub auto-creates the repo on first push.
 #
-# Final-image cache is exported per commit and per branch; imports also include
-# parent and merge-base commit refs as stable fallbacks.
+# Final-image cache stays commit-scoped. Branch-to-branch reuse for the test
+# image comes from importing the parent and merge-base commit cache refs.
 #
-# The source-scoped native cache is exported by content and by branch so exact
-# inputs are reusable across PRs while changed inputs can reuse the preceding
-# branch build without depending on a single global latest tag.
+# The source-scoped native cache is exported both per-commit and per-branch so
+# ROCm extension rebuilds are shareable within the same commit reruns and across
+# consecutive commits on the same branch without depending on a single global
+# latest tag.
 
 variable "DOCKERHUB_CACHE_REPO" {
   default = "rocm/vllm-ci-cache"
-}
-
-# v2 starts a clean trusted namespace after shared refs became write-scoped.
-# Untrusted builds import canonical v2 refs but export only refs carrying their
-# deterministic PR/preview suffix.
-variable "ROCM_CACHE_NAMESPACE" {
-  default = "v2"
-}
-
-variable "ROCM_CACHE_WRITE_SUFFIX" {
-  default = ""
 }
 
 variable "DOCKERHUB_CACHE_TO" {
@@ -164,40 +154,30 @@ variable "ROCM_FINAL_CACHE_TO_MODE" {
 function "get_cache_from_rocm" {
   params = []
   result = compact([
-    # Scoped refs allow exact reruns within an untrusted PR/preview.
-    BUILDKITE_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    PARENT_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
     # Exact commit hit - fastest cache on re-runs of the same commit
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT}" : "",
     # Parent commit - useful cache for incremental changes
-    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${PARENT_COMMIT}" : "",
     # Merge-base with main - stable fallback for long-lived or rebased PRs;
     # maps to a real main-branch commit whose cache layers are likely warm
-    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-${VLLM_MERGE_BASE_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
     # Import the source-scoped native build cache as well so builds whose
     # Python/package layers changed can still reuse compiled ROCm objects.
-    BUILDKITE_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    PARENT_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}" : "",
-    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}" : "",
-    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${VLLM_MERGE_BASE_COMMIT}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
-    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${PARENT_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
     # Import the source-scoped Rust frontend cache so non-Rust changes do not
     # force a fresh cargo release build.
-    BUILDKITE_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    PARENT_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}" : "",
-    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}" : "",
-    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${VLLM_MERGE_BASE_COMMIT}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
-    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${BUILDKITE_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${PARENT_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
     # Branch-scoped full image cache - fallback when parent-commit cache is evicted
-    ROCM_CACHE_BRANCH_TAG != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
-    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
   ])
 }
 
@@ -205,57 +185,54 @@ function "get_cache_to_rocm" {
   params = []
   result = compact([
     # Commit-scoped cache for exact re-runs.
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}${ROCM_CACHE_WRITE_SUFFIX},mode=${ROCM_FINAL_CACHE_TO_MODE}" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${BUILDKITE_COMMIT},mode=${ROCM_FINAL_CACHE_TO_MODE}" : "",
     # Branch-scoped cache so later commits on the same branch can reuse the full
     # image layers when the parent-commit cache is evicted. Unlike the old
     # rocm-latest tag (which caused duplicate exporter 400s), this is per-branch.
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX},mode=${ROCM_FINAL_CACHE_TO_MODE}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_FINAL_CACHE_TO_MODE}" : "",
   ])
 }
 
 function "get_cache_from_rocm_csrc" {
   params = []
   result = compact([
-    BUILDKITE_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    PARENT_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}" : "",
-    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}" : "",
-    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-${VLLM_MERGE_BASE_COMMIT}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
-    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${PARENT_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
   ])
 }
 
 function "get_cache_to_rocm_csrc" {
   params = []
   result = compact([
+    # Export the exact-commit native cache for same-commit reruns.
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${BUILDKITE_COMMIT},mode=${ROCM_CSRC_CACHE_TO_MODE}" : "",
     # Export the branch-scoped native cache so later commits on the same branch
-    # can reuse compiled ROCm objects when the content-addressed cache changes.
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX},mode=${ROCM_CSRC_CACHE_TO_MODE}" : "",
+    # can reuse compiled ROCm objects even when the exact parent cache is absent.
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_CSRC_CACHE_TO_MODE}" : "",
   ])
 }
 
 function "get_cache_from_rocm_rust" {
   params = []
   result = compact([
-    BUILDKITE_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    PARENT_COMMIT != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${BUILDKITE_COMMIT}" : "",
-    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${PARENT_COMMIT}" : "",
-    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-${VLLM_MERGE_BASE_COMMIT}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" && ROCM_CACHE_WRITE_SUFFIX != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
-    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${BUILDKITE_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${PARENT_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
   ])
 }
 
 function "get_cache_to_rocm_rust" {
   params = []
   result = compact([
-    # A content-addressed cache ref is appended by ci-bake-rocm.sh. Keep one
-    # rolling mode=max ref for incremental reuse when the Rust inputs change.
-    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${ROCM_CACHE_NAMESPACE}-branch-${ROCM_CACHE_BRANCH_TAG}${ROCM_CACHE_WRITE_SUFFIX},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
+    # Export exact-commit and branch-scoped Rust caches. A content-addressed
+    # cache ref is appended by ci-bake-rocm.sh when that wrapper is used.
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${BUILDKITE_COMMIT},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
   ])
 }
 
@@ -267,33 +244,30 @@ function "get_cache_to_rocm_rust" {
 function "get_cache_from_rocm_deps" {
   params = []
   result = compact([
-    ROCM_CACHE_WRITE_SUFFIX != "" && NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${ROCM_CACHE_NAMESPACE}-${NIXL_CACHE_KEY}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${ROCM_CACHE_NAMESPACE}-${NIXL_CACHE_KEY}" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${ROCM_CACHE_NAMESPACE}-${NIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
-    ROCM_CACHE_WRITE_SUFFIX != "" && ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCM_CACHE_NAMESPACE}-${ROCSHMEM_CACHE_KEY}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCM_CACHE_NAMESPACE}-${ROCSHMEM_CACHE_KEY}" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCM_CACHE_NAMESPACE}-${ROCSHMEM_BRANCH}" : ""),
-    ROCM_CACHE_WRITE_SUFFIX != "" && DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${ROCM_CACHE_NAMESPACE}-${DEEPEP_CACHE_KEY}${ROCM_CACHE_WRITE_SUFFIX}" : "",
-    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${ROCM_CACHE_NAMESPACE}-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${ROCM_CACHE_NAMESPACE}-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}" : ""),
+    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY}" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
+    ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH}" : ""),
+    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}" : ""),
   ])
 }
 
 function "get_cache_to_rocm_nixl" {
   params = []
   result = compact([
-    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${ROCM_CACHE_NAMESPACE}-${NIXL_CACHE_KEY}${ROCM_CACHE_WRITE_SUFFIX},mode=min" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${ROCM_CACHE_NAMESPACE}-${NIXL_BRANCH}-ucx-${UCX_BRANCH}${ROCM_CACHE_WRITE_SUFFIX},mode=min" : ""),
+    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY},mode=min" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : ""),
   ])
 }
 
 function "get_cache_to_rocm_rocshmem" {
   params = []
   result = compact([
-    ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCM_CACHE_NAMESPACE}-${ROCSHMEM_CACHE_KEY}${ROCM_CACHE_WRITE_SUFFIX},mode=min" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCM_CACHE_NAMESPACE}-${ROCSHMEM_BRANCH}${ROCM_CACHE_WRITE_SUFFIX},mode=min" : ""),
+    ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY},mode=min" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH},mode=min" : ""),
   ])
 }
 
 function "get_cache_to_rocm_deepep" {
   params = []
   result = compact([
-    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${ROCM_CACHE_NAMESPACE}-${DEEPEP_CACHE_KEY}${ROCM_CACHE_WRITE_SUFFIX},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${ROCM_CACHE_NAMESPACE}-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}${ROCM_CACHE_WRITE_SUFFIX},mode=min" : ""),
+    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH},mode=min" : ""),
   ])
 }
 
@@ -371,22 +345,14 @@ group "test-rocm-ci-with-wheel" {
 }
 
 # Image tags for the ci_base build. ci-bake-rocm.sh publishes a versioned,
-# content-scoped primary tag plus a commit alias. After validating both outputs,
-# a trusted current-main build separately promotes the legacy stable runtime tag
-# and the versioned stable cache tag.
+# content-scoped primary tag plus a unique build-scoped runtime alias. A trusted
+# current-main build separately promotes the stable runtime tag.
 variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
 }
 
-# Supplemental tags only. ci-bake-rocm.sh leaves these empty when the same ref
-# is already the primary CI_BASE_IMAGE_TAG.
-variable "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" {
-  default = ""
-}
-
-# Read-only, versioned fallback for PR builds. Only trusted current-main builds
-# promote this ref after Bake has completed and all required aliases validate.
-variable "CI_BASE_STABLE_CACHE_REF" {
+# Unique runtime handoff consumed by native jobs in the same Buildkite build.
+variable "CI_BASE_IMAGE_TAG_BUILD_EXTRA" {
   default = ""
 }
 
@@ -440,14 +406,16 @@ target "ci-base-rocm-ci" {
     compact([
       CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",
       CI_BASE_TRUSTED_CONTENT_REF != "" ? "type=registry,ref=${CI_BASE_TRUSTED_CONTENT_REF}" : "",
-      CI_BASE_STABLE_CACHE_REF != "" ? "type=registry,ref=${CI_BASE_STABLE_CACHE_REF}" : "",
     ]),
     # Import upstream dependency caches so NIXL/ROCShmem/DeepEP stages
     # are cache hits even when ci_base itself needs rebuilding.
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT_EXTRA])
+  tags = compact([
+    CI_BASE_IMAGE_TAG,
+    CI_BASE_IMAGE_TAG_BUILD_EXTRA,
+  ])
   attest   = ["type=provenance,disabled=true"]
   output   = ["type=registry"]
 }

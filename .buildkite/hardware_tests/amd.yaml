@@ -1,8 +1,8 @@
 group: Hardware - AMD Build
 
 # ROCm image flow:
-# 1. Refresh the long-lived ROCm base image only when Dockerfile.rocm_base changes.
-# 2. Build ci_base from either the stable base or the freshly refreshed base.
+# 1. Select the content-matching ROCm base, building only on a cache miss.
+# 2. Build ci_base from either the stable base or the newly selected base.
 # 3. Build the per-commit ROCm CI image and smoke-test it before GPU jobs run.
 steps:
   - label: "AMD: :docker: refresh ROCm base"
@@ -12,6 +12,8 @@ steps:
     no_plugin: true
     commands:
       - bash .buildkite/scripts/rocm/refresh-base-image.sh
+    concurrency: 1
+    concurrency_group: "vllm/rocm/base-build/$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
@@ -40,6 +42,8 @@ steps:
     no_plugin: true
     commands:
       - bash .buildkite/scripts/rocm/build-ci-base.sh
+    concurrency: 1
+    concurrency_group: "vllm/rocm/ci-base-build/$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
@@ -50,6 +54,8 @@ steps:
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
+        - exit_status: 2  # Exact image found but registry handoff failed
           limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
@@ -72,7 +78,7 @@ steps:
       TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
-      IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
+      IMAGE_TAG: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
       REMOTE_VLLM: "0"
     retry:
       automatic:
