@@ -36,16 +36,16 @@ def _install_tilelang_kernel_stubs(
 ) -> dict[str, int]:
     calls = {"jit_decorate": 0, "compiled_call": 0}
 
-    platforms = ModuleType("vllm.platforms")
+    platforms: Any = ModuleType("vllm.platforms")
     platforms.current_platform = _Platform(is_cuda=is_cuda, is_rocm=is_rocm)
 
-    import_utils = ModuleType("vllm.utils.import_utils")
+    import_utils: Any = ModuleType("vllm.utils.import_utils")
     import_utils.has_tilelang = lambda: True
 
-    math_utils = ModuleType("vllm.utils.math_utils")
+    math_utils: Any = ModuleType("vllm.utils.math_utils")
     math_utils.cdiv = lambda a, b: (a + b - 1) // b
 
-    tilelang = ModuleType("tilelang")
+    tilelang: Any = ModuleType("tilelang")
 
     def jit(**kwargs: Any) -> Any:
         def decorate(func: Any) -> Any:
