@@ -12,7 +12,6 @@ from types import NoneType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import regex as re
 import torch
 import torch.nn as nn
 
@@ -280,25 +279,24 @@ class Worker(WorkerBase):
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
         """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
         cost of more cudaMalloc calls (negligible in practice). Restores the original
-        value on exit."""
+        allocator settings on exit."""
         if not current_platform.is_cuda():
             yield
             return
 
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        match = re.search(r"max_split_size_mb:(\d+)", conf)
-        original_value = match.group(1) if match else None
-
+        # parseArgs resets max_split_size_mb, garbage_collection_threshold, and
+        # roundup_power2_divisions to defaults on every call, so the full settings
+        # string must be carried through both calls to keep user-configured keys.
+        # Keys are parsed sequentially, so the appended override wins.
+        original = torch._C._accelerator_getAllocatorSettings()
+        override = f"max_split_size_mb:{max_split_size_mb}"
         torch._C._accelerator_setAllocatorSettings(
-            f"max_split_size_mb:{max_split_size_mb}"
+            f"{original},{override}" if original else override
         )
         try:
             yield
         finally:
-            # PyTorch defaults to SIZE_MAX (no limit).
-            _SIZE_MAX_MB = (2**64 - 1) // (1024 * 1024)
-            restore = original_value if original_value else str(_SIZE_MAX_MB)
-            torch._C._accelerator_setAllocatorSettings(f"max_split_size_mb:{restore}")
+            torch._C._accelerator_setAllocatorSettings(original)
 
     @instrument(span_name="Init device")
     def init_device(self):
