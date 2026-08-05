@@ -574,12 +574,10 @@ class Scheduler(SchedulerInterface):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
-
                         # Record the index of the preemption victim to
                         # maintain accurate loop state.
                         victim_index = self.running.index(preempted_req)
-                        self.running.remove(preempted_req)
-
+                        del self.running[victim_index]
                         # Decrement the loop cursor if the removed request
                         # preceded the current iteration, preventing the
                         # silent omission of the subsequent request.
