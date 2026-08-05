@@ -398,7 +398,7 @@ class HiSparseManager:
         self,
         request_ids: Sequence[str],
     ) -> SparseKVOffloadCommand | None:
-        """Package residency decisions behind the worker store boundary."""
+        """Package residency decisions for the worker connector."""
         if not self.resident_managers:
             return None
         block_table_updates = {

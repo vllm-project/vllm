@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SparseKVPageTransfer:
-    """Copy one logical KV page between cache-manager-owned and store-owned tiers."""
+    """Copy one logical KV page between cache-manager and worker-owned tiers."""
 
     transfer_id: int
     destination_block_id: int
@@ -17,7 +17,7 @@ class SparseKVPageTransfer:
 
 @dataclass
 class SparseKVOffloadCommand:
-    """Opaque scheduler-to-store command for one model step."""
+    """Opaque scheduler-to-worker command for one model step."""
 
     block_table_updates: dict[str, tuple[list[int], ...]]
     page_transfers: list[SparseKVPageTransfer]

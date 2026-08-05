@@ -36,8 +36,8 @@ from vllm.v1.kv_offload.sparse.hisparse_layer import (
     check_hisparse_host_memory,
 )
 from vllm.v1.kv_offload.sparse.hisparse_store import (
-    HiSparseOffloadStore,
-    init_hisparse_store,
+    HiSparseOffloadWorker,
+    init_hisparse_worker,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
@@ -495,7 +495,7 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
     block_tables: "BlockTables",
-) -> tuple[dict[str, Any], "HiSparseOffloadStore | None"]:
+) -> tuple[dict[str, Any], "HiSparseOffloadWorker | None"]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     kv_cache_raw_tensors = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device
@@ -509,9 +509,9 @@ def init_kv_cache(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_config=kv_cache_config,
     )
-    hisparse_store = None
+    hisparse_worker = None
     if vllm_config.attention_config.hisparse_config is not None:
-        hisparse_store = init_hisparse_store(
+        hisparse_worker = init_hisparse_worker(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,
             raw_tensors=kv_cache_raw_tensors,
@@ -537,7 +537,7 @@ def init_kv_cache(
     runner_kv_caches.extend(
         cache for name, cache in kv_caches.items() if name not in forward_context
     )
-    return kv_caches, hisparse_store
+    return kv_caches, hisparse_worker
 
 
 def build_slot_mappings_by_layer(

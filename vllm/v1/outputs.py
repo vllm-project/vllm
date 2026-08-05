@@ -291,8 +291,6 @@ class ModelRunnerOutput:
 
     hisparse_stats: HiSparseStats | None = None
 
-    sparse_kv_completions: list[int] | None = None
-
     ec_connector_output: ECConnectorOutput | None = None
 
     # req_id -> num_nans_in_logits
@@ -329,15 +327,13 @@ class ModelRunnerOutput:
     def with_worker_output_only(
         kv_connector_output: KVConnectorOutput | None,
         hisparse_stats: HiSparseStats | None,
-        sparse_kv_completions: list[int] | None = None,
     ) -> "ModelRunnerOutput":
-        if hisparse_stats is None and sparse_kv_completions is None:
+        if hisparse_stats is None:
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         if kv_connector_output is not None and not kv_connector_output.is_empty():
             output.kv_connector_output = kv_connector_output
         output.hisparse_stats = hisparse_stats
-        output.sparse_kv_completions = sparse_kv_completions
         return output
 
 

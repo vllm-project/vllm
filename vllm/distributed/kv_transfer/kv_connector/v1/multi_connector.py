@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorWorkerMetadata,
     SupportsHMA,
+    supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -203,6 +204,30 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
+    @classmethod
+    def from_connectors(
+        cls,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+        connectors: list[KVConnectorBase_V1],
+    ) -> "MultiConnector":
+        """Compose already-created connectors without changing user config."""
+        connector = cls.__new__(cls)
+        KVConnectorBase_V1.__init__(connector, vllm_config, role, kv_cache_config)
+        connector._connectors = connectors
+        connector._ktc_kv_transfer_config = [
+            child._kv_transfer_config for child in connectors
+        ]
+        connector._all_support_hma = all(supports_hma(child) for child in connectors)
+        assert (
+            vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            or connector._all_support_hma
+        ), "HMA should not be enabled unless all sub-connectors support it"
+        connector._requests_to_connector = {}
+        connector._extra_async_saves = {}
+        return connector
+
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         if not self._connectors:
@@ -355,6 +380,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(kv_connector_metadata, MultiKVConnectorMetadata)
         for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
             c.handle_preemptions(cm)
+
+    def prepare_step(self, scheduler_output: SchedulerOutput) -> None:
+        for c in self._connectors:
+            c.prepare_step(scheduler_output)
+
+    def finish_forward(self) -> None:
+        for c in self._connectors:
+            c.finish_forward()
 
     def get_finished_count(self) -> int | None:
         # TODO(https://github.com/vllm-project/vllm/issues/33400)

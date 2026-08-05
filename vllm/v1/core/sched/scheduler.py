@@ -288,6 +288,19 @@ class Scheduler(SchedulerInterface):
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
         )
+        if self.kv_cache_config.hisparse_host_num_blocks is not None:
+            from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_connector import (  # noqa: E501
+                attach_hisparse_connector,
+            )
+
+            self.connector = attach_hisparse_connector(
+                self.connector,
+                self.vllm_config,
+                KVConnectorRole.SCHEDULER,
+                self.kv_cache_config,
+                self.kv_cache_manager.hisparse_manager,
+            )
+            self.requires_kv_delivery = self.connector.requires_kv_delivery
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
         if self.connector is not None:
@@ -1237,11 +1250,6 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
-            sparse_kv_offload=(
-                self.kv_cache_manager.hisparse_manager.build_offload_command(
-                    list(num_scheduled_tokens)
-                )
-            ),
             partial_tail_offloads=pending_partial_tail_offloads,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
@@ -1699,8 +1707,6 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         hisparse_stats = model_runner_output.hisparse_stats
-        completed_transfers = model_runner_output.sparse_kv_completions
-        self.kv_cache_manager.hisparse_manager.complete_spills(completed_transfers)
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
@@ -2501,8 +2507,7 @@ class Scheduler(SchedulerInterface):
         if self.connector.reset_cache() is False:
             return False
 
-        if self.log_stats:
-            assert self.connector_prefix_cache_stats is not None
+        if self.connector_prefix_cache_stats is not None:
             self.connector_prefix_cache_stats.reset = True
 
         return True
@@ -2608,7 +2613,7 @@ class Scheduler(SchedulerInterface):
         Returns optional kv transfer parameters to be included with the
         request outputs.
         """
-        if self.connector is None:
+        if self.connector is None or self.vllm_config.kv_transfer_config is None:
             return False, None
 
         # Free any out-of-window prefix blocks before we hand the block table to

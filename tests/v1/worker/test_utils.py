@@ -15,7 +15,7 @@ from vllm.v1.kv_offload.sparse.base import (
     SparseKVPageTransfer,
 )
 from vllm.v1.kv_offload.sparse.hisparse_store import (
-    HiSparseOffloadStore,
+    HiSparseOffloadWorker,
     _expand_source_block_ids,
 )
 from vllm.v1.metrics.stats import HiSparseStats
@@ -115,7 +115,7 @@ def test_hisparse_layers_join_index_groups_during_construction(monkeypatch):
 
 def test_hisparse_offload_store_invalidates_only_index_group_leaders(monkeypatch):
     """Recycled blocks must not enter followers whose LRU state was released."""
-    store = object.__new__(HiSparseOffloadStore)
+    store = object.__new__(HiSparseOffloadWorker)
     store.kernel_block_size = 2
     calls: list[tuple[str, torch.Tensor]] = []
     leader = SimpleNamespace(
@@ -147,7 +147,7 @@ def test_hisparse_offload_store_invalidates_only_index_group_leaders(monkeypatch
 
 
 def test_hisparse_offload_store_prepare_step_invalidates_and_restores(monkeypatch):
-    store = object.__new__(HiSparseOffloadStore)
+    store = object.__new__(HiSparseOffloadWorker)
     store.kernel_block_size = 64
     store._post_forward_transfers = []
     scheduler_output = SimpleNamespace(
@@ -178,7 +178,7 @@ def test_hisparse_offload_store_prepare_step_invalidates_and_restores(monkeypatc
 
 
 def test_hisparse_offload_store_prepare_step_accepts_warmup_without_command():
-    store = object.__new__(HiSparseOffloadStore)
+    store = object.__new__(HiSparseOffloadWorker)
     store.kernel_block_size = 64
     store._post_forward_transfers = [object()]
     scheduler_output = SimpleNamespace(
@@ -199,7 +199,7 @@ def test_hisparse_offload_store_prepare_step_accepts_warmup_without_command():
 
 
 def test_hisparse_offload_store_enqueues_fused_page_spill(monkeypatch):
-    store = object.__new__(HiSparseOffloadStore)
+    store = object.__new__(HiSparseOffloadWorker)
     store.kernel_block_size = 4
     store.blocks_per_kv_block = 2
     store.spill_row_capacity = 8
@@ -268,7 +268,7 @@ def test_hisparse_offload_store_enqueues_fused_page_spill(monkeypatch):
 
 
 def test_hisparse_offload_store_finish_forward_enqueues_deferred_spills(monkeypatch):
-    store = object.__new__(HiSparseOffloadStore)
+    store = object.__new__(HiSparseOffloadWorker)
     store.hot_backing = SimpleNamespace(device="cuda:0")
     transfer = object()
     store._post_forward_transfers = [transfer]
@@ -289,7 +289,7 @@ def test_hisparse_offload_store_finish_forward_enqueues_deferred_spills(monkeypa
 
 
 def test_hisparse_offload_store_finish_step_counts_each_index_group_once():
-    store = object.__new__(HiSparseOffloadStore)
+    store = object.__new__(HiSparseOffloadWorker)
     store._metrics_calls = hisparse_store_module._METRICS_INTERVAL - 1
     store._metrics_last = HiSparseStats()
     store.lru_layers = [
@@ -304,7 +304,7 @@ def test_hisparse_offload_store_finish_step_counts_each_index_group_once():
 
 
 def test_hisparse_offload_store_reports_each_completed_transfer_once():
-    store = object.__new__(HiSparseOffloadStore)
+    store = object.__new__(HiSparseOffloadWorker)
     store._completed_transfer_ids = [3, 5]
 
     assert store.take_completed_transfer_ids() == [3, 5]
@@ -312,7 +312,7 @@ def test_hisparse_offload_store_reports_each_completed_transfer_once():
 
 
 def test_hisparse_offload_store_shutdown_releases_pinned_state(monkeypatch):
-    store = object.__new__(HiSparseOffloadStore)
+    store = object.__new__(HiSparseOffloadWorker)
     store.layers = []
     released = False
 

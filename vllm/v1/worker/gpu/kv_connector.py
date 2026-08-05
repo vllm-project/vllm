@@ -29,7 +29,13 @@ if TYPE_CHECKING:
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
+    def prepare_step(self, scheduler_output: "SchedulerOutput") -> None:
+        pass
+
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
+        pass
+
+    def finish_forward(self) -> None:
         pass
 
     def post_forward(
@@ -57,15 +63,23 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         self._disabled = False
+        self._step_prepared = False
 
-    def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
+    def prepare_step(self, scheduler_output: "SchedulerOutput") -> None:
         if self._disabled:
             return
-
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
+        self.kv_connector.prepare_step(scheduler_output)
+        self._step_prepared = True
+
+    def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
+        if self._disabled:
+            return
+        if not self._step_prepared:
+            self.prepare_step(scheduler_output)
 
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
@@ -73,6 +87,10 @@ class ActiveKVConnector(KVConnector):
         else:
             with set_forward_context(None, self.vllm_config):
                 self.kv_connector.start_load_kv(get_forward_context())
+
+    def finish_forward(self) -> None:
+        if not self._disabled:
+            self.kv_connector.finish_forward()
 
     def post_forward(
         self, finished_req_ids: set[str], wait_for_save: bool = True
@@ -93,6 +111,7 @@ class ActiveKVConnector(KVConnector):
             self.kv_connector.build_connector_worker_meta()
         )
         self.kv_connector.clear_connector_metadata()
+        self._step_prepared = False
         return output
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:

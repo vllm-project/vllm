@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""HiSparse worker-side store for host/hot state and data movement."""
+"""HiSparse worker-side host/hot state and data movement."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def _get_hisparse_layer(
     return hisparse_layer
 
 
-class HiSparseOffloadStore:
+class HiSparseOffloadWorker:
     """Own HiSparse host/hot state and execute its worker-side transfers."""
 
     def __init__(
@@ -401,7 +401,7 @@ class HiSparseOffloadStore:
             )
 
 
-def init_hisparse_store(
+def init_hisparse_worker(
     *,
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
@@ -412,7 +412,7 @@ def init_hisparse_store(
     max_model_len: int,
     max_concurrent_batches: int,
     device: torch.device,
-) -> HiSparseOffloadStore:
+) -> HiSparseOffloadWorker:
     tensor_configs = {
         name: tensor_config
         for tensor_config in kv_cache_config.kv_cache_tensors
@@ -534,7 +534,7 @@ def init_hisparse_store(
     assert block_size % indexer_block_size == 0
     if not layers or hot_backing is None:
         raise RuntimeError("HiSparse runtime found no hot-cache layers.")
-    return HiSparseOffloadStore(
+    return HiSparseOffloadWorker(
         cache_pairs,
         layers,
         hot_backing,
