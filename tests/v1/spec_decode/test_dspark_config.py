@@ -96,29 +96,37 @@ def _dspark_configs(block_size: int):
         data_parallel_size=1,
         enable_expert_parallel=False,
         distributed_executor_backend="mp",
+        max_parallel_loading_workers=None,
+        disable_custom_all_reduce=False,
+        ray_workers_use_nsight=False,
+        placement_group=None,
+        decode_context_parallel_size=1,
     )
     return draft_model_config, target_model_config, target_parallel_config
 
 
-def test_dspark_rejects_num_speculative_tokens_above_block_size():
-    """DSpark drafts exactly one block per pass; extra slots are never accepted.
+def test_dspark_warns_num_speculative_tokens_above_block_size(caplog_vllm):
+    """nst > block_size works but wastes drafts, so it warns instead of raising.
 
-    Measured on 2x GB10 with DeepSeek-V4-Flash-0731 (block size 5): positions 5
-    and 6 accepted 0.000 in every sample and mean acceptance length fell from
-    2.19 to 2.03 (probabilistic) and 2.11 to 1.75 (greedy). The validator used to
-    allow >= and its message recommended 7, so users paid 40% more draft compute
-    for strictly worse acceptance.
-    """
-    import pytest
+    The validator briefly required ==, which would have rejected configs users
+    demonstrably run (nst=7 against block_size=5 on vllm-project/vllm#41834,
+    normal accept curve). Measured on 2x GB10 with DeepSeek-V4-Flash-0731
+    (block size 5): positions 5 and 6 accepted 0.000 in every sample and mean
+    acceptance fell 2.19 -> 2.03 (probabilistic), 2.11 -> 1.75 (greedy) — a
+    footgun worth a warning, not a startup error. nst < block_size stays an
+    error (garbled output, covered by the companion test)."""
+    import logging
 
     _, target_model_config, target_parallel_config = _dspark_configs(5)
-    with pytest.raises(ValueError, match="num_speculative_tokens =="):
-        SpeculativeConfig(
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        config = SpeculativeConfig(
             method="dspark",
             num_speculative_tokens=7,
             target_model_config=target_model_config,
             target_parallel_config=target_parallel_config,
         )
+    assert config.num_speculative_tokens == 7
+    assert "never be accepted" in caplog_vllm.text
 
 
 def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
@@ -141,6 +149,8 @@ def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
     speculator.seeds = torch.arange(max_num_reqs, dtype=torch.int64)
     speculator.use_fp64_gumbel = False
     speculator._step_cols = torch.arange(num_speculative_steps, dtype=torch.int32)
+    speculator._draft_topk = None
+    speculator._d2t_scatter_index = None
     speculator.draft_tokens = torch.empty(
         max_num_reqs,
         num_speculative_steps,
