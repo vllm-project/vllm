@@ -40,11 +40,7 @@ DIVISOR_HEADS = [1, 2, 4, 8]
 
 
 def _rocm_aiter_available() -> bool:
-    return (
-        current_platform.is_rocm()
-        and is_aiter_found()
-        and torch.cuda.is_available()
-    )
+    return current_platform.is_rocm() and is_aiter_found() and torch.cuda.is_available()
 
 
 def _on_gfx950() -> bool:
@@ -83,9 +79,7 @@ def _make_h12_decode_metadata(device: torch.device) -> AiterMLAMetadata:
         max_seq_len=CONTEXT_LEN,
         num_actual_tokens=1,
         query_start_loc=decode.qo_indptr,
-        slot_mapping=torch.tensor(
-            [CONTEXT_LEN - 1], dtype=torch.int64, device=device
-        ),
+        slot_mapping=torch.tensor([CONTEXT_LEN - 1], dtype=torch.int64, device=device),
         num_decodes=1,
         num_decode_tokens=1,
         num_prefills=0,
