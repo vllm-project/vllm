@@ -23,10 +23,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    get_sliding_window_size_in_chunks,
     is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheGroupSpec,
     SlidingWindowSpec,
@@ -3204,3 +3206,19 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+def test_chunked_local_attention_reports_its_chunk_window():
+    """Llama 4 uses chunked local attention, which used to trip the
+    FullAttentionSpec assert and kill the engine at startup."""
+    spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+        attention_chunk_size=8192,
+    )
+
+    assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=1024) == 8
+    # Partial chunks round up, so the reachable tail is never understated.
+    assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=3000) == 3
