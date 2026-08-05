@@ -220,7 +220,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts = len(engine_inputs)
 
         # Streaming response
-        tokenizer = self.renderer.tokenizer
+        tokenizer = self._get_renderer_tokenizer()
 
         if request.stream:
             return self.completion_stream_generator(

@@ -31,7 +31,11 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
+try:
+    from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
+except ImportError:
+    GenerateRequest = None
+    GenerateResponse = None
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     TokenizeChatRequest,
@@ -134,6 +138,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
+        **kwargs,
     ):
         super().__init__()
 
@@ -197,6 +202,13 @@ class OpenAIServing(BeamSearchOnlineMixin):
                 request_id,
             )
             raise GenerationError("Internal server error")
+
+    def _get_renderer_tokenizer(self) -> TokenizerLike | None:
+        """Return the tokenizer from the renderer or engine client."""
+        tokenizer = getattr(self.renderer, "tokenizer", None)
+        if tokenizer is not None:
+            return tokenizer
+        return getattr(self.engine_client, "tokenizer", None)
 
     def _convert_generation_error_to_streaming_response(
         self, e: GenerationError

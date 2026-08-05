@@ -288,7 +288,7 @@ class OpenAIServingRender:
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
         """
-        tokenizer = self.renderer.tokenizer
+        tokenizer = self._get_renderer_tokenizer()
 
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
 

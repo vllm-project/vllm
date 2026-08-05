@@ -195,7 +195,7 @@ class ServingGenerativeScoring(OpenAIServing):
             raise self.engine_client.dead_error
 
         # Get tokenizer
-        tokenizer = self.renderer.tokenizer
+        tokenizer = self._get_renderer_tokenizer()
         if tokenizer is None:
             return self.create_error_response(
                 "Tokenizer not available. Cannot process generative scoring request."

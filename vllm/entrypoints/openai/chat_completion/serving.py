@@ -112,7 +112,7 @@ class OpenAIServingChat(OpenAIServing):
         models: OpenAIServingModels,
         response_role: str,
         *,
-        openai_serving_render: "OpenAIServingRender",
+        openai_serving_render: Any = None,
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -127,15 +127,37 @@ class OpenAIServingChat(OpenAIServing):
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        online_renderer: Any = None,
+        **kwargs,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            kwargs=kwargs,
+        )
+
+        openai_serving_render = (
+            openai_serving_render
+            or online_renderer
+            or kwargs.get("online_renderer")
+            or kwargs.get("renderer")
         )
 
         self.openai_serving_render = openai_serving_render
+        self.renderer = openai_serving_render
+
+        if self.renderer is not None and not hasattr(self.renderer, "tokenizer"):
+            tok = getattr(self, "tokenizer", None) or getattr(
+                engine_client, "tokenizer", None
+            )
+            if tok is not None:
+                try:
+                    self.renderer.tokenizer = tok
+                except AttributeError:
+                    pass
+
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -183,16 +205,19 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
-
+        
     def warmup(self) -> None:
-        self.renderer.warmup(
-            ChatParams(
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                chat_template_kwargs=self.default_chat_template_kwargs,
+        # Check if self.renderer exists and actually has the .warmup() method
+        # (vLLM v0.26.0 inside Docker does not have .warmup on OnlineRenderer)
+        if hasattr(self, "renderer") and hasattr(self.renderer, "warmup"):
+            self.renderer.warmup(
+                ChatParams(
+                    chat_template=self.chat_template,
+                    chat_template_content_format=self.chat_template_content_format,
+                    chat_template_kwargs=self.default_chat_template_kwargs,
+                )
             )
-        )
-
+            
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
     ) -> dict[str, Any]:
@@ -277,6 +302,12 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
+
+        tenant_id = None
+        if raw_request is not None:
+            tenant_id = raw_request.headers.get("tenant-id") or raw_request.headers.get(
+                "x-tenant-id"
+            )
 
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 
@@ -365,7 +396,7 @@ class OpenAIServingChat(OpenAIServing):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=reasoning_ended,
-                    tenant_id=request.tenant_id,
+                    tenant_id=tenant_id,
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": chat_template_kwargs,
                     }

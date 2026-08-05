@@ -112,7 +112,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         returns one choice per conversation indexed 0, 1, ..., N-1.
         Streaming, tool use, and beam search are not supported.
         """
-        tokenizer = self.renderer.tokenizer
+        tokenizer = self._get_renderer_tokenizer()
         assert tokenizer is not None
         single_requests = [
             request.to_chat_completion_request(messages)
