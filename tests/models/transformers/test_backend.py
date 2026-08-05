@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test the functionality of the Transformers modeling backend."""
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from vllm.model_executor.models.transformers.base import Base
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import multi_gpu_test, prep_prompts
@@ -33,6 +36,16 @@ def get_num_fused(model) -> tuple[int, int]:
     glu = sum(isinstance(m, MergedColumnParallelLinear) for m in model.modules())
     qkv = sum(isinstance(m, QKVParallelLinear) for m in model.modules())
     return glu, qkv
+
+
+def test_mistral3_uses_text_config_for_word_embedding_tying() -> None:
+    """Mistral3's nested language model owns its embedding and lm_head."""
+    backend = SimpleNamespace(
+        config=SimpleNamespace(model_type="mistral3", tie_word_embeddings=True),
+        text_config=SimpleNamespace(tie_word_embeddings=False),
+    )
+
+    assert Base._get_tie_word_embeddings(backend) is False
 
 
 def check_implementation(

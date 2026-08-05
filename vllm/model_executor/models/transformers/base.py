@@ -336,6 +336,12 @@ class Base(
         """
         Check if the model has tied word embeddings.
         """
+        # Mistral3Config has a top-level default that conflicts with its
+        # nested text config. The latter owns the embedding and lm_head, so
+        # it is authoritative for this model.
+        if self.config.model_type == "mistral3":
+            return self.text_config.tie_word_embeddings
+
         # Models created with Transformers v4 and v5 will store this in different places
         tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
         tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
