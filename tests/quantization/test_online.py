@@ -2,27 +2,39 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests online quantization."""
 
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 import torch
+from torch.distributed import ProcessGroup
 
 from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
 )
+from vllm import _custom_ops as ops
+from vllm.distributed import parallel_state
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
-    _quantize_linear_weight_per_tensor_fp8,
-    _quantize_moe_weight_per_tensor_fp8,
+    _fp8_channel_scale,
+    _fp8_quant_per_channel,
+    _fp8_scale,
+    _is_tp_sharded,
 )
+from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    amax_for_moe_weight_quant,
+    amax_for_tp_weight_quant,
+    weight_amax,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -189,110 +201,166 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
         print(outputs[0][1])
 
 
-@pytest.mark.parametrize(
-    "quantization",
-    [
-        pytest.param(
-            "fp8_per_tensor",
-            marks=pytest.mark.skipif(
-                not is_quant_method_supported("fp8"),
-                reason="FP8 is not supported on this GPU type.",
-            ),
-        ),
-        pytest.param(
-            "nvfp4",
-            marks=pytest.mark.skipif(
-                not (
-                    current_platform.is_cuda()
-                    and current_platform.is_device_capability_family(100)
-                ),
-                reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
-            ),
-        ),
-    ],
-)
-@pytest.mark.parametrize("shard_dim", [1, 2])
-def test_online_moe_tp_weight_quant_matches_ep(
-    monkeypatch, quantization: str, shard_dim: int
-) -> None:
-    """TP shards use the same global scale and quantized values as a full expert."""
-    torch.manual_seed(0)
-    weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
-    weight[:, -1, -1] = torch.tensor([32.0, 64.0], device="cuda")
-
-    if quantization == "nvfp4":
-        ep_weight, ep_block_scale, ep_global_scale = _quantize_moe_weight_to_nvfp4(
-            weight
-        )
-    else:
-        ep_weight, ep_global_scale = _quantize_moe_weight_per_tensor_fp8(weight)
-    full_amax = weight.abs().amax(dim=(1, 2)).to(torch.float32)
-    tp_group = cast(torch.distributed.ProcessGroup, object())
+def _patch_max_reduce(monkeypatch, full_amax) -> None:
+    """Stand in for the TP/EP MAX all-reduce, returning the unsharded amax."""
+    expected = cast(ProcessGroup, object())
+    stub = SimpleNamespace(device_group=expected)
+    monkeypatch.setattr(parallel_state, "get_tp_group", lambda: stub)
+    monkeypatch.setattr(parallel_state, "get_ep_group", lambda: stub)
 
     def fake_all_reduce(tensor, op, group):
         assert op == torch.distributed.ReduceOp.MAX
-        assert group is tp_group
+        assert group is expected
         tensor.copy_(full_amax)
 
     monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
 
-    shard_size = weight.shape[shard_dim] // 2
-    shard = weight.narrow(shard_dim, 0, shard_size)
-    if quantization == "nvfp4":
-        tp_weight, tp_block_scale, tp_global_scale = _quantize_moe_weight_to_nvfp4(
-            shard, tp_group
-        )
-    else:
-        tp_weight, tp_global_scale = _quantize_moe_weight_per_tensor_fp8(
-            shard, tp_group
-        )
 
-    if shard_dim == 1:
-        expected_weight = ep_weight[:, :shard_size]
-        if quantization == "nvfp4":
-            expected_block_scale = ep_block_scale[:, :shard_size]
-    else:
-        packing = 2 if quantization == "nvfp4" else 1
-        expected_weight = ep_weight[:, :, : shard_size // packing]
-        if quantization == "nvfp4":
-            expected_block_scale = ep_block_scale[:, :, : shard_size // 16]
+def test_is_tp_sharded_false_when_scale_is_already_global() -> None:
+    """Replicated and column-parallel-with-channel-scales need no collective."""
+    replicated = SimpleNamespace(
+        tp_size=4,
+        input_size=64,
+        output_size=32,
+        input_size_per_partition=64,
+        output_size_per_partition=32,
+    )
+    assert not _is_tp_sharded(replicated)
 
-    assert torch.equal(tp_weight, expected_weight)
-    if quantization == "nvfp4":
-        assert torch.equal(tp_block_scale, expected_block_scale)
-    assert torch.equal(tp_global_scale, ep_global_scale)
+    column = SimpleNamespace(
+        tp_size=4,
+        input_size=64,
+        output_size=32,
+        input_size_per_partition=64,
+        output_size_per_partition=8,
+    )
+    assert not _is_tp_sharded(column, reduces_output_dim=False)
+    assert _is_tp_sharded(column)
+
+
+def _quantize_linear(weight, scheme, is_sharded):
+    if scheme == "per_tensor":
+        amax = weight_amax(weight).reshape(1)
+        scale = _fp8_scale(amax_for_tp_weight_quant(amax, is_sharded))
+        return ops.scaled_fp8_quant(weight, scale=scale)[0], scale
+    amax = weight_amax(weight, dim=-1, keepdim=True)
+    scale = _fp8_channel_scale(amax_for_tp_weight_quant(amax, is_sharded))
+    return _fp8_quant_per_channel(weight, scale), scale
 
 
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
+@pytest.mark.parametrize("scheme", ["per_tensor", "per_channel"])
 @pytest.mark.parametrize("shard_dim", [0, 1])
 def test_online_linear_tp_weight_quant_matches_unsharded(
-    monkeypatch, shard_dim: int
+    monkeypatch, scheme: str, shard_dim: int
 ) -> None:
-    """TP shards use the same FP8 scale and values as an unsharded weight."""
+    """TP shards pack the same FP8 values and scales as the unsharded weight."""
     torch.manual_seed(0)
-    weight = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
     weight[-1, -1] = 64.0
 
-    full_weight, full_scale = _quantize_linear_weight_per_tensor_fp8(weight)
-    full_amax = weight.abs().amax().to(torch.float32).reshape(1)
-    tp_group = cast(torch.distributed.ProcessGroup, object())
+    full_weight, full_scale = _quantize_linear(weight, scheme, False)
 
-    def fake_all_reduce(tensor, op, group):
-        assert op == torch.distributed.ReduceOp.MAX
-        assert group is tp_group
-        tensor.copy_(full_amax)
-
-    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+    # Per-channel scales reduce only the input dim, so a column (dim 0) shard
+    # already matches without a collective.
+    is_sharded = scheme == "per_tensor" or shard_dim == 1
+    if is_sharded:
+        full_amax = (
+            weight_amax(weight).reshape(1)
+            if scheme == "per_tensor"
+            else weight_amax(weight, dim=-1, keepdim=True)
+        )
+        _patch_max_reduce(monkeypatch, full_amax)
 
     shard_size = weight.shape[shard_dim] // 2
     shard = weight.narrow(shard_dim, 0, shard_size).contiguous()
-    tp_weight, tp_scale = _quantize_linear_weight_per_tensor_fp8(shard, tp_group)
+    tp_weight, tp_scale = _quantize_linear(shard, scheme, is_sharded)
 
-    expected_weight = full_weight.narrow(shard_dim, 0, shard_size)
-    assert torch.equal(tp_weight, expected_weight)
+    assert torch.equal(tp_weight, full_weight.narrow(shard_dim, 0, shard_size))
+    if scheme == "per_channel" and shard_dim == 0:
+        assert torch.equal(tp_scale, full_scale.narrow(0, 0, shard_size))
+    else:
+        assert torch.equal(tp_scale, full_scale)
+
+
+def _quantize_moe(weight, scheme, moe_tp_size):
+    if scheme == "nvfp4":
+        return _quantize_moe_weight_to_nvfp4(weight, moe_tp_size)
+    if scheme == "per_tensor":
+        amax = weight_amax(weight.flatten(1), dim=-1)
+        scale = _fp8_scale(amax_for_moe_weight_quant(amax, moe_tp_size))
+        quant = lambda w, s: ops.scaled_fp8_quant(w, scale=s)[0]  # noqa: E731
+    else:
+        amax = weight_amax(weight, dim=-1, keepdim=True)
+        scale = _fp8_channel_scale(amax_for_moe_weight_quant(amax, moe_tp_size))
+        quant = _fp8_quant_per_channel
+    qweight = torch.stack([quant(w, s) for w, s in zip(weight, scale)])
+    return qweight, scale
+
+
+@pytest.mark.parametrize("scheme", ["per_tensor", "per_channel", "nvfp4"])
+def test_online_moe_tp_weight_quant_matches_ep(monkeypatch, scheme: str) -> None:
+    """TP shards of w2 pack the same values and scales as full experts."""
+    if scheme == "nvfp4":
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            pytest.skip("NVFP4 weight quantization needs a Blackwell (SM100) GPU.")
+    elif not is_quant_method_supported("fp8"):
+        pytest.skip("FP8 is not supported on this GPU type.")
+
+    torch.manual_seed(0)
+    weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+    weight[:, -1, -1] = torch.tensor([32.0, 64.0], device="cuda")
+
+    ep_out = _quantize_moe(weight, scheme, 1)
+
+    full_amax = (
+        weight_amax(weight, dim=-1, keepdim=True)
+        if scheme == "per_channel"
+        else weight_amax(weight.flatten(1), dim=-1).to(torch.float32)
+    )
+    _patch_max_reduce(monkeypatch, full_amax)
+
+    # w2 is sharded along its last (intermediate) dim.
+    shard_size = weight.shape[2] // 2
+    tp_out = _quantize_moe(weight[:, :, :shard_size], scheme, 2)
+
+    packing = 2 if scheme == "nvfp4" else 1
+    assert torch.equal(tp_out[0], ep_out[0][:, :, : shard_size // packing])
+    if scheme == "nvfp4":
+        assert torch.equal(tp_out[1], ep_out[1][:, :, : shard_size // 16])
+    assert torch.equal(tp_out[-1], ep_out[-1])
+
+
+def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
+    """Int8 MoE w2 reduces over the sharded intermediate dim."""
+    torch.manual_seed(0)
+    w13 = torch.randn(2, 16, 8, dtype=torch.bfloat16)
+    w2 = torch.randn(2, 8, 16, dtype=torch.bfloat16)
+    w2[:, -1, -1] = 64.0
+
+    def quantize(w2_in, moe_tp_size):
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(w2_in, requires_grad=False)
+        layer.num_experts = layer.local_num_experts = w13.shape[0]
+        method = SimpleNamespace(moe=SimpleNamespace(tp_size=moe_tp_size))
+        Int8OnlineMoEMethod._quantize_weights(method, layer)
+        return layer.w2_weight, layer.w2_scale
+
+    full_weight, full_scale = quantize(w2, 1)
+
+    _patch_max_reduce(monkeypatch, weight_amax(w2, dim=-1))
+
+    shard_size = w2.shape[2] // 2
+    tp_weight, tp_scale = quantize(w2[:, :, :shard_size].contiguous(), 2)
+
+    assert torch.equal(tp_weight, full_weight[:, :, :shard_size])
     assert torch.equal(tp_scale, full_scale)
 
 
