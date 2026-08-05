@@ -125,6 +125,50 @@ def test_renderer_defers_tokenization_to_hf_processor(model_id, prompt):
     assert direct_ids.count(bos_token_id) == 1
 
 
+@pytest.mark.parametrize("model_id", ["google/gemma-3-4b-it"])
+def test_renderer_chat_template_prompt_matches_hf(model_id):
+    """A chat template renders special tokens itself (gemma3's starts with
+    <bos>), so tokenization must not add them again, mirroring the fallback
+    in `ProcessorMixin.apply_chat_template`. The reference ids are the
+    processor's own chat-template tokenization."""
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    renderer = HfRenderer(
+        VllmConfig(model_config=model_config),
+        cached_tokenizer_from_config(model_config),
+    )
+    hf_processor = renderer.get_mm_processor().info.get_hf_processor()
+
+    image_pil = ImageAsset("cherry_blossom").pil_image
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image_pil},
+                {"type": "text", "text": "What is the content of this image?"},
+            ],
+        }
+    ]
+    rendered = hf_processor.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+    assert rendered.startswith(hf_processor.tokenizer.bos_token)
+
+    (engine_input,) = renderer.render_cmpl(
+        [{"prompt": rendered, "multi_modal_data": {"image": image_pil}}]
+    )
+
+    reference = hf_processor.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=True, return_dict=True
+    )
+    reference_ids = reference["input_ids"]
+    if hasattr(reference_ids, "tolist"):
+        reference_ids = reference_ids.tolist()
+    reference_ids = reference_ids[0]
+
+    assert engine_input["prompt_token_ids"] == reference_ids
+    assert reference_ids.count(hf_processor.tokenizer.bos_token_id) == 1
+
+
 def test_image_multiple_inputs():
     """Multiple images per prompt are each detected as a separate placeholder
     and multi-modal item by the Transformers backend."""
