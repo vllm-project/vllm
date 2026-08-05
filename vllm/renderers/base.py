@@ -243,42 +243,44 @@ class BaseRenderer(ABC, Generic[_T]):
         """
         from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
 
-        try:
-            logger.debug("Warming up chat template processing...")
-            start_time = time.perf_counter()
-
-            self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
-
-            elapsed = time.perf_counter() - start_time
-            logger.debug("Chat template warmup completed in %.3fs", elapsed)
-        except ChatTemplateResolutionError:
-            logger.debug("This model does not support chat template.")
-        except Exception:
-            logger.warning("Chat template warmup failed", exc_info=True)
-
-        if self.mm_processor:
+        # prevent MM processor hangs
+        with set_default_torch_num_threads(1):
             try:
-                logger.debug("Warming up multi-modal processing...")
-                self._warmup_mm_processor(
-                    self.mm_processor,
-                    log_prefix="Multi-modal",
-                )
-            except Exception:
-                logger.warning("Multi-modal warmup failed")
-            finally:
-                self.clear_mm_cache()
+                logger.debug("Warming up chat template processing...")
+                start_time = time.perf_counter()
 
-        if self._readonly_mm_processor is not None:
-            try:
-                logger.debug("Warming up readonly multi-modal processing...")
-                self._warmup_mm_processor(
-                    self._readonly_mm_processor,
-                    log_prefix="Readonly multi-modal",
-                )
+                self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
+
+                elapsed = time.perf_counter() - start_time
+                logger.debug("Chat template warmup completed in %.3fs", elapsed)
+            except ChatTemplateResolutionError:
+                logger.debug("This model does not support chat template.")
             except Exception:
-                logger.warning("Readonly multi-modal warmup failed")
-            finally:
-                self._clear_processor_cache(self._readonly_mm_processor)
+                logger.warning("Chat template warmup failed", exc_info=True)
+
+            if self.mm_processor:
+                try:
+                    logger.debug("Warming up multi-modal processing...")
+                    self._warmup_mm_processor(
+                        self.mm_processor,
+                        log_prefix="Multi-modal",
+                    )
+                except Exception:
+                    logger.warning("Multi-modal warmup failed")
+                finally:
+                    self.clear_mm_cache()
+
+            if self._readonly_mm_processor is not None:
+                try:
+                    logger.debug("Warming up readonly multi-modal processing...")
+                    self._warmup_mm_processor(
+                        self._readonly_mm_processor,
+                        log_prefix="Readonly multi-modal",
+                    )
+                except Exception:
+                    logger.warning("Readonly multi-modal warmup failed")
+                finally:
+                    self._clear_processor_cache(self._readonly_mm_processor)
 
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the multimodal executor to avoid

@@ -60,6 +60,8 @@ class MooncakeStoreScheduler:
         kvc_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.load_async = kvc_extra_config.get("load_async", True)
         self.lookup_async = kvc_extra_config.get("lookup_async", False)
+        # Skips lookup CPU cost on instances that never load KV from the store.
+        self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.client = LookupKeyClient(vllm_config)
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
@@ -86,6 +88,9 @@ class MooncakeStoreScheduler:
         Returns ``(None, False)`` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
+        if not self.enable_lookup:
+            return 0, False
+
         # Fine-grained hits may land on a hash boundary inside a block; without
         # partial hits, prefixes shorter than one physical block are skipped.
         align = (
