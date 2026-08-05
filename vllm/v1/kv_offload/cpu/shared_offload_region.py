@@ -3,7 +3,9 @@
 import mmap
 import os
 import time
+from contextlib import suppress
 
+import psutil
 import torch
 
 from vllm.logger import init_logger
@@ -23,6 +25,29 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
             )
         time.sleep(0.005)
+
+
+def _ensure_backing_store_has_space(mmap_path: str, required_bytes: int) -> None:
+    backing_dir = os.path.dirname(mmap_path)
+    stats = os.statvfs(backing_dir)
+    shm_available_bytes = stats.f_bavail * stats.f_frsize
+    memory_available_bytes = psutil.virtual_memory().available
+    available_bytes = min(shm_available_bytes, memory_available_bytes)
+    if required_bytes > available_bytes:
+        bottleneck = (
+            backing_dir
+            if shm_available_bytes <= memory_available_bytes
+            else "system memory"
+        )
+        raise RuntimeError(
+            "Insufficient shared memory for CPU KV offloading: "
+            f"requested {required_bytes / 1e9:.2f} GB, but only "
+            f"{available_bytes / 1e9:.2f} GB is available "
+            f"(limited by {bottleneck}; {backing_dir} has "
+            f"{shm_available_bytes / 1e9:.2f} GB and system memory has "
+            f"{memory_available_bytes / 1e9:.2f} GB available). "
+            "Reduce --kv-offloading-size or increase the available /dev/shm space."
+        )
 
 
 class SharedOffloadRegion:
@@ -63,10 +88,17 @@ class SharedOffloadRegion:
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
             # Exclusive create — only one worker succeeds
-            self.fd: int | None = os.open(
-                self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-            )
-            os.ftruncate(self.fd, self.total_size_bytes)
+            self.fd: int | None = None
+            fd = os.open(self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            try:
+                _ensure_backing_store_has_space(self.mmap_path, self.total_size_bytes)
+                os.ftruncate(fd, self.total_size_bytes)
+            except Exception:
+                os.close(fd)
+                with suppress(FileNotFoundError):
+                    os.unlink(self.mmap_path)
+                raise
+            self.fd = fd
             self._creator = True
             logger.info(
                 "Created mmap file %s (%.2f GB)",

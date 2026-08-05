@@ -8,12 +8,14 @@ import os
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
+    _ensure_backing_store_has_space,
     _wait_for_file_size,
 )
 
@@ -161,6 +163,64 @@ def _mp_race_construct_and_write(
 def iid():
     """Fresh instance ID for each test."""
     return str(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# Constructor — backing store capacity checks
+# ---------------------------------------------------------------------------
+
+
+def test_backing_store_space_check_raises_clear_error(monkeypatch):
+    def fake_statvfs(path):
+        assert path == "/dev/shm"
+        return SimpleNamespace(f_bavail=1, f_frsize=PAGE_SIZE)
+
+    monkeypatch.setattr(os, "statvfs", fake_statvfs)
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.cpu.shared_offload_region.psutil.virtual_memory",
+        lambda: SimpleNamespace(available=10 * PAGE_SIZE),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Insufficient shared memory.*\\/dev\\/shm.*--kv-offloading-size",
+    ):
+        _ensure_backing_store_has_space(
+            "/dev/shm/vllm_offload_test.mmap",
+            required_bytes=2 * PAGE_SIZE,
+        )
+
+
+def test_creator_closes_and_unlinks_when_space_check_fails(monkeypatch, iid):
+    fake_fd = 123
+    closed_fds = []
+    unlinked_paths = []
+    expected_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+
+    def fail_space_check(path, required_bytes):
+        assert path == expected_path
+        assert required_bytes == PAGE_SIZE
+        raise RuntimeError("no shm")
+
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.cpu.shared_offload_region._ensure_backing_store_has_space",
+        fail_space_check,
+    )
+    monkeypatch.setattr(os, "open", lambda *args: fake_fd)
+    monkeypatch.setattr(os, "close", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(os, "unlink", lambda path: unlinked_paths.append(path))
+
+    with pytest.raises(RuntimeError, match="no shm"):
+        SharedOffloadRegion(
+            instance_id=iid,
+            num_blocks=1,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    assert closed_fds == [fake_fd]
+    assert unlinked_paths == [expected_path]
 
 
 # ---------------------------------------------------------------------------
