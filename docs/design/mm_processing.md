@@ -73,8 +73,8 @@ To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation
 Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
 
 - **How it works**: We use a helper called `make_input_norm` (backed by `nn.BatchNorm1d(3, eps=0.0)`) and bake the rescale factor (typically 1/255) directly into the mean and standard deviation:
-  - Effective mean = `image_mean * (1/rescale_factor)`
-  - Effective std  = `image_std  * (1/rescale_factor)`
+    - Effective mean = `image_mean * (1/rescale_factor)`
+    - Effective std  = `image_std  * (1/rescale_factor)`
 - **At runtime**: The layer takes raw uint8 pixel values (0–255) and does the full normalised mapping in a single GPU kernel—no CPU involvement.
 
 #### Optimized Data Path for Fused Normalisation
