@@ -37,9 +37,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
-    get_mooncake_dp_engine_index,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -61,12 +58,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from .metrics import MooncakeStoreConnectorStats
 
@@ -81,6 +87,22 @@ _T = TypeVar("_T")
 
 def _rotate_list(values: list[_T], offset: int) -> list[_T]:
     return values[offset:] + values[:offset]
+
+
+def _replicate_config_supports_group_ids(
+    replicate_config_cls: type[Any],
+    replicate_config: Any,
+) -> bool:
+    if hasattr(replicate_config_cls, "group_ids"):
+        return True
+    return hasattr(replicate_config, "group_ids")
+
+
+def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
+    # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
+    # a prefix chunk, so shard dimensions stay only in the object key.
+    prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
+    return f"vllm-mooncake-store:{prefix}{metadata.model_name}@{chunk_hash}"
 
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
@@ -448,11 +470,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_databases: list[ChunkedTokenDatabase],
         block_size: int,
         tp_rank: int,
-        put_step: int,
+        group_put_steps: Sequence[int],
         kv_role: str,
         ready_event: threading.Event,
         enable_kv_event: bool = False,
         replicate_config: Any = None,
+        enable_group_semantics: bool = False,
+        supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
     ):
         super().__init__(
@@ -464,7 +488,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             name="KVCacheStoreSendingThread",
             record_operation=record_operation,
         )
-        self.put_step = put_step
+        # Only ranks with identical group bytes may stripe PUTs (e.g., MLA).
+        self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
@@ -472,6 +497,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Caller always passes a non-None ReplicateConfig — see
         # MooncakeStoreWorker.__init__ where store_replicate_config is built.
         self.replicate_config = replicate_config
+        self.enable_group_semantics = enable_group_semantics
+        self.supports_group_ids = supports_group_ids
 
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
@@ -522,6 +549,180 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
+    def _maybe_offload_partial_tail(self, req_meta: ReqMeta) -> bool:
+        """Offload the request's sub-block partial tail (its last prompt hash
+        boundary) so a later request can hit the sub-block prefix.
+
+        Covers every block from the normal save's lcm floor to the boundary:
+        the normal save floors to ``lcm_block_size``, so a smaller-block
+        group's full blocks in that gap are never persisted elsewhere, and
+        the consumer's lookup needs every group at every probed boundary.
+        Full blocks are keyed by their block-end hash, the partial boundary
+        block by the boundary sub-hash; the mamba "align" boundary block is
+        the core-provided CoW block. All keys are deduped against the store.
+
+        Returns:
+            True when no put is needed or every put succeeds, False otherwise.
+        """
+        if not self.coord.enable_partial_hash_hits or not req_meta.block_hashes:
+            return True
+        partial_tail_offloads = req_meta.partial_tail_offloads
+        if not partial_tail_offloads:
+            return True
+        hash_block_size = self.coord.hash_block_size
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError(
+                "Partial-tail offloads for one request must share a boundary"
+            )
+        boundary = boundaries.pop()
+        if boundary == 0:
+            return True
+        if boundary // hash_block_size - 1 >= len(req_meta.block_hashes):
+            return True
+        mamba_offloads = {
+            group_id: block_id for group_id, block_id, _ in partial_tail_offloads
+        }
+
+        keys: list[str] = []
+        addrs: list[list[int]] = []
+        sizes: list[list[int]] = []
+        group_ids: list[str] | None = (
+            [] if self.enable_group_semantics and self.supports_group_ids else None
+        )
+        saved = self._saved_offset.get(req_meta.req_id, 0)
+        for g_idx, db in enumerate(self.token_databases):
+            group_blocks = req_meta.block_ids[g_idx]
+            # Distribute across ranks by the same rule as normal chunks.
+            put_step = self.group_put_steps[g_idx]
+            put_step_rank = (self.tp_rank + g_idx) % put_step
+            # Always include the boundary block: its sub-hash key is written
+            # only here, even if normal saves already advanced past it.
+            last_block = cdiv(boundary, db.block_size) - 1
+            for block_idx in range(
+                min(saved // db.block_size, last_block), last_block + 1
+            ):
+                if block_idx % put_step != put_step_rank:
+                    continue
+                valid_end = min((block_idx + 1) * db.block_size, boundary)
+                key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
+                if (
+                    g_idx in mamba_offloads
+                    and valid_end == boundary
+                    and boundary % db.block_size != 0
+                ):
+                    block_id = mamba_offloads[g_idx]
+                else:
+                    if block_idx >= len(group_blocks):
+                        continue
+                    block_id = group_blocks[block_idx]
+                if block_id == NULL_BLOCK_ID:
+                    logger.debug(
+                        "Skipping unavailable partial-tail source block "
+                        "(req=%s, group=%d, block=%d)",
+                        req_meta.req_id,
+                        g_idx,
+                        block_idx,
+                    )
+                    continue
+                addr, size = db.prepare_value_for_block(block_id)
+                key = db.key_for(key_hash)
+                keys.append(key)
+                addrs.append(addr)
+                sizes.append(size)
+                if group_ids is not None:
+                    group_ids.append(
+                        _make_mooncake_group_id(
+                            db.metadata,
+                            key.rsplit("@", 1)[-1],
+                        )
+                    )
+
+        if not keys:
+            return True
+        exists_start = time.perf_counter()
+        try:
+            exists = self.store.batch_is_exist(keys)
+        except Exception as e:
+            self._record_operation(
+                "save_exists",
+                exists_start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.error(
+                "Failed to check partial-tail keys for request %s: %s",
+                req_meta.req_id,
+                e,
+            )
+            return False
+        self._record_operation("save_exists", exists_start, len(keys))
+        missing = [i for i, e in enumerate(exists) if e != 1]
+        if not missing:
+            return True
+        keys = [keys[i] for i in missing]
+        addrs = [addrs[i] for i in missing]
+        sizes = [sizes[i] for i in missing]
+        if group_ids is not None:
+            group_ids = [group_ids[i] for i in missing]
+        if req_meta.current_event is not None:
+            # Fence the CoW block copy enqueued earlier this step.
+            req_meta.current_event.synchronize()
+        if group_ids is not None:
+            assert len(group_ids) == len(keys)
+            self.replicate_config.group_ids = group_ids
+        batch_bytes = _sum_batch_bytes(sizes)
+        put_start = time.perf_counter()
+        try:
+            res = self.store.batch_put_from_multi_buffers(
+                keys, addrs, sizes, self.replicate_config
+            )
+        except Exception as e:
+            self._record_operation(
+                "save_put",
+                put_start,
+                len(keys),
+                num_bytes=batch_bytes,
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.error(
+                "Failed to put partial-tail keys for request %s: %s",
+                req_meta.req_id,
+                e,
+            )
+            return False
+
+        failed = [i for i, value in enumerate(res) if value < 0]
+        self._record_operation(
+            "save_put",
+            put_start,
+            len(keys),
+            num_bytes=batch_bytes,
+            status="partial_failure" if failed else "ok",
+            num_failed_keys=len(failed),
+        )
+        if failed:
+            failed_codes = {res[i] for i in failed}
+            logger.warning(
+                "Partial-tail put failed for request %s: %d/%d keys failed (codes=%s)",
+                req_meta.req_id,
+                len(failed),
+                len(keys),
+                failed_codes,
+            )
+            if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
+                self._mark_request_skipped_for_pressure(req_meta.req_id)
+            return False
+
+        if self._clear_store_pressure():
+            logger.info(
+                "Mooncake CPU/disk offloading pressure cleared after a "
+                "successful partial-tail batch"
+            )
+        return True
+
     def _handle_request(self, req_meta: ReqMeta):
         # Cache hits are always a multiple of ``lcm_block_size`` tokens, which
         # is also ``store_mask``'s precondition.
@@ -539,15 +740,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # so the scheduler can release the GPU blocks it pinned for this
         # request (via `delay_free_blocks`) even when the store path raises.
         try:
-            if token_len == 0:
-                return
-
             if self._should_skip_request(req_id):
                 logger.debug(
                     "Skipping Mooncake store for request %s while CPU/disk "
                     "offloading is under pressure",
                     req_id,
                 )
+                return
+
+            # Offload the sub-block partial tail (independent of the normal
+            # block-aligned save, which may be skipped this step).
+            if req_meta.partial_tail_offloads is not None and not (
+                self._maybe_offload_partial_tail(req_meta)
+            ):
+                return
+
+            if token_len == 0:
                 return
 
             # Resume from where this rank left off; only the new suffix is saved.
@@ -568,13 +776,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
             group_indices: list[int] = []
             for g_idx, db in enumerate(self.token_databases):
                 # Rotate the stride phase per group to balance load across ranks.
-                put_step_rank = (self.tp_rank + g_idx) % self.put_step
+                put_step = self.group_put_steps[g_idx]
+                put_step_rank = (self.tp_rank + g_idx) % put_step
                 for start, end, block_hash in db.process_tokens(
                     token_len,
                     req_meta.block_hashes,
                     mask_num=save_start,
                     chunk_mask=store_masks[g_idx],
-                    put_step=self.put_step,
+                    put_step=put_step,
                     put_step_rank=put_step_rank,
                 ):
                     starts.append(start)
@@ -624,6 +833,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     ]
                 group_indices = [group_indices[i] for i in missing_indices]
 
+            group_ids = (
+                [
+                    _make_mooncake_group_id(
+                        self.token_databases[g_idx].metadata,
+                        key.rsplit("@", 1)[-1],
+                    )
+                    for key, g_idx in zip(keys, group_indices, strict=True)
+                ]
+                if self.enable_group_semantics and self.supports_group_ids
+                else None
+            )
+
             logger.debug(
                 "Storing KV cache for %d blocks (groups=%s) for request %s",
                 len(keys),
@@ -634,6 +855,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
             addrs: list[list[int]] = []
             sizes: list[list[int]] = []
             stored_events: list[BlockStored] = []
+            chunks_per_group: list[list[tuple[int, int]]] = [
+                [] for _ in self.token_databases
+            ]
+            for start, end, g_idx in zip(starts, ends, group_indices, strict=True):
+                chunks_per_group[g_idx].append((start, end))
+            for g_idx, chunks in enumerate(chunks_per_group):
+                if not chunks:
+                    continue
+                db = self.token_databases[g_idx]
+                group_addrs, group_sizes, _ = db.prepare_values(
+                    chunks, block_ids_per_group[g_idx]
+                )
+                addrs.extend(group_addrs)
+                sizes.extend(group_sizes)
+
             # parent_block_hash chains live within a group, not across.
             if self.enable_kv_event:
                 prev_key_per_group: dict[int, Any] = {}
@@ -645,10 +881,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 zip(starts, ends, group_indices, strict=True)
             ):
                 db = self.token_databases[g_idx]
-                addr, size, _ = db.prepare_value(s, e, block_ids_per_group[g_idx])
-                addrs.append(addr)
-                sizes.append(size)
-
                 if self.enable_kv_event:
                     token_ids = (
                         req_meta.token_ids[s:e]
@@ -670,6 +902,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             if current_event is not None:
                 current_event.synchronize()
+
+            if group_ids is not None:
+                assert len(group_ids) == len(keys)
+                self.replicate_config.group_ids = group_ids
 
             batch_bytes = _sum_batch_bytes(sizes)
             put_start = time.perf_counter()
@@ -805,19 +1041,21 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         block_id_list: list[int] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
+            chunks: list[tuple[int, int]] = []
             for start, end, block_hash in db.process_tokens(
                 token_len, req_meta.block_hashes, mask_num
             ):
                 chunk_idx = start // db.block_size
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
-                addr, size, block_id = db.prepare_value(
-                    start, end, req_meta.block_ids[g_idx]
-                )
                 key_list.append(db.key_for(block_hash))
-                addr_list.append(addr)
-                size_list.append(size)
-                block_id_list.append(block_id)
+                chunks.append((start, end))
+            g_addrs, g_sizes, g_block_ids = db.prepare_values(
+                chunks, req_meta.block_ids[g_idx]
+            )
+            addr_list.extend(g_addrs)
+            size_list.extend(g_sizes)
+            block_id_list.extend(g_block_ids)
 
         # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
@@ -967,7 +1205,7 @@ class MooncakeStoreWorker:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
 
-        self.dp_rank = get_mooncake_dp_engine_index(parallel_config)
+        self.dp_rank = parallel_config.data_parallel_index
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
@@ -983,50 +1221,19 @@ class MooncakeStoreWorker:
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", True
         )
+        # Mirrors MooncakeStoreConnector._capacity_only.
+        self._capacity_only = self.kv_role == "kv_consumer" and not (
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "enable_lookup", True
+            )
+        )
         self.cache_config = vllm_config.cache_config
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
         self.num_layers = model_config.get_num_layers(parallel_config)
 
-        self.use_mla = False
-        if (
-            hasattr(model_config, "use_mla")
-            and isinstance(model_config.use_mla, bool)
-            and model_config.use_mla
-        ):
-            self.use_mla = True
-
-        if self.use_mla:
-            self.num_kv_head = 1
-        else:
-            self.num_kv_head = model_config.get_total_num_kv_heads()
-
-        if self.num_kv_head < self.tp_size and self.dcp_size <= 1:
-            # Dedup: TP ranks holding the same KV heads stripe PUTs across
-            # one shared key namespace. DCP splits the TP group, so with
-            # DCP>1 those ranks have different `@dcpN` namespaces and
-            # striping would leave keys unwritten (OBJECT_NOT_FOUND on
-            # GET). PCP is outer to TP (pcp_rank is constant within a TP
-            # group), so it needs no guard.
-            self.put_step = self.tp_size // self.num_kv_head
-            self.head_or_tp_rank = self.tp_rank // self.put_step
-        else:
-            self.head_or_tp_rank = self.tp_rank
-            self.put_step = 1
-
-        self.metadata = KeyMetadata(
-            model_name=model_config.model.rstrip("/").split("/")[-1],
-            tp_rank=self.head_or_tp_rank,
-            pcp_rank=self.pcp_rank,
-            dcp_rank=self.dcp_rank,
-            pp_rank=self.pp_rank,
-            cache_prefix=str(
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "cache_prefix", ""
-                )
-            ),
-        )
+        self.num_kv_head = model_config.get_total_num_kv_heads()
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_config()
@@ -1055,6 +1262,19 @@ class MooncakeStoreWorker:
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
         self.store_replicate_config = ReplicateConfig()
+        self.enable_group_semantics = (
+            str(extra_config.get("enable_group_semantics", "False")).strip().lower()
+            == "true"
+        )
+        self._supports_group_ids = _replicate_config_supports_group_ids(
+            ReplicateConfig, self.store_replicate_config
+        )
+        if self.enable_group_semantics and not self._supports_group_ids:
+            logger.warning(
+                "Mooncake group semantics is enabled, but the installed "
+                "Mooncake package does not support ReplicateConfig.group_ids. "
+                "Falling back to the existing batch_put_from_multi_buffers path."
+            )
         if preferred_segment is not None:
             self.store_replicate_config.preferred_segment = preferred_segment
 
@@ -1114,6 +1334,17 @@ class MooncakeStoreWorker:
         self.kv_connector_stats = MooncakeStoreConnectorStats()
 
         self._kv_cache_config = kv_cache_config
+        self.token_dbs: list[ChunkedTokenDatabase] = []
+
+        # a capacity-only instance does not need below utils
+        if self._capacity_only:
+            logger.info(
+                "Mooncake store in capacity-only mode: segment mounted "
+                "(global_segment_size=%d), KV transfer disabled.",
+                store_config.global_segment_size,
+            )
+            return
+
         # Single-group + PCP/DCP > 1: scale the lone group's spec.block_size to
         # self.block_size (= scheduler_block_size) so the coordinator's
         # ``block_size % hash_block_size == 0`` invariant holds.
@@ -1143,10 +1374,32 @@ class MooncakeStoreWorker:
             retention_interval=envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL,
         )
         # One ChunkedTokenDatabase per group; addresses populated in
-        # register_kv_caches once the kv-cache layout is known.
-        self.token_dbs: list[ChunkedTokenDatabase] = [
+        # register_kv_caches once the kv-cache layout is known. Each group's
+        # key namespace is its TP shard id: ranks holding identical bytes
+        # (MLA / shared GQA KV heads) share a namespace, TP-sharded Mamba
+        # state gets one namespace per rank.
+        metadata = KeyMetadata(
+            model_name=model_config.model.rstrip("/").split("/")[-1],
+            tp_rank=self.tp_rank,
+            pcp_rank=self.pcp_rank,
+            dcp_rank=self.dcp_rank,
+            pp_rank=self.pp_rank,
+            cache_prefix=str(
+                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "cache_prefix", ""
+                )
+            ),
+        )
+        self._group_tp_replication_factors: tuple[int, ...] = (
+            self._compute_group_tp_replication_factors()
+        )
+        self.token_dbs = [
             ChunkedTokenDatabase(
-                dataclasses.replace(self.metadata, group_id=g_idx),
+                dataclasses.replace(
+                    metadata,
+                    group_id=g_idx,
+                    tp_rank=self.tp_rank // self._group_tp_replication_factors[g_idx],
+                ),
                 g.kv_cache_spec.block_size,
                 hash_block_size=self.hash_block_size,
             )
@@ -1154,27 +1407,50 @@ class MooncakeStoreWorker:
         ]
         self._init_lookup_key_prefixes()
 
-    def _init_lookup_key_prefixes(self) -> None:
-        """Prepare per-group key prefixes across parallel rank namespaces."""
-        # (tp_rank, pcp_rank, dcp_rank, pp_rank) namespaces
+    def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
         if self.dcp_size > 1:
-            # DCP reuses the TP workers and splits each TP group into
-            # contiguous DCP groups, so dcp_rank == tp_rank % dcp_size.
-            # Store/load paths do not apply KV-head dedup under DCP
-            rank_namespaces = tuple(
-                (tp_rank, pcp_rank, tp_rank % self.dcp_size, pp_rank)
+            return 1
+        inner_specs = (
+            tuple(spec.kv_cache_specs.values())
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else (spec,)
+        )
+        # Any rank-specific state makes the whole packed value rank-specific.
+        if any(isinstance(inner, MambaSpec) for inner in inner_specs):
+            return 1
+        # A pure MLA packed value is replicated on every TP rank.
+        if all(
+            isinstance(inner, (MLAAttentionSpec, SlidingWindowMLASpec))
+            for inner in inner_specs
+        ):
+            return self.tp_size
+        return max(1, self.tp_size // self.num_kv_head)
+
+    def _compute_group_tp_replication_factors(self) -> tuple[int, ...]:
+        """Return the number of byte-identical TP replicas per cache group.
+
+        DCP and Mamba use 1; MLA uses ``tp_size``; GQA uses
+        ``tp_size // num_kv_head``.
+        """
+        return tuple(
+            self._spec_tp_replication_factor(group.kv_cache_spec)
+            for group in self._kv_cache_groups
+        )
+
+    def _init_lookup_key_prefixes(self) -> None:
+        def rank_namespaces(factor: int) -> tuple[tuple[int, int, int, int], ...]:
+            if self.dcp_size > 1:
+                # DCP is a TP subdivision: dcp_rank == tp_rank % dcp_size.
+                return tuple(
+                    (tp_rank, pcp_rank, tp_rank % self.dcp_size, pp_rank)
+                    for pcp_rank in range(self.pcp_size)
+                    for tp_rank in range(self.tp_size)
+                    for pp_rank in range(self.pp_size)
+                )
+            return tuple(
+                (shard_rank, pcp_rank, 0, pp_rank)
                 for pcp_rank in range(self.pcp_size)
-                for tp_rank in range(self.tp_size)
-                for pp_rank in range(self.pp_size)
-            )
-        else:
-            # Without DCP, TP ranks that share a KV head write identical KV, so
-            # lookup only needs one TP namespace per unique KV head.
-            tp_count = min(self.tp_size, self.num_kv_head)
-            rank_namespaces = tuple(
-                (tp_rank, pcp_rank, 0, pp_rank)
-                for pcp_rank in range(self.pcp_size)
-                for tp_rank in range(tp_count)
+                for shard_rank in range(self.tp_size // factor)
                 for pp_rank in range(self.pp_size)
             )
 
@@ -1187,11 +1463,12 @@ class MooncakeStoreWorker:
                     dcp_rank=dcp_rank,
                     pp_rank=pp_rank,
                 )
-                for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces
+                for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces(
+                    self._group_tp_replication_factors[g_idx]
+                )
             )
-            for db in self.token_dbs
+            for g_idx, db in enumerate(self.token_dbs)
         )
-        self._lookup_expected_per_key = len(rank_namespaces)
 
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
@@ -1207,6 +1484,8 @@ class MooncakeStoreWorker:
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
     ) -> None:
         """Register KV cache tensors and start transfer threads."""
+        if self._capacity_only:
+            return
         if not kv_caches:
             logger.warning("No KV caches to offload.")
             return
@@ -1284,11 +1563,13 @@ class MooncakeStoreWorker:
                 self.token_dbs,
                 self.block_size,
                 self.tp_rank,
-                self.put_step,
+                self._group_tp_replication_factors,
                 self.kv_role,
                 ready_event_sending,
                 self.enable_kv_events,
                 self.store_replicate_config,
+                enable_group_semantics=self.enable_group_semantics,
+                supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
             )
             self.kv_send_thread.start()
@@ -1343,6 +1624,9 @@ class MooncakeStoreWorker:
         compute is launched on the compute stream) for better
         compute-I/O overlap.
         """
+        if self._capacity_only:
+            return set(), set()
+
         # Issue async loads
         for request in meta.requests:
             load_spec = request.load_spec
@@ -1353,7 +1637,7 @@ class MooncakeStoreWorker:
             self.recv_request_queue.put(request)
 
         assert self.load_async, "load_async must be True for better performance."
-        # Issue stores with CUDA event synchronization
+        # Issue stores with CUDA event synchronization.
         if self.kv_role in ["kv_producer", "kv_both"]:
             current_event = None
             for request in meta.requests:
@@ -1454,11 +1738,17 @@ class MooncakeStoreWorker:
 
         return finished_sending
 
-    def lookup(self, token_len: int, block_hashes: Sequence[BlockHash]) -> int:
+    def lookup(self, num_tokens: int, block_hashes: Sequence[BlockHash]) -> int:
         """Check how many prefix tokens exist in the store.
 
-        Checks across all rank-specific key namespaces that may be loaded.
+        Checks across all rank-specific key namespaces that may be loaded. A
+        hit covering all ``num_tokens`` is re-derived below the request end so
+        the last token is recomputed for sampling.
         """
+        if self._capacity_only:
+            return 0
+
+        token_len = self.coord.align_lookup_length(num_tokens)
         if not block_hashes or token_len <= 0:
             return 0
 
@@ -1466,21 +1756,32 @@ class MooncakeStoreWorker:
         # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
-        lookup_masks = self.coord.lookup_mask(token_len)
+        fine_grained = self.coord.enable_partial_hash_hits
+        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
-            lookup_mask = lookup_masks[g_idx]
             key_prefixes = self._lookup_key_prefixes[g_idx]
-            group_hashes = self.coord.block_hashes_for_spec(
-                block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
-            )
-            max_chunks = min(len(group_hashes), cdiv(token_len, spec_block_size))
-            mask_limit = (
-                max_chunks if lookup_mask is None else min(max_chunks, len(lookup_mask))
-            )
-            for chunk_id in range(mask_limit):
-                if lookup_mask is not None and not lookup_mask[chunk_id]:
-                    continue
+            if fine_grained:
+                max_units = min(len(block_hashes), token_len // self.hash_block_size)
+                unit_ids: range | list[int] = range(max_units)
+                group_hashes: Sequence[BlockHash] = block_hashes
+            else:
+                lookup_mask = lookup_masks[g_idx]  # type: ignore[index]
+                group_hashes = self.coord.block_hashes_for_spec(
+                    block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
+                )
+                max_chunks = min(len(group_hashes), cdiv(token_len, spec_block_size))
+                mask_limit = (
+                    max_chunks
+                    if lookup_mask is None
+                    else min(max_chunks, len(lookup_mask))
+                )
+                unit_ids = [
+                    chunk_id
+                    for chunk_id in range(mask_limit)
+                    if lookup_mask is None or lookup_mask[chunk_id]
+                ]
+            for chunk_id in unit_ids:
                 h = group_hashes[chunk_id]
                 hash_hex = h.hex()
                 for key_prefix in key_prefixes:
@@ -1511,20 +1812,35 @@ class MooncakeStoreWorker:
             logger.error("Remote connection failed in lookup: %s", e)
             return 0
 
-        # A (group, hash) is "present" only when every TP*PP rank has it.
-        ranks_per_candidate = self._lookup_expected_per_key
-        exists_set = {
-            (g_idx, hash_bytes)
-            for i, (g_idx, hash_bytes) in enumerate(candidate_meta)
-            if all(
-                res[i * ranks_per_candidate + j] == 1
-                for j in range(ranks_per_candidate)
-            )
-        }
+        # A (group, hash) is "present" only when every namespace that will be
+        # loaded has it (per-group count: sharded groups need every rank's
+        # shard, replicated groups one namespace per unique KV head).
+        exists_set = set()
+        pos = 0
+        for g_idx, hash_bytes in candidate_meta:
+            count = len(self._lookup_key_prefixes[g_idx])
+            if all(res[pos + j] == 1 for j in range(count)):
+                exists_set.add((g_idx, hash_bytes))
+            pos += count
 
-        _masks, hit_length = self.coord.find_longest_cache_hit(
-            block_hashes, token_len, ExternalCachedBlockPool(exists_set)
+        cached_block_pool = ExternalCachedBlockPool(
+            self.hash_block_size,
+            exists_set,
         )
+        _masks, hit_length = self.coord.find_longest_cache_hit(
+            block_hashes,
+            token_len,
+            cached_block_pool,
+        )
+        if hit_length >= num_tokens:
+            usable_length = self.coord.align_lookup_length(num_tokens - 1)
+            if usable_length <= 0:
+                return 0
+            _masks, hit_length = self.coord.find_longest_cache_hit(
+                block_hashes,
+                usable_length,
+                cached_block_pool,
+            )
         return hit_length
 
     def get_kv_events(self) -> list[BlockStored]:
@@ -1590,11 +1906,11 @@ class LookupKeyServer:
                 msg_type = bytes(all_frames[0])
 
                 if msg_type == LOOKUP_MSG:
-                    token_len = int.from_bytes(all_frames[1], byteorder="big")
+                    num_tokens = int.from_bytes(all_frames[1], byteorder="big")
                     hash_len = int.from_bytes(all_frames[2], byteorder="big")
                     blob = all_frames[3].buffer
                     block_hashes = BlobBlockHashes(blob, hash_len)
-                    result = self.store_worker.lookup(token_len, block_hashes)
+                    result = self.store_worker.lookup(num_tokens, block_hashes)
                     self.socket.send(result.to_bytes(4, "big"))
 
                 elif msg_type == RESET_MSG:
@@ -1657,11 +1973,11 @@ class LookupKeyClient:
         )
         self.futures: dict[str, Future[int]] = {}
 
-    def _lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+    def _lookup(self, num_tokens: int, block_hashes: list[BlockHash]) -> int:
         hash_len = len(block_hashes[0]) if block_hashes else 0
         all_frames = (
             LOOKUP_MSG,
-            token_len.to_bytes(4, byteorder="big"),
+            num_tokens.to_bytes(4, byteorder="big"),
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
         )
@@ -1672,7 +1988,7 @@ class LookupKeyClient:
     def lookup(
         self,
         req_id: str,
-        token_len: int,
+        num_tokens: int,
         block_hashes: list[BlockHash],
         non_block: bool = False,
     ) -> int | None:
@@ -1680,7 +1996,7 @@ class LookupKeyClient:
         so the caller retries on a later step."""
         future = self.futures.get(req_id)
         if future is None:
-            future = self.executor.submit(self._lookup, token_len, list(block_hashes))
+            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
             self.futures[req_id] = future
         if non_block and not future.done():
             return None
@@ -1721,7 +2037,7 @@ class LookupKeyClient:
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     """Construct IPC path for ZMQ lookup socket."""
     assert vllm_config.kv_transfer_config is not None
-    dp_rank = get_mooncake_dp_engine_index(vllm_config.parallel_config)
+    dp_rank = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
     rpc_port = 0
     hostname = socket.gethostname()

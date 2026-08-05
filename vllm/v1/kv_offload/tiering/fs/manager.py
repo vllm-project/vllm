@@ -30,10 +30,11 @@ except ImportError:
 
 from typing_extensions import override
 
-from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
@@ -48,7 +49,11 @@ from vllm.v1.kv_offload.tiering.base import (
     ScheduleEndContext,
     SecondaryTierManager,
 )
-from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
+from vllm.v1.kv_offload.tiering.fs.io import (
+    batch_load_block,
+    batch_store_block,
+    probe_o_direct,
+)
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 if TYPE_CHECKING:
@@ -99,7 +104,7 @@ class FileSystemTierManager(SecondaryTierManager):
         content.
     """
 
-    medium: ClassVar[str] = MEDIUM_FS
+    medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
         self,
@@ -110,11 +115,12 @@ class FileSystemTierManager(SecondaryTierManager):
         n_read_threads: int = 16,
         n_write_threads: int = 16,
         enable_kv_events: bool = False,
+        locality: str | None = None,
     ):
         """
         Args:
-            offloading_spec: contains the vllm_config, kv_cache_config
-                and block_size_factor.
+            offloading_spec: Contains normalized offloading configuration and
+                blocks_per_chunk.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
             root_dir: Root directory for block files.
@@ -123,8 +129,11 @@ class FileSystemTierManager(SecondaryTierManager):
             enable_kv_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
+            locality: Whether this tier's storage is LOCAL or REMOTE relative
+                to the publishing vLLM instance.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:
@@ -150,7 +159,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
-            gpu_blocks_per_file=offloading_spec.block_size_factor,
+            blocks_per_file=offloading_spec.blocks_per_chunk,
             parallel_agnostic=True,
         )
 
@@ -162,6 +171,18 @@ class FileSystemTierManager(SecondaryTierManager):
                 json.dump(
                     self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
                 )
+
+        # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
+        # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
+        # rather than failing every block.
+        self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
+        if not self._use_o_direct:
+            logger.warning(
+                "O_DIRECT is not supported at '%s'; falling back to buffered "
+                "I/O for the '%s' KV offload tier.",
+                root_dir,
+                tier_type,
+            )
 
         self._pool = DualQueueThreadPool(
             n_read_threads,
@@ -186,31 +207,28 @@ class FileSystemTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: JobMetadata) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-        tasks = (
-            functools.partial(
-                store_block,
-                self.file_mapper.get_file_name(key),
-                self._primary_kv_view,
-                int(bid) * self._block_size,
-                self._block_size,
-            )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        task = functools.partial(
+            batch_store_block,
+            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
+            self._primary_kv_view,
+            [int(bid) * self._block_size for bid in job_metadata.block_ids],
+            self._block_size,
+            self._use_o_direct,
         )
-        self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
+        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        tasks = (
-            functools.partial(
-                load_block,
-                self.file_mapper.get_file_name(key),
-                self._primary_kv_view,
-                int(bid) * self._block_size,
-                self._block_size,
-            )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+        task = functools.partial(
+            batch_load_block,
+            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
+            self._primary_kv_view,
+            [int(bid) * self._block_size for bid in job_metadata.block_ids],
+            self._block_size,
+            self._use_o_direct,
         )
-        self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
+
+        self._pool.enqueue_load(job_metadata.job_id, 1, [task])
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -223,7 +241,12 @@ class FileSystemTierManager(SecondaryTierManager):
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:
                     self.events.append(
-                        OffloadingEvent(keys=keys, medium=self.medium, removed=False)
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.medium,
+                            removed=False,
+                            locality=self.locality,
+                        )
                     )
             results.append(JobResult(job_id=job_id, success=success))
         return results

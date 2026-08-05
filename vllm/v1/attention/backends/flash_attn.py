@@ -3,6 +3,7 @@
 """Attention layer with FlashAttention."""
 
 import copy
+import functools
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -12,6 +13,7 @@ import torch
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
+    PIN_MEMORY,
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
 )
@@ -22,12 +24,16 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
 )
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.backends.utils import (
+    fill_mm_prefix_query_ranges,
+    get_dcp_local_seq_lens,
+)
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
@@ -57,7 +63,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
     should_skip_dcp_context_attention,
@@ -74,6 +80,8 @@ class FlashAttentionBackend(AttentionBackend):
         "auto",
         "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -91,6 +99,10 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
 
     @classmethod
     def supports_batch_invariance(cls) -> bool:
@@ -133,25 +145,29 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*D).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets
-        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` (logical (B, H, N, 2*D)) to the actual memory
+        # layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
-            return (1, 0, 2, 3, 4, 5)
+            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
+            return (1, 0, 3, 2, 4)
         elif cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
+            # (num_blocks, block_size, num_kv_heads, 2*head_size)
+            stride_order = (0, 2, 1, 3)
         elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, 2, block_size, head_size)
-            return (1, 4, 0, 2, 3, 5)
+            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
+            return (1, 2, 0, 3, 4)
         elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
+            # (num_blocks, num_kv_heads, block_size, 2*head_size)
+            stride_order = (0, 1, 2, 3)
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
@@ -170,14 +186,11 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            if current_platform.is_xpu():
-                return True
-            return (
-                get_flash_attn_version() == 3
-                and current_platform.is_device_capability_family(90)
-            )
-        return kv_cache_dtype in ["auto", "float16", "bfloat16"]
+        if kv_cache_dtype not in cls.supported_kv_cache_dtypes:
+            return False
+        if is_quantized_kv_cache(kv_cache_dtype):
+            return flash_attn_supports_kv_cache_dtype(kv_cache_dtype)
+        return True
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
@@ -208,6 +221,17 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> str | None:
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
+        if (
+            kv_cache_dtype is not None
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and not flash_attn_supports_kv_cache_dtype(
+                kv_cache_dtype,
+                head_size=head_size,
+                head_size_v=head_size,
+                has_sinks=has_sink,
+            )
+        ):
+            return "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
         if (
             use_mm_prefix
             and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
@@ -265,9 +289,10 @@ class FlashAttentionMetadata:
 
     sliding_window: tuple[int, int] | None = None
 
-    # PrefixLM bidirectional ranges for multimodal tokens.
-    # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
-    mm_prefix_range_tensor: torch.Tensor | None = None
+    # PrefixLM bidirectional range containing each scheduled query token.
+    # Shape: (num_actual_tokens, 2) int32, absolute [start, end] bounds;
+    # (-1, -1) for query tokens outside every multimodal range.
+    mm_prefix_query_range_tensor: torch.Tensor | None = None
 
     # Reference Sliding Window Attention (R-SWA) fields.
     # rswa_prefix_lens:  per-request prompt lengths [num_reqs], int32, CUDA.
@@ -341,7 +366,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     def get_cudagraph_support(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: "AttentionSpec",
+        kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
         return cls._cudagraph_support
 
@@ -434,6 +459,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
             self.persistent_rswa_window_tensor = torch.tensor(
                 [self.rswa_window], dtype=torch.int32, device=self.device
+            )
+
+        # mm_prefix: persistent staging + device buffers owned by this builder,
+        # sized by scheduled query tokens so build() never allocates.
+        self.mm_prefix_query_ranges_cpu: torch.Tensor | None = None
+        self.mm_prefix_query_ranges_np: np.ndarray | None = None
+        self.mm_prefix_query_ranges_gpu: torch.Tensor | None = None
+        if self.model_config.is_mm_prefix_lm:
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self.mm_prefix_query_ranges_cpu = torch.empty(
+                (max_num_tokens, 2), dtype=torch.int32, pin_memory=PIN_MEMORY
+            )
+            self.mm_prefix_query_ranges_np = self.mm_prefix_query_ranges_cpu.numpy()
+            self.mm_prefix_query_ranges_gpu = torch.empty(
+                (max_num_tokens, 2), dtype=torch.int32, device=self.device
             )
 
     def build(
@@ -677,16 +717,31 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
 
         # Compute mm_prefix range tensor if the batch contains
-        # multimodal tokens with bidirectional ranges.
+        # multimodal tokens with bidirectional ranges.  Built for every FA
+        # group; Gemma4 nulls the field for its non-sliding layers.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
-        if mm_ranges is not None:
-            from vllm.v1.attention.backends.utils import (
-                compute_mm_prefix_range_tensor,
+        if mm_ranges is not None and self.mm_prefix_query_ranges_np is not None:
+            # The upper bound is exact for prefill rows, which is where
+            # mm_prefix ranges live; decode rows only ever get an optimistic
+            # (larger) context, moving them further past every range.
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None, (
+                "mm_prefix requires seq_lens_cpu_upper_bound"
             )
-
-            attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
-                mm_ranges, num_reqs, seq_lens.device
+            num_mm_tokens = fill_mm_prefix_query_ranges(
+                self.mm_prefix_query_ranges_np,
+                mm_ranges,
+                common_attn_metadata.query_start_loc_cpu,
+                common_attn_metadata.seq_lens_cpu_upper_bound,
             )
+            if num_mm_tokens > 0:
+                assert self.mm_prefix_query_ranges_cpu is not None
+                assert self.mm_prefix_query_ranges_gpu is not None
+                mm_query_ranges = self.mm_prefix_query_ranges_gpu[:num_mm_tokens]
+                mm_query_ranges.copy_(
+                    self.mm_prefix_query_ranges_cpu[:num_mm_tokens],
+                    non_blocking=True,
+                )
+                attn_metadata.mm_prefix_query_range_tensor = mm_query_ranges
 
         # R-SWA: copy prefix lengths into persistent buffers (outside the
         # compiled region) so forward() never allocates during CUDA graph
@@ -763,7 +818,9 @@ class FlashAttentionImpl(AttentionImpl):
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
+            requires_local_attention=sliding_window is not None,
             head_size=head_size,
+            has_sinks=sinks is not None,
         )
         logger.info_once(
             "Using FlashAttention version %s",
@@ -771,6 +828,20 @@ class FlashAttentionImpl(AttentionImpl):
         )
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
+
+        if is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ) and not flash_attn_supports_kv_cache_dtype(
+            self.kv_cache_dtype,
+            requires_alibi=alibi_slopes is not None,
+            head_size=head_size,
+            head_size_v=head_size,
+            has_sinks=sinks is not None,
+        ):
+            raise NotImplementedError(
+                f"FlashAttention does not support {self.kv_cache_dtype}"
+                " kv-cache on this device."
+            )
 
         self.sinks = sinks
         if self.sinks is not None:
@@ -819,7 +890,7 @@ class FlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -866,8 +937,8 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(1)
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
@@ -936,23 +1007,25 @@ class FlashAttentionImpl(AttentionImpl):
                 causal = attn_metadata.causal
                 is_dynamic_causal = isinstance(causal, torch.Tensor)
 
-                mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
+                mm_prefix_query_ranges = attn_metadata.mm_prefix_query_range_tensor
                 mm_mask_mod = None
                 mm_aux = None
                 if (
-                    mm_prefix_ranges is not None
+                    mm_prefix_query_ranges is not None
                     and not is_dynamic_causal
                     and causal is True
                     and self.vllm_flash_attn_version == 4
                 ):
-                    max_ranges = mm_prefix_ranges.shape[1]
-                    # Sliding window value in Triton convention
-                    # (1 + window_size[0]).  Global-attention layers
-                    # store (-1, -1) → sw stays None / 0.
+                    # Use the layer impl's window, not attn_metadata's. The
+                    # metadata field comes from kv_cache_spec (model-wide, e.g.
+                    # Gemma4's 512), while the impl holds the per-layer window
+                    # the mask_mod must encode (e.g. a test override).
+                    # Triton convention: 1 + window_size[0]. Global layers store
+                    # (-1, -1) → sw stays None.
+                    layer_window = self.sliding_window
                     sw_val = (
-                        1 + sliding_window_size[0]
-                        if sliding_window_size is not None
-                        and sliding_window_size[0] >= 0
+                        1 + layer_window[0]
+                        if layer_window is not None and layer_window[0] >= 0
                         else None
                     )
                     # Gemma4: also clamp the bidirectional block to the
@@ -965,11 +1038,16 @@ class FlashAttentionImpl(AttentionImpl):
                     ):
                         mm_clamp_sw = sw_val
                     mm_mask_mod = _make_mm_prefix_mask_mod(
-                        max_ranges,
                         sliding_window=mm_clamp_sw,
                         sliding_window_left=sw_val,
                     )
-                    mm_aux = [mm_prefix_ranges]
+                    mm_aux = [mm_prefix_query_ranges, attn_metadata.query_start_loc]
+                    # mm_prefix is (causal ∧ window) ∨ bidirectional-range —
+                    # not ⊆ causal. FA #155 stopped auto-clearing causal/local
+                    # when mask_mod is set, so the caller must disable them or
+                    # the built-in causal path shorts out / clips the mask_mod.
+                    causal = False
+                    sliding_window_size = None
 
                 # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
                 # mask without block-size approximation.  The mask_mod encodes
@@ -1075,7 +1153,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Scatter write into the KV cache using slot_mapping indices.
         # No TMA kernel is invoked here, so stride canonicalization is not needed.
-        key_cache, value_cache = kv_cache.unbind(1)
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
@@ -1342,13 +1421,18 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
+@functools.cache
 def _make_mm_prefix_mask_mod(
-    max_ranges: int,
     sliding_window: int = 0,
     sliding_window_left: int | None = None,
 ):
     """Build a CuTE-DSL mask_mod implementing
     ``(causal AND sliding_window) OR mm_prefix``.
+
+    Cached so identical ``(sliding_window, sliding_window_left)`` reuse the
+    same function object. FA4's ``hash_callable`` mixes ``repr()`` of closure
+    cells into the compile key; the nested ``_load_q_range`` would otherwise
+    get a new address each call and force a full JIT recompile every forward.
 
     The FA4 kernel passes *local* ``q_idx`` (0-based within the current
     prefill chunk) while ``kv_idx`` is absolute (0-based over the full
@@ -1357,6 +1441,15 @@ def _make_mm_prefix_mask_mod(
     so that causal, sliding-window, and mm_prefix range comparisons all
     use consistent absolute positions.  This matches the Triton
     reference path (``compute_kv_seq_mask``).
+
+    ``aux_tensors[0]`` holds the absolute ``[start, end]`` bounds of the
+    mm_prefix range containing each scheduled query token (``(-1, -1)`` when
+    none), and ``aux_tensors[1]`` is ``cu_seqlens_q``, used to turn the local
+    ``q_idx`` into a packed row index.  Because mm_prefix ranges never overlap,
+    ``r_start <= kv_idx <= r_end`` is exactly "query and key share a range", so
+    no key-side lookup is needed and ``kv_idx`` is never used as an index.
+    The ``(-1, -1)`` sentinel falls out for free: ``kv_idx <= -1`` is false for
+    every valid key.
 
     ``sliding_window_left`` enforces the sliding window on the causal
     term (None = full causal, no window).  ``sliding_window`` clamps the
@@ -1369,7 +1462,28 @@ def _make_mm_prefix_mask_mod(
 
     from vllm.vllm_flash_attn.cute.utils import (  # type: ignore[import-untyped]
         scalar_to_ssa,
+        ssa_to_scalar,
     )
+
+    @cute.jit
+    def _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx):
+        """Load the mm_prefix range bounds for this query row.
+
+        Both loads depend only on the query index, so they hoist out of the
+        unrolled per-element mask loop.  ``ssa_to_scalar`` reads lane 0, so one
+        call must not span query rows (hence the ``__vec_size__`` pin below).
+        Clamping keeps ``token_idx`` in bounds for partial tiles and padded
+        (``seqlen_q == 0``) rows; neither produces output.
+        """
+        q_ranges = aux_tensors[0]
+        cu_seqlens_q = aux_tensors[1]
+        b = batch_idx[0]
+        q_local = cutlass.min(ssa_to_scalar(q_idx), seqlen_info.seqlen_q - Int32(1))
+        token_idx = cutlass.max(cu_seqlens_q[b] + q_local, Int32(0))
+        return (
+            scalar_to_ssa(q_ranges[token_idx, 0], Int32),
+            scalar_to_ssa(q_ranges[token_idx, 1], Int32),
+        )
 
     if sliding_window_left is not None:
 
@@ -1386,18 +1500,11 @@ def _make_mm_prefix_mask_mod(
             q_abs = q_idx + ctx_off
             sw = scalar_to_ssa(Int32(sliding_window_left), Int32)
             keep = (kv_idx <= q_abs) & ((q_abs - kv_idx) < sw)
-            ranges = aux_tensors[0]
-            b = batch_idx[0]
-            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
-                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
-                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
-                valid = r_start < r_end
-                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
-                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-                mm = q_in & k_in
-                if sliding_window > 0:
-                    mm = mm & ((q_abs - kv_idx) < sw)
-                keep = keep | mm
+            r_start, r_end = _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx)
+            mm = (kv_idx >= r_start) & (kv_idx <= r_end)
+            if sliding_window > 0:
+                mm = mm & ((q_abs - kv_idx) < sw)
+            keep = keep | mm
             return keep
 
     else:
@@ -1414,18 +1521,12 @@ def _make_mm_prefix_mask_mod(
             ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
             q_abs = q_idx + ctx_off
             keep = kv_idx <= q_abs
-            ranges = aux_tensors[0]
-            b = batch_idx[0]
-            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
-                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
-                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
-                valid = r_start < r_end
-                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
-                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-                keep = keep | (q_in & k_in)
+            r_start, r_end = _load_q_range(q_idx, seqlen_info, aux_tensors, batch_idx)
+            keep = keep | ((kv_idx >= r_start) & (kv_idx <= r_end))
             return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True
+    mm_prefix_mask_mod.__vec_size__ = 1  # _load_q_range takes lane 0 of q_idx
     return mm_prefix_mask_mod
 
 

@@ -254,8 +254,8 @@ def test_multiproc_executor_shutdown_cleanup():
     for worker in executor.workers:
         assert not worker.proc.is_alive(), "Worker processes should be terminated"
 
-    # Verify shutdown event is set
-    assert executor.shutdown_event.is_set(), "Shutdown event should be set"
+    # Verify shutdown flag is set
+    assert executor.shutting_down, "Shutdown flag should be set"
 
     # Multiple shutdowns should be safe (idempotent)
     executor.shutdown()
@@ -292,7 +292,6 @@ def test_multiproc_executor_pipeline_parallel():
             "Max concurrent batches should follow the configured PP/async "
             "scheduling policy"
         )
-
     finally:
         # Clean up
         executor.shutdown()
@@ -338,6 +337,10 @@ def test_multiproc_executor_multi_node():
     - Node 1 (rank 1): Uses GPUs 2,3 (CUDA_VISIBLE_DEVICES=2,3) with TP=2
     Total world_size = 4, nnodes = 2
     """
+    # Python 3.14+ changed default multiprocessing start method to 'forkserver'
+    # which cannot pickle nested functions. Use 'fork' for this test.
+    mp_ctx = multiprocessing.get_context("fork")
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         port = s.getsockname()[1]
@@ -405,12 +408,12 @@ def test_multiproc_executor_multi_node():
                 executor.shutdown()
 
     # Create a queue to collect results from both processes
-    result_queue: multiprocessing.Queue[dict[str, int | bool]] = multiprocessing.Queue()
+    result_queue: multiprocessing.Queue[dict[str, int | bool]] = mp_ctx.Queue()
 
     # Start both node processes
     processes = []
     for node_rank in range(2):
-        p = multiprocessing.Process(
+        p = mp_ctx.Process(
             target=run_node,
             args=(node_rank, result_queue, port),
             name=f"Node{node_rank}",
