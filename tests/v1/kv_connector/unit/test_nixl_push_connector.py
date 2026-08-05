@@ -341,6 +341,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._group_spec_types = (FullAttentionSpec,)
+        w._engine_last_active = {}
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
