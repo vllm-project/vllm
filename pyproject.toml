@@ -111,7 +111,6 @@ markers = [
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",
     "optional: optional tests that are automatically skipped, include --optional to run them",
-    "marlin_ldmatrix_s4: validate the CUDA 13.4 Marlin ldmatrix.s8.s4 path",
 ]
 
 [tool.ty.src]

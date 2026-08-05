@@ -39,7 +39,6 @@ def _nvcc_version(nvcc: str) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
-@pytest.mark.marlin_ldmatrix_s4
 @pytest.mark.skipif(
     _ldmatrix_s4_target() is None,
     reason="Requires a GPU with CUDA 13.4 ldmatrix.s8.s4 support.",
@@ -52,8 +51,8 @@ def test_ldmatrix_s4_layout_and_mma_mapping(tmp_path: Path):
     if (_nvcc_version(nvcc) or (0, 0)) < (13, 4):
         pytest.skip("CUDA 13.4 or newer is required")
 
-    source = Path(__file__).with_name("marlin_ldmatrix_s4_layout.cu")
-    executable = tmp_path / "marlin_ldmatrix_s4_layout"
+    source = Path(__file__).with_name("ldmatrix_s4_layout.cu")
+    executable = tmp_path / "ldmatrix_s4_layout"
     target = _ldmatrix_s4_target()
     assert target is not None
     subprocess.run(
