@@ -104,6 +104,12 @@ class MooncakeStoreCoordinator:
         """
         attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
+            # Skip groups that opt out of prefix caching (e.g. GLM5Next's
+            # kpool tail): per-request scratch, never shareable, so they must
+            # not participate in hit lookup. Mirrors core's
+            # KVCacheCoordinator.verify_and_split_kv_cache_groups.
+            if not g.kv_cache_spec.participates_in_prefix_caching:
+                continue
             spec = _unwrap_spec(g.kv_cache_spec)
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None, (

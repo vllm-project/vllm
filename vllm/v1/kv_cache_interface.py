@@ -914,6 +914,15 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     kv_cache_specs: dict[str, KVCacheSpec]
 
     @property
+    def participates_in_prefix_caching(self) -> bool:
+        # A uniform group shares one block allocator; if any member is a
+        # non-shareable scratch spec (e.g. KpoolTailSpec), the group's blocks
+        # can't be reused across requests, so the whole group opts out.
+        return all(
+            s.participates_in_prefix_caching for s in self.kv_cache_specs.values()
+        )
+
+    @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
 
