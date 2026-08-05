@@ -604,7 +604,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
     ) -> torch.Tensor:
-        if self._hisparse_decode_batch:
+        if getattr(self, "_hisparse_decode_batch", False):
             kv_c_and_k_pe_cache, topk_indices, topk_length = self._hisparse_swap_in(
                 topk_indices,
                 attn_metadata,
@@ -820,7 +820,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         prefill kernel which has head padding overhead when num_heads is small.
         Used when use_mixed_batch is True.
         """
-        if self._hisparse_decode_batch:
+        if getattr(self, "_hisparse_decode_batch", False):
             kv_c_and_k_pe_cache, topk_indices = self._hisparse_swap_in(
                 topk_indices,
                 attn_metadata,

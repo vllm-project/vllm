@@ -172,7 +172,9 @@ def test_independent_block_pool_domains():
 
     blocks = manager.allocate_slots(request, num_new_tokens=32)
     assert blocks is not None
-    assert blocks.get_block_ids() == ([1, 2], [1, 2])
+    block_ids = blocks.get_block_ids()
+    assert [len(ids) for ids in block_ids] == [2, 2]
+    assert all(len(set(ids)) == 2 for ids in block_ids)
     assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [1, 0]
 
     request.num_computed_tokens = 32

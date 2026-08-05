@@ -309,8 +309,9 @@ class HiSparseOffloadStore:
 
     def finish_forward(self) -> None:
         current_stream = torch.accelerator.current_stream(self.hot_backing.device)
-        self._enqueue_transfers(self._post_forward_transfers)
-        self._post_forward_transfers.clear()
+        transfers = self._post_forward_transfers
+        self._post_forward_transfers = []
+        self._enqueue_transfers(transfers)
         self.host_write_event.record(current_stream)
 
     def finish_step(self) -> HiSparseStats | None:

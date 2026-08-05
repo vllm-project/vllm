@@ -917,7 +917,7 @@ def test_hisparse_mha_uses_shared_staging_plan(monkeypatch):
 
     impls = [object.__new__(FlashMLASparseImpl) for _ in range(2)]
     for impl in impls:
-        impl.hisparse_layer = Coordinator()
+        impl.hisparse_layer = SimpleNamespace(offload=Coordinator())
 
     prefill = SparseMLAPrefillMetadata(
         block_table=staged_block_table,
@@ -928,6 +928,8 @@ def test_hisparse_mha_uses_shared_staging_plan(monkeypatch):
     )
     metadata = SimpleNamespace(
         prefill=prefill,
+        prefill_max_seq_len=0,
+        topk_tokens=128,
     )
     tensor = torch.empty(0)
 
@@ -1624,6 +1626,7 @@ def test_hisparse_kernel_matches_fallback():
             req_id_per_token=req_ids,
             block_table=block_table,
             topk_indices=topk.clone(),
+            request_state_indices=req_ids,
             block_size=block_size,
             return_valid_counts=True,
         )
@@ -1716,6 +1719,7 @@ def test_hisparse_apply_plan_matches_independent():
         kw = dict(
             req_id_per_token=req_ids,
             block_table=block_table,
+            request_state_indices=req_ids,
             block_size=block_size,
         )
         _, idx_full = producer.swap_in(
@@ -1799,6 +1803,7 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         block_stride=stride_elements * torch.float32.itemsize,
         num_blocks=2,
         block_size=block_size,
+        block_table=torch.tensor([[0, 1]], dtype=torch.int32, device=device),
     )
 
     source = (
@@ -1811,6 +1816,7 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
         block_table=torch.arange(8, dtype=torch.int32, device=device).view(1, 8),
         topk_indices=torch.tensor([[0, 1, 2, 3]], dtype=torch.int32, device=device),
+        request_state_indices=torch.tensor([0], dtype=torch.int32, device=device),
         block_size=block_size,
     )
 
@@ -2596,6 +2602,7 @@ def test_flashmla_fp8_metadata_reuses_common_batch_split():
     common_metadata = SimpleNamespace(
         num_actual_tokens=1,
         seq_lens_cpu_upper_bound=torch.tensor([1]),
+        seq_lens=torch.tensor([1], device=DEVICE_TYPE),
         query_start_loc_cpu=torch.tensor([0, 1]),
         block_table_tensor=torch.zeros(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
     )
@@ -2752,6 +2759,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         topk_indices_buffer=topk_indices,
         num_heads=2,
         kv_lora_rank=1,
+        hisparse_layer=None,
         _fp8_flash_mla_kernel=run_kernel,
     )
     impl._forward_fp8_kv_mixed_batch = MethodType(
