@@ -793,6 +793,22 @@ class TestQuarkInt4Format:
         assert method.pack_reorder
         assert method.use_wna16_backend
 
+    def test_triton_wna16_experts_supports_asymmetric_int4(self):
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+            TritonWNA16Experts,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kInt4Static,
+            kInt4Static32,
+            kInt4Static32Asym,
+            kInt4StaticAsym,
+        )
+
+        for key in [kInt4Static, kInt4Static32, kInt4StaticAsym, kInt4Static32Asym]:
+            assert TritonWNA16Experts._supports_quant_scheme(key, None), (
+                f"{key} should be supported by TritonWNA16Experts"
+            )
+
     def test_quark_shared_expert_gate_keeps_quantized_tensors(self):
         quant_config = QuarkConfig.from_config(_quark_int4_config())
         mapper = quant_config.get_cache_scale_mapper()
