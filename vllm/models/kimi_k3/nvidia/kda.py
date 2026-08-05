@@ -164,6 +164,8 @@ def is_flashkda_supported(
     dtype: torch.dtype,
     lower_bound: float | None,
 ) -> bool:
+    if not current_platform.is_cuda():
+        return False
     capability = current_platform.get_device_capability()
     return (
         capability is not None
