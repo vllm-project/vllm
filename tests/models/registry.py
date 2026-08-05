@@ -267,7 +267,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct", trust_remote_code=True
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
-    "ExaoneMoEForCausalLM": _HfExamplesInfo(
+    "ExaoneMoeForCausalLM": _HfExamplesInfo(
         "LGAI-EXAONE/K-EXAONE-236B-A23B", min_transformers_version="5.1.0"
     ),
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),
@@ -376,6 +376,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "guard": "meta-llama/Llama-Guard-3-1B",
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+            "fp8_1b": "RedHatAI/Llama-3.2-1B-Instruct-FP8",
             "tiny": "hmellor/tiny-random-LlamaForCausalLM",
         },
     ),
