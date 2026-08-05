@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -140,6 +139,10 @@ def make_fi_moe_ep_bootstrap() -> BootstrapConfig:
         rank=ep.rank_in_group,
         process_group=ep.device_group,
         auto_bootstrap=False,
+        # vLLM already bound this worker's (possibly remapped) device;
+        # without this the runtime would rebind to cuda:LOCAL_RANK|rank and
+        # launch weight transforms against another device's pointers.
+        device=torch.cuda.current_device(),
     )
 
 
@@ -167,15 +170,6 @@ def ensure_fi_moe_ep_runtime(vllm_config: VllmConfig) -> None:
 
     bootstrap = make_fi_moe_ep_bootstrap()
     spec = fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend)
-    # flashinfer's runtime/layer constructors bind the process to
-    # cuda:LOCAL_RANK (falling back to bootstrap.rank). vLLM has already bound
-    # this worker to its (possibly remapped) visible device, and a mismatched
-    # rebind launches the weight transforms on the wrong GPU against another
-    # device's pointers (observed as CUDA_ERROR_ILLEGAL_ADDRESS in the
-    # deep_gemm transform_sf during load). Pin LOCAL_RANK to the device vLLM
-    # chose so every internal set_device is a no-op. TODO: drop once
-    # flashinfer respects the caller's current device.
-    os.environ["LOCAL_RANK"] = str(torch.cuda.current_device())
     _FI_RUNTIME_HANDLE = bootstrap_moe_ep_runtime(
         bootstrap,
         megakernel_runtime_requirements(spec),
