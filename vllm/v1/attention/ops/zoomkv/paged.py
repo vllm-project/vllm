@@ -6,9 +6,13 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+
+_REFERENCE_GATHER_LOGGED = False
+_GATHER_SNAPSHOT_DUMPED = False
 
 
 def logical_to_physical_slots(
@@ -137,6 +141,278 @@ def gather_kv_by_logical_indices_batch(
     return torch.stack(outs_k, dim=0), torch.stack(outs_v, dim=0)
 
 
+def _validate_topk_gather_mapping(
+    key_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    topk_logical: torch.Tensor,
+    block_size: int,
+    sink_size: int,
+    local_size: int,
+) -> None:
+    """Validate every sink/local/Top-K mapping before the Triton gather."""
+    batch, heads, topk_len = topk_logical.shape
+    device = topk_logical.device
+    bt = block_table[:batch].to(device=device)
+    seq = seq_lens[:batch].to(device=device)
+    n_ctx = sink_size + local_size + topk_len
+    t = torch.arange(n_ctx, device=device).view(1, 1, n_ctx)
+    sink_len = torch.minimum(seq, torch.full_like(seq, sink_size)).view(batch, 1, 1)
+    local_start = torch.maximum(
+        sink_len.view(batch), seq - local_size
+    ).view(batch, 1, 1)
+    local_len = seq.view(batch, 1, 1) - local_start
+    in_sink = t < sink_len
+    in_local = (t >= sink_len) & (t < sink_len + local_len)
+    topk_pos = t - sink_len - local_len
+    in_topk = (topk_pos >= 0) & (topk_pos < topk_len)
+    topk_safe = topk_pos.clamp(0, max(0, topk_len - 1)).expand(
+        batch, heads, n_ctx
+    )
+    selected = torch.gather(topk_logical, 2, topk_safe)
+    logical = torch.where(
+        in_sink,
+        t,
+        torch.where(in_local, local_start + t - sink_len, selected),
+    ).expand(batch, heads, n_ctx)
+    region_valid = (in_sink | in_local | in_topk).expand(batch, heads, n_ctx)
+    logical_valid = region_valid & (logical >= 0) & (
+        logical < seq.view(batch, 1, 1)
+    )
+    logical_block = torch.div(logical.clamp(min=0), block_size, rounding_mode="floor")
+    block_valid = logical_valid & (logical_block < bt.shape[1])
+    safe_block = logical_block.clamp(0, max(0, bt.shape[1] - 1))
+    physical = torch.gather(
+        bt[:, None, :].expand(batch, heads, bt.shape[1]),
+        2,
+        safe_block,
+    )
+    physical = torch.where(block_valid, physical, -1)
+    physical_valid = (physical >= 0) & (physical < key_cache.shape[0])
+    valid = block_valid & physical_valid
+    if bool(valid.all()):
+        return
+
+    bad = (~valid).nonzero(as_tuple=False)
+    samples = []
+    for req_i, head_i, ctx_i in bad[:64].cpu().tolist():
+        region = (
+            "sink"
+            if bool(in_sink[req_i, 0, ctx_i])
+            else "local"
+            if bool(in_local[req_i, 0, ctx_i])
+            else "topk"
+        )
+        samples.append(
+            {
+                "region": region,
+                "req": req_i,
+                "head": head_i,
+                "ctx_pos": ctx_i,
+                "logical_id": int(logical[req_i, head_i, ctx_i].item()),
+                "seq_len": int(seq[req_i].item()),
+                "logical_block": int(logical_block[req_i, head_i, ctx_i].item()),
+                "physical_block": int(physical[req_i, head_i, ctx_i].item()),
+            }
+        )
+    message = (
+        "ZoomKV strict gather mapping validation failed: "
+        f"rank={os.environ.get('LOCAL_RANK', '?')}, device={device}, "
+        f"bad={bad.shape[0]}/{valid.numel()}, "
+        f"block_table_shape={tuple(bt.shape)}, "
+        f"num_physical_blocks={key_cache.shape[0]}, samples={samples}"
+    )
+    print(message, flush=True)
+    raise RuntimeError(message)
+
+
+def _gather_kv_from_topk_batch_reference(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    topk_logical: torch.Tensor,
+    block_size: int,
+    sink_size: int,
+    local_size: int,
+    out_k: torch.Tensor | None = None,
+    out_v: torch.Tensor | None = None,
+    output_bthd: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pure PyTorch reference for isolating the fused Triton gather."""
+    batch, heads, topk_len = topk_logical.shape
+    device = topk_logical.device
+    seq = seq_lens[:batch].to(device=device)
+    bt = block_table[:batch].to(device=device)
+    n_ctx = sink_size + local_size + topk_len
+    t = torch.arange(n_ctx, device=device).view(1, 1, n_ctx)
+    sink_len = torch.minimum(seq, torch.full_like(seq, sink_size)).view(batch, 1, 1)
+    local_start = torch.maximum(
+        sink_len.view(batch), seq - local_size
+    ).view(batch, 1, 1)
+    local_len = seq.view(batch, 1, 1) - local_start
+    in_sink = t < sink_len
+    in_local = (t >= sink_len) & (t < sink_len + local_len)
+    topk_pos = t - sink_len - local_len
+    in_topk = (topk_pos >= 0) & (topk_pos < topk_len)
+    topk_safe = topk_pos.clamp(0, max(0, topk_len - 1)).expand(
+        batch, heads, n_ctx
+    )
+    selected = torch.gather(topk_logical, 2, topk_safe)
+    logical = torch.where(
+        in_sink,
+        t,
+        torch.where(in_local, local_start + t - sink_len, selected),
+    ).expand(batch, heads, n_ctx)
+    valid = (in_sink | in_local | in_topk).expand(batch, heads, n_ctx) & (
+        (logical >= 0) & (logical < seq.view(batch, 1, 1))
+    )
+
+    logical_safe = logical.clamp(min=0)
+    logical_block = torch.div(logical_safe, block_size, rounding_mode="floor")
+    token_offset = torch.remainder(logical_safe, block_size)
+    valid = valid & (logical_block < bt.shape[1])
+    safe_block = logical_block.clamp(0, max(0, bt.shape[1] - 1))
+    physical_block = torch.gather(
+        bt[:, None, :].expand(batch, heads, bt.shape[1]),
+        2,
+        safe_block,
+    )
+    valid = valid & (physical_block >= 0) & (
+        physical_block < key_cache.shape[0]
+    )
+    physical_safe = physical_block.clamp(0, max(0, key_cache.shape[0] - 1))
+
+    head_ids = torch.arange(heads, device=device).view(1, heads, 1)
+    gathered_k = key_cache[physical_safe, token_offset, head_ids]
+    gathered_v = value_cache[physical_safe, token_offset, head_ids]
+    gathered_k.masked_fill_(~valid.unsqueeze(-1), 0)
+    gathered_v.masked_fill_(~valid.unsqueeze(-1), 0)
+    if output_bthd:
+        gathered_k = gathered_k.permute(0, 2, 1, 3).contiguous()
+        gathered_v = gathered_v.permute(0, 2, 1, 3).contiguous()
+
+    if out_k is not None and out_k.shape == gathered_k.shape:
+        out_k.copy_(gathered_k)
+        gathered_k = out_k
+    if out_v is not None and out_v.shape == gathered_v.shape:
+        out_v.copy_(gathered_v)
+        gathered_v = out_v
+    return gathered_k, gathered_v
+
+
+def _maybe_dump_gather_snapshot(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    topk_logical: torch.Tensor,
+    block_size: int,
+    sink_size: int,
+    local_size: int,
+    output_bthd: bool,
+) -> None:
+    """Optionally dump one compact, standalone-replayable gather input."""
+    global _GATHER_SNAPSHOT_DUMPED
+    dump_dir = os.environ.get("VLLM_ZOOMKV_GATHER_DUMP_DIR")
+    rank = os.environ.get("LOCAL_RANK")
+    if rank is None:
+        try:
+            rank = (
+                str(torch.distributed.get_rank())
+                if torch.distributed.is_initialized()
+                else "0"
+            )
+        except Exception:
+            rank = "0"
+    dump_rank = os.environ.get("VLLM_ZOOMKV_GATHER_DUMP_RANK", "0")
+    if (
+        not dump_dir
+        or _GATHER_SNAPSHOT_DUMPED
+        or (dump_rank != "all" and rank != dump_rank)
+    ):
+        return
+    min_seq = int(os.environ.get("VLLM_ZOOMKV_GATHER_DUMP_MIN_SEQ", "65872"))
+    seq = seq_lens[: topk_logical.shape[0]].to(device=topk_logical.device)
+    if int(seq.max().item()) < min_seq:
+        return
+
+    batch, heads, topk_len = topk_logical.shape
+    n_ctx = sink_size + local_size + topk_len
+    t = torch.arange(n_ctx, device=topk_logical.device).view(1, 1, n_ctx)
+    sink_len = torch.minimum(seq, torch.full_like(seq, sink_size)).view(batch, 1, 1)
+    local_start = torch.maximum(
+        sink_len.view(batch), seq - local_size
+    ).view(batch, 1, 1)
+    local_len = seq.view(batch, 1, 1) - local_start
+    topk_pos = t - sink_len - local_len
+    selected = torch.gather(
+        topk_logical,
+        2,
+        topk_pos.clamp(0, max(0, topk_len - 1)).expand(batch, heads, n_ctx),
+    )
+    logical = torch.where(
+        t < sink_len,
+        t,
+        torch.where(
+            (t >= sink_len) & (t < sink_len + local_len),
+            local_start + t - sink_len,
+            selected,
+        ),
+    ).expand(batch, heads, n_ctx)
+    logical_block = torch.div(
+        logical.clamp(min=0), block_size, rounding_mode="floor"
+    )
+    bt = block_table[:batch].to(device=topk_logical.device)
+    safe_block = logical_block.clamp(0, max(0, bt.shape[1] - 1))
+    physical = torch.gather(
+        bt[:, None, :].expand(batch, heads, bt.shape[1]), 2, safe_block
+    )
+    used = torch.unique(
+        physical[(physical >= 0) & (physical < key_cache.shape[0])]
+    )
+    used_long = used.to(torch.int64)
+    remap = torch.full(
+        (key_cache.shape[0],), -1, dtype=bt.dtype, device=bt.device
+    )
+    remap[used_long] = torch.arange(
+        used.numel(), dtype=bt.dtype, device=bt.device
+    )
+    bt_valid = (bt >= 0) & (bt < key_cache.shape[0])
+    compact_bt = torch.full_like(bt, -1)
+    compact_bt[bt_valid] = remap[bt[bt_valid]]
+
+    output_path = Path(dump_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "key_cache": key_cache.index_select(0, used_long).cpu(),
+        "value_cache": value_cache.index_select(0, used_long).cpu(),
+        "block_table": compact_bt.cpu(),
+        "seq_lens": seq.cpu(),
+        "topk": topk_logical.cpu(),
+        "block_size": block_size,
+        "sink_size": sink_size,
+        "local_size": local_size,
+        "output_bthd": output_bthd,
+        "original_shapes": {
+            "key_cache": tuple(key_cache.shape),
+            "value_cache": tuple(value_cache.shape),
+            "block_table": tuple(block_table.shape),
+            "topk": tuple(topk_logical.shape),
+        },
+        "original_strides": {
+            "key_cache": tuple(key_cache.stride()),
+            "value_cache": tuple(value_cache.stride()),
+            "block_table": tuple(block_table.stride()),
+            "topk": tuple(topk_logical.stride()),
+        },
+    }
+    filename = output_path / f"gather_rank{rank}_seq{int(seq.max().item())}.pt"
+    torch.save(snapshot, filename)
+    _GATHER_SNAPSHOT_DUMPED = True
+    print(f"ZoomKV gather snapshot saved to {filename}", flush=True)
+
+
 def gather_kv_from_topk_batch(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
@@ -148,16 +424,65 @@ def gather_kv_from_topk_batch(
     local_size: int,
     out_k: torch.Tensor | None = None,
     out_v: torch.Tensor | None = None,
+    output_bthd: bool = False,
+    validate_mapping: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused sink/local/topk assembly + paged gather for a decode batch.
 
     Direct fully-valid path uses this to avoid materializing ``ctx_idx`` /
-    ``_ctx_valid`` and launching a separate assemble kernel.
+    ``_ctx_valid`` and launching a separate assemble kernel. Set
+    ``output_bthd`` to write FlashAttention's packed-token layout directly.
     """
     if topk_logical.dim() != 3:
         raise ValueError(
             "gather_kv_from_topk_batch expects topk [B, Hkv, K], "
             f"got {tuple(topk_logical.shape)}"
+        )
+    if validate_mapping:
+        _validate_topk_gather_mapping(
+            key_cache,
+            block_table,
+            seq_lens,
+            topk_logical,
+            block_size,
+            sink_size,
+            local_size,
+        )
+        _maybe_dump_gather_snapshot(
+            key_cache,
+            value_cache,
+            block_table,
+            seq_lens,
+            topk_logical,
+            block_size,
+            sink_size,
+            local_size,
+            output_bthd,
+        )
+    if (
+        validate_mapping
+        and os.environ.get("VLLM_ZOOMKV_REFERENCE_GATHER", "0") == "1"
+    ):
+        global _REFERENCE_GATHER_LOGGED
+        if not _REFERENCE_GATHER_LOGGED:
+            print(
+                "ZoomKV using PyTorch reference gather "
+                f"(rank={os.environ.get('LOCAL_RANK', '?')})",
+                flush=True,
+            )
+            _REFERENCE_GATHER_LOGGED = True
+        return _gather_kv_from_topk_batch_reference(
+            key_cache,
+            value_cache,
+            block_table,
+            seq_lens,
+            topk_logical,
+            block_size,
+            sink_size,
+            local_size,
+            out_k=out_k,
+            out_v=out_v,
+            output_bthd=output_bthd,
         )
     if key_cache.is_cuda:
         from vllm.v1.attention.ops.zoomkv.paged_triton import (
@@ -175,6 +500,7 @@ def gather_kv_from_topk_batch(
             local_size,
             out_k=out_k,
             out_v=out_v,
+            output_bthd=output_bthd,
         )
     # CPU / reference fallback: assemble then gather.
     ctx_idx, _ = assemble_sparse_context_indices_batch(
@@ -183,7 +509,7 @@ def gather_kv_from_topk_batch(
         sink_size,
         local_size,
     )
-    return gather_kv_by_logical_indices_batch(
+    gk, gv = gather_kv_by_logical_indices_batch(
         key_cache,
         value_cache,
         block_table,
@@ -192,6 +518,12 @@ def gather_kv_from_topk_batch(
         out_k=out_k,
         out_v=out_v,
     )
+    if output_bthd:
+        return (
+            gk.permute(0, 2, 1, 3).contiguous(),
+            gv.permute(0, 2, 1, 3).contiguous(),
+        )
+    return gk, gv
 
 
 def build_sink_local_indices(
@@ -370,21 +702,28 @@ def sparse_decode_attention_batch(
     value: torch.Tensor,
     scale: float,
     valid_mask: torch.Tensor | None = None,
+    *,
+    kv_layout_bthd: bool = False,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Batched non-causal sparse decode attention.
 
     Args:
         query: [B, Hq, D]
-        key / value: [B, Hkv, n_ctx, D]
+        key / value: [B, Hkv, n_ctx, D], or [B, n_ctx, Hkv, D] when
+            ``kv_layout_bthd`` is true.
         valid_mask: [B, Hkv, n_ctx] bool (optional). When provided and not
             all-True, falls back to per-request SDPA. The common long-context
             path has a fully-valid context and skips this.
+        out: Optional preallocated [B, Hq, D] FlashAttention output.
     Returns:
         out: [B, Hq, D]
     """
     batch, hq, d = query.shape
-    hkv = key.shape[1]
-    n_ctx = key.shape[2]
+    if kv_layout_bthd:
+        n_ctx, hkv = key.shape[1:3]
+    else:
+        hkv, n_ctx = key.shape[1:3]
     assert hq % hkv == 0
     # Avoid GPU sync: if the caller knows the mask is fully valid it passes
     # valid_mask=None (the common long-context path used by the batched
@@ -396,13 +735,21 @@ def sparse_decode_attention_batch(
             cu_q, cu_k = _flash_cu_seqlens_batch(query.device, batch, n_ctx)
             # Flash varlen wants packed [total_q, Hq, D] / [total_k, Hkv, D].
             q_flat = query.contiguous()
-            k_flat = (
-                key.permute(0, 2, 1, 3).reshape(batch * n_ctx, hkv, d).contiguous()
-            )
-            v_flat = (
-                value.permute(0, 2, 1, 3).reshape(batch * n_ctx, hkv, d).contiguous()
-            )
-            return flash_attn_varlen_func(
+            if kv_layout_bthd:
+                k_flat = key.reshape(batch * n_ctx, hkv, d)
+                v_flat = value.reshape(batch * n_ctx, hkv, d)
+            else:
+                k_flat = (
+                    key.permute(0, 2, 1, 3)
+                    .reshape(batch * n_ctx, hkv, d)
+                    .contiguous()
+                )
+                v_flat = (
+                    value.permute(0, 2, 1, 3)
+                    .reshape(batch * n_ctx, hkv, d)
+                    .contiguous()
+                )
+            result = flash_attn_varlen_func(
                 q_flat,
                 k_flat,
                 v_flat,
@@ -413,7 +760,10 @@ def sparse_decode_attention_batch(
                 dropout_p=0.0,
                 softmax_scale=scale,
                 causal=False,
+                num_splits=1,
+                out=out,
             )
+            return out if out is not None else result
         except (ImportError, RuntimeError):
             if os.environ.get("VLLM_ZOOMKV_STRICT_KERNELS", "0") == "1":
                 raise
@@ -421,6 +771,9 @@ def sparse_decode_attention_batch(
     # Reference / masked path: one SDPA call with GQA.
     repeats = hq // hkv
     q = query.unsqueeze(2)  # [B, Hq, 1, D]
+    if kv_layout_bthd:
+        key = key.permute(0, 2, 1, 3)
+        value = value.permute(0, 2, 1, 3)
     attn_mask = None
     if valid_mask is not None:
         m = valid_mask.repeat_interleave(repeats, dim=1)  # [B, Hq, T]

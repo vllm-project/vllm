@@ -16,6 +16,8 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#include <optional>
+
 namespace {
 
 constexpr int BLOCK_SIZE = 1024;
@@ -63,15 +65,21 @@ __device__ void naive_topk(int64_t* __restrict__ indices,
  */
 __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
                                   const int64_t* __restrict__ values,
+                                  const int32_t* __restrict__ lengths,
+                                  const int32_t* __restrict__ ks,
                                   int64_t* __restrict__ indices,    // [B, k]
                                   int64_t input_stride,
                                   int64_t values_stride, int32_t length,
-                                  int32_t k) {
+                                  int32_t max_k) {
   const int bid = blockIdx.x;
   const int tid = threadIdx.x;
+  const int row_length =
+      lengths == nullptr ? length : max(0, min(lengths[bid], length));
+  const int row_k =
+      ks == nullptr ? max_k : max(0, min(ks[bid], min(row_length, max_k)));
 
   const float* in = input + bid * input_stride;
-  int64_t* out = indices + bid * k;
+  int64_t* out = indices + bid * max_k;
 
   // Sentinel init (B+C): the radix-select paths below can leave some of the
   // k output slots unwritten when fewer than k candidates survive (e.g. a
@@ -82,14 +90,15 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
   // bs*context). Pre-fill every slot with -1 so unwritten slots are a clean
   // sentinel that consumers can skip. This is a single coalesced pass of k
   // writes per block (k ~ hundreds) — negligible next to the radix select.
-  for (int i = tid; i < k; i += BLOCK_SIZE) {
+  for (int i = tid; i < max_k; i += BLOCK_SIZE) {
     out[i] = -1;
   }
   __syncthreads();
+  if (row_k == 0) return;
 
   // Early exit for length <= k
-  if (length <= k) {
-    naive_topk(out, values, values_stride, bid, length, k);
+  if (row_length <= row_k) {
+    naive_topk(out, values, values_stride, bid, row_length, row_k);
     return;
   }
 
@@ -106,7 +115,7 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
   int* s_histogram = s_histogram_buf[0];
   const int smem_idx_size = (64 * 1024 / sizeof(int)) / 2;
 
-  int topk_remain = k;
+  int topk_remain = row_k;
 
   // ===== Round 0: 8-bit coarse histogram (bits 24-31) =====
   if (tid < RADIX + 1) {
@@ -120,7 +129,7 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
   __syncthreads();
 
   // Build histogram
-  for (int idx = tid; idx < length; idx += BLOCK_SIZE) {
+  for (int idx = tid; idx < row_length; idx += BLOCK_SIZE) {
     uint32_t ordered = float_to_ordered_uint32(in[idx]);
     uint8_t bin = extract_byte(ordered, 24);
     atomicAdd(&s_histogram_buf[0][bin], 1);
@@ -157,12 +166,12 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
 
   // Collect bin > threshold
   if (topk_remain == 0) {
-    for (int idx = tid; idx < length; idx += BLOCK_SIZE) {
+    for (int idx = tid; idx < row_length; idx += BLOCK_SIZE) {
       uint32_t ordered = float_to_ordered_uint32(in[idx]);
       uint8_t bin = extract_byte(ordered, 24);
       if (bin > threshold_bin_r0) {
         int pos = atomicAdd(&s_counter, 1);
-        if (pos < k)
+        if (pos < row_k)
           out[pos] = map_topk_index(values, values_stride, bid, idx);
       }
     }
@@ -177,14 +186,14 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
   __syncthreads();
 
   // Collect bin > threshold and store bin == threshold
-  for (int idx = tid; idx < length; idx += BLOCK_SIZE) {
+  for (int idx = tid; idx < row_length; idx += BLOCK_SIZE) {
     float val = in[idx];
     uint32_t ordered = float_to_ordered_uint32(val);
     uint8_t bin = extract_byte(ordered, 24);
 
     if (bin > threshold_bin_r0) {
       int pos = atomicAdd(&s_counter, 1);
-      if (pos < k)
+      if (pos < row_k)
         out[pos] = map_topk_index(values, values_stride, bid, idx);
     } else if (bin == threshold_bin_r0) {
       int pos = atomicAdd(&s_num_input[0], 1);
@@ -242,7 +251,7 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
         uint8_t bin = extract_byte(ordered, byte_offset);
         if (bin > threshold_bin) {
           int pos = atomicAdd(&s_counter, 1);
-          if (pos < k)
+          if (pos < row_k)
             out[pos] = map_topk_index(values, values_stride, bid, idx);
         }
       }
@@ -265,14 +274,14 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
 
       if (bin > threshold_bin) {
         int pos = atomicAdd(&s_counter, 1);
-          if (pos < k)
+          if (pos < row_k)
             out[pos] = map_topk_index(values, values_stride, bid, idx);
       } else if (bin == threshold_bin) {
         if (round == 3) {
           // Last round: fill remaining slots
           int pos = atomicAdd(&s_last_remain, -1);
           if (pos > 0) {
-            out[k - pos] =
+            out[row_k - pos] =
                 map_topk_index(values, values_stride, bid, idx);
           }
         } else {
@@ -296,7 +305,10 @@ __global__ void float_topk_kernel(const float* __restrict__ input,  // [B, L]
 // =====================================================================
 
 torch::Tensor float_topk_cuda_impl(torch::Tensor input,
-                                   const torch::Tensor* values, int64_t k) {
+                                   const torch::Tensor* values, int64_t k,
+                                   const torch::Tensor* output = nullptr,
+                                   const torch::Tensor* lengths = nullptr,
+                                   const torch::Tensor* ks = nullptr) {
   TORCH_CHECK(input.is_cuda(), "input must be on CUDA");
   TORCH_CHECK(input.dim() == 2, "input must be 2D [B, L]");
   TORCH_CHECK(k > 0, "k must be positive");
@@ -313,9 +325,21 @@ torch::Tensor float_topk_cuda_impl(torch::Tensor input,
     input_float = input.contiguous();
   }
 
-  auto indices = torch::empty(
-      {B, k},
-      torch::TensorOptions().dtype(torch::kInt64).device(input.device()));
+  torch::Tensor indices;
+  if (output != nullptr) {
+    TORCH_CHECK(output->is_cuda() && output->device() == input.device(),
+                "output must be CUDA on the same device as input");
+    TORCH_CHECK(output->scalar_type() == torch::kInt64,
+                "output must be int64");
+    TORCH_CHECK(output->dim() == 2 && output->size(0) == B &&
+                    output->size(1) == k && output->is_contiguous(),
+                "output must be contiguous [B,k]");
+    indices = *output;
+  } else {
+    indices = torch::empty(
+        {B, k},
+        torch::TensorOptions().dtype(torch::kInt64).device(input.device()));
+  }
 
   c10::cuda::CUDAGuard device_guard(input.device());
   auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -333,6 +357,23 @@ torch::Tensor float_topk_cuda_impl(torch::Tensor input,
     values_ptr = values_contiguous.data_ptr<int64_t>();
     values_stride = values_contiguous.stride(0);
   }
+  const int32_t* lengths_ptr = nullptr;
+  const int32_t* ks_ptr = nullptr;
+  if (lengths != nullptr) {
+    TORCH_CHECK(lengths->is_cuda() && lengths->device() == input.device() &&
+                    lengths->scalar_type() == torch::kInt32 &&
+                    lengths->dim() == 1 && lengths->size(0) == B &&
+                    lengths->is_contiguous(),
+                "lengths must be contiguous CUDA int32 [B]");
+    lengths_ptr = lengths->data_ptr<int32_t>();
+  }
+  if (ks != nullptr) {
+    TORCH_CHECK(ks->is_cuda() && ks->device() == input.device() &&
+                    ks->scalar_type() == torch::kInt32 && ks->dim() == 1 &&
+                    ks->size(0) == B && ks->is_contiguous(),
+                "ks must be contiguous CUDA int32 [B]");
+    ks_ptr = ks->data_ptr<int32_t>();
+  }
 
   // Dynamic shared memory: candidate index double buffer (extern __shared__
   // s_input_idx). sm_80 default cap is 48KB; request 64KB before launch (same
@@ -347,8 +388,8 @@ torch::Tensor float_topk_cuda_impl(torch::Tensor input,
       cudaGetErrorString(err_attr));
 
   float_topk_kernel<<<B, BLOCK_SIZE, smem, stream>>>(
-      input_float.data_ptr<float>(), values_ptr, indices.data_ptr<int64_t>(),
-      input_float.stride(0), values_stride, L, k);
+      input_float.data_ptr<float>(), values_ptr, lengths_ptr, ks_ptr,
+      indices.data_ptr<int64_t>(), input_float.stride(0), values_stride, L, k);
 
   auto err = cudaGetLastError();
   TORCH_CHECK(err == cudaSuccess,
@@ -374,7 +415,8 @@ torch::Tensor float_topk_3d_cuda(torch::Tensor input, int64_t k) {
 }
 
 torch::Tensor float_topk_values_3d_cuda(torch::Tensor input,
-                                       torch::Tensor values, int64_t k) {
+                                       torch::Tensor values, int64_t k,
+                                       std::optional<torch::Tensor> output) {
   TORCH_CHECK(input.dim() == 3 && values.dim() == 3,
               "input and values must be 3D [bs, kv_heads, kv_len]");
   TORCH_CHECK(input.sizes() == values.sizes(),
@@ -384,8 +426,69 @@ torch::Tensor float_topk_values_3d_cuda(torch::Tensor input,
   const int kv_len = input.size(2);
   auto input_2d = input.reshape({bs * kv_heads, kv_len});
   auto values_2d = values.reshape({bs * kv_heads, kv_len});
-  auto selected_2d = float_topk_cuda_impl(input_2d, &values_2d, k);
+  torch::Tensor output_2d;
+  const torch::Tensor* output_ptr = nullptr;
+  if (output.has_value()) {
+    TORCH_CHECK(output->dim() == 3 && output->size(0) == bs &&
+                    output->size(1) == kv_heads && output->size(2) == k &&
+                    output->is_contiguous(),
+                "output must be contiguous [bs,kv_heads,k]");
+    output_2d = output->reshape({bs * kv_heads, k});
+    output_ptr = &output_2d;
+  }
+  auto selected_2d =
+      float_topk_cuda_impl(input_2d, &values_2d, k, output_ptr);
   return selected_2d.reshape({bs, kv_heads, k});
+}
+
+torch::Tensor float_topk_3d_varlen_cuda(torch::Tensor input,
+                                       torch::Tensor lengths,
+                                       torch::Tensor ks, int64_t max_k) {
+  TORCH_CHECK(input.dim() == 3, "input must be 3D [bs,kv_heads,length]");
+  TORCH_CHECK(lengths.dim() == 2 && ks.dim() == 2,
+              "lengths and ks must be 2D [bs,kv_heads]");
+  TORCH_CHECK(lengths.sizes() == input.sizes().slice(0, 2) &&
+                  ks.sizes() == lengths.sizes(),
+              "lengths/ks must match input leading dimensions");
+  const int64_t rows = input.size(0) * input.size(1);
+  const int64_t length = input.size(2);
+  auto input_2d = input.reshape({rows, length});
+  auto lengths_1d = lengths.contiguous().reshape({rows});
+  auto ks_1d = ks.contiguous().reshape({rows});
+  auto selected = float_topk_cuda_impl(input_2d, nullptr, max_k, nullptr,
+                                       &lengths_1d, &ks_1d);
+  return selected.reshape({input.size(0), input.size(1), max_k});
+}
+
+torch::Tensor float_topk_values_3d_varlen_cuda(
+    torch::Tensor input, torch::Tensor values, torch::Tensor lengths,
+    torch::Tensor ks, int64_t max_k, std::optional<torch::Tensor> output) {
+  TORCH_CHECK(input.dim() == 3 && values.sizes() == input.sizes(),
+              "input and values must be matching 3D tensors");
+  TORCH_CHECK(lengths.dim() == 2 && ks.dim() == 2 &&
+                  lengths.sizes() == input.sizes().slice(0, 2) &&
+                  ks.sizes() == lengths.sizes(),
+              "lengths/ks must match input leading dimensions");
+  const int64_t rows = input.size(0) * input.size(1);
+  const int64_t length = input.size(2);
+  auto input_2d = input.reshape({rows, length});
+  auto values_2d = values.reshape({rows, length});
+  auto lengths_1d = lengths.contiguous().reshape({rows});
+  auto ks_1d = ks.contiguous().reshape({rows});
+  torch::Tensor output_2d;
+  const torch::Tensor* output_ptr = nullptr;
+  if (output.has_value()) {
+    TORCH_CHECK(output->dim() == 3 && output->size(0) == input.size(0) &&
+                    output->size(1) == input.size(1) &&
+                    output->size(2) == max_k && output->is_contiguous(),
+                "output must be contiguous [bs,kv_heads,max_k]");
+    output_2d = output->reshape({rows, max_k});
+    output_ptr = &output_2d;
+  }
+  auto selected =
+      float_topk_cuda_impl(input_2d, &values_2d, max_k, output_ptr,
+                           &lengths_1d, &ks_1d);
+  return selected.reshape({input.size(0), input.size(1), max_k});
 }
 
 #ifndef ZOOMKV_UNIFIED_EXTENSION
@@ -398,6 +501,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("input"), py::arg("k"));
   m.def("float_topk_values_3d", &float_topk_values_3d_cuda,
         "Float Top-K returning associated int64 values", py::arg("input"),
-        py::arg("values"), py::arg("k"));
+        py::arg("values"), py::arg("k"), py::arg("output") = std::nullopt);
+  m.def("float_topk_3d_varlen", &float_topk_3d_varlen_cuda,
+        py::arg("input"), py::arg("lengths"), py::arg("ks"),
+        py::arg("max_k"));
+  m.def("float_topk_values_3d_varlen",
+        &float_topk_values_3d_varlen_cuda, py::arg("input"),
+        py::arg("values"), py::arg("lengths"), py::arg("ks"),
+        py::arg("max_k"), py::arg("output") = std::nullopt);
 }
 #endif

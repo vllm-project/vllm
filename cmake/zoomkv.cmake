@@ -12,6 +12,11 @@ Sources live under vllm/v1/attention/ops/zoomkv/ and cuda/.
 ]]
 
 option(VLLM_BUILD_ZOOMKV_EXT "Build the optional ZoomKV CUDA extension" OFF)
+option(
+  VLLM_ZOOMKV_DEBUG_CUDA
+  "Build ZoomKV CUDA kernels with line info and optimization disabled"
+  OFF
+)
 
 set(
   ZOOMKV_SRC_DIR
@@ -40,6 +45,13 @@ if(VLLM_BUILD_ZOOMKV_EXT AND VLLM_GPU_LANG STREQUAL "CUDA")
     WITH_SOABI
   )
   target_compile_definitions(_zoomkv_C PRIVATE ZOOMKV_UNIFIED_EXTENSION=1)
+  if(VLLM_ZOOMKV_DEBUG_CUDA)
+    target_compile_options(
+      _zoomkv_C
+      PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo;-O0>
+    )
+  endif()
   # Some development environments carry a stale libtorch C++ API include in
   # TorchConfig.cmake while linking the active Python torch package. Put the
   # active package headers first so CUDA/C++ objects use one ABI consistently.

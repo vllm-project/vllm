@@ -324,6 +324,10 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += 1
 
+
+
+
+
     def append_n(self, blocks: list[KVCacheBlock]) -> None:
         """Put a list of blocks back into the free list
 
@@ -349,6 +353,11 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
+
+
+
+
+
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
 
@@ -370,6 +379,10 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
+
+
+
+
 def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
 
@@ -388,6 +401,11 @@ def need_extra_keys(request: Request) -> bool:
         or (request.lora_request is not None)
         or (request.cache_salt is not None)
     )
+
+
+
+
+
 
 
 def _gen_mm_extra_hash_keys(
@@ -457,6 +475,10 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
+
+
+
+
 def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
     """Generate extra keys related to LoRA for block hash computation.
 
@@ -470,6 +492,11 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
     if not request.lora_request:
         return []
     return [request.lora_request.lora_name]
+
+
+
+
+
 
 
 def _gen_prompt_embeds_extra_hash_keys(

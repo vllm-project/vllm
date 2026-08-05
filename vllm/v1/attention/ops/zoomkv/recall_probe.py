@@ -45,7 +45,7 @@ def compute_recall_record(
     scale: float,
     retrieval_query: torch.Tensor | None = None,
 ) -> dict | None:
-    """Compare retrieved Top-K tokens with the exact-attention Top-K.
+    """Compare retrieved tokens with exact Top-K under the retrieval query.
 
     Args:
         query: [1, num_q_heads, head_dim] decode query (all query heads).
@@ -57,12 +57,10 @@ def compute_recall_record(
         topk_logical: [num_kv_heads, final_topk] absolute token indices
             retrieved by ZoomKV, -1 for padding.
         scale: softmax scale of the attention layer.
-        retrieval_query: optional [1, num_kv_heads, head_dim] aggregated query
-            actually used by the retriever (``raw_q``).  When given, the
-            record also contains ``recall_vs_rq``: recall against the exact
-            q.K Top-K under this query, i.e. pipeline-only loss (Quest
-            pruning + KIVI quantization) with the query-aggregation mismatch
-            factored out.
+        retrieval_query: optional [1, num_kv_heads, head_dim] group-mean query
+            actually used by the retriever (``raw_q``). This defines the
+            primary recall ground truth. The all-query-head attention metric
+            is retained separately as ``attention_recall`` for diagnostics.
 
     Returns:
         Per-head recall / attention-mass statistics, or None when the
@@ -115,18 +113,20 @@ def compute_recall_record(
         rq_abs = rq_zone.topk(k_eff, dim=-1).indices + ret_start
 
     recall: list[float] = []
-    recall_vs_rq: list[float] = []
+    attention_recall: list[float] = []
     mass_cov: list[float] = []
     oracle_mass_cov: list[float] = []
     zone_mass_frac: list[float] = []
     for h in range(num_kv_heads):
         retrieved = topk_logical[h]
         retrieved = retrieved[retrieved >= 0]
-        hits = int(torch.isin(true_abs[h], retrieved).sum().item())
-        recall.append(hits / k_eff)
+        attention_hits = int(torch.isin(true_abs[h], retrieved).sum().item())
+        attention_recall.append(attention_hits / k_eff)
         if rq_abs is not None:
             rq_hits = int(torch.isin(rq_abs[h], retrieved).sum().item())
-            recall_vs_rq.append(rq_hits / k_eff)
+            recall.append(rq_hits / k_eff)
+        else:
+            recall.append(attention_hits / k_eff)
         zm = float(zone_mass[h].item())
         if retrieved.numel() and zm > 0:
             mass_cov.append(float(importance[h, retrieved].sum().item()) / zm)
@@ -142,6 +142,8 @@ def compute_recall_record(
         "k": int(k_eff),
         "recall": recall,
         "recall_mean": sum(recall) / len(recall),
+        "attention_recall": attention_recall,
+        "attention_recall_mean": sum(attention_recall) / len(attention_recall),
         # Fraction of the zone's exact attention mass covered by the
         # retrieved set, and by the oracle Top-K (upper bound).
         "mass_coverage": mass_cov,
@@ -150,9 +152,9 @@ def compute_recall_record(
         # (the rest goes to sink/local, which are always attended).
         "zone_mass_frac": zone_mass_frac,
     }
-    if recall_vs_rq:
-        rec["recall_vs_rq"] = recall_vs_rq
-        rec["recall_vs_rq_mean"] = sum(recall_vs_rq) / len(recall_vs_rq)
+    # Backward-compatible alias for older aggregation scripts.
+    rec["recall_vs_rq"] = recall
+    rec["recall_vs_rq_mean"] = rec["recall_mean"]
     return rec
 
 

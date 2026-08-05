@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold", type=int, default=512)
     p.add_argument("--tensor-parallel-size", type=int, default=1)
     p.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable torch.compile / piecewise CUDA graphs.",
+    )
+    p.add_argument(
         "--enable-prefix-caching",
         action="store_true",
         help="Reuse the warmup prompt blocks for focused long-context decode.",
@@ -47,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         "--cuda-profiler-range",
         action="store_true",
         help="Bracket each measured generate with cudaProfilerStart/Stop.",
+    )
+    p.add_argument(
+        "--layerwise-nvtx",
+        action="store_true",
+        help="Emit model/module NVTX ranges for single-layer inspection.",
     )
     p.add_argument("--output-json")
     return p.parse_args()
@@ -73,7 +83,9 @@ def main() -> None:
         tensor_parallel_size=args.tensor_parallel_size,
         block_size=16,
         gpu_memory_utilization=args.gpu_memory_utilization,
-        enforce_eager=True,
+        enforce_eager=args.enforce_eager,
+        disable_log_stats=False,
+        enable_layerwise_nvtx_tracing=args.layerwise_nvtx,
         enable_prefix_caching=args.enable_prefix_caching,
         max_num_seqs=max(batches),
         attention_config=AttentionConfig(
@@ -119,6 +131,16 @@ def main() -> None:
             torch.cuda.synchronize()
             torch.cuda.cudart().cudaProfilerStop()
         decode_tokens = sum(len(o.outputs[0].token_ids) for o in outs)
+        tpots_ms = []
+        for out in outs:
+            metrics = out.metrics
+            num_output_tokens = len(out.outputs[0].token_ids)
+            if metrics is not None and num_output_tokens > 1:
+                tpots_ms.append(
+                    1000.0
+                    * (metrics.last_token_ts - metrics.first_token_ts)
+                    / (num_output_tokens - 1)
+                )
         report = _zt.dump_and_reset(
             label=f"bs={bs}", decode_tokens=max(1, decode_tokens // max(1, bs))
         )
@@ -131,11 +153,15 @@ def main() -> None:
             "wall_s": wall_s,
             "decode_tokens_total": decode_tokens,
             "tok_s_output": decode_tokens / wall_s if wall_s > 0 else 0.0,
+            "mean_tpot_ms": (
+                sum(tpots_ms) / len(tpots_ms) if tpots_ms else None
+            ),
             "stage_report": report,
         }
         results.append(row)
         print(
             f"BS={bs}: wall={wall_s:.2f}s output_tok/s={row['tok_s_output']:.2f} "
+            f"mean_tpot_ms={row['mean_tpot_ms']} "
             f"total_decode_tokens={decode_tokens}"
         )
 

@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# QYL： zoomkv meta data
+
+
+
 """Physical-block ZoomKV block-summary state (min/max/centroid/KIVI packed)."""
 
 from __future__ import annotations
@@ -76,6 +80,18 @@ class ZoomKVBlockSummary:
             dtype=torch.int32,
         )
         self.valid = torch.zeros(num_blocks, device=device, dtype=torch.bool)
+        # Anchor-indexed 256-token parent summaries.  Parent p stores its
+        # min/max at the physical block id of logical child (start_b + 16*p + 15).
+        self.parent_min = torch.zeros(
+            num_blocks, num_kv_heads, head_dim, device=device, dtype=dtype
+        )
+        self.parent_max = torch.zeros(
+            num_blocks, num_kv_heads, head_dim, device=device, dtype=dtype
+        )
+        self.parent_valid = torch.zeros(num_blocks, device=device, dtype=torch.bool)
+        self.parent_first_child = torch.full(
+            (num_blocks,), -1, device=device, dtype=torch.int32
+        )
         self._request_block_summary_cache: dict[tuple, tuple[torch.Tensor, ...]] = {}
         self._compact_slots_scratch: torch.Tensor | None = None
         self._compact_count_scratch: torch.Tensor | None = None
@@ -123,6 +139,10 @@ class ZoomKVBlockSummary:
         self.chunk_max.index_fill_(0, ids, 0)
         self.centroid.index_fill_(0, ids, 0)
         self.packed.index_fill_(0, ids, 0)
+        self.parent_valid.index_fill_(0, ids, False)
+        self.parent_min.index_fill_(0, ids, 0)
+        self.parent_max.index_fill_(0, ids, 0)
+        self.parent_first_child.index_fill_(0, ids, -1)
 
     def copy_blocks(
         self,
@@ -146,6 +166,10 @@ class ZoomKVBlockSummary:
             self.centroid[dst].copy_(self.centroid[src])
             self.packed[dst].copy_(self.packed[src])
             self.valid[dst] = self.valid[src]
+            self.parent_min[dst].copy_(self.parent_min[src])
+            self.parent_max[dst].copy_(self.parent_max[src])
+            self.parent_valid[dst] = self.parent_valid[src]
+            self.parent_first_child[dst] = self.parent_first_child[src]
 
     def update_blocks_from_key_cache(
         self,
@@ -192,6 +216,12 @@ class ZoomKVBlockSummary:
         self,
         key_cache: torch.Tensor,
         slots: torch.Tensor,
+        *,
+        block_table: torch.Tensor | None = None,
+        start_block: int = 0,
+        seq_lens: torch.Tensor | None = None,
+        scan_all_parents: bool = False,
+        max_parents: int | None = None,
     ) -> None:
         """Finalize decode blocks without a GPU→CPU predicate synchronization."""
         if slots.numel() == 0:
@@ -200,11 +230,13 @@ class ZoomKVBlockSummary:
             from vllm.v1.attention.ops.zoomkv.block_summary_triton import (
                 compact_completed_slots,
                 finalize_completed_slots,
+                finalize_parent_summaries,
             )
 
             finalize_slots = slots
             finalize_count = None
-            if slots.numel() > 256:
+            is_prefill = slots.numel() > 256
+            if is_prefill:
                 # Prefill: compact to block-ending slots before launching the
                 # D=256 finalizer. This avoids 64 masked programs per ordinary
                 # token while retaining the sync-free one-token decode path.
@@ -220,6 +252,15 @@ class ZoomKVBlockSummary:
             finalize_completed_slots(
                 key_cache, finalize_slots, self, slot_count=finalize_count
             )
+            if block_table is not None and seq_lens is not None:
+                finalize_parent_summaries(
+                    block_table,
+                    self,
+                    start_block=start_block,
+                    seq_lens=seq_lens,
+                    scan_all=scan_all_parents or is_prefill,
+                    max_parents=max_parents,
+                )
             return
         # A large update is prefill/admission for a new batch; previously
         # cached logical request views can no longer be reused.

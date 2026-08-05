@@ -87,6 +87,8 @@ _DIRECT_PHYSICAL_SYMBOLS = (
     "density_score_physical",
     "kivi_physical",
     "float_topk_values_3d",
+    "float_topk_3d_varlen",
+    "float_topk_values_3d_varlen",
     "quest_map_back",
     "mask_from_topk",
 )
@@ -108,12 +110,20 @@ def quest_chunk_score_physical(
     valid: torch.Tensor,
     scores: torch.Tensor,
     n_chunks: int,
+    actual_num_chunks: torch.Tensor | None = None,
 ) -> None:
     mod = try_load_zoomkv_c()
     if mod is None or not hasattr(mod, "quest_chunk_score_physical"):
         raise RuntimeError("ZoomKV direct physical Quest kernel unavailable")
     mod.quest_chunk_score_physical(
-        raw_q, physical_ids, chunk_min, chunk_max, valid, scores, int(n_chunks)
+        raw_q,
+        physical_ids,
+        chunk_min,
+        chunk_max,
+        valid,
+        scores,
+        int(n_chunks),
+        actual_num_chunks,
     )
 
 
@@ -126,6 +136,11 @@ def quest_parent_score_physical(
     scores: torch.Tensor,
     n_chunks: int,
     factor: int,
+    actual_num_chunks: torch.Tensor | None = None,
+    parent_min: torch.Tensor | None = None,
+    parent_max: torch.Tensor | None = None,
+    parent_valid: torch.Tensor | None = None,
+    parent_first_child: torch.Tensor | None = None,
 ) -> None:
     mod = try_load_zoomkv_c()
     if mod is None or not hasattr(mod, "quest_parent_score_physical"):
@@ -139,6 +154,11 @@ def quest_parent_score_physical(
         scores,
         int(n_chunks),
         int(factor),
+        actual_num_chunks,
+        parent_min,
+        parent_max,
+        parent_valid,
+        parent_first_child,
     )
 
 
@@ -153,6 +173,7 @@ def quest_sub_score_physical(
     n_selected: int,
     factor: int,
     n_chunks: int,
+    actual_num_chunks: torch.Tensor | None = None,
 ) -> None:
     mod = try_load_zoomkv_c()
     if mod is None or not hasattr(mod, "quest_sub_score_physical"):
@@ -168,6 +189,7 @@ def quest_sub_score_physical(
         int(n_selected),
         int(factor),
         int(n_chunks),
+        actual_num_chunks,
     )
 
 
@@ -179,6 +201,7 @@ def density_score_physical(
     raw_q: torch.Tensor,
     scores: torch.Tensor,
     n_chunks: int,
+    actual_num_chunks: torch.Tensor | None = None,
 ) -> None:
     mod = try_load_zoomkv_c()
     if mod is None or not hasattr(mod, "density_score_physical"):
@@ -191,6 +214,7 @@ def density_score_physical(
         raw_q,
         scores,
         int(n_chunks),
+        actual_num_chunks,
     )
 
 
@@ -208,6 +232,7 @@ def kivi_physical(
     token_offset: int,
     out_scores: torch.Tensor,
     out_indices: torch.Tensor,
+    actual_num_chunks: torch.Tensor | None = None,
 ) -> None:
     mod = try_load_zoomkv_c()
     if mod is None or not hasattr(mod, "kivi_physical"):
@@ -226,6 +251,7 @@ def kivi_physical(
         int(token_offset),
         out_scores,
         out_indices,
+        actual_num_chunks,
     )
 
 
@@ -477,20 +503,94 @@ def float_topk_values_3d(
     values: torch.Tensor,
     k: int,
     strict: bool | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Select Top-K scores and return their associated int64 values."""
     strict = _want_strict() if strict is None else strict
     mod = try_load_zoomkv_c()
     if mod is not None and hasattr(mod, "float_topk_values_3d"):
-        return mod.float_topk_values_3d(scores, values, int(k))
+        result = mod.float_topk_values_3d(scores, values, int(k), out)
+        return out if out is not None else result
     if scores.is_cuda:
         topk_mod = _try_load_float_topk_cuda()
         if topk_mod is not None and hasattr(topk_mod, "float_topk_values_3d"):
-            return topk_mod.float_topk_values_3d(scores, values, int(k))
+            result = topk_mod.float_topk_values_3d(scores, values, int(k), out)
+            return out if out is not None else result
     if strict:
         raise RuntimeError("ZoomKV strict mode: value-returning CUDA Top-K required")
     positions = scores.topk(k, dim=-1, largest=True).indices
+    if out is not None:
+        torch.gather(values, -1, positions, out=out)
+        return out
     return torch.gather(values, -1, positions)
+
+
+def float_topk_3d_varlen(
+    scores: torch.Tensor,
+    lengths: torch.Tensor,
+    ks: torch.Tensor,
+    max_k: int,
+    strict: bool | None = None,
+) -> torch.Tensor:
+    """Per-row Top-K over ``scores[..., :lengths]`` with fixed output width."""
+    strict = _want_strict() if strict is None else strict
+    max_k = max(1, min(int(max_k), scores.shape[-1]))
+    mod = try_load_zoomkv_c()
+    if mod is not None and hasattr(mod, "float_topk_3d_varlen"):
+        return mod.float_topk_3d_varlen(scores, lengths, ks, max_k)
+    if scores.is_cuda:
+        topk_mod = _try_load_float_topk_cuda()
+        if topk_mod is not None and hasattr(topk_mod, "float_topk_3d_varlen"):
+            return topk_mod.float_topk_3d_varlen(scores, lengths, ks, max_k)
+    if strict:
+        raise RuntimeError("ZoomKV strict mode: ragged CUDA Top-K required")
+    scan = torch.arange(scores.shape[-1], device=scores.device)
+    masked = scores.masked_fill(
+        scan.view(1, 1, -1) >= lengths.unsqueeze(-1), float("-inf")
+    )
+    positions = masked.topk(max_k, dim=-1, largest=True).indices
+    slots = torch.arange(max_k, device=scores.device).view(1, 1, -1)
+    return positions.masked_fill(slots >= ks.unsqueeze(-1), -1)
+
+
+def float_topk_values_3d_varlen(
+    scores: torch.Tensor,
+    values: torch.Tensor,
+    lengths: torch.Tensor,
+    ks: torch.Tensor,
+    max_k: int,
+    strict: bool | None = None,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Ragged Top-K returning associated values in a fixed-width output."""
+    strict = _want_strict() if strict is None else strict
+    max_k = max(1, min(int(max_k), scores.shape[-1]))
+    mod = try_load_zoomkv_c()
+    if mod is not None and hasattr(mod, "float_topk_values_3d_varlen"):
+        result = mod.float_topk_values_3d_varlen(
+            scores, values, lengths, ks, max_k, out
+        )
+        return out if out is not None else result
+    if scores.is_cuda:
+        topk_mod = _try_load_float_topk_cuda()
+        if topk_mod is not None and hasattr(
+            topk_mod, "float_topk_values_3d_varlen"
+        ):
+            result = topk_mod.float_topk_values_3d_varlen(
+                scores, values, lengths, ks, max_k, out
+            )
+            return out if out is not None else result
+    if strict:
+        raise RuntimeError("ZoomKV strict mode: ragged value Top-K required")
+    positions = float_topk_3d_varlen(
+        scores, lengths, ks, max_k, strict=False
+    )
+    selected = torch.gather(values, -1, positions.clamp_min(0))
+    selected.masked_fill_(positions < 0, -1)
+    if out is not None:
+        out.copy_(selected)
+        return out
+    return selected
 
 
 def chunk_density_scores(
@@ -547,8 +647,10 @@ def dense_mask_from_topk(
             return mask
     if strict:
         raise RuntimeError("ZoomKV strict mode: CDS mask CUDA required")
-    mask.zero_()
-    mask.scatter_(2, positions, True)
+    counts = torch.zeros(mask_shape, dtype=torch.int32, device=positions.device)
+    valid = positions >= 0
+    counts.scatter_add_(2, positions.clamp_min(0), valid.to(torch.int32))
+    mask.copy_(counts > 0)
     return mask
 
 

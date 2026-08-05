@@ -70,6 +70,7 @@ def partial_chunk_kivi_qk_ref(
     bs, kv, nk = chunk_ids.shape
     D = chunk_min.shape[-1]
     g = group_size
+    output_slots = max(dense_topk, sparse_topk)
 
     K_chunks = dequant_kcache_4bit(
         packed_K,
@@ -81,7 +82,7 @@ def partial_chunk_kivi_qk_ref(
     )
     tok_scores = (K_chunks * raw_q.view(bs, kv, 1, 1, D)).sum(dim=-1)
 
-    sorted_scores, sorted_pos = tok_scores.topk(g, dim=-1, largest=True)
+    sorted_scores, sorted_pos = tok_scores.topk(output_slots, dim=-1, largest=True)
     offs = torch.arange(g, device=chunk_ids.device, dtype=torch.int64)
     token_ids = chunk_ids.unsqueeze(-1) * g + offs
     sorted_tok = torch.gather(token_ids, -1, sorted_pos)
@@ -91,23 +92,36 @@ def partial_chunk_kivi_qk_ref(
         torch.full((), int(dense_topk), device=chunk_ids.device, dtype=torch.int64),
         torch.full((), int(sparse_topk), device=chunk_ids.device, dtype=torch.int64),
     )
-    rank = torch.arange(g, device=chunk_ids.device, dtype=torch.int64).view(1, 1, 1, g)
+    rank = torch.arange(
+        output_slots, device=chunk_ids.device, dtype=torch.int64
+    ).view(1, 1, 1, output_slots)
     keep = rank < k_eff.unsqueeze(-1)
     masked_scores = sorted_scores.masked_fill(~keep, neg_inf).to(
         out_scores.dtype if out_scores is not None else torch.float32,
     )
     masked_idx = sorted_tok.masked_fill(~keep, 0)
 
-    flat_scores = masked_scores.reshape(bs, kv, nk * g)
-    flat_idx = masked_idx.reshape(bs, kv, nk * g)
+    flat_scores = masked_scores.reshape(bs, kv, nk * output_slots)
+    flat_idx = masked_idx.reshape(bs, kv, nk * output_slots)
+    output_width = nk * output_slots
 
     if out_scores is None:
         out_scores = flat_scores.contiguous()
     else:
+        if out_scores.shape[-1] < output_width:
+            raise ValueError(
+                f"out_scores needs {output_width} slots, got {out_scores.shape[-1]}"
+            )
+        out_scores = out_scores[..., :output_width]
         out_scores.copy_(flat_scores)
     if out_indices is None:
         out_indices = flat_idx.contiguous()
     else:
+        if out_indices.shape[-1] < output_width:
+            raise ValueError(
+                f"out_indices needs {output_width} slots, got {out_indices.shape[-1]}"
+            )
+        out_indices = out_indices[..., :output_width]
         out_indices.copy_(flat_idx)
     return out_scores, out_indices
 
@@ -162,6 +176,20 @@ def partial_chunk_kivi_qk(
         else strict
     )
     head_dim = int(chunk_min.shape[-1])
+    output_slots = max(dense_topk, sparse_topk)
+    output_width = int(chunk_ids.shape[-1]) * output_slots
+    if out_scores is not None:
+        if out_scores.shape[-1] < output_width:
+            raise ValueError(
+                f"out_scores needs {output_width} slots, got {out_scores.shape[-1]}"
+            )
+        out_scores = out_scores[..., :output_width]
+    if out_indices is not None:
+        if out_indices.shape[-1] < output_width:
+            raise ValueError(
+                f"out_indices needs {output_width} slots, got {out_indices.shape[-1]}"
+            )
+        out_indices = out_indices[..., :output_width]
     use_cuda = (
         prefer_cuda
         and chunk_ids.is_cuda
@@ -178,13 +206,17 @@ def partial_chunk_kivi_qk(
                 out_scores = torch.empty(
                     bs,
                     kv,
-                    nk * group_size,
+                    nk * output_slots,
                     dtype=torch.float32,
                     device=chunk_ids.device,
                 )
             if out_indices is None:
                 out_indices = torch.empty(
-                    bs, kv, nk * group_size, dtype=torch.int64, device=chunk_ids.device
+                    bs,
+                    kv,
+                    nk * output_slots,
+                    dtype=torch.int64,
+                    device=chunk_ids.device,
                 )
             kernel.partial_chunk_kivi_qk_dense_sparse(
                 chunk_ids.to(torch.int64),

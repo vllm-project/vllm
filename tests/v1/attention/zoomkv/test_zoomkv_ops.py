@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -13,10 +14,19 @@ import vllm.v1.attention.ops.zoomkv.kernels as zoomkv_kernels
 from vllm.config.attention import AttentionConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.zoomkv_attn import (
+    ZoomKVAttentionBackend,
     ZoomKVAttentionImpl,
+    _graph_chunk_bucket,
     _needs_summary_update,
+    _should_use_mixed_sparse_decode,
+    _should_use_sparse_decode,
 )
-from vllm.v1.attention.ops.zoomkv.kernels import get_quest_ops, quest_score_reference
+from vllm.v1.attention.ops.zoomkv.kernels import (
+    float_topk_3d_varlen,
+    get_quest_ops,
+    quest_score_reference,
+)
+from vllm.v1.attention.ops.zoomkv.kivi_rerank import partial_chunk_kivi_qk_ref
 from vllm.v1.attention.ops.zoomkv.paged import (
     assemble_sparse_context_indices,
     gather_kv_by_logical_indices,
@@ -24,6 +34,10 @@ from vllm.v1.attention.ops.zoomkv.paged import (
 )
 from vllm.v1.attention.ops.zoomkv.quant_pack import pack_block_kcache_4bit
 from vllm.v1.attention.ops.zoomkv.quest import QuestTorchOps
+from vllm.v1.attention.ops.zoomkv.retrieval_metadata_triton import (
+    build_actual_num_chunks,
+    build_stage_budgets,
+)
 from vllm.v1.attention.ops.zoomkv.retriever import ZoomKVRetriever, ZoomKVRuntimeConfig
 from vllm.v1.attention.ops.zoomkv.state import (
     ZoomKVBlockSummary,
@@ -36,6 +50,150 @@ from vllm.v1.attention.ops.zoomkv.state import (
 
 def _device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64])
+def test_fused_actual_num_chunks_metadata(input_dtype):
+    seq_lens_cpu = torch.tensor([0, 63, 64, 319, 320, 321, 131055])
+    seq_lens = seq_lens_cpu.to(device="cuda", dtype=input_dtype)
+    out = torch.empty(seq_lens.numel(), device="cuda", dtype=torch.int32)
+
+    result = build_actual_num_chunks(
+        seq_lens,
+        out,
+        sink_size=64,
+        local_size=256,
+        block_size=16,
+        start_block=4,
+        max_chunks=8192,
+    )
+    expected = (
+        (torch.maximum(seq_lens_cpu, torch.tensor(320)) - 256) // 16 - 4
+    ).clamp_(0, 8192)
+    assert result.dtype == torch.int32
+    assert torch.equal(result.cpu(), expected.to(torch.int32))
+    host = ZoomKVRetriever._actual_num_chunks_host(
+        seq_lens_cpu,
+        sink_size=64,
+        local_size=256,
+        block_size=16,
+        start_block=4,
+        max_chunks=8192,
+    )
+    assert host == expected.to(torch.int32).tolist()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_stage_budgets_follow_actual_request_widths():
+    actual = torch.tensor([0, 23, 100, 8192], device="cuda", dtype=torch.int32)
+    outputs = [
+        torch.empty((4, 2), device="cuda", dtype=torch.int32) for _ in range(6)
+    ]
+    build_stage_budgets(
+        actual,
+        *outputs,
+        factor=16,
+        large_ratio=0.5,
+        small_ratio=0.3,
+        dense_ratio=0.4,
+        max_large=256,
+        max_small=1024,
+        dense_topk=8,
+        sparse_topk=4,
+        final_topk=100,
+    )
+    parent_lengths, large_ks, sub_lengths, small_ks, dense_ks, final_ks = [
+        out[:, 0].cpu().tolist() for out in outputs
+    ]
+    assert parent_lengths == [0, 2, 7, 512]
+    assert large_ks == [0, 1, 4, 256]
+    assert sub_lengths == [0, 16, 64, 4096]
+    assert small_ks == [0, 5, 20, 1024]
+    assert dense_ks == [0, 2, 8, 409]
+    assert final_ks == [0, 28, 100, 100]
+    for out in outputs:
+        assert torch.equal(out[:, 0], out[:, 1])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_ragged_topk_uses_per_row_length_and_k():
+    scores = torch.tensor(
+        [
+            [[9.0, 1.0, 8.0, 7.0, 100.0, 99.0]],
+            [[0.0, 5.0, 4.0, 3.0, 2.0, 1.0]],
+        ],
+        device="cuda",
+    )
+    lengths = torch.tensor([[4], [6]], device="cuda", dtype=torch.int32)
+    ks = torch.tensor([[2], [3]], device="cuda", dtype=torch.int32)
+    positions = float_topk_3d_varlen(scores, lengths, ks, 4, strict=True)
+    assert set(positions[0, 0, :2].cpu().tolist()) == {0, 2}
+    assert positions[0, 0, 2:].cpu().tolist() == [-1, -1]
+    assert set(positions[1, 0, :3].cpu().tolist()) == {1, 2, 3}
+    assert positions[1, 0, 3:].cpu().tolist() == [-1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_batch_meta_cache_reused_across_layers():
+    """Metadata is seq_lens geometry only; 2nd call must reuse the GPU buffer."""
+    if not zoomkv_kernels.direct_physical_retrieval_available():
+        pytest.skip("direct physical ZoomKV extension unavailable")
+
+    ZoomKVRetriever.clear_batch_meta_cache()
+    device = torch.device("cuda")
+    cfg = ZoomKVRuntimeConfig(full_attention_threshold=512)
+    r0 = ZoomKVRetriever(cfg)
+    r1 = ZoomKVRetriever(cfg)
+    block_size, hkv, d = 16, 2, 128
+    num_blocks, batch, n_chunks = 256, 1, 64
+    summary = get_or_create_block_summary(
+        "test_meta_cache",
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_kv_heads=hkv,
+        head_dim=d,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    key = torch.randn(num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16)
+    physical_ids = torch.arange(n_chunks, device=device, dtype=torch.int32)
+    summary.update_blocks_from_key_cache(key, physical_ids)
+    block_table = torch.full((batch, 128), -1, device=device, dtype=torch.int32)
+    block_table[0, :n_chunks] = physical_ids
+    # pad local/sink slots so available_chunks stays positive
+    block_table[0, n_chunks : n_chunks + 20] = torch.arange(
+        n_chunks, n_chunks + 20, device=device, dtype=torch.int32
+    )
+    seq_len = cfg.sink_size + n_chunks * block_size + cfg.local_size
+    seq_lens = torch.tensor([seq_len], device=device, dtype=torch.int32)
+    seq_lens_host = seq_lens.cpu()
+    raw_q = torch.randn(batch, hkv, d, device=device, dtype=torch.bfloat16)
+
+    out0 = r0.retrieve_topk_tokens_batch_result(
+        raw_q,
+        summary,
+        block_table,
+        seq_lens,
+        summaries_guaranteed_valid=True,
+        seq_lens_host=seq_lens_host,
+    )
+    cached = ZoomKVRetriever._batch_meta_cache
+    assert cached is not None
+    ptr0 = cached.actual_num_chunks.data_ptr()
+    out1 = r1.retrieve_topk_tokens_batch_result(
+        raw_q,
+        summary,
+        block_table,
+        seq_lens,
+        summaries_guaranteed_valid=True,
+        seq_lens_host=seq_lens_host,
+    )
+    assert ZoomKVRetriever._batch_meta_cache is not None
+    assert ZoomKVRetriever._batch_meta_cache.actual_num_chunks.data_ptr() == ptr0
+    assert out0.topk.shape == out1.topk.shape
+    ZoomKVRetriever.clear_batch_meta_cache()
+    clear_block_summaries()
 
 
 def test_quest_torch_vs_reference():
@@ -59,6 +217,41 @@ def test_quest_ops_dispatch():
     out = torch.empty(1, 2, 4, device=device, dtype=torch.float32)
     ops.quest_chunk_score(q, cmin, cmax, out, 4, None)
     assert torch.isfinite(out).all()
+
+
+def test_kivi_rerank_uses_compact_per_chunk_output():
+    device = _device()
+    group_size = 16
+    head_dim = 8
+    chunk_ids = torch.tensor([[[0, 1]]], device=device, dtype=torch.int64)
+    dense_mask = torch.tensor([[[True, False]]], device=device)
+    packed = torch.randint(
+        -(2**31),
+        2**31 - 1,
+        (1, 1, 2, head_dim // 8, group_size),
+        device=device,
+        dtype=torch.int32,
+    )
+    chunk_min = torch.randn(1, 1, 2, head_dim, device=device, dtype=torch.bfloat16)
+    chunk_max = chunk_min + 1
+    raw_q = torch.randn(1, 1, head_dim, device=device, dtype=torch.bfloat16)
+
+    scores, indices = partial_chunk_kivi_qk_ref(
+        chunk_ids,
+        dense_mask,
+        packed,
+        chunk_min,
+        chunk_max,
+        raw_q,
+        group_size=group_size,
+        dense_topk=8,
+        sparse_topk=4,
+    )
+
+    assert scores.shape == indices.shape == (1, 1, 16)
+    assert torch.all(scores[..., :8] > -1.0e30)
+    assert torch.all(scores[..., 8:12] > -1.0e30)
+    assert torch.all(scores[..., 12:] < -1.0e30)
 
 
 def test_quest_ops_prefers_complete_cuda_extension(monkeypatch):
@@ -161,8 +354,12 @@ def test_retriever_dense_gate_and_range():
         full_attention_threshold=2000, sink_size=64, local_size=256
     )
     r = ZoomKVRetriever(cfg)
-    assert r.should_use_dense(100)
+    # Decode always uses sparse unless dense_fallback is set.
+    assert not r.should_use_dense(100)
     assert not r.should_use_dense(5000)
+    assert ZoomKVRetriever(
+        ZoomKVRuntimeConfig(dense_fallback=True)
+    ).should_use_dense(5000)
     assert (
         r.retrieval_block_range(64 + 256, 16)[0]
         == r.retrieval_block_range(64 + 256, 16)[1]
@@ -173,6 +370,14 @@ def test_retriever_dense_gate_and_range():
 
 def test_retriever_pads_when_candidates_are_fewer_than_final_topk():
     device = _device()
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from vllm.v1.attention.ops.zoomkv.kernels import (
+        direct_physical_retrieval_available,
+    )
+
+    if not direct_physical_retrieval_available():
+        pytest.skip("direct physical ZoomKV extension unavailable")
     cfg = ZoomKVRuntimeConfig(
         sink_size=0,
         local_size=0,
@@ -236,14 +441,22 @@ def test_zoomkv_config_defaults_match_runtime_defaults():
     attn = AttentionConfig(backend=AttentionBackendEnum.ZOOMKV)
     runtime = ZoomKVRuntimeConfig()
 
-    assert attn.zoomkv_quest_large_ratio == runtime.quest_large_ratio
-    assert attn.zoomkv_quest_small_ratio == runtime.quest_small_ratio
+    assert attn.zoomkv_quest_large_ratio == runtime.quest_large_ratio == 0.5
+    assert attn.zoomkv_quest_small_ratio == runtime.quest_small_ratio == 0.3
     assert attn.zoomkv_dense_ratio == runtime.dense_ratio
+    assert attn.zoomkv_dense_topk == runtime.dense_topk == 8
+    assert attn.zoomkv_sparse_topk == runtime.sparse_topk == 4
     assert attn.zoomkv_quest_chunk == runtime.quest_chunk == 16
     assert attn.zoomkv_enable_offload == runtime.enable_offload is False
-    # GQA group-mean retrieval query, matching the original ZoomKV
-    # implementation; the max-head variant measured ~0.11 lower Top-K recall.
-    assert attn.zoomkv_per_query_head == runtime.per_query_head is False
+
+
+@pytest.mark.parametrize(
+    ("max_model_len", "expected"),
+    [(17_408, 1_072), (132_000, 8_240)],
+)
+def test_zoomkv_graph_bucket_uses_max_model_len(max_model_len, expected):
+    cfg = ZoomKVRuntimeConfig(max_model_len=max_model_len)
+    assert _graph_chunk_bucket(cfg, block_size=16) == expected
 
 
 def test_zoomkv_config_rejects_offload_with_dense_fallback():
@@ -353,17 +566,20 @@ def test_kv_cpu_pool_roundtrip():
     clear_block_summaries()
 
 
-def test_prepare_retrieval_query_picks_strongest_head():
+def test_prepare_retrieval_query_gqa_mean():
     from vllm.v1.attention.ops.zoomkv.retriever import prepare_retrieval_query
 
     device = _device()
     q = torch.zeros(1, 4, 8, device=device, dtype=torch.bfloat16)
-    q[0, 1] = 3.0
-    q[0, 3] = 1.0
-    out = prepare_retrieval_query(q, num_kv_heads=2, per_query_head=True)
+    q[0, 0] = 2.0
+    q[0, 1] = 4.0
+    q[0, 2] = 6.0
+    q[0, 3] = 8.0
+    out = prepare_retrieval_query(q, num_kv_heads=2)
     assert out.shape == (1, 2, 8)
-    assert torch.allclose(out[0, 0], q[0, 1])
-    assert torch.allclose(out[0, 1], q[0, 3])
+    assert out.is_contiguous()
+    assert torch.allclose(out[0, 0], torch.tensor(3.0, device=device, dtype=torch.bfloat16))
+    assert torch.allclose(out[0, 1], torch.tensor(7.0, device=device, dtype=torch.bfloat16))
 
 
 def test_sparse_decode_gate():
@@ -374,14 +590,18 @@ def test_sparse_decode_gate():
         num_decodes=1,
         num_prefills=0,
         num_reqs=1,
-        seq_lens_cpu=torch.tensor([4096]),
-        seq_lens=torch.tensor([4096]),
+        seq_lens_cpu=torch.tensor([100]),  # short seq still sparse
+        seq_lens=torch.tensor([100]),
     )
     cfg = ZoomKVRuntimeConfig(full_attention_threshold=512)
 
     assert impl._should_sparse_decode(metadata, cfg)
     metadata.num_prefills = 1
+    # Pure-batch use_sparse stays False for mixed; mixed uses use_mixed_sparse.
     assert not impl._should_sparse_decode(metadata, cfg)
+    assert _should_use_mixed_sparse_decode(
+        cfg=cfg, num_decodes=1, num_prefills=1
+    )
     metadata.num_prefills = 0
     metadata.max_query_len = 2
     assert not impl._should_sparse_decode(metadata, cfg)
@@ -389,6 +609,54 @@ def test_sparse_decode_gate():
     assert not impl._should_sparse_decode(
         metadata, ZoomKVRuntimeConfig(dense_fallback=True)
     )
+    assert not _should_use_mixed_sparse_decode(
+        cfg=ZoomKVRuntimeConfig(enable_offload=True),
+        num_decodes=1,
+        num_prefills=1,
+    )
+
+
+def test_forward_owns_kv_update_and_preserves_cache_sharing():
+    impl = ZoomKVAttentionImpl.__new__(ZoomKVAttentionImpl)
+    impl.do_kv_cache_update = Mock()
+    impl._should_sparse_decode = Mock(return_value=False)
+    output = torch.empty(1, 2, 4)
+    impl._dense_flash_forward = Mock(return_value=output)
+
+    slot_mapping = torch.tensor([3], dtype=torch.int64)
+    metadata = SimpleNamespace(
+        zoomkv=ZoomKVRuntimeConfig(),
+        slot_mapping=slot_mapping,
+        use_sparse=False,
+        use_mixed_sparse=False,
+        num_decodes=0,
+        num_prefills=1,
+    )
+    layer = SimpleNamespace(kv_sharing_target_layer_name=None)
+    query = torch.empty(1, 2, 4)
+    key = torch.empty(1, 1, 4)
+    value = torch.empty_like(key)
+    kv_cache = torch.empty(1)
+
+    result = impl.forward(
+        layer,
+        query,
+        key,
+        value,
+        kv_cache,
+        metadata,
+        output,
+    )
+    assert result is output
+    impl.do_kv_cache_update.assert_called_once()
+    call_args = impl.do_kv_cache_update.call_args
+    assert call_args.args == (layer, key, value, kv_cache, slot_mapping)
+    impl._dense_flash_forward.assert_called_once()
+
+    impl.do_kv_cache_update.reset_mock()
+    layer.kv_sharing_target_layer_name = "model.layers.0.self_attn.attn"
+    impl.forward(layer, query, key, value, kv_cache, metadata, output)
+    impl.do_kv_cache_update.assert_not_called()
 
 
 def test_assemble_and_sparse_attn():
@@ -508,6 +776,14 @@ def test_gather_and_assemble_batch_matches_serial():
     q = torch.randn(batch, 4, d, device=device, dtype=torch.bfloat16)
     out_b = sparse_decode_attention_batch(q, gk_b, gv_b, 0.1, valid_mask=None)
     assert out_b.shape == (batch, 4, d)
+    out_buf = torch.empty_like(out_b)
+    out_reused = sparse_decode_attention_batch(
+        q, gk_b, gv_b, 0.1, valid_mask=None, out=out_buf
+    )
+    assert out_reused is out_buf
+    assert torch.allclose(
+        out_reused.float(), out_b.float(), atol=2e-2, rtol=2e-2
+    )
     for i in range(batch):
         out_i = sparse_decode_attention(q[i : i + 1], gk_b[i], gv_b[i], 0.1, None)
         assert torch.allclose(out_b[i].float(), out_i[0].float(), atol=2e-2, rtol=2e-2)
@@ -561,11 +837,33 @@ def test_retrieve_topk_batch_matches_serial():
     )
     assert batch_topk.shape == (batch, hkv, cfg.final_topk)
 
+    if not zoomkv_kernels.direct_physical_retrieval_available():
+        pytest.skip("direct physical ZoomKV extension unavailable")
+
+    uniform_bucket = retriever._chunk_bucket(
+        max_blocks
+        - cfg.sink_size // block_size
+        - (cfg.local_size + block_size - 1) // block_size
+    )
     for i, seq_len in enumerate(seq_lens):
         start_b, end_b = retriever.retrieval_block_range(seq_len, block_size)
-        phys = block_table[i, start_b:end_b].to(torch.int64)
-        serial = retriever.retrieve_topk_tokens(
-            raw_q[i : i + 1], summary, phys, seq_len
+        actual = end_b - start_b
+        phys = torch.full(
+            (1, uniform_bucket),
+            -1,
+            dtype=torch.int32,
+            device=device,
+        )
+        phys[:, :actual].copy_(block_table[i : i + 1, start_b:end_b])
+        serial = retriever._retrieve_topk_physical(
+            raw_q[i : i + 1],
+            summary,
+            phys,
+            uniform_bucket,
+            start_b * block_size,
+            actual_num_chunks=torch.tensor(
+                [actual], dtype=torch.int32, device=device
+            ),
         )
         a = set(batch_topk[i].reshape(-1).tolist()) - {-1}
         b = set(serial[0].reshape(-1).tolist()) - {-1}
@@ -587,25 +885,89 @@ def test_retrieve_topk_batch_matches_serial():
         cursor += n_b
     used2 = mixed_bt[mixed_bt >= 0].unique()
     summary.update_blocks_from_key_cache(key, used2)
+    topk_out = torch.full(
+        (batch, hkv, cfg.final_topk),
+        -777,
+        dtype=torch.int64,
+        device=device,
+    )
     mixed_result = retriever.retrieve_topk_tokens_batch_result(
         raw_q,
         summary,
         mixed_bt,
         torch.tensor(mixed_lens, device=device),
         summaries_guaranteed_valid=True,
+        topk_out=topk_out,
     )
     mixed_topk = mixed_result.topk
+    assert mixed_topk is topk_out
     assert mixed_result.used_direct_physical is True
     assert mixed_result.context_fully_valid is True
+    graph_result = retriever.retrieve_topk_tokens_batch_result(
+        raw_q,
+        summary,
+        mixed_bt,
+        torch.tensor(mixed_lens, device=device),
+        summaries_guaranteed_valid=True,
+        chunk_bucket=retriever._chunk_bucket(
+            mixed_bt.shape[1]
+            - cfg.sink_size // block_size
+            - (cfg.local_size + block_size - 1) // block_size
+        ),
+        seq_lens_host=torch.tensor(mixed_lens),
+        use_cudagraph=True,
+    )
+    assert graph_result.used_direct_physical is True
+    assert graph_result.context_fully_valid is True
+    for i in range(batch):
+        eager = set(mixed_topk[i].reshape(-1).tolist()) - {-1}
+        graphed = set(graph_result.topk[i].reshape(-1).tolist()) - {-1}
+        assert graphed == eager
+    start_b = cfg.sink_size // block_size
+    bucket = retriever._chunk_bucket(mixed_bt.shape[1] - start_b)
+    padded_ids = torch.full(
+        (1, bucket), -1, dtype=torch.int32, device=device
+    )
     for i, seq_len in enumerate(mixed_lens):
         start_b, end_b = retriever.retrieval_block_range(seq_len, block_size)
-        phys = mixed_bt[i, start_b:end_b].to(torch.int64)
-        serial = retriever.retrieve_topk_tokens(
-            raw_q[i : i + 1], summary, phys, seq_len
+        actual = end_b - start_b
+        padded_ids.fill_(-1)
+        padded_ids[:, :actual].copy_(mixed_bt[i : i + 1, start_b:end_b])
+        serial = retriever._retrieve_topk_physical(
+            raw_q[i : i + 1],
+            summary,
+            padded_ids,
+            bucket,
+            start_b * block_size,
+            actual_num_chunks=torch.tensor(
+                [actual], dtype=torch.int32, device=device
+            ),
         )
         a = set(mixed_topk[i].reshape(-1).tolist()) - {-1}
         b = set(serial[0].reshape(-1).tolist()) - {-1}
         assert a == b, f"mixed req {i} topk set mismatch"
+        assert all(
+            start_b * block_size <= token < end_b * block_size
+            for token in a
+        )
+
+    # Reuse the same bucket with shorter actual widths. Padding must be
+    # overwritten rather than leaking scores/indices from the previous call.
+    shorter_lens = [768, 896, 1024, 832]
+    stale_check = retriever.retrieve_topk_tokens_batch_result(
+        raw_q,
+        summary,
+        mixed_bt,
+        torch.tensor(shorter_lens, device=device),
+        summaries_guaranteed_valid=True,
+        topk_out=topk_out,
+    ).topk
+    for i, seq_len in enumerate(shorter_lens):
+        start_b, end_b = retriever.retrieval_block_range(seq_len, block_size)
+        valid = stale_check[i][stale_check[i] >= 0]
+        assert bool(
+            ((valid >= start_b * block_size) & (valid < end_b * block_size)).all()
+        )
 
 
 def test_direct_physical_retrieval_matches_materialized():
@@ -840,6 +1202,21 @@ def test_gather_kv_from_topk_batch_matches_assemble_gather():
     )
     assert torch.equal(gk_f, gk_r)
     assert torch.equal(gv_f, gv_r)
+    gk_packed, gv_packed = gather_kv_from_topk_batch(
+        key,
+        value,
+        block_table,
+        seq_lens,
+        topk,
+        block_size,
+        sink,
+        local,
+        output_bthd=True,
+    )
+    assert gk_packed.is_contiguous()
+    assert gv_packed.is_contiguous()
+    assert torch.equal(gk_packed, gk_r.permute(0, 2, 1, 3))
+    assert torch.equal(gv_packed, gv_r.permute(0, 2, 1, 3))
 
 
 def test_gather_kv_from_topk_batch_handles_short_seq_padding():
@@ -886,6 +1263,7 @@ def test_direct_physical_bf16_d128_specialized_kernels_match_reference():
     from vllm.v1.attention.ops.zoomkv.kernels import (
         density_score_physical,
         direct_physical_retrieval_available,
+        quest_chunk_score_physical,
         quest_parent_score_physical,
         quest_sub_score_physical,
     )
@@ -1000,6 +1378,57 @@ def test_direct_physical_bf16_d128_specialized_kernels_match_reference():
                 ).sum()
     assert torch.allclose(density, ref_den, atol=2e-2, rtol=2e-2)
 
+    # Bucket launches must overwrite every padded slot. Seed scratch with
+    # finite values to catch stale data surviving a shorter request.
+    actual = torch.tensor([n_chunks, 23], dtype=torch.int32, device=device)
+    flat_scores = torch.full(
+        (batch, hkv, n_chunks), 123.0, device=device, dtype=torch.float32
+    )
+    quest_chunk_score_physical(
+        q,
+        physical_ids,
+        gmin,
+        gmax,
+        gvalid,
+        flat_scores,
+        n_chunks,
+        actual,
+    )
+    assert bool(torch.isneginf(flat_scores[1, :, 23:]).all())
+
+    parent_scores.fill_(123.0)
+    quest_parent_score_physical(
+        q,
+        physical_ids,
+        gmin,
+        gmax,
+        gvalid,
+        parent_scores,
+        n_chunks,
+        factor,
+        actual,
+    )
+    # Parent 1 contains actual chunks 16..22. Later parents are outside the
+    # per-row Top-K scan length, so the producer deliberately leaves that
+    # contiguous tail untouched instead of spending work writing sentinels.
+    assert bool((parent_scores[1, :, 2:] == 123.0).all())
+
+    chunk_ids[1, :, :] = torch.arange(
+        24, device=device, dtype=torch.int64
+    )
+    density.fill_(123.0)
+    density_score_physical(
+        chunk_ids,
+        physical_ids,
+        gcent,
+        gvalid,
+        q,
+        density,
+        n_chunks,
+        actual,
+    )
+    assert bool(torch.isneginf(density[1, :, 23:]).all())
+
 
 def test_retrieve_marks_fully_valid_direct_path():
     if not torch.cuda.is_available():
@@ -1097,3 +1526,394 @@ def test_need_summary_update_only_on_block_boundary():
         seq_lens_cpu=torch.tensor([1000, 1001, 1002]),
         **common,
     )
+
+
+def test_use_sparse_gate_matches_builder_helper():
+    """Sparse routing should be computable once per step from host metadata."""
+    cfg = ZoomKVRuntimeConfig(full_attention_threshold=512)
+    assert _should_use_sparse_decode(
+        cfg=cfg,
+        max_query_len=1,
+        num_decodes=1,
+        num_prefills=0,
+        num_reqs=1,
+        seq_lens_cpu=torch.tensor([100]),
+    )
+    # Pure-batch flag is False for mixed; mixed uses the separate helper.
+    assert not _should_use_sparse_decode(
+        cfg=cfg,
+        max_query_len=1,
+        num_decodes=1,
+        num_prefills=1,
+        num_reqs=1,
+        seq_lens_cpu=torch.tensor([4096]),
+    )
+    assert _should_use_mixed_sparse_decode(
+        cfg=cfg, num_decodes=2, num_prefills=1
+    )
+    assert not _should_use_sparse_decode(
+        cfg=ZoomKVRuntimeConfig(dense_fallback=True),
+        max_query_len=1,
+        num_decodes=1,
+        num_prefills=0,
+        num_reqs=1,
+        seq_lens_cpu=torch.tensor([4096]),
+    )
+
+
+def test_mixed_forward_routes_sparse_prefix_and_dense_suffix():
+    """Mixed GPU-only batches must split decode sparse / prefill dense."""
+    impl = ZoomKVAttentionImpl.__new__(ZoomKVAttentionImpl)
+    calls: list[tuple[str, dict]] = []
+
+    def update(layer, key, value, kv_cache, slot_mapping, **kwargs):
+        calls.append(("update", {}))
+
+    def sparse_batched(layer, query, kv_cache, attn_metadata, output, cfg, **kwargs):
+        calls.append(("sparse", dict(kwargs)))
+        return output
+
+    def dense_forward(
+        layer,
+        query,
+        kv_cache,
+        attn_metadata,
+        output,
+        output_scale=None,
+        output_block_scale=None,
+        **kwargs,
+    ):
+        calls.append(("dense", dict(kwargs)))
+        return output
+
+    impl.do_kv_cache_update = update
+    impl._sparse_decode_forward_batched = sparse_batched
+    impl._dense_flash_forward = dense_forward
+
+    tensor = torch.zeros((3, 1, 4))
+    metadata = SimpleNamespace(
+        slot_mapping=torch.tensor([0, 1, 2], dtype=torch.int32),
+        zoomkv=ZoomKVRuntimeConfig(enable_offload=False),
+        use_sparse=False,
+        use_mixed_sparse=True,
+        num_decodes=2,
+        num_prefills=1,
+        num_decode_tokens=2,
+        num_reqs=3,
+        max_query_len=4,
+        block_table=None,
+        seq_lens=None,
+        graph_chunk_bucket=None,
+    )
+    layer = SimpleNamespace(kv_sharing_target_layer_name=None)
+    impl.forward(layer, tensor, tensor, tensor, tensor, metadata, tensor.clone())
+    assert [name for name, _ in calls] == ["update", "sparse", "dense"]
+    assert calls[1][1] == {"num_decode_reqs": 2, "num_decode_tokens": 2}
+    assert calls[2][1]["req_start"] == 2
+    assert calls[2][1]["tok_start"] == 2
+
+
+def test_dense_prefill_slice_rebases_query_start_loc(monkeypatch):
+    """Prefill suffix FA must rebase cu_seqlens and use local max_seq_len."""
+    captured: dict = {}
+
+    def fake_fa(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.zoomkv_attn.flash_attn_varlen_func",
+        fake_fa,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.zoomkv_attn.is_quantized_kv_cache",
+        lambda *_a, **_k: False,
+    )
+
+    impl = ZoomKVAttentionImpl.__new__(ZoomKVAttentionImpl)
+    impl.num_kv_heads = 1
+    impl.scale = 1.0
+    impl.kv_cache_dtype = "auto"
+    impl._fa = SimpleNamespace(
+        vllm_flash_attn_version=3,
+        sliding_window=None,
+        supports_quant_query_input=False,
+        alibi_slopes=None,
+        logits_soft_cap=0.0,
+        sinks=None,
+    )
+    impl._split_kv_cache = lambda kv: (kv[:, 0], kv[:, 1])
+
+    # 2 decode tokens + 4 prefill tokens.
+    query = torch.zeros(6, 1, 8)
+    output = torch.zeros_like(query)
+    kv_cache = torch.zeros(8, 2, 16, 1, 8)
+    qsl = torch.tensor([0, 1, 2, 6], dtype=torch.int32)
+    seq_lens = torch.tensor([4096, 4096, 128], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        use_cascade=False,
+        num_reqs=3,
+        num_actual_tokens=6,
+        query_start_loc=qsl.clone(),
+        query_start_loc_cpu=qsl.clone(),
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens.clone(),
+        block_table=torch.zeros(3, 8, dtype=torch.int32),
+        max_query_len=4,
+        max_seq_len=4096,
+        causal=True,
+        scheduler_metadata=object(),
+        max_num_splits=2,
+    )
+    layer = SimpleNamespace(_q_scale=torch.ones(1), _k_scale=torch.ones(1), _v_scale=torch.ones(1))
+    impl._dense_flash_forward(
+        layer, query, kv_cache, metadata, output, req_start=2, tok_start=2
+    )
+    assert captured["max_seqlen_q"] == 4
+    assert captured["max_seqlen_k"] == 128
+    assert captured["scheduler_metadata"] is None
+    assert torch.equal(captured["cu_seqlens_q"], torch.tensor([0, 4], dtype=torch.int32))
+    assert captured["q"].shape[0] == 4
+    assert captured["out"].shape[0] == 4
+
+
+def test_forward_owns_kv_cache_update_before_attention():
+    """The unified attention op must update cache before either read path."""
+    assert ZoomKVAttentionBackend.forward_includes_kv_cache_update
+
+    impl = ZoomKVAttentionImpl.__new__(ZoomKVAttentionImpl)
+    calls: list[str] = []
+
+    def update(layer, key, value, kv_cache, slot_mapping, **kwargs):
+        assert torch.equal(slot_mapping, torch.tensor([3], dtype=torch.int32))
+        calls.append("update")
+
+    def dense_forward(*args, **kwargs):
+        assert calls == ["update"]
+        calls.append("attention")
+        return args[4]
+
+    impl.do_kv_cache_update = update
+    impl._should_sparse_decode = lambda metadata, cfg: False
+    impl._dense_flash_forward = dense_forward
+
+    tensor = torch.zeros((1, 1, 4))
+    metadata = SimpleNamespace(
+        slot_mapping=torch.tensor([3], dtype=torch.int32),
+        zoomkv=ZoomKVRuntimeConfig(enable_offload=False),
+        use_sparse=False,
+        use_mixed_sparse=False,
+        num_decodes=0,
+        num_prefills=1,
+    )
+    layer = SimpleNamespace(kv_sharing_target_layer_name=None)
+    result = impl.forward(
+        layer,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        metadata,
+        tensor.clone(),
+    )
+
+    assert calls == ["update", "attention"]
+    assert result.shape == tensor.shape
+
+
+def test_parent_summary_invalidate_and_cow():
+    device = _device()
+    clear_block_summaries()
+    sc = get_or_create_block_summary(
+        "parent-layer",
+        num_blocks=32,
+        num_kv_heads=2,
+        head_dim=128,
+        block_size=16,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    sc.parent_valid[10] = True
+    sc.parent_first_child[10] = 3
+    sc.parent_min[10].fill_(1.0)
+    invalidate_block_summaries_for_blocks([10])
+    assert not bool(sc.parent_valid[10])
+    assert int(sc.parent_first_child[10]) == -1
+    assert float(sc.parent_min[10, 0, 0]) == 0.0
+
+    sc.parent_valid[11] = True
+    sc.parent_min[11].fill_(2.0)
+    sc.copy_blocks([(11, 12)])
+    assert bool(sc.parent_valid[12])
+    assert float(sc.parent_min[12, 0, 0]) == 2.0
+    copy_block_summaries_for_block_pairs([(12, 13)])
+    assert bool(sc.parent_valid[13])
+    clear_block_summaries()
+
+
+def test_parent_finalize_matches_build_parent_minmax():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from vllm.v1.attention.ops.zoomkv.block_summary_triton import (
+        finalize_parent_summaries,
+    )
+
+    device = torch.device("cuda")
+    hkv, d, factor = 2, 128, 16
+    start_b = 4
+    n_chunks = 32
+    num_blocks = 64
+    sc = ZoomKVBlockSummary(num_blocks, hkv, d, 16, device)
+    key = torch.randn(num_blocks, 16, hkv, d, device=device, dtype=torch.bfloat16)
+    phys = torch.arange(start_b, start_b + n_chunks, device=device, dtype=torch.int32)
+    sc.update_blocks_from_key_cache(key, phys)
+    block_table = torch.full(
+        (1, start_b + n_chunks), -1, device=device, dtype=torch.int32
+    )
+    block_table[0, start_b : start_b + n_chunks] = phys
+    seq_len = (start_b + n_chunks) * 16
+    finalize_parent_summaries(
+        block_table,
+        sc,
+        start_block=start_b,
+        seq_lens=torch.tensor([seq_len], device=device, dtype=torch.int32),
+        scan_all=True,
+    )
+    torch.cuda.synchronize()
+
+    packed, cmin, cmax, centroid, valid = sc.gather_request_block_summaries(phys)
+    ref_min, ref_max, ref_valid = sc.build_parent_minmax(phys, cmin, cmax, valid)
+    n_parent = n_chunks // factor
+    for p in range(n_parent):
+        anchor = int(phys[p * factor + factor - 1])
+        assert bool(sc.parent_valid[anchor])
+        assert int(sc.parent_first_child[anchor]) == int(phys[p * factor])
+        assert torch.allclose(sc.parent_min[anchor], ref_min[0, :, p], atol=1e-3)
+        assert torch.allclose(sc.parent_max[anchor], ref_max[0, :, p], atol=1e-3)
+
+
+def test_parent_precomputed_scoring_matches_inline():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from vllm.v1.attention.ops.zoomkv.kernels import (
+        direct_physical_retrieval_available,
+        quest_parent_score_physical,
+    )
+
+    if not direct_physical_retrieval_available():
+        pytest.skip("_zoomkv_C direct physical kernels unavailable")
+
+    device = torch.device("cuda")
+    batch, hkv, d = 1, 2, 128
+    factor, n_chunks = 16, 64
+    num_blocks = 128
+    start_b = 4
+    torch.manual_seed(7)
+    q = torch.randn(batch, hkv, d, device=device, dtype=torch.bfloat16)
+    phys = torch.tensor(
+        [[12, 5, 20, 33, 7, 44, 19, 2, 55, 61, 8, 14, 27, 39, 48, 50] * 4],
+        device=device,
+        dtype=torch.int32,
+    )
+    sc = ZoomKVBlockSummary(num_blocks, hkv, d, 16, device)
+    key = torch.randn(num_blocks, 16, hkv, d, device=device, dtype=torch.bfloat16)
+    sc.update_blocks_from_key_cache(key, phys.reshape(-1).unique())
+    block_table = torch.full(
+        (1, start_b + n_chunks), -1, device=device, dtype=torch.int32
+    )
+    block_table[0, start_b : start_b + n_chunks] = phys[0]
+    seq_len = (start_b + n_chunks) * 16
+    sc.update_completed_slots(
+        key,
+        torch.tensor([(start_b + n_chunks - 1) * 16 + 15], device=device),
+        block_table=block_table,
+        start_block=start_b,
+        seq_lens=torch.tensor([seq_len], device=device, dtype=torch.int32),
+        scan_all_parents=True,
+    )
+    torch.cuda.synchronize()
+
+    n_parent = n_chunks // factor
+    scores_pre = torch.empty(batch, hkv, n_parent, device=device, dtype=torch.float32)
+    quest_parent_score_physical(
+        q,
+        block_table[:, start_b : start_b + n_chunks],
+        sc.chunk_min,
+        sc.chunk_max,
+        sc.valid,
+        scores_pre,
+        n_chunks,
+        factor,
+        parent_min=sc.parent_min,
+        parent_max=sc.parent_max,
+        parent_valid=sc.parent_valid,
+        parent_first_child=sc.parent_first_child,
+    )
+    scores_inline = torch.empty_like(scores_pre)
+    sc.parent_valid.zero_()
+    quest_parent_score_physical(
+        q,
+        block_table[:, start_b : start_b + n_chunks],
+        sc.chunk_min,
+        sc.chunk_max,
+        sc.valid,
+        scores_inline,
+        n_chunks,
+        factor,
+    )
+    assert torch.allclose(scores_pre, scores_inline, atol=2e-2, rtol=2e-2)
+
+
+def test_parent_stale_first_child_falls_back_to_inline():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from vllm.v1.attention.ops.zoomkv.kernels import (
+        direct_physical_retrieval_available,
+        quest_parent_score_physical,
+    )
+
+    if not direct_physical_retrieval_available():
+        pytest.skip("_zoomkv_C direct physical kernels unavailable")
+
+    device = torch.device("cuda")
+    batch, hkv, d = 1, 2, 128
+    factor, n_chunks = 16, 32
+    num_blocks = 64
+    phys = torch.arange(n_chunks, device=device, dtype=torch.int32).view(1, -1)
+    sc = ZoomKVBlockSummary(num_blocks, hkv, d, 16, device)
+    key = torch.randn(num_blocks, 16, hkv, d, device=device, dtype=torch.bfloat16)
+    sc.update_blocks_from_key_cache(key, phys.reshape(-1))
+    anchor = int(phys[0, factor - 1])
+    sc.parent_valid[anchor] = True
+    sc.parent_first_child[anchor] = 999  # stale
+    sc.parent_min[anchor].fill_(0.0)
+    sc.parent_max[anchor].fill_(0.0)
+
+    q = torch.randn(batch, hkv, d, device=device, dtype=torch.bfloat16)
+    n_parent = n_chunks // factor
+    scores = torch.empty(batch, hkv, n_parent, device=device, dtype=torch.float32)
+    quest_parent_score_physical(
+        q,
+        phys,
+        sc.chunk_min,
+        sc.chunk_max,
+        sc.valid,
+        scores,
+        n_chunks,
+        factor,
+        parent_min=sc.parent_min,
+        parent_max=sc.parent_max,
+        parent_valid=sc.parent_valid,
+        parent_first_child=sc.parent_first_child,
+    )
+    ref = torch.empty_like(scores)
+    quest_parent_score_physical(
+        q,
+        phys,
+        sc.chunk_min,
+        sc.chunk_max,
+        sc.valid,
+        ref,
+        n_chunks,
+        factor,
+    )
+    assert torch.allclose(scores, ref, atol=2e-2, rtol=2e-2)

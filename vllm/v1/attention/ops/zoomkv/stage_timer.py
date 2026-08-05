@@ -45,6 +45,18 @@ class Stage:
         self.nvtx_pushed = False
 
     def __enter__(self) -> Stage:
+        if not (_ENABLED or _NVTX_ENABLED):
+            return self
+        # Timing events recorded during CUDA Graph capture cannot later be
+        # queried with elapsed_time(). NVTX-only profiling does not create
+        # CUDA events, so it must not query cudaStreamIsCapturing on every
+        # stage in the eager decode hot path.
+        if (
+            _ENABLED
+            and torch.cuda.is_available()
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            return self
         if _NVTX_ENABLED and torch.cuda.is_available():
             torch.cuda.nvtx.range_push(self.name)
             self.nvtx_pushed = True
@@ -58,7 +70,7 @@ class Stage:
         return self
 
     def __exit__(self, *exc) -> None:
-        if _ENABLED:
+        if _ENABLED and self.t0:
             t1 = time.perf_counter()
             if self.start_evt is not None and self.end_evt is not None:
                 self.end_evt.record()

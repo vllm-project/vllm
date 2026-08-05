@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ZoomKV V1 attention backend.
 
-Dense prefill / short-context decode reuse Triton paged attention.
-Long-context single-token decode runs hierarchical Quest + KIVI retrieval
-over physical-block block_summaries, then non-causal attention over
-sink + local + Top-K tokens.
+Dense prefill / short-context decode use FlashAttention over the Triton
+paged KV layout. Long-context single-token decode runs hierarchical
+Quest + KIVI retrieval over physical-block block_summaries, then
+non-causal attention over sink + local + Top-K tokens.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -17,6 +18,7 @@ import torch
 
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -26,16 +28,23 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.triton_attn import (
-    TritonAttentionBackend,
-    TritonAttentionImpl,
-    TritonAttentionMetadata,
-    TritonAttentionMetadataBuilder,
+
+from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_varlen_func,
 )
+
+from vllm.v1.attention.backends.flash_attn import (
+    FlashAttentionImpl,
+    FlashAttentionMetadata,
+    FlashAttentionMetadataBuilder,
+)
+
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
+
 from vllm.v1.attention.ops.zoomkv import recall_probe as _zoomkv_recall
 from vllm.v1.attention.ops.zoomkv import stage_timer as _zt
 from vllm.v1.attention.ops.zoomkv.paged import (
@@ -48,11 +57,13 @@ from vllm.v1.attention.ops.zoomkv.paged import (
     sparse_decode_attention,
     sparse_decode_attention_batch,
 )
+
 from vllm.v1.attention.ops.zoomkv.retriever import (
     ZoomKVRetriever,
     ZoomKVRuntimeConfig,
     prepare_retrieval_query,
 )
+
 from vllm.v1.attention.ops.zoomkv.state import get_or_create_block_summary
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -85,6 +96,58 @@ def _needs_summary_update(
     )
 
 
+def _decode_region_sparse_eligible(
+    *,
+    cfg: ZoomKVRuntimeConfig,
+    num_decodes: int,
+) -> bool:
+    """True when the reordered decode prefix may use sparse decode.
+
+    No seq_len threshold: every single-token decode uses sparse retrieval.
+    Mixed batches keep a global ``max_query_len > 1`` from the prefill suffix,
+    so callers must not require batch-wide query_len==1.
+    """
+    return (not cfg.dense_fallback) and num_decodes > 0
+
+
+def _should_use_sparse_decode(
+    *,
+    cfg: ZoomKVRuntimeConfig,
+    max_query_len: int,
+    num_decodes: int,
+    num_prefills: int,
+    num_reqs: int,
+    seq_lens_cpu: torch.Tensor | None,
+    seq_lens: torch.Tensor | None = None,
+) -> bool:
+    """Pure-batch sparse flag (CUDA Graph / all-sparse path).
+
+    Mixed batches keep ``use_sparse=False`` here; forward routes them via
+    ``_should_use_mixed_sparse_decode`` plus a dense prefill suffix instead.
+    """
+    del num_reqs, seq_lens_cpu, seq_lens  # Length gate removed; decode count only.
+    if cfg.dense_fallback:
+        return False
+    # Speculative / multi-token pure decode → dense (first release).
+    if max_query_len != 1:
+        return False
+    if num_prefills > 0:
+        return False
+    return _decode_region_sparse_eligible(cfg=cfg, num_decodes=num_decodes)
+
+
+def _should_use_mixed_sparse_decode(
+    *,
+    cfg: ZoomKVRuntimeConfig,
+    num_decodes: int,
+    num_prefills: int,
+) -> bool:
+    """GPU-only mixed batch: sparse decode prefix + dense prefill suffix."""
+    if num_prefills <= 0 or cfg.enable_offload:
+        return False
+    return _decode_region_sparse_eligible(cfg=cfg, num_decodes=num_decodes)
+
+
 def _load_zoomkv_runtime_config(vllm_config: VllmConfig | None) -> ZoomKVRuntimeConfig:
     if vllm_config is None:
         try:
@@ -105,34 +168,56 @@ def _load_zoomkv_runtime_config(vllm_config: VllmConfig | None) -> ZoomKVRuntime
     return ZoomKVRuntimeConfig(
         sink_size=getattr(attn, "zoomkv_sink_size", 64),
         local_size=getattr(attn, "zoomkv_local_size", 256),
+        max_model_len=int(vllm_config.model_config.max_model_len),
         final_topk=getattr(attn, "zoomkv_final_topk", 100),
         quest_chunk=getattr(attn, "zoomkv_quest_chunk", 16),
         quest_large_chunk=getattr(attn, "zoomkv_quest_large_chunk", 256),
-        quest_large_ratio=getattr(attn, "zoomkv_quest_large_ratio", 0.8),
-        quest_small_ratio=getattr(attn, "zoomkv_quest_small_ratio", 0.5),
+        quest_large_ratio=getattr(attn, "zoomkv_quest_large_ratio", 0.5),
+        quest_small_ratio=getattr(attn, "zoomkv_quest_small_ratio", 0.3),
         dense_ratio=getattr(attn, "zoomkv_dense_ratio", 0.4),
-        dense_topk=getattr(attn, "zoomkv_dense_topk", 16),
-        sparse_topk=getattr(attn, "zoomkv_sparse_topk", 8),
+        dense_topk=getattr(attn, "zoomkv_dense_topk", 8),
+        sparse_topk=getattr(attn, "zoomkv_sparse_topk", 4),
         full_attention_threshold=getattr(attn, "zoomkv_full_attention_threshold", 2000),
         dense_fallback=getattr(attn, "zoomkv_dense_fallback", False),
         strict_kernels=strict,
         enable_offload=getattr(attn, "zoomkv_enable_offload", False),
-        per_query_head=getattr(attn, "zoomkv_per_query_head", False),
     )
 
 
+def _graph_chunk_bucket(cfg: ZoomKVRuntimeConfig, block_size: int) -> int:
+    """Static retrieval capacity for full CUDA Graph capture."""
+    start_block = cfg.sink_size // block_size
+    local_start = max(cfg.sink_size, cfg.max_model_len - cfg.local_size)
+    max_chunks = max(1, local_start // block_size - start_block)
+    # Graph shapes are already static; unlike eager scratch buckets, they do
+    # not need power-of-two rounding. Align only to a complete parent group.
+    factor = cfg.hq_factor
+    return max(factor, ((max_chunks + factor - 1) // factor) * factor)
+
+
 @dataclass
-class ZoomKVMetadata(TritonAttentionMetadata):
+class ZoomKVMetadata(FlashAttentionMetadata):
     num_reqs: int = 0
     num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
+    num_prefill_tokens: int = 0
     zoomkv: ZoomKVRuntimeConfig | None = None
     query_start_loc_cpu: torch.Tensor | None = None
     seq_lens_cpu: torch.Tensor | None = None
     # True when at least one request completes a physical block this step.
     # Pure decode skips summary updates on the other 15/16 tokens.
     need_summary_update: bool = True
+    # Pure-batch sparse flag (CUDA Graph / all-sparse). Mixed batches keep this
+    # False and use ``use_mixed_sparse`` for decode-prefix + prefill-suffix.
+    use_sparse: bool = False
+    # GPU-only mixed: sparse over reordered decode prefix, dense prefill tail.
+    use_mixed_sparse: bool = False
+    # True only for the static pure-decode metadata used while capturing a
+    # full CUDA Graph.  Python executes once at capture time; replay updates
+    # seq_lens/block_table/slot_mapping in-place.
+    is_cudagraph_capture: bool = False
+    graph_chunk_bucket: int | None = None
     # Preallocated physical Top-K / context index buffers (MLA-style).
     # Shape: [max_num_seqs, num_kv_heads, final_topk]
     topk_indices_buffer: torch.Tensor | None = None
@@ -140,13 +225,26 @@ class ZoomKVMetadata(TritonAttentionMetadata):
     context_indices_buffer: torch.Tensor | None = None
 
 
-class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
-    """Build Triton-compatible metadata plus ZoomKV knobs.
+class ZoomKVMetadataBuilder(FlashAttentionMetadataBuilder):
+    """Build FlashAttention metadata plus ZoomKV knobs."""
 
-    CUDA Graphs are disabled for ZoomKV (eager-only first release).
-    """
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        cfg = _load_zoomkv_runtime_config(vllm_config)
+        # The first full-graph implementation deliberately excludes CPU
+        # offload and dense-only/debug routing. Mixed/prefill batches continue
+        # to use the normal piecewise/eager path.
+        if cfg.enable_offload or cfg.dense_fallback:
+            return AttentionCGSupport.NEVER
+        return cls._cudagraph_support
 
     def __init__(
         self,
@@ -167,6 +265,16 @@ class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
                 f"(got {self.zoomkv.quest_chunk})"
             )
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+        self.graph_chunk_bucket = _graph_chunk_bucket(
+            self.zoomkv, kv_cache_spec.block_size
+        )
+        logger.info_once(
+            "ZoomKV GPU-only CUDA Graph retrieval capacity: %d child chunks "
+            "(max_model_len=%d, max_small_candidates=%d)",
+            self.graph_chunk_bucket,
+            self.zoomkv.max_model_len,
+            self.zoomkv.max_small_candidates,
+        )
         # Preallocate once; sparse decode writes into these buffers instead of
         # allocating temporary Top-K / context index tensors per request.
         max_seqs = int(vllm_config.scheduler_config.max_num_seqs)
@@ -188,6 +296,29 @@ class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
             device=device,
         )
 
+
+
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> ZoomKVMetadata:
+        metadata = self.build(0, common_attn_metadata)
+        # Dummy capture sequence lengths are intentionally tiny in the generic
+        # runner. Force the static sparse route; replay supplies real long
+        # context lengths through persistent device buffers.
+        metadata.use_sparse = True
+        metadata.use_mixed_sparse = False
+        metadata.need_summary_update = True
+        metadata.is_cudagraph_capture = True
+        # Capture against the configured maximum context, not the generic
+        # runner's tiny dummy sequence lengths. Replay changes only device
+        # values (seq_lens/block_table); all retrieval tensor shapes stay fixed.
+        metadata.graph_chunk_bucket = self.graph_chunk_bucket
+        ZoomKVAttentionImpl._step_need_summary_update = True
+        return metadata
+
+
+
     def build(
         self,
         common_prefix_len: int,
@@ -195,9 +326,11 @@ class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
         fast_build: bool = False,
     ) -> ZoomKVMetadata:
         base = super().build(common_prefix_len, common_attn_metadata, fast_build)
-        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
-            common_attn_metadata,
-            decode_threshold=1,
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=1,
+            )
         )
         # Host-side block-boundary check: after writing the new token,
         # seq_len % block_size == 0 means a child chunk just completed.
@@ -210,9 +343,22 @@ class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
             num_reqs=common_attn_metadata.num_reqs,
             block_size=int(self.kv_cache_spec.block_size),
         )
+        use_sparse = _should_use_sparse_decode(
+            cfg=self.zoomkv,
+            max_query_len=common_attn_metadata.max_query_len,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+            num_reqs=common_attn_metadata.num_reqs,
+            seq_lens_cpu=seq_cpu,
+            seq_lens=common_attn_metadata.seq_lens,
+        )
+        use_mixed_sparse = _should_use_mixed_sparse_decode(
+            cfg=self.zoomkv,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+        )
         # do_kv_cache_update runs without metadata; publish for this step.
         ZoomKVAttentionImpl._step_need_summary_update = need_summary_update
-        # Reconstruct from base fields that exist on this vLLM version.
         fields = {
             "num_actual_tokens": base.num_actual_tokens,
             "max_query_len": base.max_query_len,
@@ -221,24 +367,22 @@ class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
             "seq_lens": base.seq_lens,
             "block_table": base.block_table,
             "slot_mapping": base.slot_mapping,
-            "seq_threshold_3D": base.seq_threshold_3D,
-            "num_par_softmax_segments": base.num_par_softmax_segments,
-            "softmax_segm_output": base.softmax_segm_output,
-            "softmax_segm_max": base.softmax_segm_max,
-            "softmax_segm_expsum": base.softmax_segm_expsum,
             "use_cascade": base.use_cascade,
             "common_prefix_len": base.common_prefix_len,
             "cu_prefix_query_lens": base.cu_prefix_query_lens,
             "prefix_kv_lens": base.prefix_kv_lens,
             "suffix_kv_lens": base.suffix_kv_lens,
+            "max_dcp_context_kv_len": base.max_dcp_context_kv_len,
+            "dcp_context_kv_lens": base.dcp_context_kv_lens,
             "scheduler_metadata": base.scheduler_metadata,
             "prefix_scheduler_metadata": base.prefix_scheduler_metadata,
-            "mm_prefix_range": base.mm_prefix_range,
-            "mm_prefix_range_tensor": base.mm_prefix_range_tensor,
+            "max_num_splits": base.max_num_splits,
+            "causal": base.causal,
             "num_reqs": common_attn_metadata.num_reqs,
             "num_decodes": num_decodes,
             "num_prefills": num_prefills,
             "num_decode_tokens": num_decode_tokens,
+            "num_prefill_tokens": num_prefill_tokens,
             "zoomkv": self.zoomkv,
             # Keep host copies in metadata so every full-attention layer does
             # not synchronize the GPU merely to recover scalar sequence
@@ -246,6 +390,10 @@ class ZoomKVMetadataBuilder(TritonAttentionMetadataBuilder):
             "query_start_loc_cpu": common_attn_metadata.query_start_loc_cpu,
             "seq_lens_cpu": common_attn_metadata.seq_lens_cpu,
             "need_summary_update": need_summary_update,
+            "use_sparse": use_sparse,
+            "use_mixed_sparse": use_mixed_sparse,
+            "is_cudagraph_capture": False,
+            "graph_chunk_bucket": None,
             "topk_indices_buffer": self.topk_indices_buffer,
             "context_indices_buffer": self.context_indices_buffer,
         }
@@ -256,7 +404,7 @@ class ZoomKVAttentionBackend(AttentionBackend):
     """Native ZoomKV sparse-retrieval attention backend."""
 
     accept_output_buffer: bool = True
-    forward_includes_kv_cache_update: bool = False
+    forward_includes_kv_cache_update: bool = True
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
@@ -361,7 +509,19 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         self.num_kv_heads = num_kv_heads or num_heads
         self.kv_cache_dtype = kv_cache_dtype
         self.block_size = 16
-        self._dense = TritonAttentionImpl(
+        # FlashAttention dense path config. ZoomKV keeps the Triton paged KV
+        # layout for sparse gather/summary compatibility, so dense attention
+        # calls flash_attn_varlen_func on the split K/V views rather than
+        # FlashAttentionImpl.forward (which expects FA's (2, N, ...) layout).
+        if use_alibi_sqrt:
+            raise NotImplementedError(
+                "ZoomKV dense FlashAttention path does not support use_alibi_sqrt"
+            )
+        if chunk_lookback is not None and chunk_lookback >= 0:
+            raise NotImplementedError(
+                "ZoomKV dense FlashAttention path does not support chunk_lookback"
+            )
+        self._fa = FlashAttentionImpl(
             num_heads=num_heads,
             head_size=head_size,
             scale=scale,
@@ -373,8 +533,6 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
             attn_type=attn_type,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             sinks=sinks,
-            use_alibi_sqrt=use_alibi_sqrt,
-            chunk_lookback=chunk_lookback,
         )
         self._retriever: ZoomKVRetriever | None = None
         self._layer_name: str | None = None
@@ -412,6 +570,12 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
+        *,
+        block_table: torch.Tensor | None = None,
+        seq_lens: torch.Tensor | None = None,
+        num_reqs: int = 0,
+        scan_all_parents: bool = False,
+        graph_chunk_bucket: int | None = None,
     ) -> None:
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         triton_reshape_and_cache_flash(
@@ -452,8 +616,31 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         # completed a physical block (seq_len % block_size == 0). Skip the
         # conditional Triton launch on the other 15/16 decode steps.
         if self._step_need_summary_update:
+            start_b = cfg.sink_size // self.block_size
+            max_parents = None
+            if graph_chunk_bucket is not None:
+                max_parents = max(
+                    1, graph_chunk_bucket // block_summary.blocks_per_parent
+                )
+            parent_block_table = block_table
+            parent_seq_lens = seq_lens
+            if parent_seq_lens is not None and num_reqs > 0:
+                parent_seq_lens = parent_seq_lens[:num_reqs]
+                if parent_block_table is not None:
+                    parent_block_table = parent_block_table[:num_reqs]
+            else:
+                parent_block_table = None
+                parent_seq_lens = None
             with _zt.Stage("block_summary.update"):
-                block_summary.update_completed_slots(key_cache, slots)
+                block_summary.update_completed_slots(
+                    key_cache,
+                    slots,
+                    block_table=parent_block_table,
+                    start_block=start_b,
+                    seq_lens=parent_seq_lens,
+                    scan_all_parents=scan_all_parents,
+                    max_parents=max_parents,
+                )
 
         # K+V offload: after block_summaries are built for completed blocks,
         # async D2H the Key and Value pages. GPU pages are NOT zeroed here —
@@ -497,18 +684,84 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         if attn_metadata is None:
             return output.fill_(0)
 
-        cfg = attn_metadata.zoomkv or ZoomKVRuntimeConfig()
-        use_sparse = self._should_sparse_decode(attn_metadata, cfg)
+        # Own the KV update inside this opaque attention op. This removes the
+        # separate unified_kv_cache_update op and its dummy dependency while
+        # preserving launch order before any dense or sparse cache read.
+        if (
+            layer.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
+            with _zt.Stage("sparse.kv_update"):
+                self.do_kv_cache_update(
+                    layer,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata.slot_mapping,
+                    block_table=getattr(attn_metadata, "block_table", None),
+                    seq_lens=getattr(attn_metadata, "seq_lens", None),
+                    num_reqs=getattr(attn_metadata, "num_reqs", 0),
+                    scan_all_parents=(
+                        getattr(attn_metadata, "num_prefills", 0) > 0
+                        or getattr(attn_metadata, "max_query_len", 1) != 1
+                    ),
+                    graph_chunk_bucket=getattr(
+                        attn_metadata, "graph_chunk_bucket", None
+                    ),
+                )
+
+        with _zt.Stage("sparse.route"):
+            cfg = attn_metadata.zoomkv or ZoomKVRuntimeConfig()
+            use_sparse = getattr(attn_metadata, "use_sparse", None)
+            if use_sparse is None:
+                use_sparse = self._should_sparse_decode(attn_metadata, cfg)
+            use_mixed_sparse = getattr(attn_metadata, "use_mixed_sparse", None)
+            if use_mixed_sparse is None:
+                use_mixed_sparse = _should_use_mixed_sparse_decode(
+                    cfg=cfg,
+                    num_decodes=getattr(attn_metadata, "num_decodes", 0),
+                    num_prefills=getattr(attn_metadata, "num_prefills", 0),
+                )
+
+        if use_mixed_sparse:
+            # Reordered decode prefix → sparse; prefill suffix → dense FA.
+            num_decodes = int(attn_metadata.num_decodes)
+            num_decode_tokens = int(attn_metadata.num_decode_tokens)
+            logger.info_once(
+                "ZoomKV mixed batch path is active: sparse decode prefix + "
+                "dense chunked-prefill suffix"
+            )
+            self._sparse_decode_forward_batched(
+                layer,
+                query,
+                kv_cache,
+                attn_metadata,
+                output,
+                cfg,
+                num_decode_reqs=num_decodes,
+                num_decode_tokens=num_decode_tokens,
+            )
+            return self._dense_flash_forward(
+                layer,
+                query,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale=output_scale,
+                output_block_scale=output_block_scale,
+                req_start=num_decodes,
+                tok_start=num_decode_tokens,
+            )
+
         if not use_sparse:
             if cfg.enable_offload:
                 # Dense attention reads the paged cache directly; any cold
                 # (zeroed) block visible to this batch must be restored first.
                 self._restore_cold_blocks_for_dense(layer, kv_cache, attn_metadata)
-            return self._dense.forward(
+            return self._dense_flash_forward(
                 layer,
                 query,
-                key,
-                value,
                 kv_cache,
                 attn_metadata,
                 output,
@@ -525,6 +778,132 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         return self._sparse_decode_forward_batched(
             layer, query, kv_cache, attn_metadata, output, cfg
         )
+
+    def _dense_flash_forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: ZoomKVMetadata,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        *,
+        req_start: int = 0,
+        tok_start: int = 0,
+    ) -> torch.Tensor:
+        """Dense prefill/short decode via FlashAttention on Triton KV pages.
+
+        Keeps ZoomKV's Triton ``(num_blocks, 2, block_size, Hkv, D)`` cache
+        layout so sparse gather and block_summary stay unchanged. K/V are
+        split with ``_split_kv_cache`` and passed directly to FA's paged API.
+
+        Optional ``req_start`` / ``tok_start`` select the prefill suffix of a
+        reordered mixed batch (TurboQuant / FlashInfer style).
+        """
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for ZoomKV dense FA"
+            )
+        if attn_metadata is None:
+            return output.fill_(0)
+        if getattr(attn_metadata, "use_cascade", False):
+            raise NotImplementedError(
+                "Cascade attention is not supported by the ZoomKV dense FA path"
+            )
+
+        fa = self._fa
+        assert fa.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
+        num_reqs = int(attn_metadata.num_reqs)
+        num_actual_tokens = int(attn_metadata.num_actual_tokens)
+        if req_start < 0 or req_start > num_reqs:
+            raise ValueError(f"invalid dense req_start={req_start} num_reqs={num_reqs}")
+        if tok_start < 0 or tok_start > num_actual_tokens:
+            raise ValueError(
+                f"invalid dense tok_start={tok_start} "
+                f"num_actual_tokens={num_actual_tokens}"
+            )
+        region_reqs = num_reqs - req_start
+        region_tokens = num_actual_tokens - tok_start
+        if region_reqs <= 0 or region_tokens <= 0:
+            return output
+
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "ZoomKV dense FlashAttention path does not support quantized KV cache"
+            )
+
+        if req_start == 0 and tok_start == 0:
+            query_start_loc = attn_metadata.query_start_loc
+            seq_lens = attn_metadata.seq_lens
+            block_table = attn_metadata.block_table
+            max_query_len = int(attn_metadata.max_query_len)
+            max_seq_len = int(attn_metadata.max_seq_len)
+            scheduler_metadata = getattr(attn_metadata, "scheduler_metadata", None)
+            num_splits = getattr(attn_metadata, "max_num_splits", 0)
+        else:
+            # Prefill suffix of a mixed batch. Rebase query_start_loc and use
+            # prefill-local max lengths so FA fast paths stay correct.
+            query_start_loc = (
+                attn_metadata.query_start_loc[req_start : num_reqs + 1] - tok_start
+            )
+            seq_lens = attn_metadata.seq_lens[req_start:num_reqs]
+            block_table = attn_metadata.block_table[req_start:num_reqs]
+            qsl_cpu = attn_metadata.query_start_loc_cpu
+            if qsl_cpu is None:
+                qsl_cpu = attn_metadata.query_start_loc
+            q_lens = qsl_cpu[req_start + 1 : num_reqs + 1] - qsl_cpu[req_start:num_reqs]
+            max_query_len = int(q_lens.max().item()) if q_lens.numel() else 1
+            seq_cpu = attn_metadata.seq_lens_cpu
+            if seq_cpu is None:
+                # Avoid GPU sync in the common path; fall back only if needed.
+                seq_cpu = attn_metadata.seq_lens
+            region_seq = seq_cpu[req_start:num_reqs]
+            max_seq_len = (
+                int(max(region_seq.tolist())) if region_seq.numel() else max_query_len
+            )
+            # Full-batch scheduler_metadata is invalid for a sliced call.
+            scheduler_metadata = None
+            num_splits = 0
+
+        sliding_window_size = (
+            list(fa.sliding_window) if fa.sliding_window is not None else None
+        )
+        descale_shape = (region_reqs, self.num_kv_heads)
+        q_descale = (
+            layer._q_scale.expand(descale_shape)
+            if fa.supports_quant_query_input
+            else None
+        )
+        k_descale = layer._k_scale.expand(descale_shape)
+        v_descale = layer._v_scale.expand(descale_shape)
+        flash_attn_varlen_func(
+            q=query[tok_start : tok_start + region_tokens],
+            k=key_cache,
+            v=value_cache,
+            out=output[tok_start : tok_start + region_tokens],
+            cu_seqlens_q=query_start_loc,
+            max_seqlen_q=max_query_len,
+            seqused_k=seq_lens,
+            max_seqlen_k=max_seq_len,
+            softmax_scale=self.scale,
+            causal=getattr(attn_metadata, "causal", True),
+            alibi_slopes=fa.alibi_slopes,
+            window_size=sliding_window_size,
+            block_table=block_table,
+            softcap=fa.logits_soft_cap,
+            scheduler_metadata=scheduler_metadata,
+            fa_version=fa.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            num_splits=num_splits,
+            s_aux=fa.sinks,
+        )
+        return output
 
     @staticmethod
     def _block_table_cpu(attn_metadata: ZoomKVMetadata) -> torch.Tensor:
@@ -594,27 +973,14 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
     def _should_sparse_decode(
         self, attn_metadata: ZoomKVMetadata, cfg: ZoomKVRuntimeConfig
     ) -> bool:
-        if cfg.dense_fallback:
-            return False
-        # Speculative / multi-token decode → dense (first release).
-        if attn_metadata.max_query_len != 1:
-            return False
-        if attn_metadata.num_decodes <= 0:
-            return False
-        if attn_metadata.num_prefills > 0:
-            # Mixed batch: keep dense for correctness.
-            return False
-        # All decode requests must exceed the full-attention threshold.
-        seq_lens = (
-            attn_metadata.seq_lens_cpu
-            if attn_metadata.seq_lens_cpu is not None
-            else attn_metadata.seq_lens
-        )[: attn_metadata.num_reqs]
-        if seq_lens.numel() == 0:
-            return False
-        retriever = self._get_retriever(cfg)
-        return bool(
-            all(not retriever.should_use_dense(int(s)) for s in seq_lens.tolist())
+        return _should_use_sparse_decode(
+            cfg=cfg,
+            max_query_len=attn_metadata.max_query_len,
+            num_decodes=attn_metadata.num_decodes,
+            num_prefills=attn_metadata.num_prefills,
+            num_reqs=attn_metadata.num_reqs,
+            seq_lens_cpu=attn_metadata.seq_lens_cpu,
+            seq_lens=attn_metadata.seq_lens,
         )
 
     def _sparse_decode_forward(
@@ -684,9 +1050,7 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
             seq_len = int(seq_lens_list[req_i])
             q = query[q0:q1]  # [1, Hq, D]
             with _zt.Stage("sparse.prep_q"):
-                raw_q = prepare_retrieval_query(
-                    q, self.num_kv_heads, per_query_head=cfg.per_query_head
-                )
+                raw_q = prepare_retrieval_query(q, self.num_kv_heads)
 
             start_b, end_b = retriever.retrieval_block_range(seq_len, self.block_size)
             bt = block_table[req_i]
@@ -874,13 +1238,16 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         attn_metadata: ZoomKVMetadata,
         output: torch.Tensor,
         cfg: ZoomKVRuntimeConfig,
+        *,
+        num_decode_reqs: int | None = None,
+        num_decode_tokens: int | None = None,
     ) -> torch.Tensor:
         """GPU-only batched sparse decode: one retrieve/gather/attn per layer.
 
-        Requires pure single-token decode with every request above the full-
-        attention threshold (already gated by ``_should_sparse_decode``).
-        Different sequence lengths are represented via block_table padding and
-        chunk_valid masks inside the retriever; the paged KV layout is unchanged.
+        Pure decode and mixed-batch decode prefixes both use this path. Mixed
+        callers pass ``num_decode_reqs`` / ``num_decode_tokens`` so only the
+        reordered decode prefix is processed; the prefill suffix is handled by
+        dense FA. CUDA Graph capture remains pure one-token decode only.
         """
         with _zt.Stage("sparse.setup"):
             logger.info_once(
@@ -905,36 +1272,68 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 blocks_per_parent=max(1, cfg.quest_large_chunk // cfg.quest_chunk),
             )
             retriever = self._get_retriever(cfg)
+            block_table = attn_metadata.block_table
+            num_reqs = (
+                int(attn_metadata.num_reqs)
+                if num_decode_reqs is None
+                else int(num_decode_reqs)
+            )
+            if num_reqs <= 0:
+                return output
+            tok_end = (
+                num_reqs
+                if num_decode_tokens is None
+                else int(num_decode_tokens)
+            )
+            graph_capture = bool(
+                getattr(attn_metadata, "is_cudagraph_capture", False)
+            )
+            if graph_capture and (
+                num_decode_reqs is not None or num_decode_tokens is not None
+            ):
+                raise RuntimeError(
+                    "ZoomKV CUDA Graph sparse path does not support mixed-batch slices"
+                )
+
+        if graph_capture:
+            # Full-graph capture is restricted to pure one-token decode, whose
+            # padded token layout is statically [0..B). Do not inspect CPU
+            # metadata or synchronize a device tensor while capturing.
+            q_start_list = None
+            contiguous = True
+            q_batch = query[:num_reqs]
+        else:
             q_start = (
                 attn_metadata.query_start_loc_cpu
                 if attn_metadata.query_start_loc_cpu is not None
                 else attn_metadata.query_start_loc
             )
-            seq_lens_cpu = (
-                attn_metadata.seq_lens_cpu
-                if attn_metadata.seq_lens_cpu is not None
-                else attn_metadata.seq_lens.cpu()
+            q_start_list = q_start.tolist()
+            contiguous = (
+                all(int(q_start_list[i]) == i for i in range(num_reqs))
+                and int(q_start_list[num_reqs]) == tok_end
             )
-            block_table = attn_metadata.block_table
-            num_reqs = attn_metadata.num_reqs
-
-        q_start_list = q_start.tolist()
-        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
-        # Pure single-token decode packs tokens contiguously as [0..B).
-        # Fall back to gather if the pack layout is somehow non-contiguous.
-        contiguous = all(int(q_start_list[i]) == i for i in range(num_reqs)) and int(q_start_list[num_reqs]) == num_reqs
-        if contiguous:
-            q_batch = query[:num_reqs]
-        else:
-            starts = [int(q_start_list[i]) for i in range(num_reqs)]
-            q_batch = query[starts]
+            if contiguous:
+                q_batch = query[:num_reqs]
+            else:
+                starts = [int(q_start_list[i]) for i in range(num_reqs)]
+                q_batch = query[starts]
 
         with _zt.Stage("sparse.prep_q"):
-            raw_q = prepare_retrieval_query(
-                q_batch, self.num_kv_heads, per_query_head=cfg.per_query_head
-            )
+            raw_q = prepare_retrieval_query(q_batch, self.num_kv_heads)
 
-        seq_lens_t = seq_lens_cpu[:num_reqs]
+        seq_lens_t = attn_metadata.seq_lens[:num_reqs]
+        seq_lens_host = (
+            None
+            if graph_capture or attn_metadata.seq_lens_cpu is None
+            else attn_metadata.seq_lens_cpu[:num_reqs]
+        )
+        topk_buf = attn_metadata.topk_indices_buffer
+        topk_out = (
+            topk_buf[:num_reqs]
+            if topk_buf is not None and topk_buf.shape[0] >= num_reqs
+            else None
+        )
         with _zt.Stage("sparse.retrieve"):
             retrieval = retriever.retrieve_topk_tokens_batch_result(
                 raw_q,
@@ -946,12 +1345,53 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 # before they enter the retrieval zone and preserves state on
                 # CoW remaps; invalid-summary tests deliberately omit this.
                 summaries_guaranteed_valid=True,
+                topk_out=topk_out,
+                assume_context_fully_valid=graph_capture,
+                chunk_bucket=(
+                    attn_metadata.graph_chunk_bucket
+                    if graph_capture
+                    else (
+                        _graph_chunk_bucket(cfg, self.block_size)
+                        if num_decode_reqs is not None
+                        else None
+                    )
+                ),
+                seq_lens_host=seq_lens_host,
+                use_cudagraph=num_decode_reqs is not None,
+            )
+        if graph_capture and not retrieval.used_direct_physical:
+            raise RuntimeError(
+                "ZoomKV full CUDA Graph requires direct physical retrieval"
             )
 
-        # Eager-only: pass the retrieve tensor directly. Avoid fill_+copy_
-        # into the MLA-style buffer on the hot path.
         topk_logical = retrieval.topk
-        fully_valid = retrieval.context_fully_valid
+        fully_valid = graph_capture or retrieval.context_fully_valid
+        if _zoomkv_recall.enabled() and not graph_capture:
+            # Debug-only exact recall probe for the batched direct path. The
+            # probe intentionally uses host sequence lengths and per-request
+            # exact QK, so it remains outside production/full-graph execution.
+            probe = _zoomkv_recall.get_probe()
+            seq_lens_host = attn_metadata.seq_lens_cpu
+            if probe is not None and seq_lens_host is not None:
+                for req_i in range(num_reqs):
+                    seq_len = int(seq_lens_host[req_i])
+                    start_b, end_b = retriever.retrieval_block_range(
+                        seq_len, self.block_size
+                    )
+                    probe.record(
+                        layer_name=str(layer_name),
+                        req_idx=req_i,
+                        query=q_batch[req_i : req_i + 1],
+                        key_cache=key_cache,
+                        block_table_row=block_table[req_i],
+                        block_size=self.block_size,
+                        seq_len=seq_len,
+                        start_block=start_b,
+                        end_block=end_b,
+                        topk_logical=topk_logical[req_i],
+                        scale=self.scale,
+                        retrieval_query=raw_q[req_i : req_i + 1],
+                    )
 
         # Device seq_lens for Triton fused gather / assemble kernels.
         seq_lens_dev = attn_metadata.seq_lens[:num_reqs]
@@ -968,8 +1408,17 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                     self.block_size,
                     cfg.sink_size,
                     cfg.local_size,
+                    output_bthd=True,
+                    validate_mapping=(
+                        num_decode_reqs is not None
+                        and os.environ.get(
+                            "VLLM_ZOOMKV_VALIDATE_GATHER", "0"
+                        )
+                        == "1"
+                    ),
                 )
             valid_mask = None
+            kv_layout_bthd = True
         else:
             ctx_buf = attn_metadata.context_indices_buffer
             ctx_out = (
@@ -995,7 +1444,9 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 )
             # Safe fallback for short / padded contexts: one host sync.
             valid_mask = None if bool(_ctx_valid.all()) else _ctx_valid
+            kv_layout_bthd = False
 
+        attn_out = output[:num_reqs] if contiguous else None
         with _zt.Stage("sparse.attn"):
             out = sparse_decode_attention_batch(
                 q_batch,
@@ -1003,11 +1454,17 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 gv,
                 self.scale,
                 valid_mask=valid_mask,
+                kv_layout_bthd=kv_layout_bthd,
+                out=attn_out,
             )
 
         if contiguous:
-            output[:num_reqs].copy_(out)
+            # The fully-valid FlashAttention path writes directly into the
+            # model output. Reference fallbacks return a separate tensor.
+            if out is not attn_out:
+                output[:num_reqs].copy_(out)
         else:
+            assert q_start_list is not None
             for i in range(num_reqs):
                 q0 = int(q_start_list[i])
                 output[q0 : q0 + 1].copy_(out[i : i + 1])

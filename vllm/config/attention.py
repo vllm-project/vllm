@@ -72,19 +72,19 @@ class AttentionConfig:
     zoomkv_quest_large_chunk: int = 256
     """Parent chunk size for hierarchical Quest filtering."""
 
-    zoomkv_quest_large_ratio: float = 0.8
+    zoomkv_quest_large_ratio: float = 0.5
     """Fraction of parent chunks retained by Stage-1 Quest."""
 
-    zoomkv_quest_small_ratio: float = 0.5
+    zoomkv_quest_small_ratio: float = 0.3
     """Fraction of child chunks retained inside selected parents."""
 
     zoomkv_dense_ratio: float = 0.4
     """Fraction of candidate chunks treated as dense in CDS rerank."""
 
-    zoomkv_dense_topk: int = 16
+    zoomkv_dense_topk: int = 8
     """Per-chunk local token budget for dense chunks."""
 
-    zoomkv_sparse_topk: int = 8
+    zoomkv_sparse_topk: int = 4
     """Per-chunk local token budget for sparse chunks."""
 
     zoomkv_full_attention_threshold: int = 2000
@@ -101,12 +101,6 @@ class AttentionConfig:
 
     zoomkv_cpu_bytes_per_rank: int = 8 * 1024**3
     """Pinned host K+V pool budget per worker rank."""
-
-    zoomkv_per_query_head: bool = False
-    """Retrieve with the strongest (max-L2-norm) query head per KV group
-    instead of the GQA group mean.  The original ZoomKV implementation uses
-    the group mean; measured Top-K recall is significantly higher with the
-    mean, so this defaults to False."""
 
     def _validate_zoomkv(self) -> None:
         if self.backend != AttentionBackendEnum.ZOOMKV:
@@ -138,9 +132,7 @@ class AttentionConfig:
         if not (1 <= self.zoomkv_sparse_topk <= self.zoomkv_quest_chunk):
             raise ValueError("zoomkv_sparse_topk must be in [1, zoomkv_quest_chunk]")
         if self.zoomkv_enable_offload and self.zoomkv_dense_fallback:
-            raise ValueError(
-                "zoomkv_enable_offload cannot be combined with zoomkv_dense_fallback"
-            )
+            raise ValueError("zoomkv_enable_offload cannot be combined with zoomkv_dense_fallback")
         if self.zoomkv_cpu_bytes_per_rank <= 0:
             raise ValueError("zoomkv_cpu_bytes_per_rank must be positive")
 

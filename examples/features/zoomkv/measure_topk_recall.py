@@ -6,8 +6,8 @@
 Enables the ``VLLM_ZOOMKV_RECALL_LOG`` probe, runs one long prompt, then
 aggregates the JSONL records the workers wrote:
 
-- recall@k: fraction of the exact-attention Top-K tokens (per KV head,
-  restricted to the retrieval zone) that ZoomKV retrieved,
+- recall@k: fraction of the exact Q.K Top-K under the group-mean retrieval
+  query (per KV head, restricted to the retrieval zone) that ZoomKV retrieved,
 - mass coverage: fraction of the zone's exact attention mass covered by the
   retrieved tokens (oracle = best achievable with k tokens),
 - zone mass fraction: how much attention mass lives in the retrieval zone at
@@ -44,21 +44,25 @@ def parse_args() -> argparse.Namespace:
         help="Number of distinct filler sentences in the long prompt.",
     )
     parser.add_argument("--output-tokens", type=int, default=64)
+    parser.add_argument(
+        "--dataset-jsonl",
+        default=None,
+        help="Optional LongBench-style JSONL with context/input fields.",
+    )
+    parser.add_argument(
+        "--target-prompt-tokens",
+        type=int,
+        default=None,
+        help="Build a deterministic multi-document prompt of this token length.",
+    )
     parser.add_argument("--log-dir", default=None)
     parser.add_argument("--output-json", default=None)
     # Retrieval knobs (defaults mirror ZoomKVRuntimeConfig).
-    parser.add_argument("--quest-large-ratio", type=float, default=0.8)
-    parser.add_argument("--quest-small-ratio", type=float, default=0.5)
+    parser.add_argument("--quest-large-ratio", type=float, default=0.5)
+    parser.add_argument("--quest-small-ratio", type=float, default=0.3)
     parser.add_argument("--dense-ratio", type=float, default=0.4)
-    parser.add_argument("--dense-topk", type=int, default=16)
-    parser.add_argument("--sparse-topk", type=int, default=8)
-    parser.add_argument(
-        "--per-query-head",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use the strongest query head per KV group for retrieval "
-        "instead of the default GQA group mean.",
-    )
+    parser.add_argument("--dense-topk", type=int, default=8)
+    parser.add_argument("--sparse-topk", type=int, default=4)
     return parser.parse_args()
 
 
@@ -122,6 +126,42 @@ def build_prompt(n_sentences: int) -> str:
     return " ".join(lines)
 
 
+def build_dataset_prompt(path: str, target_tokens: int, tokenizer) -> str:
+    """Build a fixed-length prompt from real LongBench document contexts."""
+    contexts: list[str] = []
+    question = ""
+    total_chars = 0
+    # Collect enough real text before tokenizing once. Multiple records form a
+    # realistic multi-document context when one sample is shorter than 64K.
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            rec = json.loads(line)
+            context = str(rec.get("context", ""))
+            if not context:
+                continue
+            contexts.append(context)
+            total_chars += len(context)
+            if not question:
+                question = str(rec.get("input", ""))
+            if total_chars >= target_tokens * 6:
+                break
+    if not contexts:
+        raise RuntimeError(f"No context records found in {path}")
+
+    suffix = f"\n\nQuestion: {question}\nAnswer:"
+    suffix_ids = tokenizer.encode(suffix, add_special_tokens=False)
+    body_ids = tokenizer.encode(
+        "\n\n--- Next document ---\n\n".join(contexts),
+        add_special_tokens=False,
+    )
+    body_budget = target_tokens - len(suffix_ids)
+    if body_budget <= 0 or len(body_ids) < body_budget:
+        raise RuntimeError(
+            f"Dataset supplied {len(body_ids)} body tokens, need {body_budget}"
+        )
+    return tokenizer.decode(body_ids[:body_budget]) + suffix
+
+
 def aggregate(log_dir: str, prompt_tokens: int) -> dict:
     records = []
     for path in glob.glob(os.path.join(log_dir, "recall.*.jsonl")):
@@ -149,7 +189,9 @@ def aggregate(log_dir: str, prompt_tokens: int) -> dict:
     for step in sorted(by_step):
         recs = by_step[step]
         recalls = [r for rec in recs for r in rec["recall"]]
-        rq = [r for rec in recs for r in rec.get("recall_vs_rq", [])]
+        attention = [
+            r for rec in recs for r in rec.get("attention_recall", [])
+        ]
         cov = [c for rec in recs for c in rec["mass_coverage"]]
         oracle = [c for rec in recs for c in rec["oracle_mass_coverage"]]
         zone = [z for rec in recs for z in rec["zone_mass_frac"]]
@@ -160,7 +202,7 @@ def aggregate(log_dir: str, prompt_tokens: int) -> dict:
                 "seq_len": recs[0]["seq_len"],
                 "records": len(recs),
                 "recall_mean": _mean(recalls),
-                "recall_vs_rq_mean": _mean(rq),
+                "attention_recall_mean": _mean(attention),
                 "recall_min_layer": min(layer_means),
                 "recall_max_layer": max(layer_means),
                 "mass_coverage_mean": _mean(cov),
@@ -174,11 +216,13 @@ def aggregate(log_dir: str, prompt_tokens: int) -> dict:
         for layer, vals in sorted(by_layer.items(), key=lambda kv: _mean(kv[1]))
     }
     all_recalls = [r for rec in records for r in rec["recall"]]
-    all_rq = [r for rec in records for r in rec.get("recall_vs_rq", [])]
+    all_attention = [
+        r for rec in records for r in rec.get("attention_recall", [])
+    ]
     return {
         "num_records": len(records),
         "overall_recall_mean": _mean(all_recalls),
-        "overall_recall_vs_rq_mean": _mean(all_rq),
+        "overall_attention_recall_mean": _mean(all_attention),
         "per_step": steps,
         "per_layer_recall_mean": layers,
     }
@@ -219,7 +263,6 @@ def main() -> None:
             zoomkv_dense_ratio=args.dense_ratio,
             zoomkv_dense_topk=args.dense_topk,
             zoomkv_sparse_topk=args.sparse_topk,
-            zoomkv_per_query_head=args.per_query_head,
             zoomkv_full_attention_threshold=args.threshold,
         ),
     )
@@ -228,7 +271,16 @@ def main() -> None:
         temperature=0.0,
         ignore_eos=True,
     )
-    prompt = build_prompt(args.prompt_sentences)
+    if args.dataset_jsonl:
+        if args.target_prompt_tokens is None:
+            raise ValueError("--dataset-jsonl requires --target-prompt-tokens")
+        prompt = build_dataset_prompt(
+            args.dataset_jsonl,
+            args.target_prompt_tokens,
+            llm.get_tokenizer(),
+        )
+    else:
+        prompt = build_prompt(args.prompt_sentences)
     output = llm.generate([prompt], sampling)[0]
     prompt_tokens = len(output.prompt_token_ids)
     if prompt_tokens < args.threshold:
@@ -248,15 +300,15 @@ def main() -> None:
         "dense_ratio": args.dense_ratio,
         "dense_topk": args.dense_topk,
         "sparse_topk": args.sparse_topk,
-        "per_query_head": args.per_query_head,
     }
+    summary["dataset_jsonl"] = args.dataset_jsonl
     summary["generated_text"] = output.outputs[0].text
     summary["log_dir"] = log_dir
 
     print(f"\nprompt_tokens={prompt_tokens}  output_tokens={args.output_tokens}")
     print(f"generated: {output.outputs[0].text!r}\n")
     header = (
-        f"{'step':>4} {'seq_len':>8} {'recs':>5} {'recall':>7} {'rq-rec':>7} "
+        f"{'step':>4} {'seq_len':>8} {'recs':>5} {'recall':>7} {'attn-rec':>8} "
         f"{'min-layer':>9} {'max-layer':>9} {'coverage':>8} "
         f"{'oracle':>7} {'zone-mass':>9}"
     )
@@ -264,7 +316,7 @@ def main() -> None:
     for s in summary["per_step"]:
         print(
             f"{s['step']:>4} {s['seq_len']:>8} {s['records']:>5} "
-            f"{s['recall_mean']:>7.3f} {s['recall_vs_rq_mean']:>7.3f} "
+            f"{s['recall_mean']:>7.3f} {s['attention_recall_mean']:>8.3f} "
             f"{s['recall_min_layer']:>9.3f} "
             f"{s['recall_max_layer']:>9.3f} {s['mass_coverage_mean']:>8.3f} "
             f"{s['oracle_mass_coverage_mean']:>7.3f} "
@@ -272,8 +324,8 @@ def main() -> None:
         )
     print(f"\noverall recall@{args.final_topk}: {summary['overall_recall_mean']:.3f}")
     print(
-        f"overall recall vs retrieval-query truth: "
-        f"{summary['overall_recall_vs_rq_mean']:.3f}"
+        f"auxiliary all-query-head attention recall: "
+        f"{summary['overall_attention_recall_mean']:.3f}"
     )
     print("weakest layers by recall:")
     for layer, r in list(summary["per_layer_recall_mean"].items())[:5]:

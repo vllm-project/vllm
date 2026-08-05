@@ -26,8 +26,8 @@
 //   chunk_min       : [bs, kv_heads, n_chunks_max, D]                 bf16
 //   chunk_max       : [bs, kv_heads, n_chunks_max, D]                 bf16
 //   raw_q           : [bs, kv_heads, D]                               bf16
-//   out_scores      : [bs, kv_heads, nk * CHUNK_SIZE]                 fp32
-//   out_indices     : [bs, kv_heads, nk * CHUNK_SIZE]                 int64
+//   out_scores      : [bs, kv_heads, nk * max(dense_topk,sparse_topk)] fp32
+//   out_indices     : [bs, kv_heads, nk * max(dense_topk,sparse_topk)] int64
 //
 // out_indices semantics: still a chunk-internal token id of the form
 //   real_chunk_id * CHUNK_SIZE + lane_in_chunk
@@ -66,8 +66,8 @@ struct KiviChunkDenseSparseParams {
   const void* __restrict__ chunk_min_ptr;  // [bs, kv, n_chunks_max, D] bf16
   const void* __restrict__ chunk_max_ptr;  // [bs, kv, n_chunks_max, D] bf16
   const void* __restrict__ raw_q_ptr;      // [bs, kv, D] bf16
-  void* __restrict__ out_scores_ptr;       // [bs, kv, nk*CHUNK_SIZE] fp32
-  void* __restrict__ out_indices_ptr;      // [bs, kv, nk*CHUNK_SIZE] int64
+  void* __restrict__ out_scores_ptr;   // [bs, kv, nk*output_slots] fp32
+  void* __restrict__ out_indices_ptr;  // [bs, kv, nk*output_slots] int64
 
   int num_chunks;       // == nk
   int n_chunks_packed;  // packed_K chunk-axis size (chunk capacity)
@@ -76,6 +76,7 @@ struct KiviChunkDenseSparseParams {
   int n_pack;           // D / 8  (== 16 for D=128)
   int dense_topk;
   int sparse_topk;
+  int output_slots;
 
   // packed_K strides in int32 elements (chunk-major):
   //   index = bs*pK_bs + head*pK_head + chunk*pK_chunk + dimblock*pK_dimblock +
@@ -305,19 +306,21 @@ __global__ void partial_chunk_kivi_qk_dense_sparse_kernel(
     }
   }
 
-  // ---- write output (uniform nk * CHUNK_SIZE layout) ----
+  // ---- write compact output (uniform nk * output_slots layout) ----
   if (valid_slot) {
-    const int out_base = bidx * params.os_bs_stride +
-                         bidy * params.os_head_stride +
-                         chunk_slot * CHUNK_SIZE + lane_in_chunk;
-    const int effective_topk = is_dense ? dense_topk : sparse_topk;
-    if (lane_in_chunk < effective_topk) {
-      reinterpret_cast<float*>(params.out_scores_ptr)[out_base] = score_f;
-      reinterpret_cast<int64_t*>(params.out_indices_ptr)[out_base] =
-          static_cast<int64_t>(token_idx);
-    } else {
-      reinterpret_cast<float*>(params.out_scores_ptr)[out_base] = -1e30f;
-      reinterpret_cast<int64_t*>(params.out_indices_ptr)[out_base] = 0;
+    if (lane_in_chunk < params.output_slots) {
+      const int out_base = bidx * params.os_bs_stride +
+                           bidy * params.os_head_stride +
+                           chunk_slot * params.output_slots + lane_in_chunk;
+      const int effective_topk = is_dense ? dense_topk : sparse_topk;
+      if (lane_in_chunk < effective_topk) {
+        reinterpret_cast<float*>(params.out_scores_ptr)[out_base] = score_f;
+        reinterpret_cast<int64_t*>(params.out_indices_ptr)[out_base] =
+            static_cast<int64_t>(token_idx);
+      } else {
+        reinterpret_cast<float*>(params.out_scores_ptr)[out_base] = -1e30f;
+        reinterpret_cast<int64_t*>(params.out_indices_ptr)[out_base] = 0;
+      }
     }
   }
 }
@@ -334,8 +337,8 @@ void partial_chunk_kivi_qk_dense_sparse_interface(
     at::Tensor raw_q,       // [bs, kv, D] bf16
     int dense_topk, int sparse_topk,
     int group_size,         // 8 or 16
-    at::Tensor out_scores,  // [bs, kv, nk * group_size] fp32
-    at::Tensor out_indices  // [bs, kv, nk * group_size] int64
+    at::Tensor out_scores,  // [bs, kv, nk * max(dense_topk,sparse_topk)] fp32
+    at::Tensor out_indices  // [bs, kv, nk * max(dense_topk,sparse_topk)] int64
 ) {
   TORCH_CHECK(chunk_ids.scalar_type() == at::ScalarType::Long);
   TORCH_CHECK(dense_mask.scalar_type() == at::ScalarType::Bool);
@@ -392,13 +395,15 @@ void partial_chunk_kivi_qk_dense_sparse_interface(
               "); got ", packed_K.stride(-2));
   TORCH_CHECK(dense_topk >= 1 && dense_topk <= group_size);
   TORCH_CHECK(sparse_topk >= 1 && sparse_topk <= group_size);
+  const int output_slots =
+      dense_topk > sparse_topk ? dense_topk : sparse_topk;
   TORCH_CHECK(out_scores.size(0) == bs && out_scores.size(1) == kv_heads);
   TORCH_CHECK(out_indices.size(0) == bs && out_indices.size(1) == kv_heads);
-  TORCH_CHECK(out_scores.size(2) >= nk * group_size,
-              "out_scores too small: need ", nk * group_size, " got ",
+  TORCH_CHECK(out_scores.size(2) >= nk * output_slots,
+              "out_scores too small: need ", nk * output_slots, " got ",
               out_scores.size(2));
-  TORCH_CHECK(out_indices.size(2) >= nk * group_size,
-              "out_indices too small: need ", nk * group_size, " got ",
+  TORCH_CHECK(out_indices.size(2) >= nk * output_slots,
+              "out_indices too small: need ", nk * output_slots, " got ",
               out_indices.size(2));
 
   constexpr int BLOCK_SIZE = 128;
@@ -423,6 +428,7 @@ void partial_chunk_kivi_qk_dense_sparse_interface(
   params.n_pack = n_pack;
   params.dense_topk = dense_topk;
   params.sparse_topk = sparse_topk;
+  params.output_slots = output_slots;
 
   params.pK_bs_stride = static_cast<int>(packed_K.stride(0));
   params.pK_head_stride = static_cast<int>(packed_K.stride(1));
