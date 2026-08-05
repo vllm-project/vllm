@@ -181,6 +181,38 @@ def test_divisor_gluon_selection_follows_arch():
     assert AiterMLAHelper.use_gluon_decode(1, 1) is on_gfx950
 
 
+def test_asm_padding_env_default_is_auto(monkeypatch):
+    monkeypatch.delenv("VLLM_ROCM_AITER_MLA_ASM_PADDING", raising=False)
+    import vllm.envs as envs
+
+    assert envs.VLLM_ROCM_AITER_MLA_ASM_PADDING == "auto"
+
+
+def test_asm_padding_env_force_asm_disables_gluon(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_ASM_PADDING", "asm")
+    # Forcing the asm path: no small-head count uses Gluon on any arch.
+    for num_heads in (1, 2, 4, 8, 12):
+        assert not AiterMLAHelper.use_gluon_decode(num_heads, 1)
+
+
+def test_asm_padding_env_force_gluon_follows_arch(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_ASM_PADDING", "gluon")
+    on_gfx950 = _on_gfx950()
+    # Forcing Gluon: any 1..15 single-token decode uses it where a build exists
+    # (gfx950), including non-divisor counts like 12; gfx942/non-ROCm still
+    # falls back to the asm path.
+    for num_heads in (1, 2, 4, 8, 12):
+        assert AiterMLAHelper.use_gluon_decode(num_heads, 1) is on_gfx950
+
+
+def test_asm_padding_env_auto_matches_arch_gate(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_ASM_PADDING", "auto")
+    on_gfx950 = _on_gfx950()
+    # auto: divisor counts keep Gluon on gfx950, non-divisor counts take asm.
+    assert AiterMLAHelper.use_gluon_decode(8, 1) is on_gfx950
+    assert not AiterMLAHelper.use_gluon_decode(12, 1)
+
+
 @pytest.mark.skipif(
     not _rocm_aiter_available(),
     reason="12-head AITER MLA asm persistent decode needs ROCm + AITER",
