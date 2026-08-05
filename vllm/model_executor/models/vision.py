@@ -19,10 +19,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.transformers_utils.processor import (
-    get_video_processor_cls_name_from_config,
-    get_video_processor_config,
-)
+from vllm.transformers_utils.processor import get_processor, get_processor_config
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -590,7 +587,7 @@ def run_dp_sharded_mrope_vision_model(
 def make_input_norm(model_config: "ModelConfig") -> nn.Module:
     model = model_config.model
     revision = model_config.revision
-    config = get_video_processor_config(model, revision=revision)
+    config = get_processor_config(model, revision=revision)
 
     do_rescale = config.get("do_rescale", None)
     do_normalize = config.get("do_normalize", None)
@@ -600,7 +597,7 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
     rescale_factor = config.get("rescale_factor", 1 / 255)
 
     if None in [do_rescale, do_normalize, image_mean, image_std]:
-        processor = get_video_processor_cls_name_from_config(model, revision=revision)
+        processor = get_processor(model, revision=revision)
 
         if do_rescale is None:
             do_rescale = getattr(processor, "do_rescale", None)

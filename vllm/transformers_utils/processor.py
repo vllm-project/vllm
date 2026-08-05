@@ -142,10 +142,10 @@ def _merge_mm_kwargs(
     return allowed_kwargs
 
 
-def get_processor_cls_name_from_config(
+def get_processor_config(
     processor_name: str,
     revision: str | None = "main",
-) -> str | None:
+) -> dict:
     config_file = [
         "processor_config.json",
         "preprocessor_config.json",
@@ -154,14 +154,26 @@ def get_processor_cls_name_from_config(
     for file in config_file:
         config = get_hf_file_to_dict(file, processor_name, revision=revision)
         if config and "processor_class" in config:
-            return config["processor_class"]
-    return None
+            return config
+    return {}
 
 
-def get_video_processor_config(
+def get_processor_cls_name_from_config(
     processor_name: str,
     revision: str | None = "main",
-) -> dict:
+) -> str | None:
+    config = get_processor_config(processor_name, revision=revision)
+
+    if not config:
+        return None
+
+    return config["processor_class"]
+
+
+def get_video_processor_cls_name_from_config(
+    processor_name: str,
+    revision: str | None = "main",
+) -> str | None:
     processor_name = convert_model_repo_to_path(processor_name)
     config_file = [
         "video_preprocessor_config.json",
@@ -169,20 +181,8 @@ def get_video_processor_config(
     ]
     for file in config_file:
         config = get_hf_file_to_dict(file, processor_name, revision=revision)
-        if config:
-            return config
-
-    return {}
-
-
-def get_video_processor_cls_name_from_config(
-    processor_name: str,
-    revision: str | None = "main",
-) -> str | None:
-    config = get_video_processor_config(processor_name, revision)
-
-    if config and "video_processor_type" in config:
-        return config["video_processor_type"]
+        if config and "video_processor_type" in config:
+            return config["video_processor_type"]
 
     # Some models ship no explicit ``video_processor_type`` in their
     # preprocessor config. Fall back to transformers' ``model_type`` -> video
