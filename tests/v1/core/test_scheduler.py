@@ -5748,15 +5748,11 @@ def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
     ecm.cache_size = ecm.num_free_slots = ecm.num_freeable_slots = 8 * image_tokens
     scheduler.max_num_encoder_input_tokens = 8 * image_tokens
 
-    # `make_empty_encoder_model_runner_output` reads only `num_computed_tokens`
-    # and `num_prompt_tokens`, so `scheduler.requests` stands in for the worker's
-    # `CachedRequestState` map without a model runner.
     (request,) = create_requests(
         num_requests=1,
         num_tokens=text_prefix + image_tokens + 4,
-        # The EPD proxy caps the encoder request at one token so the server
-        # runs the encoder path and returns immediately.
-        max_tokens=1,
+        # Completion must hinge on the prompt being encoded, not on max_tokens.
+        max_tokens=16,
         mm_hashes_list=[["img-hash-0"]],
         mm_positions=[[PlaceholderRange(offset=text_prefix, length=image_tokens)]],
     )
@@ -5768,10 +5764,9 @@ def test_encoder_instance_defers_stop_until_prompt_is_consumed():
     """An encoder instance must not finish a request that has not encoded yet.
 
     When the encoder cache cannot admit the multi-modal item, the scheduler
-    schedules only the tokens before it. The encoder instance replies without
-    sampling, so if that reply carried a token anyway the request would hit
-    max_tokens=1 and finish having never produced an embedding — silently, with
-    a successful completion for the client.
+    schedules only the tokens before it. Finishing that step would hand the
+    client a successful completion for a request whose image was never
+    encoded, so no embedding is ever published to the EC connector.
     """
     scheduler = create_scheduler(
         max_num_seqs=8,
@@ -5792,7 +5787,7 @@ def test_encoder_instance_defers_stop_until_prompt_is_consumed():
 
     scheduler.update_from_output(
         output,
-        make_empty_encoder_model_runner_output(output, scheduler.requests),
+        make_empty_encoder_model_runner_output(output),
     )
 
     assert not request.is_finished(), (
@@ -5810,13 +5805,13 @@ def test_encoder_instance_defers_stop_until_prompt_is_consumed():
 
     scheduler.update_from_output(
         output,
-        make_empty_encoder_model_runner_output(output, scheduler.requests),
+        make_empty_encoder_model_runner_output(output),
     )
     assert request.is_finished()
 
 
 def test_encoder_instance_finishes_request_once_prompt_is_consumed():
-    """The unblocked path still completes in a single step."""
+    """The unblocked path completes in a single step, without sampling."""
     scheduler = create_scheduler(
         max_num_seqs=8,
         max_num_batched_tokens=1024,
@@ -5832,7 +5827,8 @@ def test_encoder_instance_finishes_request_once_prompt_is_consumed():
 
     scheduler.update_from_output(
         output,
-        make_empty_encoder_model_runner_output(output, scheduler.requests),
+        make_empty_encoder_model_runner_output(output),
     )
-    assert request.is_finished()
-    assert request.num_output_tokens == 1
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    # The encoder instance publishes an embedding, not tokens.
+    assert request.num_output_tokens == 0

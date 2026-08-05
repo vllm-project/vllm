@@ -19,7 +19,6 @@ if TYPE_CHECKING:
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-    from vllm.v1.worker.gpu_input_batch import CachedRequestState
 else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
@@ -345,16 +344,10 @@ class DraftTokenIds:
 
 def make_empty_encoder_model_runner_output(
     scheduler_output: "SchedulerOutput",
-    requests: dict[str, "CachedRequestState"],
 ) -> ModelRunnerOutput:
     """
     Create a ModelRunnerOutput stub that contains the correct
     per-request bookkeeping but no generated data yet.
-
-    Args:
-        scheduler_output: The output of the scheduler for this step.
-        requests: The caller's request states, keyed by request id. Only
-            `num_computed_tokens` and `num_prompt_tokens` are read.
     """
     if not scheduler_output.num_scheduled_tokens:
         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -365,22 +358,10 @@ def make_empty_encoder_model_runner_output(
     # Give every request its own contiguous index
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
-    # A placeholder token stands in for "this request is done on the encoder
-    # instance", so it may only be emitted once the prompt is fully consumed.
-    # Emitting it mid-prefill would trip the length/stop check and finish the
-    # request before its remaining multi-modal items were ever encoded. The
-    # encoder instance returns without sampling, so it cannot rely on
-    # `discard_request_mask` to hold those tokens back. Encoder inputs are never
-    # scheduled past a multi-modal item the encoder cache could not admit, so a
-    # consumed prompt also means every item in it has been encoded.
-    sampled_token_ids: list[list[int]] = []
-    for rid in req_ids:
-        request = requests.get(rid)
-        prompt_done = request is not None and (
-            request.num_computed_tokens + scheduler_output.num_scheduled_tokens[rid]
-            >= request.num_prompt_tokens
-        )
-        sampled_token_ids.append([0] if prompt_done else [])
+    # An encoder instance never samples, so it emits no tokens at all. The
+    # scheduler finishes these requests once their prompt is fully encoded
+    # (see `Scheduler.update_from_output`).
+    sampled_token_ids: list[list[int]] = [[] for _ in req_ids]
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]

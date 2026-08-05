@@ -4209,9 +4209,7 @@ class GPUModelRunner(
                     encoder_cache=self.encoder_cache,
                 ) as ec_connector_output:
                     self._execute_mm_encoder(scheduler_output)
-                    return make_empty_encoder_model_runner_output(
-                        scheduler_output, self.requests
-                    )
+                    return make_empty_encoder_model_runner_output(scheduler_output)
 
             if not num_scheduled_tokens:
                 if (
