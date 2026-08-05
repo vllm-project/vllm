@@ -50,6 +50,7 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
 )
+from vllm.v1.worker.block_table import get_block_table_width
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -829,13 +830,25 @@ def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
     )
 
 
-def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
+def test_tokenspeed_mla_noncausal_capability():
+    builder = tokenspeed_mla_module.TokenspeedMLAMetadataBuilder
+    assert builder.supports_non_causal_multi_token_decode
+    assert tokenspeed_mla_module.TokenspeedMLABackend.supports_non_causal()
+
+
+@pytest.mark.parametrize(
+    ("causal", "tokens_per_decode", "dcp_world_size", "dcp_rank"),
+    [
+        pytest.param(True, 1, 2, 1, id="causal-dcp"),
+        pytest.param(False, 3, 1, 0, id="noncausal-multi-token"),
+    ],
+)
+def test_tokenspeed_mla_decode_contract(
+    monkeypatch, causal, tokens_per_decode, dcp_world_size, dcp_rank
+):
     decode_call = None
     num_decodes = 2
-    tokens_per_decode = 1
     num_decode_tokens = num_decodes * tokens_per_decode
-    dcp_world_size = 2
-    dcp_rank = 1
     num_heads = 128
     kv_lora_rank = 512
     qk_rope_head_dim = 64
@@ -881,6 +894,7 @@ def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
         num_decodes=num_decodes,
         num_decode_tokens=num_decode_tokens,
         max_seq_len=max_seq_len,
+        causal=causal,
         decode=SimpleNamespace(
             block_table=torch.empty((num_decodes, 1), dtype=torch.int32),
             seq_lens=torch.tensor([16, max_seq_len], dtype=torch.int32),
@@ -915,9 +929,13 @@ def test_tokenspeed_mla_dcp_single_token_decode_contract(monkeypatch):
     )
     torch.testing.assert_close(decode_call["seq_lens"], metadata.decode.seq_lens)
     torch.testing.assert_close(decode_call["block_tables"], metadata.decode.block_table)
-    torch.testing.assert_close(
-        decode_call["causal_seqs"], metadata.decode.dcp_tot_seq_lens
-    )
+    if dcp_world_size > 1:
+        torch.testing.assert_close(
+            decode_call["causal_seqs"], metadata.decode.dcp_tot_seq_lens
+        )
+    else:
+        assert decode_call["causal_seqs"] is None
+    assert decode_call["causal_mask"] is causal
     assert decode_call["return_lse"] is True
     assert decode_call["cp_world"] == dcp_world_size
     assert decode_call["cp_rank"] == dcp_rank
@@ -1482,16 +1500,9 @@ def _run_backend_correctness(
             batch_spec, block_size, device
         )
 
-        # Pad block table to meet requirement:
-        # block_num % (128 / block_size) == 0
-        required_divisor = int(128 / block_size)
         current_block_num = common_attn_metadata.block_table_tensor.shape[1]
-        if current_block_num % required_divisor != 0:
-            # Pad to next multiple of required_divisor
-            padded_block_num = (
-                (current_block_num + required_divisor - 1) // required_divisor
-            ) * required_divisor
-            padding_cols = padded_block_num - current_block_num
+        padded_block_num = get_block_table_width(current_block_num, block_size)
+        if padding_cols := padded_block_num - current_block_num:
             padding = torch.zeros(
                 (common_attn_metadata.block_table_tensor.shape[0], padding_cols),
                 dtype=torch.int32,
