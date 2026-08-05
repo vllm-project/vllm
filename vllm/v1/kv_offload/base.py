@@ -20,24 +20,36 @@ if TYPE_CHECKING:
 
 from vllm.v1.kv_offload.config import OffloadingConfig
 
-# `OffloadKey` identifies an offloaded block. It combines a block hash with
-# its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
-# Use the helper functions below to construct / decompose keys.
+# `OffloadKey` identifies an offloaded chunk. Layout, as raw bytes to avoid
+# tuple GC overhead:
+#     block_hash | group_idx (u32, big-endian) | chunk_idx (u32, big-endian)
+# `chunk_idx` is the absolute, group-relative chunk index. Use the helper
+# functions below to construct / decompose keys.
 OffloadKey = NewType("OffloadKey", bytes)
 
 
-def make_offload_key(block_hash: bytes, group_idx: int) -> OffloadKey:
-    """Pack a block hash and group index into an `OffloadKey`."""
-    return OffloadKey(block_hash + group_idx.to_bytes(4, "big", signed=False))
+def make_offload_key(block_hash: bytes, group_idx: int, chunk_idx: int) -> OffloadKey:
+    """Pack a block hash, KV group index, and absolute group-relative chunk
+    index into an `OffloadKey`."""
+    return OffloadKey(
+        block_hash
+        + group_idx.to_bytes(4, "big", signed=False)
+        + chunk_idx.to_bytes(4, "big", signed=False)
+    )
 
 
 def get_offload_block_hash(key: OffloadKey) -> bytes:
     """Extract the block hash from an `OffloadKey`."""
-    return key[:-4]
+    return key[:-8]
 
 
 def get_offload_group_idx(key: OffloadKey) -> int:
-    """Extract the group index from an `OffloadKey`."""
+    """Extract the KV group index from an `OffloadKey`."""
+    return int.from_bytes(key[-8:-4], "big", signed=False)
+
+
+def get_offload_chunk_idx(key: OffloadKey) -> int:
+    """Extract the absolute group-relative chunk index from an `OffloadKey`."""
     return int.from_bytes(key[-4:], "big", signed=False)
 
 

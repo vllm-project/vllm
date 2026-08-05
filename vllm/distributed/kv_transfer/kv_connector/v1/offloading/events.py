@@ -39,6 +39,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingKVEventsConfig,
     OffloadKey,
     get_offload_block_hash,
+    get_offload_chunk_idx,
     get_offload_group_idx,
 )
 from vllm.v1.request import Request
@@ -113,10 +114,11 @@ class OffloadingEventsTracker:
         self,
         req: Request,
         group_config: "GroupOffloadConfig",
-        chunk_idx: int,
         offload_key: OffloadKey,
     ) -> None:
         """Snapshot the KV cache event payload for one offloaded chunk.
+
+        The chunk index is decoded from the ``OffloadKey`` itself.
 
         No-op when self-describing event capture is disabled or for
         sliding-window / SSM groups, which keep the legacy placeholder payload.
@@ -125,6 +127,7 @@ class OffloadingEventsTracker:
             return
         if group_config.sliding_window_size_in_chunks is not None:
             return
+        chunk_idx = get_offload_chunk_idx(offload_key)
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         self._pending_event_metadata[offload_key] = meta
 
@@ -132,15 +135,18 @@ class OffloadingEventsTracker:
         self,
         req: Request,
         group_config: "GroupOffloadConfig",
-        chunk_idx: int,
         offload_key: OffloadKey,
     ) -> None:
-        """Snapshot metadata for a ready primary-tier lookup hit."""
+        """Snapshot metadata for a ready primary-tier lookup hit.
+
+        The chunk index is decoded from the ``OffloadKey`` itself.
+        """
         if not self.self_describing_enabled:
             return
         if group_config.sliding_window_size_in_chunks is not None:
             return
         if offload_key not in self._pending_event_metadata:
+            chunk_idx = get_offload_chunk_idx(offload_key)
             self._pending_event_metadata[offload_key] = self._build_event_metadata(
                 req, group_config, chunk_idx
             )

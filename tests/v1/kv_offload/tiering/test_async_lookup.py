@@ -10,7 +10,7 @@ from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 
 
 def _key(i: int) -> OffloadKey:
-    return make_offload_key(str(i).encode(), 0)
+    return make_offload_key(str(i).encode(), 0, 0)
 
 
 def _ctx(req_id: str = "r1") -> ReqContext:

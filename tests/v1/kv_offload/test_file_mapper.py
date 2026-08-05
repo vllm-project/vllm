@@ -82,13 +82,23 @@ def test_get_file_name_full_structure():
     group_idx = 2
     block_hash = bytes(range(8))  # deterministic, non-zero bytes
     fm = make_mapper_from_offloading_spec(rank=rank)
-    key = make_offload_key(block_hash, group_idx)
+    key = make_offload_key(block_hash, group_idx, 0)
     path = fm.get_file_name(key)
 
     expected_path = (
         "/tmp/cache/test-model_de3bba26cf36_r3/000/10_g2/0001020304050607.bin"
     )
     assert path == expected_path
+
+
+def test_get_file_name_ignores_chunk_idx():
+    """The FS layout keys on (block_hash, group_idx) only, so a non-zero
+    chunk_idx in the OffloadKey must not change the file name."""
+    block_hash = bytes(range(8))
+    fm = make_mapper_from_offloading_spec(rank=3)
+    path_chunk0 = fm.get_file_name(make_offload_key(block_hash, 2, 0))
+    path_chunk7 = fm.get_file_name(make_offload_key(block_hash, 2, 7))
+    assert path_chunk0 == path_chunk7
 
 
 def test_get_run_config_fields():

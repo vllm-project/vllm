@@ -60,7 +60,7 @@ class ExpectedPrepareStoreOutput:
 
 
 def to_key(int_hash: int) -> OffloadKey:
-    return make_offload_key(str(int_hash).encode(), 0)
+    return make_offload_key(str(int_hash).encode(), 0, 0)
 
 
 def to_keys(int_hashes: list[int]) -> list[OffloadKey]:

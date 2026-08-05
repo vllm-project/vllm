@@ -97,7 +97,7 @@ _MOCK_OFFLOADING_SPEC = _make_offloading_spec(enable_kv_cache_events=False)
 
 
 def key(n: int) -> OffloadKey:
-    return make_offload_key(n.to_bytes(8, "big"), 0)
+    return make_offload_key(n.to_bytes(8, "big"), 0, 0)
 
 
 def make_job(

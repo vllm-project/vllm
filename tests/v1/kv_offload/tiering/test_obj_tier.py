@@ -98,7 +98,7 @@ _CTX = ReqContext(req_id="test-req")
 
 
 def key(n: int) -> OffloadKey:
-    return make_offload_key(n.to_bytes(8, "big"), 0)
+    return make_offload_key(n.to_bytes(8, "big"), 0, 0)
 
 
 def make_job(
