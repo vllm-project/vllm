@@ -29,12 +29,14 @@ from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
     get_standby_dp_group,
     get_standby_ep_group,
+    get_standby_eplb_group,
     pop_standby_groups,
 )
-from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
+from vllm.distributed.eplb.eplb_communicator import (
+    EplbCommunicator,
+)
 from vllm.distributed.parallel_state import (
     _replace_active_groups,
-    get_eplb_group,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
@@ -149,6 +151,7 @@ class ElasticEPScalingExecutor:
         self.worker_ref = weakref.ref(worker)
         self.reconfig_request = None
         self._staged_moe_quant_methods: dict[nn.Module, FusedMoEMethodBase] = {}
+        self._prepared_eplb_communicator: EplbCommunicator | None = None
         self._async_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="ElasticEPAsync"
         )
@@ -228,8 +231,18 @@ class ElasticEPScalingExecutor:
             enable_eplb=parallel_config.enable_eplb,
         )
         self.stage_standby_moe_quant_methods()
+        self._prepare_eplb_communicator(get_standby_eplb_group())
         if new_dp_size > old_dp_size:
             self.transfer_weights(old_dp_size, new_dp_size)
+
+    def _prepare_eplb_communicator(self, eplb_group) -> None:
+        assert eplb_group is not None
+        model_runner = self.worker.model_runner
+        eplb_state = model_runner.eplb_state
+        assert eplb_state is not None
+        self._prepared_eplb_communicator = eplb_state.create_communicator(
+            model_runner.model_config, eplb_group
+        )
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
         standby_dp_group = get_standby_dp_group()
@@ -484,18 +497,9 @@ class ElasticEPScalingExecutor:
                 if getattr(module._quant_method, "wraps_legacy_quant_method", False):
                     module._replace_quant_method(module._quant_method.old_quant_method)
 
-        eplb_model_state.expert_buffer = [
-            torch.empty_like(w) for w in model.expert_weights[0]
-        ]
-        assert parallel_config.eplb_config.communicator is not None, (
-            "EPLB communicator backend must be set by ParallelConfig"
-        )
-        eplb_model_state.communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
-            backend=parallel_config.eplb_config.communicator,
-            expert_weights=model.expert_weights,
-            expert_buffer=eplb_model_state.expert_buffer,
-        )
+        assert self._prepared_eplb_communicator is not None
+        eplb_state.update_communicator(model_config, self._prepared_eplb_communicator)
+        self._prepared_eplb_communicator = None
 
         if (
             self.worker.vllm_config.compilation_config.mode
