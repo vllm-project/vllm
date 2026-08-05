@@ -10,7 +10,7 @@ use winnow::token::{literal, rest, take_until};
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
-use crate::tool::{StructuralTagModel, Tool};
+use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALLS_START: &str = "<tool_calls>";
 const TOOL_CALLS_END: &str = "</tool_calls>";
@@ -116,8 +116,8 @@ impl ToolParser for HyV3ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::HyV3)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::HyV3.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

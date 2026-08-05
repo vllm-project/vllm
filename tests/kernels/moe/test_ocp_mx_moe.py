@@ -1203,8 +1203,8 @@ ROCM_BACKEND_CONFIGS = {
         "requires_gfx950": False,
     },
     "AITER_MXFP4_BF16": {
-        "activation": "SILU",
-        "rtol": 1.0,
+        "activation": "SWIGLUOAI",
+        "rtol": 0.1,
         "percent": 0.7,
         "requires_aiter": True,
         "requires_gfx950": True,
@@ -1337,6 +1337,13 @@ def test_rocm_mxfp4_moe_oracle(
     w2_quant = w2_quant_2d.reshape(num_experts, hidden_size, -1)
     w2_scale = w2_scale_2d.reshape(num_experts, hidden_size, -1)
 
+    # AITER conversion mutates checkpoint-format weights and scales in place.
+    # Preserve their original layout for the reference calculation below.
+    w13_quant_ref = w13_quant.clone()
+    w13_scale_ref = w13_scale.clone()
+    w2_quant_ref = w2_quant.clone()
+    w2_scale_ref = w2_scale.clone()
+
     w13_bias = torch.randn(
         num_experts, 2 * intermediate_size, dtype=dtype, device=device
     )
@@ -1453,10 +1460,10 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Dequantize weights for reference computation
     w13_dq = upcast_from_mxfp(
-        w13_quant.view(torch.uint8), w13_scale, torch.bfloat16, axis=-1
+        w13_quant_ref.view(torch.uint8), w13_scale_ref, torch.bfloat16, axis=-1
     )
     w2_dq = upcast_from_mxfp(
-        w2_quant.view(torch.uint8), w2_scale, torch.bfloat16, axis=-1
+        w2_quant_ref.view(torch.uint8), w2_scale_ref, torch.bfloat16, axis=-1
     )
 
     # Determine activation type and layout
@@ -1512,3 +1519,97 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Check accuracy using per-backend thresholds
     check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+
+
+# -----------------------------------------------------------------------------
+# MXFP4 emulation size-rounding tests
+# -----------------------------------------------------------------------------
+# Emulation needs each per-partition dim rounded up to OCP_MX_BLOCK_SIZE (32);
+# a non-block-aligned shard (e.g. GPT-OSS 2880 // 4 = 720) otherwise truncates
+# the scale buffer and fails weight loading.
+# NOTE: gated to ROCm since it is the emulation backend's current target;
+# remove this skip if the backend is enabled on non-ROCm platforms.
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize(
+    "hidden_size,intermediate_size,expected_hidden,expected_intermediate",
+    [
+        (2880, 720, 2880, 736),  # GPT-OSS TP=4 shard: 720 -> round_up(720, 32)
+        (2880, 360, 2880, 384),  # GPT-OSS TP=8 shard: 360 -> 384
+        (2880, 2880, 2880, 2880),  # already block-aligned: unchanged
+        (90, 90, 96, 96),  # both dims unaligned
+    ],
+)
+def test_mxfp4_emulation_rounds_up_to_block_size(
+    hidden_size: int,
+    intermediate_size: int,
+    expected_hidden: int,
+    expected_intermediate: int,
+):
+    """Emulation must block-align per-partition dims to OCP_MX_BLOCK_SIZE."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+    from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+        OCP_MX_BLOCK_SIZE,
+    )
+
+    rounded_hidden, rounded_intermediate = (
+        mxfp4_round_up_hidden_size_and_intermediate_size(
+            Mxfp4MoeBackend.EMULATION, hidden_size, intermediate_size
+        )
+    )
+
+    assert rounded_hidden == expected_hidden
+    assert rounded_intermediate == expected_intermediate
+    # The block-scale buffer (dim // OCP_MX_BLOCK_SIZE) must not floor-truncate.
+    assert rounded_hidden % OCP_MX_BLOCK_SIZE == 0
+    assert rounded_intermediate % OCP_MX_BLOCK_SIZE == 0
+
+
+def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    select_mxfp4_moe_backend() must raise NotImplementedError, with the
+    collected per-backend unsupported reasons in the message, when no
+    backend supports the requested deployment configuration.
+    """
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+
+    class UnsupportedExperts:
+        @staticmethod
+        def is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        ):
+            return False, f"unsupported reason for {cls.__name__}"
+
+    monkeypatch.setattr(
+        mxfp4_oracle, "backend_to_kernel_cls", lambda backend: [UnsupportedExperts]
+    )
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+
+    moe_config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cpu",
+        routing_method=RoutingMethodType.Renormalize,
+    )
+
+    with pytest.raises(NotImplementedError, match="Unsupported reasons"):
+        mxfp4_oracle.select_mxfp4_moe_backend(moe_config)

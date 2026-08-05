@@ -46,6 +46,7 @@ def _gather(features, cached, *, num_scheduled, shift, num_computed=0):
         input_batch=SimpleNamespace(req_ids=["req0"]),
         requests={"req0": req_state},
         encoder_cache=encoder_cache,
+        _get_encoder_output_from_cache=lambda mm_hash: encoder_cache.get(mm_hash),
         is_multimodal_pruning_enabled=False,
         uses_mrope=False,
     )

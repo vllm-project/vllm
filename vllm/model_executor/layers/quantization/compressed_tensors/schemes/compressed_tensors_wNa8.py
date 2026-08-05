@@ -96,7 +96,7 @@ class CompressedTensorsWNA8Int(CompressedTensorsScheme):
         return 75
 
     def _build_input_quant_config(self) -> dict | None:
-        """Build the config dict that HummingInputSchema.from_config expects."""
+        """Build the config dict that BaseInputSchema.from_config expects."""
         if self.input_quant is None:
             return None
         iq = self.input_quant
@@ -112,7 +112,7 @@ class CompressedTensorsWNA8Int(CompressedTensorsScheme):
             "dynamic": iq.dynamic,
             "group_size": iq.group_size or 0,
             "quant_method": "compressed-tensors",
-            "format": self.quant_format,
+            "format": "int-quantized",
         }
 
     def create_weights(

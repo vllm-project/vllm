@@ -20,8 +20,12 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 DEVICE = current_platform.device_type
 
 pytestmark = pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
-    reason="mamba_ssm kernels require CUDA-alike or XPU",
+    not (
+        current_platform.is_cuda_alike()
+        or current_platform.is_xpu()
+        or current_platform.is_cpu()
+    ),
+    reason="mamba_ssm kernels require CUDA-alike, XPU, or CPU",
 )
 
 # selective_scan_fn is backed by the CUDA-only `ops.selective_scan_fwd` C++ op,
@@ -342,12 +346,23 @@ def test_selective_scan(
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update(dim, dstate, has_z, itype):
     device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        if (
+            current_platform.is_rocm()
+            or current_platform.is_xpu()
+            or current_platform.is_device_capability_family(90)
+        ):
             atol *= 2
     # set seed
     set_random_seed(0)
@@ -432,6 +447,13 @@ def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_r
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 @pytest.mark.parametrize("max_seq_len", [1, 2, 4])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
     device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
@@ -693,6 +715,13 @@ def test_selective_scan_varlen(
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [True, False])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_with_batch_indices(
     with_padding, dim, dstate, has_z, itype
 ):
@@ -785,6 +814,13 @@ def test_selective_state_update_with_batch_indices(
 @pytest.mark.parametrize("ngroups", [1, 4])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_with_heads_with_batch_indices(
     dim, dstate, ngroups, has_z, tie_hdim, itype
 ):
@@ -858,6 +894,13 @@ def test_selective_state_update_with_heads_with_batch_indices(
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.parametrize("max_seq_len", [2, 4])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_with_num_accepted_tokens(
     dim, dstate, has_z, itype, max_seq_len
 ):
@@ -984,6 +1027,13 @@ def test_selective_state_update_with_num_accepted_tokens(
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.parametrize("max_seq_len", [2, 4])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_varlen_with_num_accepted(
     dim, dstate, has_z, itype, max_seq_len
 ):

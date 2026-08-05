@@ -90,8 +90,8 @@ async fn shutdown_mock(
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<Result<()>>,
 ) {
-    client.shutdown().await.expect("client shutdown");
     shutdown.cancel();
+    client.shutdown().await.expect("client shutdown");
     task.await.expect("mock join").expect("mock run");
 }
 

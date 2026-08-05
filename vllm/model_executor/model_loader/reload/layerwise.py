@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBa
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
-    SKIP_TENSORS,
+    SKIP_LOAD_TENSORS,
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
@@ -140,7 +140,7 @@ def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
     """Wrap each parameter's weight loader."""
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
-        if name in SKIP_TENSORS:
+        if name in SKIP_LOAD_TENSORS:
             continue
         if _get_weight_loader(tensor).__name__ != "online_process_loader":
             tensor.weight_loader = make_online_process_loader(layer, name)
@@ -364,6 +364,11 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
         quant_method.process_weights_after_loading(layer)
+        # Re-reconcile parameter TP state: process_weights_after_loading may
+        # have re-created Parameters (stamped with the global rank), which would
+        # otherwise break replicated (disable_tp) weights on a subsequent reload.
+        if hasattr(layer, "update_param_tp_status"):
+            layer.update_param_tp_status()
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)

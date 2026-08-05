@@ -15,7 +15,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.tracing import instrument
-from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -37,23 +36,6 @@ _DEFAULT_TOKEN_SIZE_CANDIDATES = (
     8192,
     16_384,
 )
-
-
-def _compute_mhc_pre_num_split(
-    *,
-    num_tokens: int,
-    hidden_size: int,
-    hc_mult: int,
-    num_sms: int,
-) -> int:
-    block_k = 64
-    block_m = 64
-    k = hc_mult * hidden_size
-    grid_size = cdiv(num_tokens, block_m)
-    split_k = num_sms // grid_size
-    num_block_k = cdiv(k, block_k)
-    split_k = min(split_k, num_block_k // 4)
-    return max(split_k, 1)
 
 
 def _normalize_token_sizes(
