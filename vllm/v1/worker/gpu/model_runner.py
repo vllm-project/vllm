@@ -789,14 +789,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return 0
 
         assert self.cudagraph_manager is not None
-        capture_decoder = self.cudagraph_manager.needs_capture()
         capture_encoder = (
             self.model_state.supports_mm_inputs
             and self.model_state.encoder_runner.has_cudagraph()
         )
-        if not capture_decoder and not capture_encoder:
+        capture_decoder = self.cudagraph_manager.needs_capture()
+        if not capture_encoder and not capture_decoder:
             logger.warning(
-                "Skipping CUDA graph capture because no CUDA graphs are configured"
+                "Skipping CUDA graph capture. To turn on CUDA graph capture, "
+                "ensure `cudagraph_mode` was not manually set to `NONE`"
             )
             return 0
 
@@ -808,6 +809,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
+            if capture_encoder:
+                self.model_state.encoder_runner.capture()
+
             if capture_decoder:
                 self.cudagraph_manager.capture(
                     self.model,
@@ -823,9 +827,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 if self.speculator is not None:
                     self.speculator.capture()
-
-            if capture_encoder:
-                self.model_state.encoder_runner.capture()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
