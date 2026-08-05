@@ -95,9 +95,21 @@ class ReqContext:
     # Per-request scratch space keyed by value type, so a tier can parse
     # kv_transfer_params once (in on_new_request) and read the result back
     # on later calls for the same request.
+    #
+    # The scheduler also writes the per-request ``StorePolicy`` here (in
+    # ``KVOffloadingConnector.on_new_request`` after the enum-to-strategy
+    # translation runs) so tiers can read back the scheduler's chosen
+    # store policy via ``get_state(StorePolicy)``. The scheduler owns that
+    # key; tiers should treat it as read-only.
     _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
 
     def set_state(self, val: Any) -> None:
+        """Set a per-request scratch value keyed by ``type(val)``.
+
+        The scheduler owns the ``StorePolicy`` key (written from
+        ``KVOffloadingConnector.on_new_request``); tiers should treat
+        that key as read-only and rely on ``get_state`` to observe it.
+        """
         self._state[type(val)] = val
 
     def get_state(self, cls: type[_T]) -> _T | None:
@@ -122,9 +134,40 @@ class OffloadPolicy(Enum):
     REQUEST_LEVEL = "request_level"
 
 
+class StorePolicy(Enum):
+    """When eligible offloaded chunks are offered to the offload tier.
+
+    Independent of ``OffloadPolicy`` (which selects *which* blocks to
+    offload); ``StorePolicy`` selects the *timing*. A tier returns
+    ``RequestOffloadingContext(store_policy=...)`` from its
+    ``on_new_request`` hook; the scheduler translates it into a
+    ``StoreStrategy`` instance in ``RequestOffloadState.__post_init__``.
+
+    Read-back: ``KVOffloadingConnector.on_new_request`` writes the
+    scheduler's chosen ``StorePolicy`` value into ``req_context._state``
+    via ``set_state``. A tier that needs to observe the scheduler's
+    choice in later hooks (``prepare_store``, ``submit_store``,
+    ``lookup``, ...) can call
+    ``req_context.get_state(StorePolicy) -> StorePolicy | None``.
+
+    Note: the write happens AFTER the tier's own ``on_new_request``
+    returns, so a tier cannot read back its just-chosen policy inside
+    its own ``on_new_request`` callback -- only in subsequent hooks.
+    """
+
+    # Main behavior: every eligible chunk is offered as soon as it is
+    # allocated. Mirrors the pre-``StoreStrategy`` inline behavior.
+    ON_COMPUTE = "on_compute"
+    # Hold off all stores until the request reaches a terminal state
+    # (e.g. abort, finish). The strategy flushes everything in the
+    # ``req.is_finished()`` step; before that no chunks are offered.
+    ON_FINISH = "on_finish"
+
+
 @dataclass
 class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
+    store_policy: StorePolicy = StorePolicy.ON_COMPUTE
 
 
 class ScheduleEndContext(NamedTuple):
