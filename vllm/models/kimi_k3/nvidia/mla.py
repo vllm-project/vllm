@@ -309,6 +309,10 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             parallel_config.decode_context_parallel_size <= 1
             and parallel_config.prefill_context_parallel_size <= 1
         ), "Kimi-K3 MultiHeadLatentAttention does not support context parallelism."
+
+        self.impl.dcp_world_size = 1
+        self.impl.dcp_rank = 0
+
         self.prefill_backend = get_mla_prefill_backend(vllm_config)(
             num_heads=self.num_local_heads,
             scale=self.scale,
