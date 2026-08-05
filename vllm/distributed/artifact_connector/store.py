@@ -58,6 +58,7 @@ class BackgroundArtifactStore:
         )
         self._error: BaseException | None = None
         self._closed = False
+        self._state_lock = threading.Lock()
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
@@ -94,12 +95,13 @@ class BackgroundArtifactStore:
             raise ArtifactStoreError("artifact publication failed") from self._error
 
     def put(self, objects: list[ArtifactObject]) -> None:
-        if self._closed:
-            raise RuntimeError("artifact store is closed")
-        self._raise_if_failed()
-        if objects:
-            self._queue.put(list(objects))
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("artifact store is closed")
             self._raise_if_failed()
+            if objects:
+                self._queue.put(list(objects))
+                self._raise_if_failed()
 
     def get(self, keys: list[str]) -> list[bytes]:
         # Internal reads must observe publications issued earlier by the same
@@ -109,11 +111,12 @@ class BackgroundArtifactStore:
         return self._store.get(keys)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._queue.join()
-        self._queue.put(None)
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._queue.join()
+            self._queue.put(None)
         self._thread.join()
         try:
             self._raise_if_failed()

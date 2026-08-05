@@ -265,6 +265,10 @@ class InputProcessor:
     ) -> EngineCoreRequest:
         self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
+        if resumable and self.vllm_config.artifact_config.enabled:
+            raise VLLMValidationError(
+                "Artifact Connector does not support resumable streaming input."
+            )
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
@@ -317,18 +321,28 @@ class InputProcessor:
             prompt_token_ids = decoder_inputs["prompt_token_ids"]
             prompt_embeds = None
             prompt_is_token_ids = None
+        prompt_len = length_from_prompt_token_ids_or_embeds(
+            prompt_token_ids, prompt_embeds
+        )
 
         sampling_params = None
         pooling_params = None
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
+            if sampling_params.routed_experts_prompt_start >= prompt_len:
+                raise VLLMValidationError(
+                    "routed_experts_prompt_start must be smaller than the prompt "
+                    f"length ({prompt_len}), got "
+                    f"{sampling_params.routed_experts_prompt_start}.",
+                    parameter="routed_experts_prompt_start",
+                    value=sampling_params.routed_experts_prompt_start,
+                )
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
-                seq_len = length_from_prompt_token_ids_or_embeds(
-                    prompt_token_ids, prompt_embeds
+                sampling_params.max_tokens = (
+                    self.model_config.max_model_len - prompt_len
                 )
-                sampling_params.max_tokens = self.model_config.max_model_len - seq_len
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,

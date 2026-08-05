@@ -193,6 +193,10 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
+    def get_num_stored_block_hashes(self) -> int | None:
+        """Return the connector's maximum retained block-hash count."""
+        return None
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

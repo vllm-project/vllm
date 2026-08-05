@@ -67,6 +67,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
         offloading_config = build_offloading_config(vllm_config, kv_cache_config)
         spec = OffloadingSpecFactory.create_spec(offloading_config)
+        self._spec = spec
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
@@ -78,6 +79,17 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker = OffloadingConnectorWorker(
                 spec, vllm_config, kv_cache_config
             )
+
+    def get_num_stored_block_hashes(self) -> int | None:
+        num_blocks = getattr(self._spec, "num_blocks", None)
+        if num_blocks is None:
+            return None
+        hashes_per_chunk = (
+            self._spec.blocks_per_chunk
+            * max(self._spec.tokens_per_block)
+            // self._spec.tokens_per_hash
+        )
+        return num_blocks * hashes_per_chunk
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:

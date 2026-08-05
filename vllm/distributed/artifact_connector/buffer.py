@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-owned fixed-size tail buffers for execution artifacts."""
 
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,9 +41,9 @@ class RoutedExpertsArtifactBuffer:
         self._completed_slots: dict[int, int] = {}
         self._free_retained_slots = list(range(max_retained_blocks - 1, -1, -1))
         self._retained_slots: dict[int, int] = {}
-        self._requests: dict[str, _RequestTail] = {}
+        self._requests: dict[Hashable, _RequestTail] = {}
 
-    def _tail(self, request_id: str, block_start: int) -> _RequestTail:
+    def _tail(self, request_id: Hashable, block_start: int) -> _RequestTail:
         tail = self._requests.get(request_id)
         if tail is not None:
             if tail.block_start != block_start:
@@ -59,7 +60,7 @@ class RoutedExpertsArtifactBuffer:
         return tail
 
     def capture(
-        self, request_id: str, token_start: int, rows: np.ndarray
+        self, request_id: Hashable, token_start: int, rows: np.ndarray
     ) -> list[tuple[int, np.ndarray]]:
         """Stage rows and return completed blocks without retaining them."""
         rows = np.asarray(rows)
@@ -113,7 +114,9 @@ class RoutedExpertsArtifactBuffer:
 
         return completed
 
-    def read(self, request_id: str, token_start: int, token_end: int) -> np.ndarray:
+    def read(
+        self, request_id: Hashable, token_start: int, token_end: int
+    ) -> np.ndarray:
         tail = self._requests.get(request_id)
         if tail is None:
             raise RuntimeError(f"artifact buffer is missing request {request_id}")
@@ -148,11 +151,11 @@ class RoutedExpertsArtifactBuffer:
         if slot is not None:
             self._free_retained_slots.append(slot)
 
-    def _release(self, request_id: str) -> None:
+    def _release(self, request_id: Hashable) -> None:
         tail = self._requests.pop(request_id)
         self._free_slots.append(tail.slot)
 
-    def discard(self, request_id: str) -> None:
+    def discard(self, request_id: Hashable) -> None:
         if request_id in self._requests:
             self._release(request_id)
 

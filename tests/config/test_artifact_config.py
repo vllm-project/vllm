@@ -8,7 +8,9 @@ import pytest
 
 from vllm.config import ArtifactConfig, ModelConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
+from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = pytest.mark.cpu_test
 
@@ -78,6 +80,30 @@ def test_legacy_prompt_start_is_accepted():
     params = SamplingParams(routed_experts_prompt_start=3)
 
     assert params.routed_experts_prompt_start == 3
+
+
+def test_negative_prompt_start_is_rejected():
+    with pytest.raises(VLLMValidationError, match="must be non-negative"):
+        SamplingParams(routed_experts_prompt_start=-1)
+
+
+def test_artifact_connector_rejects_resumable_streaming_input():
+    processor = cast(InputProcessor, object.__new__(InputProcessor))
+    processor_mock = cast(Any, processor)
+    processor_mock.vllm_config = SimpleNamespace(
+        artifact_config=ArtifactConfig(enable_return_routed_experts=True)
+    )
+    processor_mock._validate_params = lambda *_: None
+    processor_mock._validate_lora = lambda *_: None
+
+    with pytest.raises(VLLMValidationError, match="resumable streaming input"):
+        processor.process_inputs(
+            "request",
+            cast(Any, {"type": "tokens", "prompt_token_ids": [1]}),
+            SamplingParams(),
+            ("generate",),
+            resumable=True,
+        )
 
 
 def test_artifact_connector_requires_model_runner_v2():

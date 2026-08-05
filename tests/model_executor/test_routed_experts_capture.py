@@ -286,7 +286,7 @@ def test_mrv2_async_output_finishes_pending_artifact_output():
     ).get_output()
 
     pending.to_cpu_nonblocking.assert_called_once_with()
-    pending.finish.assert_called_once_with()
+    pending.finish.assert_called_once_with(set())
     assert output.artifact_connector_output is artifact_output
 
 
@@ -302,6 +302,8 @@ def test_model_runner_initializes_capture(monkeypatch):
     runner.max_num_tokens = 32
     runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=0))
     runner.model = Mock()
+    runner.kv_connector = Mock()
+    runner.kv_connector.get_num_stored_block_hashes.return_value = 128
     kv_cache_config = Mock()
 
     runner.init_artifact_connector(kv_cache_config)
@@ -310,6 +312,7 @@ def test_model_runner_initializes_capture(monkeypatch):
         model=runner.model,
         kv_cache_config=kv_cache_config,
         max_num_batched_tokens=32,
+        external_capacity_blocks=128,
         vllm_config=runner.vllm_config,
     )
     assert runner.artifact_connector is connector
@@ -340,6 +343,7 @@ def test_artifact_worker_connector_owns_capture(monkeypatch):
         model=model,
         kv_cache_config=SimpleNamespace(),
         max_num_batched_tokens=32,
+        external_capacity_blocks=0,
     )
 
     constructor.assert_called_once_with(

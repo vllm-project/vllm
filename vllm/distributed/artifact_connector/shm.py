@@ -22,6 +22,7 @@ from vllm.distributed.artifact_connector.store import (
     ArtifactCapacityError,
     ArtifactNotFoundError,
     ArtifactObject,
+    ArtifactStoreError,
 )
 from vllm.logger import init_logger
 
@@ -121,7 +122,12 @@ class LocalSharedMemoryArtifactStore:
                 ):
                     raise ValueError(f"unsafe artifact writer lock: {path}")
                 os.fchmod(fd, 0o600)
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise ArtifactStoreError(
+                        f"artifact SHM store already has a live writer: {self.root}"
+                    ) from error
                 try:
                     path_stat = path.stat(follow_symlinks=False)
                 except FileNotFoundError:

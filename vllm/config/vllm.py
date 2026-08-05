@@ -952,7 +952,10 @@ class VllmConfig:
         if not self.artifact_config.enabled:
             return
         if not self.use_v2_model_runner:
-            raise ValueError("Artifact Connector requires Model Runner V2.")
+            raise ValueError(
+                "Artifact Connector requires Model Runner V2; set "
+                "VLLM_USE_V2_MODEL_RUNNER=1."
+            )
         if self.parallel_config.pipeline_parallel_size > 1:
             raise ValueError(
                 "--enable-return-routed-experts is incompatible with "

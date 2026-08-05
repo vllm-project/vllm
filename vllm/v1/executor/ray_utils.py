@@ -237,6 +237,11 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
                 token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
             )
 
+    artifact_output = output.artifact_connector_output
+    if artifact_output is not None:
+        for request_output in artifact_output.requests.values():
+            request_output.rows = _copy_if_readonly(request_output.rows)
+
 
 class FutureWrapper(Future):
     """A wrapper around Ray output reference to meet the interface

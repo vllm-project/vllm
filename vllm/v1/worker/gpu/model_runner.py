@@ -299,6 +299,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model=self.model,
             kv_cache_config=kv_cache_config,
             max_num_batched_tokens=self.max_num_tokens,
+            external_capacity_blocks=self.kv_connector.get_num_stored_block_hashes(),
             vllm_config=self.vllm_config,
         )
 

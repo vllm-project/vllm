@@ -91,8 +91,12 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         if self.pending_artifact_output is not None:
+            kv_output = self.model_runner_output.kv_connector_output
+            invalid_block_ids = (
+                kv_output.invalid_block_ids if kv_output is not None else set()
+            )
             self.model_runner_output.artifact_connector_output = (
-                self.pending_artifact_output.finish()
+                self.pending_artifact_output.finish(invalid_block_ids)
             )
 
         if self._has_fault is not None and self._has_fault.item():

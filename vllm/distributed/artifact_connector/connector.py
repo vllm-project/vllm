@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, overload
 
@@ -63,6 +63,8 @@ class ArtifactRequestMetadata:
     emit_output: bool
     block_hashes: Sequence[bytes]
     block_hash_start: int = 0
+    epoch: int = 0
+    kv_block_ids: Sequence[int] = ()
 
 
 @dataclass
@@ -70,7 +72,7 @@ class ArtifactConnectorMetadata:
     generation: int
     block_size: int
     requests: list[ArtifactRequestMetadata]
-    finished_requests: dict[str, Sequence[bytes] | None]
+    finished_requests: dict[tuple[str, int], Sequence[bytes] | None]
 
 
 @dataclass
@@ -87,6 +89,7 @@ class ArtifactConnectorOutput:
 @dataclass
 class _RequestState:
     emit_cursor: int
+    epoch: int = 0
     packed_hashes: bytearray = field(default_factory=bytearray)
     num_hashes: int = 0
     hash_size: int = 0
@@ -100,7 +103,7 @@ class ArtifactSchedulerConnector:
         self._reuse_kv_hashes = vllm_config.cache_config.enable_prefix_caching
         self._states: dict[str, _RequestState] = {}
         self._resume_emit_cursors: dict[str, int] = {}
-        self._finished_requests: dict[str, Sequence[bytes] | None] = {}
+        self._finished_requests: dict[tuple[str, int], Sequence[bytes] | None] = {}
         self._generation = 0
 
     def request_started(self, request: Request) -> None:
@@ -122,7 +125,12 @@ class ArtifactSchedulerConnector:
         self,
         scheduler_output: SchedulerOutput,
         requests: dict[str, Request],
+        kv_block_ids: Mapping[str, Sequence[int]] | None = None,
     ) -> ArtifactConnectorMetadata:
+        if kv_block_ids is None:
+            kv_block_ids = {}
+        for request_id in scheduler_output.preempted_req_ids or ():
+            self.request_restarted(request_id)
         token_starts = {
             request.req_id: request.num_computed_tokens
             for request in scheduler_output.scheduled_new_reqs
@@ -161,12 +169,12 @@ class ArtifactSchedulerConnector:
                     ),
                     block_hashes=block_hashes,
                     block_hash_start=block_hash_start,
+                    epoch=state.epoch,
+                    kv_block_ids=kv_block_ids.get(request_id, ()),
                 )
             )
-        finished_requests = {
-            request_id: self._finished_requests.pop(request_id, None)
-            for request_id in scheduler_output.finished_req_ids
-        }
+        finished_requests = self._finished_requests
+        self._finished_requests = {}
         return ArtifactConnectorMetadata(
             self._generation,
             self._block_size,
@@ -209,7 +217,7 @@ class ArtifactSchedulerConnector:
             if state.num_hashes > len(request.block_hashes):
                 raise RuntimeError("KV block-hash history shrank")
             self._pack_block_hashes(state, request.block_hashes[state.num_hashes :])
-        self._finished_requests[request_id] = PackedBlockHashes(
+        self._finished_requests[(request_id, state.epoch)] = PackedBlockHashes(
             bytes(state.packed_hashes), state.hash_size or 1
         )
         self._states.pop(request_id, None)
@@ -230,12 +238,25 @@ class ArtifactSchedulerConnector:
         return PackedBlockHashes(packed_hashes, state.hash_size or 1)
 
     def request_aborted(self, request_id: str) -> None:
-        self._finished_requests[request_id] = None
-        self._states.pop(request_id, None)
+        state = self._states.pop(request_id, None)
+        if state is not None:
+            self._finished_requests[(request_id, state.epoch)] = None
         self._resume_emit_cursors.pop(request_id, None)
+
+    def request_restarted(self, request_id: str) -> None:
+        """Start a fresh worker epoch while preserving delivered output."""
+        state = self._states.get(request_id)
+        if state is None:
+            return
+        self._finished_requests[(request_id, state.epoch)] = None
+        state.epoch += 1
+        state.packed_hashes.clear()
+        state.num_hashes = 0
+        state.hash_size = 0
 
     def reset(self) -> None:
         for request_id, state in self._states.items():
             self._resume_emit_cursors[request_id] = state.emit_cursor
         self._states.clear()
+        self._finished_requests.clear()
         self._generation += 1

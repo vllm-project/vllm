@@ -1233,9 +1233,19 @@ class Scheduler(SchedulerInterface):
             scheduler_output.kv_connector_metadata = meta
 
         if self.artifact_connector is not None:
+            artifact_kv_block_ids = (
+                {
+                    request_id: self.kv_cache_manager.get_block_ids(request_id)[0]
+                    for request_id in scheduler_output.num_scheduled_tokens
+                }
+                if self.connector is not None
+                else {}
+            )
             scheduler_output.artifact_connector_metadata = (
                 self.artifact_connector.build_connector_meta(
-                    scheduler_output, self.requests
+                    scheduler_output,
+                    self.requests,
+                    artifact_kv_block_ids,
                 )
             )
 
@@ -1690,6 +1700,9 @@ class Scheduler(SchedulerInterface):
                 kv_connector_output.invalid_block_ids,
                 num_scheduled_tokens,
             )
+            if self.artifact_connector is not None and self.recompute_kv_load_failures:
+                for request_id in failed_kv_load_req_ids:
+                    self.artifact_connector.request_restarted(request_id)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -2396,11 +2409,17 @@ class Scheduler(SchedulerInterface):
                 "which is not supported yet."
             )
 
+        # Artifact keys follow the lifetime of every KV cache that can satisfy
+        # a prefix hit. Reset remote/offloaded KV together with artifacts so a
+        # surviving remote hit cannot refer to a newly reset artifact store.
+        reset_connector = reset_connector or (
+            self.artifact_connector is not None and self.connector is not None
+        )
+        if reset_successful and reset_connector:
+            reset_successful = self.reset_connector_cache() and reset_successful
+
         if reset_successful and self.artifact_connector is not None:
             self.artifact_connector.reset()
-
-        if reset_connector:
-            reset_successful = self.reset_connector_cache() and reset_successful
 
         return reset_successful
 
