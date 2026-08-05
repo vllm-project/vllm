@@ -752,8 +752,13 @@ class MPClient(EngineCoreClient):
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
 
         # Sync block_size: may be enlarged by _align_hybrid_block_size in the
-        # worker for hybrid Mamba models.
+        # worker for hybrid Mamba models, or reduced to the min KV-cache-group
+        # granularity by engine init. This frontend copy still holds the
+        # pre-reduction value; preserve it for cache_config_info before
+        # overwriting (vllm-project/vllm#51163).
         cache_config = vllm_config.cache_config
+        if cache_config.requested_block_size is None:
+            cache_config.requested_block_size = cache_config.block_size
         cache_config.block_size = response.block_size
         # Keep these as per-engine cache_config_info values; do not sum across DP.
         cache_config.kv_cache_size_tokens = (
