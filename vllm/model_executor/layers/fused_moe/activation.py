@@ -7,6 +7,19 @@ from enum import Enum
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
+
+_ON_GFX90A = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx90a
+
+    _ON_GFX90A = on_gfx90a()
+    if _ON_GFX90A:
+        from .rocm_gfx90a_activation import (
+            can_use_fused_relu2,
+            fused_relu2,
+        )
+
 
 class MoEActivation(Enum):
     """Activation functions for MoE layers."""
@@ -205,8 +218,11 @@ def apply_moe_activation(
     elif activation == MoEActivation.GELU_TANH_NO_MUL:
         output.copy_(F.gelu(input, approximate="tanh"))
     elif activation == MoEActivation.RELU2_NO_MUL:
-        F.relu(input, inplace=True)
-        torch.square(input, out=output)
+        if _ON_GFX90A and can_use_fused_relu2(output, input):
+            fused_relu2(output, input)
+        else:
+            F.relu(input, inplace=True)
+            torch.square(input, out=output)
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
