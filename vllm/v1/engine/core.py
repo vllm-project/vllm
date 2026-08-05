@@ -46,11 +46,11 @@ from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
-    get_kv_cache_capacity,
     get_kv_cache_configs,
     get_request_block_hasher,
     init_none_hash,
     resolve_kv_cache_block_sizes,
+    update_kv_cache_capacity,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -319,11 +319,7 @@ class EngineCore:
             vllm_config.cache_config.block_size = min(
                 g.kv_cache_spec.block_size for g in kv_cache_groups
             )
-            num_tokens, max_concurrency = get_kv_cache_capacity(
-                vllm_config, scheduler_kv_cache_config
-            )
-            vllm_config.cache_config.kv_cache_size_tokens = num_tokens
-            vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
+            update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
         vllm_config.validate_block_size()
 
@@ -1639,6 +1635,7 @@ class EngineCoreProc(EngineCore):
             max_num_seqs=scheduler_config.max_num_seqs,
             max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
             instance_id=self.vllm_config.instance_id,
+            kv_events_config=self.scheduler.get_kv_event_publisher_config(),
         )
 
     def process_input_sockets(

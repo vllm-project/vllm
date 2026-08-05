@@ -234,7 +234,7 @@
       ],
       "range_warp_specializes": [
         null,
-        true,
+        false,
         null,
         null
       ],
@@ -1354,7 +1354,7 @@
       ],
       "range_warp_specializes": [
         null,
-        true,
+        false,
         null,
         null
       ],
@@ -1564,7 +1564,7 @@
       ],
       "range_warp_specializes": [
         null,
-        true,
+        false,
         null,
         null
       ],
@@ -1634,7 +1634,7 @@
       ],
       "range_warp_specializes": [
         null,
-        true,
+        false,
         null,
         null
       ],
@@ -2546,7 +2546,7 @@
       ],
       "range_warp_specializes": [
         null,
-        true,
+        false,
         null,
         null
       ],
@@ -2686,7 +2686,7 @@
       ],
       "range_warp_specializes": [
         null,
-        true,
+        false,
         null,
         null
       ],
