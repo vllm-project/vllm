@@ -585,6 +585,28 @@ def test_store_lru_and_immutable_put(tmp_path):
     store.close()
 
 
+def test_store_compacts_in_offset_order(tmp_path):
+    store = _make_store(tmp_path, max_bytes=12)
+    store.put(
+        [
+            ArtifactObject("first", b"1111"),
+            ArtifactObject("second", b"2222"),
+            ArtifactObject("third", b"3333"),
+        ]
+    )
+    assert store.get(["second"]) == [b"2222"]
+    store.put([ArtifactObject("fourth", b"4444")])
+
+    store._compact()
+
+    assert store.get(["second", "third", "fourth"]) == [
+        b"2222",
+        b"3333",
+        b"4444",
+    ]
+    store.close()
+
+
 def test_ttl_collects_only_inactive_store(tmp_path):
     stale = LocalSharedMemoryArtifactStore(
         str(tmp_path), "stale", 0, max_bytes=100, ttl_seconds=1
@@ -719,6 +741,28 @@ def test_scheduler_connector_sends_only_new_block_hashes(tmp_path):
     assert first.requests[0].block_hash_start == 0
     assert list(second.requests[0].block_hashes) == [b"b" * 32]
     assert second.requests[0].block_hash_start == 1
+
+
+def test_scheduler_connector_uses_fixed_size_synthetic_hashes(tmp_path):
+    connector = _make_connector(tmp_path, enable_prefix_caching=False)
+    request = _scheduler_request("request", [], num_tokens=48)
+    connector.request_started(request)
+
+    first = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [44]),
+        {request.request_id: request},
+    )
+    second = connector.build_connector_meta(
+        _step_output([request.request_id], [44], [4]),
+        {request.request_id: request},
+    )
+
+    assert first.requests[0].block_hash_start == 0
+    assert len(first.requests[0].block_hashes) == 11
+    assert {len(block_hash) for block_hash in first.requests[0].block_hashes} == {32}
+    assert second.requests[0].block_hash_start == 11
+    assert len(second.requests[0].block_hashes) == 1
+    assert len(second.requests[0].block_hashes[0]) == 32
 
 
 def test_scheduler_connector_reset_preserves_emit_cursor(tmp_path):

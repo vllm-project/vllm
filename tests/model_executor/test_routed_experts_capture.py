@@ -285,7 +285,7 @@ def test_mrv2_async_output_finishes_pending_artifact_output():
         pending_artifact_output=pending,
     ).get_output()
 
-    pending.copy_to_cpu.assert_called_once_with()
+    pending.to_cpu_nonblocking.assert_called_once_with()
     pending.finish.assert_called_once_with()
     assert output.artifact_connector_output is artifact_output
 

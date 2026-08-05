@@ -270,7 +270,7 @@ class LocalSharedMemoryArtifactStore:
     def _compact(self) -> None:
         assert self._arena is not None
         cursor = 0
-        for entry in self._lru.values():
+        for entry in sorted(self._lru.values(), key=lambda entry: entry.offset):
             if entry.offset != cursor:
                 payload = self._arena[entry.offset : entry.offset + entry.size]
                 self._arena[cursor : cursor + entry.size] = payload

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, overload
@@ -136,18 +137,18 @@ class ArtifactSchedulerConnector:
             request = requests.get(request_id)
             if state is None or request is None:
                 continue
-            source_hashes: Sequence[bytes]
             if self._reuse_kv_hashes:
-                source_hashes = request.block_hashes
+                if state.num_hashes > len(request.block_hashes):
+                    raise RuntimeError("KV block-hash history shrank")
+                new_hashes: Sequence[bytes] = request.block_hashes[state.num_hashes :]
             else:
-                source_hashes = [
-                    f"{request_id}:{i}".encode()
-                    for i in range(
-                        (token_starts[request_id] + num_tokens) // self._block_size
-                    )
+                num_hashes = (token_starts[request_id] + num_tokens) // self._block_size
+                new_hashes = [
+                    hashlib.sha256(f"{request_id}:{i}".encode()).digest()
+                    for i in range(state.num_hashes, num_hashes)
                 ]
             block_hash_start = state.num_hashes
-            block_hashes = self._pack_new_block_hashes(state, source_hashes)
+            block_hashes = self._pack_block_hashes(state, new_hashes)
             metadata.append(
                 ArtifactRequestMetadata(
                     request_id=request_id,
@@ -204,7 +205,10 @@ class ArtifactSchedulerConnector:
     def request_finished(self, request: Request) -> None:
         request_id = request.request_id
         state = self._states[request_id]
-        self._pack_new_block_hashes(state, request.block_hashes)
+        if self._reuse_kv_hashes:
+            if state.num_hashes > len(request.block_hashes):
+                raise RuntimeError("KV block-hash history shrank")
+            self._pack_block_hashes(state, request.block_hashes[state.num_hashes :])
         self._finished_requests[request_id] = PackedBlockHashes(
             bytes(state.packed_hashes), state.hash_size or 1
         )
@@ -212,19 +216,17 @@ class ArtifactSchedulerConnector:
         self._resume_emit_cursors.pop(request_id, None)
 
     @staticmethod
-    def _pack_new_block_hashes(
-        state: _RequestState, block_hashes: Sequence[bytes]
+    def _pack_block_hashes(
+        state: _RequestState, new_hashes: Sequence[bytes]
     ) -> PackedBlockHashes:
-        packed_hashes = b""
-        if state.num_hashes < len(block_hashes):
-            new_hashes = block_hashes[state.num_hashes :]
+        packed_hashes = b"".join(new_hashes)
+        if new_hashes:
             if state.hash_size == 0:
                 state.hash_size = len(new_hashes[0])
             if any(len(block_hash) != state.hash_size for block_hash in new_hashes):
                 raise RuntimeError("KV block hashes have inconsistent sizes")
-            packed_hashes = b"".join(new_hashes)
             state.packed_hashes.extend(packed_hashes)
-            state.num_hashes = len(block_hashes)
+            state.num_hashes += len(new_hashes)
         return PackedBlockHashes(packed_hashes, state.hash_size or 1)
 
     def request_aborted(self, request_id: str) -> None:
