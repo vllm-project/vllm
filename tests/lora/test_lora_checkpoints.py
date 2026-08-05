@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
 from vllm.lora.lora_model import LoRAModel
+from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import parse_fine_tuned_lora_name
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -24,6 +26,20 @@ MOCK_PACKED_MAPPING = {
         "up_proj",
     ],
 }
+
+
+def _linear_peft_helper(*, use_dora: bool) -> PEFTHelper:
+    return PEFTHelper(
+        r=2,
+        lora_alpha=4,
+        target_modules=["linear"],
+        use_dora=use_dora,
+    )
+
+
+@pytest.fixture
+def disable_lora_pin_memory(monkeypatch):
+    monkeypatch.setattr("vllm.lora.lora_model.PIN_MEMORY", False)
 
 
 @pytest.mark.parametrize("lora_name", lora_lst)
@@ -140,7 +156,7 @@ def test_gemma4_lora_weights_mapping():
     name = "base_model.model.model.language_model.layers.9.mlp.down_proj.lora_A.weight"
     assert parse_fine_tuned_lora_name(name, mapper) == (
         "model.layers.9.mlp.down_proj",
-        True,
+        "lora_a",
     )
 
 
@@ -152,5 +168,97 @@ def test_gemma4_moe_lora_weights_mapping():
     )
     assert parse_fine_tuned_lora_name(name, mapper) == (
         "model.layers.9.moe.gate_up_proj",
-        False,
+        "lora_b",
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_load_dora_tensors(disable_lora_pin_memory):
+    tensors = {
+        "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
+        "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
+        "base_model.model.linear.lora_magnitude_vector": torch.randn(4),
+    }
+
+    lora_model = LoRAModel.from_lora_tensors(
+        1,
+        tensors,
+        _linear_peft_helper(use_dora=True),
+        device="cpu",
+    )
+
+    lora = lora_model.loras["linear"]
+    assert lora.use_dora
+    assert isinstance(lora.lora_a, torch.Tensor)
+    assert isinstance(lora.lora_b, torch.Tensor)
+    assert isinstance(lora.lora_magnitude_vector, torch.Tensor)
+    assert torch.equal(lora.lora_a, tensors["base_model.model.linear.lora_A.weight"])
+    assert torch.equal(lora.lora_b, tensors["base_model.model.linear.lora_B.weight"])
+    assert torch.equal(
+        lora.lora_magnitude_vector,
+        tensors["base_model.model.linear.lora_magnitude_vector"],
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_pack_dora_lora_weights() -> None:
+    dtype = torch.float32
+    rank = 2
+    loras = [
+        LoRALayerWeights(
+            f"proj_{i}",
+            rank=rank,
+            lora_alpha=rank,
+            lora_a=torch.full((rank, 4), 0.1 * (i + 1), dtype=dtype),
+            lora_b=torch.full((out_size, rank), 0.2 * (i + 1), dtype=dtype),
+            lora_magnitude_vector=torch.full((out_size,), i + 1, dtype=dtype),
+            use_dora=True,
+        )
+        for i, out_size in enumerate([4, 2, 2])
+    ]
+
+    packed_lora = PackedLoRALayerWeights.pack(loras)
+
+    assert packed_lora.use_dora
+    assert isinstance(packed_lora.lora_magnitude_vector, list)
+    for i, lora in enumerate(loras):
+        torch.testing.assert_close(packed_lora.lora_a[i], lora.lora_a)
+        torch.testing.assert_close(packed_lora.lora_b[i], lora.lora_b)
+        torch.testing.assert_close(
+            packed_lora.lora_magnitude_vector[i], lora.lora_magnitude_vector
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_load_lora_tensors_rejects_unconfigured_dora_magnitude(
+    disable_lora_pin_memory,
+):
+    tensors = {
+        "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
+        "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
+        "base_model.model.linear.lora_magnitude_vector": torch.randn(4),
+    }
+
+    with pytest.raises(ValueError, match="use_dora=False"):
+        LoRAModel.from_lora_tensors(
+            1,
+            tensors,
+            _linear_peft_helper(use_dora=False),
+            device="cpu",
+        )
+
+
+@pytest.mark.skip_global_cleanup
+def test_load_dora_tensors_rejects_missing_magnitude(disable_lora_pin_memory):
+    tensors = {
+        "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
+        "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
+    }
+
+    with pytest.raises(ValueError, match="missing lora_magnitude_vector"):
+        LoRAModel.from_lora_tensors(
+            1,
+            tensors,
+            _linear_peft_helper(use_dora=True),
+            device="cpu",
+        )

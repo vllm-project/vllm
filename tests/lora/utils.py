@@ -3,10 +3,11 @@
 
 import json
 import os
+import shutil
 from dataclasses import dataclass
 
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.platforms import current_platform
@@ -102,6 +103,36 @@ def assert_close(a, b):
         torch.float32: (1e-2, 1e-2),
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
+
+
+def convert_dora_checkpoint_to_lora(
+    dora_dir: str, lora_dir: str | os.PathLike[str]
+) -> str:
+    """Copy a DoRA adapter and strip DoRA-only state."""
+    lora_dir = os.fspath(lora_dir)
+    shutil.copytree(dora_dir, lora_dir, dirs_exist_ok=True)
+
+    config_path = os.path.join(lora_dir, "adapter_config.json")
+    with open(config_path, encoding="utf-8") as f:
+        adapter_config = json.load(f)
+    assert adapter_config["use_dora"]
+    adapter_config["use_dora"] = False
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(adapter_config, f, indent=2)
+
+    weights_path = os.path.join(lora_dir, "adapter_model.safetensors")
+    tensors = load_file(weights_path)
+    dora_tensor_count = sum(
+        name.endswith("lora_magnitude_vector") for name in tensors
+    )
+    assert dora_tensor_count > 0
+    tensors = {
+        name: tensor
+        for name, tensor in tensors.items()
+        if not name.endswith("lora_magnitude_vector")
+    }
+    save_file(tensors, weights_path)
+    return str(lora_dir)
 
 
 @dataclass

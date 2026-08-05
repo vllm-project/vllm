@@ -134,15 +134,31 @@ class LoRAModel:
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
             if skip_prefixes and cls._should_skip_module(tensor_name, skip_prefixes):
                 continue
-            module_name, is_lora_a = parse_fine_tuned_lora_name(
+            module_name, weight_type = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper
             )
             if module_name not in loras:
                 loras[module_name] = LoRALayerWeights.from_config(
                     module_name, peft_helper
                 )
+            module_lora = loras[module_name]
 
-            if is_lora_a:
+            if weight_type == "dora_magnitude":
+                if not peft_helper.use_dora:
+                    raise ValueError(
+                        f"Received DoRA lora_magnitude_vector for module "
+                        f"{module_name}, but adapter_config.json has use_dora=False."
+                    )
+                module_lora.lora_magnitude_vector = tensor.to(
+                    device=device, dtype=dtype
+                )
+                if pin_memory:
+                    module_lora.lora_magnitude_vector = (
+                        module_lora.lora_magnitude_vector.pin_memory()
+                    )
+                continue
+
+            if weight_type == "lora_a":
                 if (
                     "lora_embedding_A" in tensor_name
                     and model_vocab_size is not None
@@ -152,14 +168,26 @@ class LoRAModel:
                         f"The embedding LoRA size({tensor.shape[1]}) must be consistent"
                         f" with the base model's vocabulary size({model_vocab_size})."
                     )
-                loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
+                module_lora.lora_a = tensor.to(device=device, dtype=dtype)
                 if pin_memory:
-                    loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
+                    module_lora.lora_a = module_lora.lora_a.pin_memory()
             else:
-                loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
+                module_lora.lora_b = tensor.to(device=device, dtype=dtype)
 
                 if pin_memory:
-                    loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
+                    module_lora.lora_b = module_lora.lora_b.pin_memory()
+
+        if peft_helper.use_dora:
+            missing_magnitude = [
+                module_name
+                for module_name, module_lora in loras.items()
+                if module_lora.lora_magnitude_vector is None
+            ]
+            if missing_magnitude:
+                raise ValueError(
+                    "DoRA adapter is missing lora_magnitude_vector for "
+                    f"module(s): {missing_magnitude}."
+                )
 
         return cls(lora_model_id, peft_helper.r, loras)
 

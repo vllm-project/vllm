@@ -20,6 +20,10 @@ class LoRALayerWeights:
         lora_alpha: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
+        use_dora: bool = False,
         scaling: float | None = None,
     ) -> None:
         self.module_name = module_name
@@ -27,6 +31,8 @@ class LoRALayerWeights:
         self.lora_alpha = lora_alpha
         self.lora_a = lora_a
         self.lora_b = lora_b
+        self.lora_magnitude_vector = lora_magnitude_vector
+        self.use_dora = use_dora
 
         if scaling is None:
             self.scaling = self.lora_alpha / self.rank
@@ -61,12 +67,13 @@ class LoRALayerWeights:
     ) -> "LoRALayerWeights":
         # lora_a and lora_b are set to None for config-based construction
         return cls(
-            module_name,
-            peft_helper.r,
-            peft_helper.lora_alpha,
-            None,
-            None,
-            peft_helper.vllm_lora_scaling_factor,
+            module_name=module_name,
+            rank=peft_helper.r,
+            lora_alpha=peft_helper.lora_alpha,
+            lora_a=None,
+            lora_b=None,
+            use_dora=peft_helper.use_dora,
+            scaling=peft_helper.vllm_lora_scaling_factor,
         )
 
     @classmethod
@@ -106,6 +113,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         lora_alphas: list[int | None],
         lora_a: list[torch.Tensor | None],
         lora_b: list[torch.Tensor | None],
+        lora_magnitude_vector: list[torch.Tensor | None] | None = None,
+        use_dora: bool = False,
         scaling: list[float] | None = None,
     ) -> None:
         super().__init__(
@@ -114,6 +123,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             lora_alpha=0,
             lora_a=lora_a,
             lora_b=lora_b,
+            lora_magnitude_vector=lora_magnitude_vector,
+            use_dora=use_dora,
             scaling=scaling,  # type: ignore
         )
         self.lora_alphas = lora_alphas
@@ -132,9 +143,19 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         If LoRA is None, it signifies that the submodule does not have a LoRA.
         """
         first_lora = next(lora for lora in loras if lora is not None)
+        use_dora = any(lora is not None and lora.use_dora for lora in loras)
+        lora_magnitude_vector: list[torch.Tensor | None] | None = (
+            [] if use_dora else None
+        )
         for lora in loras:
             if lora is None:
+                if lora_magnitude_vector is not None:
+                    lora_magnitude_vector.append(None)
                 continue
+            assert lora.use_dora == use_dora
+            if lora_magnitude_vector is not None:
+                assert isinstance(lora.lora_magnitude_vector, torch.Tensor)
+                lora_magnitude_vector.append(lora.lora_magnitude_vector)
             lora.optimize()
         rank = first_lora.rank
         module_name = first_lora.module_name
@@ -144,6 +165,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             [lora.lora_alpha if lora is not None else None for lora in loras],
             [lora.lora_a if lora is not None else None for lora in loras],
             [lora.lora_b if lora is not None else None for lora in loras],
+            lora_magnitude_vector,
+            use_dora=use_dora,
             scaling=[
                 1 if lora is not None else None  # type: ignore
                 for lora in loras
@@ -165,6 +188,9 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
         first_lora = next(lora for lora in loras if lora is not None)
         assert first_lora is not None
+        for lora in loras:
+            if lora is not None and lora.use_dora:
+                raise NotImplementedError("DoRA is not supported for MoE LoRA.")
         rank = first_lora.rank
         lora_alpha = first_lora.lora_alpha
         assert len(loras) % 3 == 0

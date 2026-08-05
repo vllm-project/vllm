@@ -229,7 +229,26 @@ class OpenAIServingModels:
             if error_check_ret is not None:
                 return error_check_ret
 
-            # Safe to delete now since we hold the lock
+            # Safe to remove now since we hold the lock. Remove from the
+            # engine before dropping the frontend registry entry so adapter
+            # slot state is cleared even when a name is reused later.
+            lora_request = self.lora_requests[lora_name]
+            try:
+                removed = await self.engine_client.remove_lora(
+                    lora_request.lora_int_id
+                )
+            except Exception as e:
+                return create_error_response(
+                    message=str(e),
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            if not removed:
+                logger.info(
+                    "LoRA adapter '%s' was not present in the engine cache "
+                    "during unload.",
+                    lora_name,
+                )
             del self.lora_requests[lora_name]
             logger.info("Removed LoRA adapter: name '%s'", lora_name)
             return f"Success: LoRA adapter '{lora_name}' removed successfully."
