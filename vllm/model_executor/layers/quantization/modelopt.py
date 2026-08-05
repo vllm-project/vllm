@@ -97,6 +97,34 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def _wrap_weight_loader_for_transpose(weight_loader, packed_input_dim):
+    """Wrap weight_loader to handle transposed NVFP4 checkpoints.
+
+    Some NVFP4 checkpoints store weights as (packed_in_features, out_features)
+    instead of the expected (out_features, packed_in_features). This wrapper
+    detects the mismatch against the expected checkpoint dimensions and
+    transposes before the original loader runs, preventing shape validation
+    failures during TP sharding.
+
+    Args:
+        weight_loader: The original weight loader to wrap.
+        packed_input_dim: Expected checkpoint dim of the input dimension,
+            i.e. the packed width of the layer this parameter belongs to.
+    """
+
+    def wrapped(param, loaded_weight, *args, **kwargs):
+        if (
+            loaded_weight.ndim == 2
+            and loaded_weight.shape[0] == packed_input_dim
+            and loaded_weight.shape[1] != packed_input_dim
+        ):
+            loaded_weight = loaded_weight.t()
+        return weight_loader(param, loaded_weight, *args, **kwargs)
+
+    return wrapped
+
+
 QUANT_ALGOS = [
     # FP8 (per-tensor weight + optional static activation scale).
     "FP8",
@@ -1133,6 +1161,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        packed_input_dim = input_size // 2
+        packed_scale_input_dim = input_size // self.quant_config.group_size
         del input_size, output_size
         if not self.quant_config.is_checkpoint_nvfp4_serialized:
             raise ValueError(
@@ -1165,7 +1195,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             ),
             input_dim=1,
             output_dim=0,
-            weight_loader=weight_loader,
+            weight_loader=_wrap_weight_loader_for_transpose(
+                weight_loader, packed_input_dim
+            ),
         )
         layer.register_parameter("weight", weight)
 
@@ -1192,7 +1224,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             ),
             input_dim=1,
             output_dim=0,
-            weight_loader=weight_loader,
+            weight_loader=_wrap_weight_loader_for_transpose(
+                weight_loader, packed_scale_input_dim
+            ),
         )
 
         layer.register_parameter("weight_scale", weight_scale)
@@ -1282,6 +1316,8 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        packed_input_dim = input_size // 2
+        packed_scale_input_dim = input_size // self.quant_config.group_size
         del input_size, output_size
         if not self.quant_config.is_checkpoint_nvfp4_serialized:
             raise ValueError(
@@ -1309,7 +1345,9 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
             ),
             input_dim=1,
             output_dim=0,
-            weight_loader=weight_loader,
+            weight_loader=_wrap_weight_loader_for_transpose(
+                weight_loader, packed_input_dim
+            ),
         )
         layer.register_parameter("weight", weight)
 
@@ -1331,7 +1369,9 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
             ),
             input_dim=1,
             output_dim=0,
-            weight_loader=weight_loader,
+            weight_loader=_wrap_weight_loader_for_transpose(
+                weight_loader, packed_scale_input_dim
+            ),
         )
         layer.register_parameter("weight_scale", weight_scale)
 

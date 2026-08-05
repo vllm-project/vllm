@@ -112,6 +112,44 @@ def test_inkling_mapper_maps_modelopt_exclusions() -> None:
     assert not quant_config.is_layer_excluded("model.layers.3.mlp.experts")
 
 
+def test_gemma4_mapper_maps_modelopt_exclusions() -> None:
+    """NVFP4 exclude_modules written in checkpoint naming (``model.language_model.*``)
+    must map onto the vLLM module paths of both Gemma4 model classes. Regression:
+    a hand-rolled prefix translation stripped ``model.`` before the mapper ran,
+    breaking model-aware rules like Inkling's ``model.llm.*``."""
+
+    def map_exclusions(mapper) -> ModelOptNvFp4Config:
+        quant_config = ModelOptNvFp4Config.from_config(
+            {
+                "quantization": {
+                    "quant_algo": "NVFP4",
+                    "group_size": 16,
+                    "kv_cache_quant_algo": None,
+                    "exclude_modules": [
+                        "model.language_model.layers.0.self_attn.qkv_proj",
+                    ],
+                }
+            }
+        )
+        quant_config.apply_vllm_mapper(mapper.get_unstacked_mapper())
+        return quant_config
+
+    from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+    from vllm.model_executor.models.gemma4_mm import Gemma4ForConditionalGeneration
+
+    causal_lm = map_exclusions(Gemma4ForCausalLM.hf_to_vllm_mapper)
+    assert causal_lm.is_layer_excluded("model.layers.0.self_attn.qkv_proj")
+    assert not causal_lm.is_layer_excluded("model.layers.1.self_attn.qkv_proj")
+
+    conditional = map_exclusions(Gemma4ForConditionalGeneration.hf_to_vllm_mapper)
+    assert conditional.is_layer_excluded(
+        "language_model.model.layers.0.self_attn.qkv_proj"
+    )
+    assert not conditional.is_layer_excluded(
+        "language_model.model.layers.1.self_attn.qkv_proj"
+    )
+
+
 @pytest.mark.parametrize("projection", ["w13", "w2"])
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize(

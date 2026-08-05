@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
     ModelOptNvFp4W4A16LinearMethod,
+    _wrap_weight_loader_for_transpose,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -97,6 +98,48 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
             exclude_modules=[],
         ),
     )
+
+
+def _recording_loader(loaded_weights: list) -> Any:
+    def loader(param, loaded_weight, *args, **kwargs):
+        loaded_weights.append(loaded_weight)
+
+    return loader
+
+
+@pytest.mark.parametrize(
+    ("param_shape", "loaded_shape", "packed_input_dim", "expected_shape"),
+    [
+        # Correctly oriented fused gate_up shard: (out_partition, packed_in).
+        # Regression: gate_up shard [15360, 1920] was falsely transposed at TP=1.
+        ((30720, 1920), (15360, 1920), 1920, (15360, 1920)),
+        # Misoriented checkpoint: (packed_in, out_partition).
+        ((30720, 1920), (1920, 15360), 1920, (15360, 1920)),
+        # 2D per-block weight scale in expected orientation.
+        ((15360, 240), (15360, 240), 240, (15360, 240)),
+        # 2D per-block weight scale, misoriented.
+        ((15360, 240), (240, 15360), 240, (15360, 240)),
+        # TP>1: global column weight vs TP-sharded param dim-0.
+        ((1920, 1920), (3840, 1920), 1920, (3840, 1920)),
+    ],
+)
+def test_modelopt_nvfp4_transpose_wrapper(
+    param_shape, loaded_shape, packed_input_dim, expected_shape
+):
+    """The transpose wrapper must key off the expected checkpoint dims, not
+    loaded-vs-param dim-0 equality (which corrupts fused shards and TP>1)."""
+    loaded_weights: list[Any] = []
+    wrapped = _wrap_weight_loader_for_transpose(
+        _recording_loader(loaded_weights), packed_input_dim
+    )
+
+    loaded = torch.empty(*loaded_shape)
+    wrapped(torch.empty(*param_shape), loaded)
+
+    assert len(loaded_weights) == 1
+    assert loaded_weights[0].shape == expected_shape
+    if loaded_shape == expected_shape:
+        assert loaded_weights[0] is loaded
 
 
 def test_modelopt_nvfp4_quantizes_parallel_lm_head():
