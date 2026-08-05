@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -299,6 +300,40 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         if not mod or not hasattr(mod, attr_name):
             return False
     return True
+
+
+@functools.cache
+def has_flashinfer_humming_moe() -> bool:
+    """Return `True` if the FlashInfer CUTLASS SM90 "humming" MXFP4-weight x
+    FP8-activation fused MoE path is available (FlashInfer >= 0.6.16)."""
+    # Deliberately not chained on has_flashinfer_cutlass_fused_moe(): that also
+    # requires nvfp4/TRT-LLM symbols which the humming path never touches, and
+    # which are absent from builds where humming works fine.
+    if not has_flashinfer_moe():
+        return False
+
+    fused_moe = _get_submodule("flashinfer.fused_moe")
+    if not fused_moe:
+        return False
+
+    # Only the preprocessing helper is humming-specific; the interleave helpers
+    # predate it and are shared with the SM90 W4A16 path.
+    required_functions = [
+        "cutlass_fused_moe",
+        "preprocess_moe_weights_for_sm90_mixed_gemm_humming",
+        "interleave_moe_weights_for_sm90_mixed_gemm",
+        "interleave_moe_scales_for_sm90_mixed_gemm",
+    ]
+    if any(not hasattr(fused_moe, name) for name in required_functions):
+        return False
+
+    # The kernel-side opt-in is a keyword argument rather than a symbol, so it
+    # needs a signature check to tell a humming-capable build from an older one.
+    try:
+        params = inspect.signature(fused_moe.cutlass_fused_moe).parameters
+    except (TypeError, ValueError):
+        return False
+    return "use_wfp4afp8_humming" in params
 
 
 @functools.cache

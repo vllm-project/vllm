@@ -8,6 +8,7 @@ the string -> enum mapping, and the guards that keep a misdirected request
 from reaching the kernel, not the kernel itself.
 """
 
+from contextlib import contextmanager
 from typing import get_args
 from unittest.mock import patch
 
@@ -20,7 +21,7 @@ from vllm.config.kernel import KernelConfig, MoEBackend
 from vllm.engine.arg_utils import EngineArgs, get_kwargs
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
-    _check_explicit_backend_platform,
+    _check_explicit_backend_requirements,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
     map_mxfp4_backend,
@@ -85,32 +86,93 @@ def test_map_backend_does_not_steal_humming_package_backend():
     assert map_mxfp4_backend("humming") == [Mxfp4MoeBackend.HUMMING]
 
 
+@contextmanager
+def _patched_platform(*, is_sm90: bool, humming_available: bool = True):
+    """Run the oracle against a synthetic device and FlashInfer build."""
+    with (
+        patch(f"{ORACLE}.current_platform") as platform,
+        patch(f"{ORACLE}.has_flashinfer_humming_moe", return_value=humming_available),
+    ):
+        platform.is_cuda.return_value = True
+        platform.is_rocm.return_value = False
+        platform.is_device_capability.side_effect = lambda c: is_sm90 and c == 90
+        platform.has_device_capability.side_effect = (
+            lambda c: (90 if is_sm90 else 120) >= c
+        )
+        platform.get_device_capability.return_value = 90 if is_sm90 else 120
+        yield platform
+
+
 def test_explicit_request_on_non_sm90_is_actionable():
     config = make_dummy_moe_config()
     config.moe_backend = HUMMING_BACKEND
-    with patch(f"{ORACLE}.current_platform") as platform:
-        platform.is_cuda.return_value = True
-        platform.is_device_capability.return_value = False
-        platform.get_device_capability.return_value = 120
-        with pytest.raises(ValueError, match="SM90"):
-            select_deepseek_v4_mxfp4_moe_backend(config)
+    with _patched_platform(is_sm90=False), pytest.raises(ValueError, match="SM90"):
+        select_deepseek_v4_mxfp4_moe_backend(config)
 
 
 def test_explicit_request_on_sm90_passes_the_guard():
-    with patch(f"{ORACLE}.current_platform") as platform:
-        platform.is_cuda.return_value = True
-        platform.is_device_capability.side_effect = lambda c: c == 90
-        _check_explicit_backend_platform(
+    with _patched_platform(is_sm90=True):
+        _check_explicit_backend_requirements(
             HUMMING_BACKEND, map_mxfp4_backend(HUMMING_BACKEND)
         )
 
 
+def test_explicit_request_on_old_flashinfer_names_the_version():
+    """Without the probe this surfaces as an ImportError from deep inside
+    weight loading; the user needs to be told which version to install."""
+    config = make_dummy_moe_config()
+    config.moe_backend = HUMMING_BACKEND
+    with (
+        _patched_platform(is_sm90=True, humming_available=False),
+        pytest.raises(ValueError, match="flashinfer-python>=0.6.16"),
+    ):
+        select_deepseek_v4_mxfp4_moe_backend(config)
+
+
+def test_auto_selection_never_reaches_the_backend():
+    """The backend is opt-in only: it appears in no automatic priority list, so
+    a DeepSeek-V4 MXFP4 model on SM90 must not land on it without an explicit
+    request, even where the kernel is available."""
+    config = make_dummy_moe_config()  # moe_backend stays "auto"
+    with _patched_platform(is_sm90=True):
+        try:
+            backend, _ = select_deepseek_v4_mxfp4_moe_backend(config)
+        except (ValueError, NotImplementedError):
+            pass  # nothing suitable on this synthetic device; still not humming
+        else:
+            assert backend is not Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING
+
+
 @pytest.mark.parametrize("backend", ["marlin", "humming", "triton_unfused"])
 def test_guard_only_fires_for_the_flashinfer_humming_backend(backend):
-    with patch(f"{ORACLE}.current_platform") as platform:
-        platform.is_cuda.return_value = True
-        platform.is_device_capability.return_value = False
-        _check_explicit_backend_platform(backend, map_mxfp4_backend(backend))
+    with _patched_platform(is_sm90=False, humming_available=False):
+        _check_explicit_backend_requirements(backend, map_mxfp4_backend(backend))
+
+
+def test_probe_ignores_symbols_the_humming_path_never_uses():
+    """The probe must not require nvfp4/TRT-LLM symbols. FlashInfer builds
+    exist that carry the humming kernel but not `fp4_quantize` /
+    `nvfp4_block_scale_interleave`; rejecting those would tell the user to
+    upgrade a FlashInfer that already works."""
+    from types import SimpleNamespace
+
+    from vllm.utils import flashinfer as fi
+
+    def cutlass_fused_moe(*, use_wfp4afp8_humming=False): ...
+
+    humming_only = SimpleNamespace(
+        cutlass_fused_moe=cutlass_fused_moe,
+        preprocess_moe_weights_for_sm90_mixed_gemm_humming=lambda *a, **k: None,
+        interleave_moe_weights_for_sm90_mixed_gemm=lambda *a, **k: None,
+        interleave_moe_scales_for_sm90_mixed_gemm=lambda *a, **k: None,
+    )
+    fi.has_flashinfer_humming_moe.cache_clear()
+    with (
+        patch.object(fi, "has_flashinfer_moe", return_value=True),
+        patch.object(fi, "_get_submodule", return_value=humming_only),
+    ):
+        assert fi.has_flashinfer_humming_moe() is True
+    fi.has_flashinfer_humming_moe.cache_clear()
 
 
 def _dummy_mxfp4_weights(num_experts=2, intermediate_size=128, hidden_size=128):
