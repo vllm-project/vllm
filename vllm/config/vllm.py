@@ -537,6 +537,24 @@ class VllmConfig:
         return hash_str
 
     @property
+    def is_ec_producer_only(self) -> bool:
+        ec_config = self.ec_transfer_config
+        return (
+            ec_config is not None
+            and ec_config.is_ec_producer
+            and not ec_config.is_ec_consumer
+        )
+
+    @property
+    def is_encoder_only(self) -> bool:
+        mm_config = (
+            self.model_config.multimodal_config
+            if self.model_config is not None
+            else None
+        )
+        return self.is_ec_producer_only or bool(mm_config and mm_config.mm_encoder_only)
+
+    @property
     def max_concurrent_batches(self) -> int:
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.
@@ -2287,10 +2305,6 @@ class VllmConfig:
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")
-
-        if self.ec_transfer_config is not None:
-            # Will be added by https://github.com/vllm-project/vllm/pull/38390
-            unsupported.append("EC transfer")
 
         return unsupported
 
