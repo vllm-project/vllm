@@ -423,7 +423,11 @@ class RoutedExperts(PluggableLayer):
 
     @staticmethod
     def _orient_fused_weight(
-        fused_weight: torch.Tensor, shard_id: str, unpadded_hidden: int
+        fused_weight: torch.Tensor,
+        shard_id: str,
+        unpadded_hidden: int,
+        target_shape: torch.Size | None = None,
+        target_is_transposed: bool = False,
     ) -> torch.Tensor:
         """Normalise a fused expert tensor from either checkpoint orientation
         to (intermediate, hidden) for w1/w3 and (hidden, intermediate) for w2.
@@ -436,11 +440,31 @@ class RoutedExperts(PluggableLayer):
             hidden_axis, intermediate_axis = -2, -1
         else:
             hidden_axis, intermediate_axis = -1, -2
-        if (
-            fused_weight.shape[hidden_axis] != unpadded_hidden
-            and fused_weight.shape[intermediate_axis] == unpadded_hidden
-        ):
+
+        # Prefer the checkpoint's unpadded hidden size when it identifies an
+        # axis. The allocated target can use a larger, backend-padded hidden
+        # extent, which may also happen to equal the intermediate dimension.
+        if fused_weight.shape[hidden_axis] == unpadded_hidden:
+            return fused_weight
+        if fused_weight.shape[intermediate_axis] == unpadded_hidden:
             return fused_weight.transpose(-1, -2)
+
+        if (
+            target_shape is not None
+            and not target_is_transposed
+            and len(target_shape) == fused_weight.ndim
+        ):
+            # The hidden axis is not TP-sharded, unlike the intermediate axis.
+            # Use its allocated extent to orient tensors whose dimensions are
+            # block counts (e.g. FP8 scales), where ``unpadded_hidden`` cannot
+            # identify an axis. Comparing the complete target shape would fail
+            # for TP>1 because the checkpoint's intermediate axis is unsharded.
+            target_hidden = target_shape[hidden_axis]
+            if (
+                fused_weight.shape[hidden_axis] != target_hidden
+                and fused_weight.shape[intermediate_axis] == target_hidden
+            ):
+                return fused_weight.transpose(-1, -2)
         return fused_weight
 
     @staticmethod
@@ -942,7 +966,11 @@ class RoutedExperts(PluggableLayer):
                     # transpose below doesn't mutate loaded_weight across
                     # iterations (else w3 is transposed twice and wrongly chunked)
                     fused_weight = self._orient_fused_weight(
-                        loaded_weight, shard_id, unpadded_hidden
+                        loaded_weight,
+                        shard_id,
+                        unpadded_hidden,
+                        param.shape,
+                        getattr(param, "is_transposed", False),
                     )
                     if shard_id in {"w1", "w3"}:
                         # Repurpose expert_id for deconcatenating w1 and w3

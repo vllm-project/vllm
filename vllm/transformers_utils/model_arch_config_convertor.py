@@ -22,6 +22,49 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 logger = init_logger(__name__)
 
 
+def _get_max_resolved_per_layer_value(
+    config: PretrainedConfig, attrs: tuple[str, ...]
+) -> int | None:
+    per_layer_config = getattr(config, "per_layer_config", None)
+    if per_layer_config is None:
+        return None
+
+    per_layer_attributes = getattr(config, "per_layer_attributes", None)
+    if per_layer_attributes is not None:
+        attrs = tuple(attr for attr in attrs if attr in per_layer_attributes)
+        if not attrs:
+            return None
+
+    values = (
+        value
+        for layer_config in per_layer_config
+        for attr in attrs
+        if (value := getattr(layer_config, attr, None)) is not None
+    )
+    value = max(values, default=0)
+    return value or None
+
+
+def _get_max_per_layer_head_size(config: PretrainedConfig) -> int | None:
+    if head_size := _get_max_resolved_per_layer_value(
+        config, ("head_dim", "global_head_dim")
+    ):
+        return head_size
+    head_dim = getattr(config, "head_dim", 0) or 0
+    global_head_dim = getattr(config, "global_head_dim", 0) or 0
+    return max(head_dim, global_head_dim) or None
+
+
+def _get_max_per_layer_num_kv_heads(config: PretrainedConfig) -> int | None:
+    if num_kv_heads := _get_max_resolved_per_layer_value(
+        config, ("num_key_value_heads", "num_global_key_value_heads")
+    ):
+        return num_kv_heads
+    num_kv_heads = getattr(config, "num_key_value_heads", 0) or 0
+    global_num_kv_heads = getattr(config, "num_global_key_value_heads", 0) or 0
+    return max(num_kv_heads, global_num_kv_heads) or None
+
+
 class ModelArchConfigConvertorBase:
     def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
         self.hf_config = hf_config
@@ -609,6 +652,17 @@ class Gemma4MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_hidden_layers", 0)
 
+    def get_head_size(self) -> int:
+        return (
+            _get_max_per_layer_head_size(self.hf_text_config) or super().get_head_size()
+        )
+
+    def get_total_num_kv_heads(self) -> int:
+        return (
+            _get_max_per_layer_num_kv_heads(self.hf_text_config)
+            or super().get_total_num_kv_heads()
+        )
+
 
 class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
@@ -623,9 +677,18 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # Gemma4 uses dual head dimensions: head_dim (sliding attention)
         # and global_head_dim (full attention).  Return the largest so
         # that attention backends allocate buffers large enough for both.
+        if head_size := _get_max_per_layer_head_size(self.hf_text_config):
+            return head_size
+
         head_dim = getattr(self.hf_text_config, "head_dim", 0)
         global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
         return max(head_dim, global_head_dim) or super().get_head_size()
+
+    def get_total_num_kv_heads(self) -> int:
+        return (
+            _get_max_per_layer_num_kv_heads(self.hf_text_config)
+            or super().get_total_num_kv_heads()
+        )
 
 
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -683,9 +746,11 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "falcon": FalconModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
     "gemma4": Gemma4ModelArchConfigConvertor,
+    "gemma4_assistant": Gemma4MTPModelArchConfigConvertor,
     "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
     "gemma4_text": Gemma4ModelArchConfigConvertor,
     "gemma4_unified": Gemma4ModelArchConfigConvertor,
+    "gemma4_unified_assistant": Gemma4MTPModelArchConfigConvertor,
     "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,

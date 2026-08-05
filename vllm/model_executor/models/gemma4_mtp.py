@@ -46,7 +46,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .gemma4 import Gemma4MLP, _get_text_config
+from .gemma4 import (
+    Gemma4MLP,
+    _get_gemma4_head_dim,
+    _get_gemma4_num_kv_heads,
+    _get_text_config,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -271,21 +276,8 @@ class Gemma4MTPDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         layer_idx = extract_layer_index(prefix)
-        layer_type = config.layer_types[layer_idx]
-        is_full_attention = layer_type == "full_attention"
-        head_dim = (
-            getattr(config, "global_head_dim", config.head_dim)
-            if is_full_attention
-            else config.head_dim
-        )
-
-        use_k_eq_v = is_full_attention and getattr(config, "attention_k_eq_v", False)
-        if use_k_eq_v:
-            num_kv_heads = getattr(
-                config, "num_global_key_value_heads", config.num_key_value_heads
-            )
-        else:
-            num_kv_heads = config.num_key_value_heads
+        head_dim = _get_gemma4_head_dim(config, layer_idx)
+        num_kv_heads = _get_gemma4_num_kv_heads(config, layer_idx)
 
         self.self_attn = Gemma4MTPAttention(
             config=config,

@@ -195,6 +195,29 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         text_config.rswa_window = rswa_window
 
 
+def _get_gemma4_head_dims(hf_text_config: "PretrainedConfig") -> tuple[int, int] | None:
+    per_layer_config = getattr(hf_text_config, "per_layer_config", None)
+    per_layer_attributes = getattr(hf_text_config, "per_layer_attributes", None)
+    head_attrs = ("head_dim", "global_head_dim")
+    if per_layer_attributes is not None:
+        head_attrs = tuple(attr for attr in head_attrs if attr in per_layer_attributes)
+    if per_layer_config is not None and head_attrs:
+        head_dims = {
+            value
+            for layer_config in per_layer_config
+            for attr in head_attrs
+            if (value := getattr(layer_config, attr, None)) is not None
+        }
+        if head_dims:
+            return min(head_dims), max(head_dims)
+
+    head_dim = getattr(hf_text_config, "head_dim", None)
+    global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+    if head_dim is None or global_head_dim is None:
+        return None
+    return head_dim, global_head_dim
+
+
 class Gemma4Config(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -210,10 +233,11 @@ class Gemma4Config(VerifyAndUpdateConfig):
         When FA4 is not available we fall back to Triton.
         """
         hf_text_config = vllm_config.model_config.hf_text_config
-        head_dim = getattr(hf_text_config, "head_dim", None)
-        global_head_dim = getattr(hf_text_config, "global_head_dim", None)
-
-        if head_dim is None or global_head_dim is None or head_dim == global_head_dim:
+        head_dims = _get_gemma4_head_dims(hf_text_config)
+        if head_dims is None:
+            return
+        head_dim, global_head_dim = head_dims
+        if head_dim == global_head_dim:
             return
 
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
