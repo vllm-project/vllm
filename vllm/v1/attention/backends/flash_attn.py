@@ -3,6 +3,7 @@
 """Attention layer with FlashAttention."""
 
 import copy
+import functools
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -1420,12 +1421,18 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
+@functools.cache
 def _make_mm_prefix_mask_mod(
     sliding_window: int = 0,
     sliding_window_left: int | None = None,
 ):
     """Build a CuTE-DSL mask_mod implementing
     ``(causal AND sliding_window) OR mm_prefix``.
+
+    Cached so identical ``(sliding_window, sliding_window_left)`` reuse the
+    same function object. FA4's ``hash_callable`` mixes ``repr()`` of closure
+    cells into the compile key; the nested ``_load_q_range`` would otherwise
+    get a new address each call and force a full JIT recompile every forward.
 
     The FA4 kernel passes *local* ``q_idx`` (0-based within the current
     prefill chunk) while ``kv_idx`` is absolute (0-based over the full
