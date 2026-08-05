@@ -27,7 +27,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.engine.events import EventType, SemanticEvent
-from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.parser_engine import ParserEngine, ToolCallSlot
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
@@ -1694,3 +1694,56 @@ class TestDropSpecialTokens:
             e.value for e in events if e.type == EventType.REASONING_CHUNK
         )
         assert "<bos>" not in reasoning_text
+
+
+class TestIncrementalSafePrefix:
+    """Verify that ``_incremental_safe_prefix`` matches ``_safe_arg_prefix``
+    for the same input, and that caching produces correct results across
+    incremental calls."""
+
+    @pytest.mark.parametrize(
+        "json_str",
+        [
+            '{"a": 1}',
+            '{"a": 1, "b": 2}',
+            '{"a": "hello", "b": "world"}',
+            '{"obj": {"x": 1}, "b": 2}',
+            '{"k":1}',
+            '{"k":"value"}',
+            '{"k":"unterminated',
+            "{}",
+            "{",
+            "",
+            '{"a": 1',
+        ],
+    )
+    def test_matches_static_version(self, json_str):
+        slot = ToolCallSlot()
+        result = ParserEngine._incremental_safe_prefix(json_str, None, slot)
+        expected = ParserEngine._safe_arg_prefix(json_str)
+        assert result == expected, (
+            f"Mismatch for {json_str!r}: incremental={result!r}, static={expected!r}"
+        )
+
+    def test_incremental_accumulation(self):
+        """Feed a JSON string one character at a time, resetting slot state
+        each time, and verify the incremental prefix matches the static
+        version at each step."""
+        full = '{"name": "Alice", "age": 30, "city": "NYC"}'
+        for end in range(1, len(full) + 1):
+            partial = full[:end]
+            slot = ToolCallSlot()
+            inc = ParserEngine._incremental_safe_prefix(partial, None, slot)
+            static = ParserEngine._safe_arg_prefix(partial)
+            assert inc == static, f"Mismatch at position {end}: {partial!r}"
+
+    def test_true_incremental_across_calls(self):
+        """Feed JSON character by character using the *same* slot to verify
+        incremental state accumulation produces the correct result."""
+        full = '{"a": 1, "b": "hello"}'
+        slot = ToolCallSlot()
+        for end in range(1, len(full) + 1):
+            partial = full[:end]
+            result = ParserEngine._incremental_safe_prefix(partial, None, slot)
+            expected = ParserEngine._safe_arg_prefix(partial)
+            assert result == expected, f"Mismatch at position {end}: {partial!r}"
