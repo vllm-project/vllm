@@ -664,6 +664,7 @@ With `--multi-turn`, `--num-prompts` controls the number of **conversations**, n
 
 - `--dataset-name random` — synthetic conversations with controllable per-turn token lengths. Auto-sets `min_tokens` to enforce output length without `ignore_eos`.
 - `--dataset-name sharegpt` — loads all turns (not just the first two); filters for entries with ≥ 2 real turns.
+- `--dataset-name hf` — downloads a ShareGPT-format HuggingFace config, then loads it like `sharegpt`.
 
 **Prefix sharing** (random dataset): when `--multi-turn-prefix-global-ratio` or `--multi-turn-prefix-conversation-ratio` is > 0, each turn sends a fixed-length message (no history accumulation) composed of a global prefix + per-conversation prefix + unique suffix. The two ratios must sum to < 1.0.
 
