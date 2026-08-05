@@ -1120,6 +1120,22 @@ def test_scheduler_resets_artifacts_only_after_successful_kv_reset(reset_success
         scheduler.artifact_connector.reset.assert_not_called()
 
 
+def test_scheduler_requires_explicit_remote_kv_reset():
+    scheduler = object.__new__(Scheduler)
+    scheduler.running = []
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.reset_prefix_cache.return_value = True
+    scheduler.artifact_connector = Mock()
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = True
+    scheduler.log_stats = False
+
+    assert not scheduler.reset_prefix_cache()
+    scheduler.kv_cache_manager.reset_prefix_cache.assert_not_called()
+    scheduler.connector.reset_cache.assert_not_called()
+    scheduler.artifact_connector.reset.assert_not_called()
+
+
 def test_scheduler_resets_remote_kv_before_artifacts():
     scheduler = object.__new__(Scheduler)
     scheduler.running = []
@@ -1130,7 +1146,7 @@ def test_scheduler_resets_remote_kv_before_artifacts():
     scheduler.connector.reset_cache.return_value = True
     scheduler.log_stats = False
 
-    assert scheduler.reset_prefix_cache()
+    assert scheduler.reset_prefix_cache(reset_connector=True)
     scheduler.connector.reset_cache.assert_called_once_with()
     scheduler.artifact_connector.reset.assert_called_once_with()
 
@@ -1145,7 +1161,7 @@ def test_scheduler_preserves_artifacts_if_remote_kv_reset_fails():
     scheduler.connector.reset_cache.return_value = False
     scheduler.log_stats = False
 
-    assert not scheduler.reset_prefix_cache()
+    assert not scheduler.reset_prefix_cache(reset_connector=True)
     scheduler.artifact_connector.reset.assert_not_called()
 
 
@@ -1159,7 +1175,7 @@ def test_scheduler_fails_closed_if_connector_reset_is_unsupported():
     scheduler.connector.reset_cache.return_value = None
     scheduler.log_stats = False
 
-    assert not scheduler.reset_prefix_cache()
+    assert not scheduler.reset_prefix_cache(reset_connector=True)
     scheduler.artifact_connector.reset.assert_not_called()
 
 

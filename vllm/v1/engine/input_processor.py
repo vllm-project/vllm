@@ -330,7 +330,10 @@ class InputProcessor:
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
-            if sampling_params.routed_experts_prompt_start >= prompt_len:
+            if (
+                self.vllm_config.artifact_config.enabled
+                and sampling_params.routed_experts_prompt_start >= prompt_len
+            ):
                 raise VLLMValidationError(
                     "routed_experts_prompt_start must be smaller than the prompt "
                     f"length ({prompt_len}), got "

@@ -28,6 +28,8 @@ async def reset_prefix_cache(
 
     Optionally, if the query parameter `reset_external=true`
     also resets the external (connector-managed) prefix cache.
+    Artifact capture with an external KV connector requires
+    `reset_external=true` so both caches remain consistent.
 
     Returns `{"success": bool}`. The reset fails (`success=false`) while
     blocks are still held, e.g. by running requests or in-flight async KV

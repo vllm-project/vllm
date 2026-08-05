@@ -291,6 +291,38 @@ def test_mrv2_async_output_finishes_pending_artifact_output():
     assert output.artifact_connector_output is artifact_output
 
 
+def test_model_runner_shutdown_cleans_gpu_before_artifact_error(monkeypatch):
+    pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
+    import vllm.v1.worker.gpu.model_runner as model_runner
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+    monkeypatch.setattr(torch.accelerator, "empty_cache", Mock())
+    monkeypatch.setattr(model_runner, "free_before_shutdown", Mock())
+    monkeypatch.setattr(model_runner.gc, "collect", Mock())
+
+    runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
+    runner.vllm_config = Mock()
+    runner.kv_caches = Mock()
+    runner.attn_groups = Mock()
+    runner.kv_cache_config = Mock()
+    runner.model_state = Mock()
+    runner.speculator = Mock()
+    runner.model = Mock()
+    runner.artifact_connector = Mock()
+    runner.artifact_connector.close.side_effect = RuntimeError("publication failed")
+
+    with pytest.raises(RuntimeError, match="publication failed"):
+        runner.shutdown()
+
+    runner.kv_caches.clear.assert_called_once_with()
+    runner.attn_groups.clear.assert_called_once_with()
+    assert not hasattr(runner, "kv_cache_config")
+    assert not hasattr(runner, "model_state")
+    assert runner.speculator is None
+    assert not hasattr(runner, "model")
+    torch.accelerator.empty_cache.assert_called_once_with()
+
+
 def test_model_runner_initializes_capture(monkeypatch):
     pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
     import vllm.v1.worker.gpu.model_runner as model_runner

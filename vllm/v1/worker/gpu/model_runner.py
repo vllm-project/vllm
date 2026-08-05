@@ -1718,26 +1718,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
-        if self.artifact_connector is not None:
-            self.artifact_connector.close()
-        torch.accelerator.synchronize()
-        if hasattr(self, "kv_caches"):
-            self.kv_caches.clear()
-        if hasattr(self, "attn_groups"):
-            self.attn_groups.clear()
-        if hasattr(self, "kv_cache_config"):
-            del self.kv_cache_config
-        free_before_shutdown(self.vllm_config)
-        if hasattr(self, "model_state"):
-            del self.model_state
-        if getattr(self, "speculator", None) is not None:
-            self.speculator = None
-        if hasattr(self, "model"):
-            del self.model
+        try:
+            torch.accelerator.synchronize()
+            if hasattr(self, "kv_caches"):
+                self.kv_caches.clear()
+            if hasattr(self, "attn_groups"):
+                self.attn_groups.clear()
+            if hasattr(self, "kv_cache_config"):
+                del self.kv_cache_config
+            free_before_shutdown(self.vllm_config)
+            if hasattr(self, "model_state"):
+                del self.model_state
+            if getattr(self, "speculator", None) is not None:
+                self.speculator = None
+            if hasattr(self, "model"):
+                del self.model
 
-        gc.collect()
-        torch.accelerator.empty_cache()
-        logger.debug("Cleaned up model weights, KV caches, and workspace")
+            gc.collect()
+            torch.accelerator.empty_cache()
+            logger.debug("Cleaned up model weights, KV caches, and workspace")
+        finally:
+            if self.artifact_connector is not None:
+                self.artifact_connector.close()
 
     ########### EPLB methods start ###########
     @property
