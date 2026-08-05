@@ -60,7 +60,10 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.openai.engine.protocol import (
+    OpenAIBaseModel,
+    validate_kv_transfer_params,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -630,6 +633,13 @@ class ResponsesRequest(OpenAIBaseModel):
                     parameter="tool_choice",
                 )
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_kv_transfer_params_fields(cls, data):
+        if isinstance(data, dict) and data.get("kv_transfer_params") is not None:
+            validate_kv_transfer_params(data["kv_transfer_params"])
         return data
 
 

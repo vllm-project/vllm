@@ -281,6 +281,53 @@ def validate_structured_outputs_structural_tag(
         )
 
 
+_MAX_KV_TRANSFER_TP_SIZE = 4096
+_MAX_KV_TRANSFER_PP_SIZE = 256
+
+
+def validate_kv_transfer_params(
+    params: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate safety-critical fields in ``kv_transfer_params``.
+
+    Prevents attacker-controlled values (e.g. an arbitrarily large
+    ``tp_size``) from reaching the KV connector, where they could cause
+    unbounded memory allocation.
+    """
+    if params is None:
+        return None
+
+    tp_size = params.get("tp_size")
+    if tp_size is not None and (
+        not isinstance(tp_size, int)
+        or tp_size < 1
+        or tp_size > _MAX_KV_TRANSFER_TP_SIZE
+    ):
+        raise ValueError(
+            f"kv_transfer_params.tp_size must be a positive integer "
+            f"<= {_MAX_KV_TRANSFER_TP_SIZE}, got {tp_size!r}"
+        )
+
+    pp_size = params.get("pp_size")
+    if pp_size is not None and (
+        not isinstance(pp_size, int)
+        or pp_size < 1
+        or pp_size > _MAX_KV_TRANSFER_PP_SIZE
+    ):
+        raise ValueError(
+            f"kv_transfer_params.pp_size must be a positive integer "
+            f"<= {_MAX_KV_TRANSFER_PP_SIZE}, got {pp_size!r}"
+        )
+
+    port = params.get("remote_port")
+    if port is not None and (not isinstance(port, int) or port < 1 or port > 65535):
+        raise ValueError(
+            f"kv_transfer_params.remote_port must be in [1, 65535], got {port!r}"
+        )
+
+    return params
+
+
 class StreamOptions(OpenAIBaseModel):
     include_usage: bool | None = False
     continuous_usage_stats: bool | None = False

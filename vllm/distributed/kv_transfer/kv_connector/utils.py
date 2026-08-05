@@ -520,6 +520,8 @@ class TransferTopology:
     # Common methods
     # ============================================================
 
+    _MAX_REMOTE_TP_SIZE = 4096
+
     def tp_ratio(self, remote_tp_size: int) -> int:
         """Calculate the tensor parallel ratio between local and remote TP.
 
@@ -527,6 +529,13 @@ class TransferTopology:
         same remote worker in groups of size ``tp_ratio``).  Negative when
         remote_tp > local_tp (ratio is flipped).
         """
+        if remote_tp_size < 1:
+            raise ValueError(f"remote_tp_size must be >= 1, got {remote_tp_size}")
+        if remote_tp_size > self._MAX_REMOTE_TP_SIZE:
+            raise ValueError(
+                f"remote_tp_size {remote_tp_size} exceeds maximum "
+                f"allowed value {self._MAX_REMOTE_TP_SIZE}"
+            )
         if self.tp_size >= remote_tp_size:
             assert self.tp_size % remote_tp_size == 0, (
                 f"Local tensor parallel size {self.tp_size} is not divisible "

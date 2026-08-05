@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
     structured_outputs_from_response_format,
+    validate_kv_transfer_params,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -1024,6 +1025,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                     part_type,
                                 )
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_kv_transfer_params_fields(cls, data):
+        if isinstance(data, dict) and data.get("kv_transfer_params") is not None:
+            validate_kv_transfer_params(data["kv_transfer_params"])
         return data
 
 
