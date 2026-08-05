@@ -7,7 +7,9 @@ matching the eager triton kernel output."""
 import pytest
 import torch
 
-from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
+    FusedRMSNormGated,
+)
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16]
@@ -47,6 +49,11 @@ def test_compiled_vs_eager(
         device=device,
         dtype=dtype,
     )
+    # Model parameters use torch.empty because checkpoint loading overwrites
+    # them. Initialize the standalone test module so allocator contents cannot
+    # introduce NaNs and make this comparison flaky.
+    if module.weight is not None:
+        module.weight.uniform_(-1, 1)
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     g = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
@@ -92,6 +99,8 @@ def test_compiled_vs_eager_multidim(
         device=device,
         dtype=dtype,
     )
+    if module.weight is not None:
+        module.weight.uniform_(-1, 1)
     x = torch.randn(*shape, dtype=dtype, device=device)
     g = torch.randn(*shape, dtype=dtype, device=device)
 

@@ -375,6 +375,115 @@ def _topk_topp_sample_fake(
     return
 
 
+def _xpu_deepseek_fused_indexer_q_rope_fp8_impl(
+    index_q: torch.Tensor,
+    positions: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_q_fp8: torch.Tensor,
+    index_weights_out: torch.Tensor,
+) -> None:
+    """Fused RoPE + FP8 quant of the DeepSeek-V4 sparse-indexer Q (XPU).
+    Writes ``index_q_fp8`` and ``index_weights_out`` in place (no return).
+    Requires head_dim=128, rope_dim=64, and num_heads divisible by 2.
+
+    Args:
+        index_q: (T, H, 128) bfloat16 Q before RoPE. Contiguous.
+        positions: (T,) int64 absolute token positions.
+        index_q_cos_sin_cache: (max_pos, 64) float32 RoPE cos/sin cache.
+        index_weights: (T, H) bfloat16 raw indexer weights.
+        index_weights_softmax_scale: scalar softmax scale.
+        index_weights_head_scale: scalar per-head scale.
+        index_q_fp8: (T, H, 128) fp8 (e4m3) output, preallocated. [written]
+        index_weights_out: (T, H) float32 output, preallocated;
+            = index_weights * q_scale * softmax_scale * head_scale (the
+            per-(token, head) q_scale is folded in here). [written]
+    """
+    torch.ops._xpu_C.deepseek_fused_indexer_q_rope_fp8(
+        index_q,
+        positions,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        index_q_fp8,
+        index_weights_out,
+    )
+
+
+def _xpu_deepseek_fused_indexer_q_rope_fp8_fake(
+    index_q: torch.Tensor,
+    positions: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_q_fp8: torch.Tensor,
+    index_weights_out: torch.Tensor,
+) -> None:
+    return
+
+
+def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
+    index_q: torch.Tensor,
+    positions: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_q_packed: torch.Tensor,
+    index_q_scale: torch.Tensor,
+    index_weights_out: torch.Tensor,
+) -> None:
+    """Fused RoPE + MXFP4 quant of the DeepSeek-V4 sparse-indexer Q (XPU).
+    Writes ``index_q_packed``, ``index_q_scale`` and ``index_weights_out`` in
+    place (no return). Requires head_dim=128, rope_dim=64, and num_heads
+    divisible by 4.
+
+    Args:
+        index_q: (T, H, 128) bfloat16 Q before RoPE. Contiguous.
+        positions: (T,) int64 absolute token positions.
+        index_q_cos_sin_cache: (max_pos, 64) float32 RoPE cos/sin cache.
+        index_weights: (T, H) bfloat16 raw indexer weights.
+        index_weights_softmax_scale: scalar softmax scale.
+        index_weights_head_scale: scalar per-head scale.
+        index_q_packed: (T, H, 64) uint8 packed E2M1 nibbles (2 per byte),
+            preallocated. [written]
+        index_q_scale: (T, H, 4) uint8 ue8m0 per-block (32-elem) scales,
+            preallocated. [written]
+        index_weights_out: (T, H) float32 output, preallocated;
+            = index_weights * softmax_scale * head_scale (no q_scale folded;
+            per-block scales live in index_q_scale). [written]
+    """
+    torch.ops._xpu_C.deepseek_fused_indexer_q_rope_mxfp4(
+        index_q,
+        positions,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        index_q_packed,
+        index_q_scale,
+        index_weights_out,
+    )
+
+
+def _xpu_deepseek_fused_indexer_q_rope_mxfp4_fake(
+    index_q: torch.Tensor,
+    positions: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_q_packed: torch.Tensor,
+    index_q_scale: torch.Tensor,
+    index_weights_out: torch.Tensor,
+) -> None:
+    return
+
+
 def _xpu_mxfp8_quantize_impl(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1139,6 +1248,24 @@ class xpu_ops:
                 op_name="xpu_topk_topp_sampler",
                 op_func=_topk_topp_sample_impl,
                 fake_impl=_topk_topp_sample_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_deepseek_fused_indexer_q_rope_fp8",
+                op_func=_xpu_deepseek_fused_indexer_q_rope_fp8_impl,
+                mutates_args=["index_q_fp8", "index_weights_out"],
+                fake_impl=_xpu_deepseek_fused_indexer_q_rope_fp8_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_deepseek_fused_indexer_q_rope_mxfp4",
+                op_func=_xpu_deepseek_fused_indexer_q_rope_mxfp4_impl,
+                mutates_args=[
+                    "index_q_packed",
+                    "index_q_scale",
+                    "index_weights_out",
+                ],
+                fake_impl=_xpu_deepseek_fused_indexer_q_rope_mxfp4_fake,
             )
 
             _OPS_REGISTERED = True
