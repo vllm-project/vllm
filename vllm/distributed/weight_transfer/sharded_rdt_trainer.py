@@ -3,23 +3,26 @@
 """Trainer-side engine for the sharded-RDT (pull-based NIXL) backend.
 
 Symmetric to the NCCL/IPC trainer engines, but RDT is *pull-based*: the vLLM
-workers initiate every transfer, dialing the trainer's Ray actors and pulling
-the exact slice each worker consumes over NIXL. So unlike NCCL (which
-broadcasts) this engine does not push anything from `send_weights`; instead it
+workers initiate every transfer, dialing the trainer's Ray actors and pulling the
+exact slice each worker consumes. So unlike NCCL (which broadcasts) this engine
+pushes nothing from `send_weights`; instead it
 
-  * owns a per-rank **producer server** — an internal Ray actor that exposes the
-    NIXL serve surface (`rdt_produce_weights_batched`, `free_gather`,
+  * owns a per-rank **producer server** -- an internal Ray actor exposing the NIXL
+    serve surface (`rdt_produce_weights_batched`, `free_gather`,
     `reserve_serve_arena`) the worker engine calls by name, and
   * on each `send_weights`, gathers this rank's weights group-by-group from the
     `WeightSource`, shares each group into the server over CUDA IPC, and (on the
-    sender) drives the inference-side `start/update/finish` handshake — the
-    single empty `update_weights` unblocks the workers to pull.
+    sender) drives the inference-side `start/update/finish` handshake -- the single
+    empty `update_weights` unblocks the workers to pull.
 
-The serve-side state — gather cache, serve rings, free ref-counting, arena
-registration — all lives on the server actor, spawned and owned by this engine.
-Trainer processes therefore need no mixin, no named actors, and no
-`enable_tensor_transport` / `max_concurrency` actor options: any process that can
-reach Ray and (for multi-rank) `torch.distributed` works.
+All serve-side state lives on the server actor, so trainer processes need no
+mixin, no named actors and no `enable_tensor_transport` / `max_concurrency` actor
+options: any process that can reach Ray and (for multi-rank)
+`torch.distributed` works.
+
+See docs/training/weight_transfer/sharded_rdt.md for the publish -> serve ->
+free_gather -> release lifecycle, the ownership model, and the known concurrency
+rough edges.
 """
 
 import contextlib
@@ -196,17 +199,11 @@ class _RDTProducerServer:
         """Create this server's NIXL agent NOW, while the rank's GPU is quiet.
 
         The engine calls this at spawn time, before the server-name all-gather
-        barrier — i.e. before any trainer rank can be spinning in a collective
-        (gather or barrier). Lazily creating the agent later (first
-        reserve_serve_arena, during the sender's worker-init RPC) deadlocks on
-        EFA-class fabrics: libfabric's fi_getinfo probes CUDA HMEM support with
-        a cudaMalloc/cudaFree, and cudaFree blocks behind the co-resident
-        trainer rank's persistent NCCL kernel — which cannot finish because the
-        collective is waiting on the sender rank, which is waiting on the
-        worker-init RPC, which is waiting on this server. Creating (and
-        HMEM-warming) the agent up front breaks the cycle. The warmup buffer
-        stays registered/alive so the agent and its CUDA-HMEM path stay
-        initialized.
+        barrier -- i.e. before any trainer rank can be spinning in a collective.
+        Creating the agent lazily instead deadlocks on EFA-class fabrics; see the
+        cycle in docs/training/weight_transfer/sharded_rdt.md ("warmup_nixl breaks
+        a startup deadlock"). The warmup buffer stays registered and alive so the
+        agent and its CUDA-HMEM path stay initialized.
         """
         from ray.experimental import register_nixl_memory
 
@@ -261,18 +258,16 @@ class _RDTProducerServer:
         ``entries`` is ``(storages, views)``: ``storages`` maps a storage id to
         the ``reduce_tensor`` args of a whole-storage uint8 view (ONE CUDA-IPC
         export per storage), ``views`` maps each served name to
-        ``(sid, dtype_name, shape, stride, storage_offset)`` — rebuilt here as
-        ``as_strided`` views. The per-name rebuild loop this replaces cost
-        ~32 us/name of pure Python plus one IPC open per name-with-new-storage
-        (and IPC opens are ~9x slower still when the exporting process uses
-        the expandable_segments allocator — see trainer_init's warning).
+        ``(sid, dtype_name, shape, stride, storage_offset)`` -- rebuilt here as
+        ``as_strided`` views. One export per storage rather than per name; see the
+        doc for the cost this replaced.
 
-        ``free_target`` is how many consumers are routed to this producer for
-        this group (>= 1; the engine skips publishing a group no consumer pulls
-        from it). Frees can arrive before the publish they belong to — a
-        consumer that pulls nothing of a group frees it as soon as its plan
-        starts — so a group whose frees have already all landed is released
-        here rather than waiting for a free that will never come.
+        ``free_target`` is how many consumers are routed to this producer for this
+        group (>= 1; the engine skips publishing a group no consumer pulls from
+        it). Frees can arrive BEFORE the publish they belong to -- a consumer that
+        pulls nothing of a group frees it as soon as its plan starts -- so a group
+        whose frees have already all landed is released here rather than waiting
+        for one that will never come.
         """
         with self._cache_cond:
             while len(self._inflight_keys) >= self._lookahead:
@@ -624,13 +619,12 @@ class ShardedRDTTrainerWeightTransferEngine(
             init_info=init_info,
         )
 
-        # CUDA-IPC publish is the trainer engine's hot path; the VMM-based
-        # expandable_segments allocator makes IPC storage opens ~9x slower on
-        # both the export and rebuild side (measured; see publish_group).
-        # Frameworks that enable it (e.g. via PYTORCH_CUDA_ALLOC_CONF) should
-        # disable it around send_weights so the gathered tensors land in
-        # classic, IPC-fast segments. Detection below only sees the env var —
-        # runtime _set_allocator_settings changes are not introspectable.
+        # CUDA-IPC publish is the trainer engine's hot path, and the VMM-based
+        # expandable_segments allocator makes IPC storage opens ~9x slower on both
+        # the export and rebuild side (measured). Frameworks that enable it should
+        # disable it around send_weights so the gathered tensors land in classic,
+        # IPC-fast segments. This only sees the env var -- runtime
+        # _set_allocator_settings changes are not introspectable.
         import os as _os
 
         if "expandable_segments:True" in _os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""):
