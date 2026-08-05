@@ -568,6 +568,7 @@ RUN dnf install -y numactl-devel \
 ARG PYTORCH_NIGHTLY
 
 # Install development dependencies
+COPY requirements/common.txt requirements/common.txt
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
@@ -884,6 +885,7 @@ RUN apt-get update -y \
 ARG PYTORCH_NIGHTLY
 
 # Install development dependencies (for testing)
+COPY requirements/common.txt requirements/common.txt
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
