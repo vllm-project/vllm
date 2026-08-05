@@ -292,8 +292,8 @@ def test_all_nan_target_logits_in_range(temperature: float):
     _compute_global_target_argmax (greedy) and _insert_resampled_kernel
     (stochastic). The vocab size below gives a non-power-of-2 block count
     (3 blocks of 8192, padded to 4) so the padded region exists. Post-fix,
-    NaN is mapped to -inf and the block index is clamped, so the kernels
-    must complete without error and emit in-range token ids.
+    NaN is mapped to -inf, so the kernels must complete without error and
+    emit in-range token ids.
     """
     torch.manual_seed(0)
     device = "cuda"
