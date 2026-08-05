@@ -144,11 +144,8 @@ context rows of those prefills — attention, up-projection and merging are
 charged only to the requests it covers, and no chunk contains an empty context
 span. See `plan_mla_context_chunks`.
 
-Because chunks are emitted in request order, at most a chunk's *first* request
-already has a partial from an earlier chunk: that request's tokens are merged
-and the remaining tokens of the chunk are written, so accumulating the context
-partial costs one request-slice merge plus one bulk write per chunk (see
-`accumulate_mla_context_chunk`).
+A continuation chunk contains only its split request, so accumulation performs
+either one request-slice merge or one bulk write per chunk.
 
 q_c        = h_t @ W_DQ
 q_nope     = (q_c @ W_UQ).view(Sq, N, P)
@@ -2397,8 +2394,8 @@ def accumulate_mla_context_chunk(
 ) -> None:
     """Fold one chunk's partial into the running context partial.
 
-    Chunks are emitted in request order, so at most the chunk's first request
-    already has a partial: its tokens are merged, the rest are written.
+    Continuation chunks merge a split request; other chunks initialize their
+    token range.
     """
     init_start = chunk.token_start
     if chunk.is_continuation:
