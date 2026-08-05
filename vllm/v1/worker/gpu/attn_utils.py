@@ -218,6 +218,7 @@ def _allocate_kv_cache(
         if kv_cache_tensor.host_resident:
             tensor = allocate_pinned_host_pool(kv_cache_tensor.size)
         elif kv_cache_tensor.block_stride > 0:
+            assert kv_cache_tensor.block_pool_id is not None
             # Allocate once; all packed tensors alias the same backing.
             packed_backing = packed_backings.get(kv_cache_tensor.block_pool_id)
             if packed_backing is None:

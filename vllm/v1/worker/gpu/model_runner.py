@@ -564,7 +564,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             self.block_tables,
         )
-        self.kv_caches_by_pool: dict[int, list[torch.Tensor]] = {}
+        self.kv_caches_by_pool: dict[int | None, list[torch.Tensor]] = {}
         for group in self.kv_cache_config.kv_cache_groups:
             pool_caches = self.kv_caches_by_pool.setdefault(group.block_pool_id, [])
             pool_caches.extend(

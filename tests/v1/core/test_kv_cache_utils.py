@@ -129,7 +129,10 @@ def test_hisparse_hma_splits_scheduler_blocks_into_kernel_blocks(block_size):
     )
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
-    assert cache_config.num_blocks_by_pool == [7, 7]
+    assert cache_config.num_blocks_by_pool == [7]
+    assert cache_config.hisparse_host_num_blocks == 7
+    assert host_group.block_pool_id is None
+    assert indexer_group.block_pool_id == 0
     assert host_group.kv_cache_spec.block_size == block_size
     assert indexer_group.kv_cache_spec.block_size == 64
     resident_groups = [
@@ -271,11 +274,11 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
     ]
     assert indexer.layer_names == [c4_indexer]
     assert indexer.kv_cache_spec.block_size == 256
-    assert source.block_pool_id == 0
+    assert source.block_pool_id is None
     hisparse_gpu_groups = [
         group for group in other_groups if not group.enable_kv_transfer
     ]
-    assert all(group.block_pool_id == 1 for group in hisparse_gpu_groups)
+    assert all(group.block_pool_id == 0 for group in hisparse_gpu_groups)
     regular_groups = [group for group in other_groups if group.enable_kv_transfer]
     assert all(group.block_pool_id == 0 for group in regular_groups)
     assert {name for group in regular_groups for name in group.layer_names} == {

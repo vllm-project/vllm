@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, get_unique_kv_cache_group_id
 from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
@@ -32,8 +35,29 @@ class _PendingSpill:
     copy_enqueued: bool = False
 
 
-class HiSparseResidencyController:
-    """Own scheduler-side HiSparse residency and HMA lease transitions."""
+class HiSparseManager:
+    """Own HiSparse host allocation, prefix state, and GPU residency transitions."""
+
+    @staticmethod
+    def create_host_block_pool(
+        kv_cache_config: KVCacheConfig,
+        *,
+        enable_caching: bool,
+        hash_block_size: int,
+        enable_kv_cache_events: bool,
+        metrics_collector: KVCacheMetricsCollector | None,
+    ) -> BlockPool | None:
+        num_blocks = kv_cache_config.hisparse_host_num_blocks
+        if num_blocks is None:
+            return None
+        return BlockPool(
+            num_gpu_blocks=num_blocks,
+            enable_caching=enable_caching,
+            hash_block_size=hash_block_size,
+            enable_kv_cache_events=enable_kv_cache_events,
+            metrics_collector=metrics_collector,
+            block_pool_id=None,
+        )
 
     def __init__(
         self,
@@ -54,9 +78,11 @@ class HiSparseResidencyController:
                         "HiSparse resident specs require resident cache managers."
                     )
                 resident_managers.append(manager)
+                assert group.block_pool_id is not None
                 hisparse_pool_ids.add(group.block_pool_id)
             if isinstance(manager, HiSparseHotManager):
                 hot_managers.append(manager)
+                assert group.block_pool_id is not None
                 hisparse_pool_ids.add(group.block_pool_id)
 
         if len(hisparse_pool_ids) > 1:
@@ -71,14 +97,17 @@ class HiSparseResidencyController:
             and not isinstance(manager, HiSparseHotManager)
             for group, manager in zip(groups, managers)
         )
-        self.host_manager = None
+        self.host_manager: SingleTypeKVCacheManager | None = None
         self.pages_per_host_block = 0
         self.max_spill_pages = 0
-        if self.resident_managers:
+        if kv_cache_config.hisparse_host_num_blocks is not None:
             host_group_id = get_unique_kv_cache_group_id(
                 kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
             )
             self.host_manager = managers[host_group_id]
+        self.has_host_cache = self.host_manager is not None
+        if self.resident_managers:
+            assert self.host_manager is not None
             resident_block_sizes = {
                 manager.block_size for manager in self.resident_managers
             }
@@ -122,6 +151,77 @@ class HiSparseResidencyController:
         if not self.resident_managers or has_cpu_history:
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
+
+    def get_host_block_pool(self) -> BlockPool | None:
+        manager = self.host_manager
+        return manager.block_pool if manager is not None else None
+
+    def owns_block(self, block: KVCacheBlock) -> bool:
+        pool = self.get_host_block_pool()
+        return (
+            pool is not None
+            and block.pool_id is None
+            and 0 <= block.block_id < len(pool.blocks)
+            and pool.blocks[block.block_id] is block
+        )
+
+    def has_host_capacity(self, num_blocks: int) -> bool:
+        pool = self.get_host_block_pool()
+        return (
+            num_blocks == 0
+            if pool is None
+            else num_blocks <= pool.get_num_free_blocks()
+        )
+
+    def get_num_host_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        manager = self.host_manager
+        if manager is None:
+            return 0
+        return manager.get_num_blocks_to_allocate(
+            request_id,
+            num_tokens,
+            new_computed_blocks[manager.kv_cache_group_id],
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            apply_admission_cap=apply_admission_cap,
+        )
+
+    def free_host_blocks(self, blocks: Iterable[KVCacheBlock]) -> list[KVCacheBlock]:
+        """Free owned host blocks and return blocks from other pools."""
+        host_blocks: list[KVCacheBlock] = []
+        other_blocks: list[KVCacheBlock] = []
+        for block in blocks:
+            (host_blocks if self.owns_block(block) else other_blocks).append(block)
+        if host_blocks:
+            pool = self.get_host_block_pool()
+            assert pool is not None
+            pool.free_blocks(host_blocks)
+        return other_blocks
+
+    def evict_host_blocks(self, block_ids: set[int]) -> bool:
+        pool = self.get_host_block_pool()
+        if pool is None:
+            return False
+        pool.evict_blocks(block_ids)
+        return True
+
+    def reset_prefix_cache(self) -> bool:
+        pool = self.get_host_block_pool()
+        return pool is None or pool.reset_prefix_cache()
+
+    def take_events(self) -> list[KVCacheEvent]:
+        pool = self.get_host_block_pool()
+        return [] if pool is None else pool.take_events()
 
     def reclaim_resident_blocks(self, block_pool_id: int, num_blocks: int) -> int:
         """Reclaim host-valid pages and enqueue copies for GPU-only pages."""

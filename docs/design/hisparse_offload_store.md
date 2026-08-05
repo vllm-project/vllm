@@ -4,30 +4,24 @@ Status: worktree design draft
 
 ## The short version
 
-There are two different jobs:
+There are three different jobs:
 
-1. The normal KV cache system decides which pages occupy GPU memory.
-2. The sparse offload store owns the host copy, the small GPU hot buffer, and
-   movement between them.
+1. The normal KV cache system manages GPU block pools and tables.
+2. `HiSparseManager` manages logical host blocks, source-prefix identity, and
+   host/GPU residency transitions.
+3. The sparse offload store owns the worker-side host bytes, the small GPU hot
+   buffer, and movement between them.
 
-The offload store does **not** allocate, free, or own resident GPU pages. HMA is
-the allocator used by the normal cache system; it is not a second cache
-manager.
+The offload store does **not** allocate or free logical blocks. HMA provides the
+GPU allocation shared by the resident and hot groups; it does not manage CPU
+memory or KV identity.
 
 ```text
-                   owns page leases
-             ┌────────────────────────┐
-request ────►│ normal KV cache manager│
-             └───────────┬────────────┘
-                         │ resident GPU pages
-                         ▼
-                  sparse attention
-                         ▲
-                         │ host miss: return a hot GPU row
-             ┌───────────┴────────────┐
-             │ sparse KV offload store│
-             │ host bytes + hot + LRU │
-             └────────────────────────┘
+request ────► HiSparseManager ── source blocks + residency policy
+                    │
+                    ├──► KV cache manager ── resident/hot GPU leases (HMA)
+                    │
+                    └──► sparse offload store ── host bytes + copies + GPU LRU
 ```
 
 This is local storage tiering. A P/D connector is a separate feature and is
@@ -37,26 +31,29 @@ not part of this diagram.
 
 | Thing | Owner | What “owner” means |
 | --- | --- | --- |
-| Request and prefix identity | normal KV cache manager | maps tokens to logical pages |
+| HiSparse source and prefix identity | `HiSparseManager` | maps tokens to logical host blocks |
 | Resident GPU block leases | normal KV cache manager | allocates and frees HMA blocks |
 | Resident block tables | normal KV cache manager | tells attention where resident pages are |
-| Residency transitions | `HiSparseResidencyController` | plans spill-before-free transactions |
-| Pinned host allocation and bytes | `HiSparseOffloadStore` | authoritative backing for spilled pages |
+| Residency transitions | `HiSparseManager` | plans spill-before-free transactions |
+| Logical host block allocation | `HiSparseManager` | owns the separate CPU block pool and its lifecycle |
+| Pinned host tensor and bytes | `HiSparseOffloadStore` | worker-side backing for spilled pages |
 | Hot GPU block contents | `HiSparseOffloadStore` | fills cache-manager-provided hot leases |
 | Hot row map and LRU | `HiSparseOffloadLayer` | resolves hits and chooses victims on GPU |
 | Sparse attention | attention backend | consumes a device cache and physical row IDs |
 | HMA | allocator | provides GPU capacity; owns no KV meaning |
 
-The key distinction is lease versus contents. The normal cache manager owns a
-hot block lease. The offload store owns what the bytes in that leased block
-mean.
+The key distinction is logical allocation versus contents. `HiSparseManager`
+owns host block IDs and their request/prefix associations. The offload store
+owns the corresponding bytes. The normal cache manager sees only device pools.
+The source group has `block_pool_id=None`; device-pool consumers must narrow it
+before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
 ## Code boundary
 
 ```text
 scheduler process                         worker process
 
-HiSparseResidencyController
+HiSparseManager
   │
   │ SparseKVOffloadCommand
   │   - page transfers
@@ -115,7 +112,7 @@ A resident block cannot be reused until its contents have been handed to the
 store.
 
 ```text
-normal KV cache manager                    offload store
+HiSparseManager                            offload store
           │                                     │
           │ pin source and destination leases   │
           │── SparseKVPageTransfer ─────────────►│
@@ -157,7 +154,7 @@ command, output, and layer-resolution boundaries.
 
 | Class | Inherits / implements | Responsibility |
 | --- | --- | --- |
-| `HiSparseResidencyController` | plain scheduler component | resident leases and spill state machine |
+| `HiSparseManager` | plain scheduler component | host allocation, source prefixes, resident leases, and spill state machine |
 | `HiSparseResidentManager` | `SingleTypeKVCacheManager` | normal block-pool bookkeeping with host-backed holes |
 | `PagedCacheView` | immutable data object | shared resident/hot HMA tensor binding |
 | `HiSparseOffloadStore` | plain worker component | host/hot ownership and step-level transfers |

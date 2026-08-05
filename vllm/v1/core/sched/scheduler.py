@@ -589,8 +589,8 @@ class Scheduler(SchedulerInterface):
                     # allocatable after the worker acknowledges the spill.
                     # Yield this scheduling iteration instead of preempting a
                     # request whose resident pages are already being reclaimed.
-                    residency = self.kv_cache_manager.hisparse_residency
-                    if residency.has_pending_reclamation():
+                    hisparse = self.kv_cache_manager.hisparse_manager
+                    if hisparse.has_pending_reclamation():
                         break
 
                     # The request cannot be scheduled.
@@ -971,12 +971,17 @@ class Scheduler(SchedulerInterface):
                     )
 
                 reserved_blocks: int | tuple[int, ...] = 0
+                reserved_host_blocks = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    if self.kv_cache_manager.hisparse_manager.has_host_cache:
+                        reserved_host_blocks = (
+                            self._inflight_prefill_reserved_host_blocks()
+                        )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -989,6 +994,7 @@ class Scheduler(SchedulerInterface):
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
+                    reserved_host_blocks=reserved_host_blocks,
                     has_scheduled_reqs=bool(self.running),
                 )
 
@@ -1232,7 +1238,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             sparse_kv_offload=(
-                self.kv_cache_manager.hisparse_residency.build_offload_command(
+                self.kv_cache_manager.hisparse_manager.build_offload_command(
                     list(num_scheduled_tokens)
                 )
             ),
@@ -1694,7 +1700,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         hisparse_stats = model_runner_output.hisparse_stats
         completed_transfers = model_runner_output.sparse_kv_completions
-        self.kv_cache_manager.hisparse_residency.complete_spills(completed_transfers)
+        self.kv_cache_manager.hisparse_manager.complete_spills(completed_transfers)
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
@@ -2644,6 +2650,19 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
         )
 
+    def _request_remaining_host_blocks(self, request: Request) -> int:
+        """HiSparse host blocks needed to hold the request's full sequence."""
+        full_num_tokens = min(request.num_tokens, self.max_model_len)
+        return self.kv_cache_manager.hisparse_manager.get_num_host_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=full_num_tokens,
+            new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
+            total_computed_tokens=request.num_computed_tokens,
+            num_local_computed_tokens=request.num_computed_tokens,
+            num_tokens_main_model=full_num_tokens,
+            apply_admission_cap=True,
+        )
+
     def _inflight_prefill_reserved_blocks(self) -> tuple[int, ...]:
         """Per-pool reservations needed by all in-flight prefills."""
         reserved = [0] * len(self.kv_cache_manager.block_pools)
@@ -2651,6 +2670,13 @@ class Scheduler(SchedulerInterface):
             for pool_id, count in enumerate(self._request_remaining_blocks(request)):
                 reserved[pool_id] += count
         return tuple(reserved)
+
+    def _inflight_prefill_reserved_host_blocks(self) -> int:
+        """HiSparse host reservation needed by all in-flight prefills."""
+        return sum(
+            self._request_remaining_host_blocks(request)
+            for request in self._inflight_prefills
+        )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """

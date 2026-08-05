@@ -156,8 +156,8 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
-    # Physical block-pool domain that owns this block.
-    pool_id: int = 0
+    # Device block-pool domain, or None for a dedicated non-device owner.
+    pool_id: int | None = 0
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
@@ -201,7 +201,7 @@ class KVCacheBlock:
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int
-    block_pool_id: int = 0
+    block_pool_id: int | None = 0
 
 
 class FreeKVCacheBlockQueue:
@@ -968,18 +968,30 @@ def get_max_concurrency_for_kv_cache_config(
     tightest domain determines concurrency.
     """
     blocks_per_request = [0] * len(kv_cache_config.num_blocks_by_pool)
+    host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
-        blocks_per_request[group.block_pool_id] += cdiv(
+        required = cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
-    return min(
+        if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
+            host_blocks_per_request += required
+        else:
+            assert group.block_pool_id is not None
+            blocks_per_request[group.block_pool_id] += required
+    limits = [
         num_blocks / required
         for num_blocks, required in zip(
             kv_cache_config.num_blocks_by_pool, blocks_per_request
         )
         if required > 0
-    )
+    ]
+    if host_blocks_per_request:
+        assert kv_cache_config.hisparse_host_num_blocks is not None
+        limits.append(
+            kv_cache_config.hisparse_host_num_blocks / host_blocks_per_request
+        )
+    return min(limits)
 
 
 def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
@@ -1479,7 +1491,7 @@ def _get_hisparse_hma_config(
     indexer_group = KVCacheGroupSpec(
         list(indexer_specs),
         indexer_group_spec,
-        block_pool_id=1,
+        block_pool_id=0,
         enable_prefix_caching=False,
         enable_kv_transfer=False,
         role=KVCacheGroupRole.HISPARSE_INDEXER,
@@ -1536,7 +1548,7 @@ def _get_hisparse_hma_config(
                     block_size=gpu_block_size,
                     page_size=page_size,
                 ),
-                block_pool_id=1,
+                block_pool_id=0,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
             )
@@ -1549,7 +1561,7 @@ def _get_hisparse_hma_config(
                     page_size=page_size,
                     blocks_per_request=hot_blocks_per_request,
                 ),
-                block_pool_id=1,
+                block_pool_id=0,
                 enable_prefix_caching=False,
                 enable_kv_transfer=False,
             )
@@ -1578,7 +1590,7 @@ def _get_hisparse_hma_config(
     transfer_group = KVCacheGroupSpec(
         list(transfer_specs),
         transfer_group_spec,
-        block_pool_id=0,
+        block_pool_id=None,
         role=KVCacheGroupRole.HISPARSE_SOURCE,
     )
 
@@ -1591,7 +1603,7 @@ def _get_hisparse_hma_config(
                 list(remaining_full_specs),
                 remaining_full_spec,
                 is_eagle_group=group.is_eagle_group,
-                block_pool_id=1,
+                block_pool_id=0,
             )
         )
     other_regular_groups = [
@@ -1611,7 +1623,7 @@ def _get_hisparse_hma_config(
             layer_names=regular.layer_names,
             kv_cache_spec=regular.kv_cache_spec,
             is_eagle_group=regular.is_eagle_group,
-            block_pool_id=1,
+            block_pool_id=0,
             enable_prefix_caching=regular.enable_prefix_caching,
             enable_kv_transfer=regular.enable_kv_transfer,
             role=regular.role,
@@ -1647,6 +1659,7 @@ def _get_hisparse_hma_config(
             size=spec.page_size_bytes * host_num_blocks,
             shared_by=[name],
             host_resident=True,
+            block_pool_id=None,
         )
         for name, spec in source_specs.items()
     ]
@@ -1657,7 +1670,7 @@ def _get_hisparse_hma_config(
             shared_by=names,
             offset=offset,
             block_stride=gpu_stride,
-            block_pool_id=1,
+            block_pool_id=0,
         )
         for offset, names in sorted(gpu_layers_by_offset.items())
     )
@@ -1672,8 +1685,8 @@ def _get_hisparse_hma_config(
             len(hot_groups),
         )
     return KVCacheConfig(
-        num_blocks=host_num_blocks,
-        num_blocks_by_pool=[host_num_blocks, gpu_num_blocks],
+        num_blocks=gpu_num_blocks,
+        num_blocks_by_pool=[gpu_num_blocks],
         kv_cache_tensors=tensors,
         kv_cache_groups=[
             transfer_group,
@@ -1682,6 +1695,7 @@ def _get_hisparse_hma_config(
             *hot_groups,
             *other_regular_groups,
         ],
+        hisparse_host_num_blocks=host_num_blocks,
     )
 
 
@@ -2239,6 +2253,10 @@ def generate_scheduler_kv_cache_config(
         cfg.num_blocks_by_pool == kv_cache_configs[0].num_blocks_by_pool
         for cfg in kv_cache_configs
     )
+    assert all(
+        cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
+        for cfg in kv_cache_configs
+    )
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
@@ -2616,20 +2634,34 @@ def get_kv_cache_configs(
         min(block_counts[pool_id] for block_counts in block_counts_by_config)
         for pool_id in range(num_pools)
     ]
+    host_counts = [
+        config.hisparse_host_num_blocks
+        for config in kv_cache_configs
+        if config.hisparse_host_num_blocks is not None
+    ]
+    min_host_num_blocks = min(host_counts) if host_counts else None
     for kv_cache_config in kv_cache_configs:
         old_num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
+        old_host_num_blocks = kv_cache_config.hisparse_host_num_blocks
         kv_cache_config.num_blocks_by_pool = min_num_blocks_by_pool.copy()
         kv_cache_config.num_blocks = min_num_blocks_by_pool[0]
+        if old_host_num_blocks is not None:
+            assert min_host_num_blocks is not None
+            kv_cache_config.hisparse_host_num_blocks = min_host_num_blocks
 
         # Shrink tensor size proportionally
         for tensor in kv_cache_config.kv_cache_tensors:
-            old_num_blocks = old_num_blocks_by_pool[tensor.block_pool_id]
+            if tensor.host_resident:
+                assert old_host_num_blocks is not None
+                new_num_blocks = min_host_num_blocks
+                old_num_blocks = old_host_num_blocks
+            else:
+                assert tensor.block_pool_id is not None
+                new_num_blocks = min_num_blocks_by_pool[tensor.block_pool_id]
+                old_num_blocks = old_num_blocks_by_pool[tensor.block_pool_id]
+            assert new_num_blocks is not None
             assert tensor.size % old_num_blocks == 0
-            tensor.size = (
-                tensor.size
-                // old_num_blocks
-                * min_num_blocks_by_pool[tensor.block_pool_id]
-            )
+            tensor.size = tensor.size // old_num_blocks * new_num_blocks
 
         if len(kv_cache_config.kv_cache_groups) > 0:
             max_model_len = vllm_config.model_config.max_model_len

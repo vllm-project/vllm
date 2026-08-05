@@ -990,7 +990,7 @@ class KVCacheTensor:
     offset: int = 0  # byte offset of this layer within a contiguous block
     block_stride: int = 0  # total bytes per block in a packed layout (0 = not packed)
     host_resident: bool = False  # allocate in host rather than device memory
-    block_pool_id: int = 0
+    block_pool_id: int | None = 0
 
 
 class KVCacheGroupRole(str, Enum):
@@ -1014,8 +1014,9 @@ class KVCacheGroupSpec:
     is_eagle_group: bool = False
     # Physical block-pool domain used by this group. Groups in the same domain
     # share block IDs and may overlap in a packed HMA layout. Groups in
-    # different domains have independent block-ID spaces.
-    block_pool_id: int = 0
+    # different domains have independent block-ID spaces. None identifies a
+    # group owned by a dedicated non-device manager.
+    block_pool_id: int | None = 0
     # Whether this group participates in persistent prefix-cache lookup.
     # Ephemeral accelerator-side replicas set this to False; their source
     # group remains authoritative and they are rebuilt when a prefix is reused.
@@ -1051,24 +1052,53 @@ class KVCacheConfig:
     An omitted list preserves the traditional single pool of ``num_blocks`` blocks.
     """
 
+    hisparse_host_num_blocks: int | None = None
+    """Capacity of the dedicated HiSparse host-block manager, when enabled."""
+
     def __post_init__(self) -> None:
         if not self.num_blocks_by_pool:
             self.num_blocks_by_pool = [self.num_blocks]
         if any(n < 0 for n in self.num_blocks_by_pool):
             raise ValueError("KV cache block-pool sizes must be non-negative.")
+        if self.hisparse_host_num_blocks is not None and (
+            self.hisparse_host_num_blocks < 0
+        ):
+            raise ValueError("HiSparse host block-pool size must be non-negative.")
         if self.num_blocks != self.num_blocks_by_pool[0]:
             raise ValueError(
                 "KVCacheConfig.num_blocks must equal num_blocks_by_pool[0]."
             )
         num_pools = len(self.num_blocks_by_pool)
         for group in self.kv_cache_groups:
-            if not 0 <= group.block_pool_id < num_pools:
+            if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
+                if (
+                    group.block_pool_id is not None
+                    or self.hisparse_host_num_blocks is None
+                ):
+                    raise ValueError(
+                        "HiSparse source groups require a dedicated host block pool."
+                    )
+                continue
+            if group.block_pool_id is None or not (
+                0 <= group.block_pool_id < num_pools
+            ):
                 raise ValueError(
                     f"Invalid block_pool_id={group.block_pool_id}; "
                     f"configuration has {num_pools} block pools."
                 )
         for tensor in self.kv_cache_tensors:
-            if not 0 <= tensor.block_pool_id < num_pools:
+            if tensor.host_resident:
+                if (
+                    tensor.block_pool_id is not None
+                    or self.hisparse_host_num_blocks is None
+                ):
+                    raise ValueError(
+                        "Host-resident tensors require the HiSparse host pool."
+                    )
+                continue
+            if tensor.block_pool_id is None or not (
+                0 <= tensor.block_pool_id < num_pools
+            ):
                 raise ValueError(
                     f"Invalid tensor block_pool_id={tensor.block_pool_id}; "
                     f"configuration has {num_pools} block pools."
@@ -1103,9 +1133,12 @@ class KVCacheConfig:
         zeroing_pools = {
             group.block_pool_id
             for group in self.kv_cache_groups
-            if isinstance(group.kv_cache_spec, MambaSpec)
+            if group.block_pool_id is not None
+            and isinstance(group.kv_cache_spec, MambaSpec)
         }
         for group in self.kv_cache_groups:
+            if group.block_pool_id is None:
+                continue
             group_spec = group.kv_cache_spec
             specs = (
                 group_spec.kv_cache_specs.values()

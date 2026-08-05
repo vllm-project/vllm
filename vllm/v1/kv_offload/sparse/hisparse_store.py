@@ -430,6 +430,8 @@ def init_hisparse_store(
     source_specs = cast(UniformTypeKVCacheSpecs, source_group.kv_cache_spec)
     indexer_specs = cast(UniformTypeKVCacheSpecs, indexer_group.kv_cache_spec)
     num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
+    host_num_blocks = kv_cache_config.hisparse_host_num_blocks
+    assert host_num_blocks is not None
 
     cache_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
     for layer_name in indexer_group.layer_names:
@@ -449,7 +451,7 @@ def init_hisparse_store(
         source_cache = torch.as_strided(
             raw_tensors[cache_name].view(source_spec.dtype),
             size=(
-                num_blocks_by_pool[tensor_config.block_pool_id] * blocks_per_kv_block,
+                host_num_blocks * blocks_per_kv_block,
                 kernel_block_size,
                 source_spec.head_size,
             ),
@@ -475,6 +477,7 @@ def init_hisparse_store(
             assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
             tensor_config = tensor_configs[cache_name]
+            assert tensor_config.block_pool_id is not None
             layer = _get_hisparse_layer(forward_context, layer_name)
             layer.bind_cache(
                 raw_tensors[cache_name],
@@ -505,6 +508,7 @@ def init_hisparse_store(
             layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
             layer = _get_hisparse_layer(forward_context, layer_name)
             tensor_config = tensor_configs[cache_name]
+            assert tensor_config.block_pool_id is not None
             layer.offload.bind_hot_cache(
                 raw_tensor,
                 byte_offset=tensor_config.offset,

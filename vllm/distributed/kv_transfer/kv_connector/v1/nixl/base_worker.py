@@ -391,7 +391,11 @@ class NixlBaseConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
 
-        self.num_blocks = kv_cache_config.num_blocks
+        self.num_blocks = (
+            kv_cache_config.hisparse_host_num_blocks
+            if kv_cache_config.hisparse_host_num_blocks is not None
+            else kv_cache_config.num_blocks
+        )
         self.enable_permute_local_kv = False
         self.enable_heterogeneous_attn_post_process = False
 
