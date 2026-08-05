@@ -146,19 +146,11 @@ def _reference(convs, ssms, bt, src_col, dst_col, bias, num_reqs, conv_dim_first
     return conv_ref, ssm_ref
 
 
-# COPY_BLOCK_SIZE: 1024 matches the production launch; 8 shrinks the
-# per-tile rounding so the 4 KiB SSM block actually crosses tile
-# boundaries under TEMPORAL_TILES=_TEMPORAL_TILES. The partitioning math
-# is COPY_BLOCK_SIZE-agnostic, so a small value proves it for all values.
-_COPY_BLOCK_SIZES = [8, 1024]
-
-
 @_parametrize("conv_state_dim_first", [False, True])
 @_parametrize("num_reqs", [1, 4, 16])
 @_parametrize("token_bias", [0, 1, 2])
 @_parametrize("has_idx_mapping", [True, False])
 @_parametrize("temporal_tiles", [1, _TEMPORAL_TILES])
-@_parametrize("copy_block_size", _COPY_BLOCK_SIZES)
 @_cuda_required
 def test_precopy_matches_v1_copy_specs(
     num_reqs,
@@ -166,7 +158,6 @@ def test_precopy_matches_v1_copy_specs(
     has_idx_mapping,
     conv_state_dim_first,
     temporal_tiles,
-    copy_block_size,
 ):
     device = torch.device("cuda")
     torch.manual_seed(0)
@@ -436,11 +427,10 @@ if __name__ == "__main__":
         (True, False),  # has_idx_mapping
         (False, True),  # conv_state_dim_first
         (1, _TEMPORAL_TILES),  # temporal_tiles
-        _COPY_BLOCK_SIZES,  # copy_block_size
     )
-    for nr, tb, mapping, dim_first, tt, cbs in _CASES:
-        test_precopy_matches_v1_copy_specs(nr, tb, mapping, dim_first, tt, cbs)
+    for nr, tb, mapping, dim_first, tt in _CASES:
+        test_precopy_matches_v1_copy_specs(nr, tb, mapping, dim_first, tt)
         print(
             f"OK num_reqs={nr} token_bias={tb} has_idx_mapping={mapping} "
-            f"conv_dim_first={dim_first} temporal_tiles={tt} copy_block_size={cbs}"
+            f"conv_dim_first={dim_first} temporal_tiles={tt}"
         )
