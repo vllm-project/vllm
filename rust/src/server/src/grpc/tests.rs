@@ -1508,6 +1508,7 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(server.total_kv_blocks, DEFAULT_MOCK_NUM_GPU_BLOCKS);
     assert_eq!(server.max_running_requests, 256);
     assert_eq!(server.max_batched_tokens, 8_192);
+    assert!(server.supports_explicit_data_parallel_rank);
     let parallelism = server.parallelism.expect("parallelism metadata");
     assert_eq!(parallelism.tensor_parallel_size, 1);
     assert_eq!(parallelism.pipeline_parallel_size, 1);

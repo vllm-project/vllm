@@ -23,6 +23,10 @@ message ServerInfo {
   uint64 total_kv_blocks = 7;
   uint64 max_running_requests = 8;
   uint64 max_batched_tokens = 9;
+  // GenerateRequest.data_parallel_rank is honored by this server. Clients
+  // that require deterministic rank routing must fail closed when this is
+  // false, because older servers accept and silently discard the field.
+  bool supports_explicit_data_parallel_rank = 10;
 }
 
 message ParallelismInfo {

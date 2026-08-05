@@ -6106,7 +6106,7 @@ async fn tokenize_allows_prompts_at_or_above_max_model_len() {
         max_model_len: 4,
         ..default_ready_response()
     };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready, 1).await;
 
     let (completion_status, completion_json) = post_json(
         &mut app,
