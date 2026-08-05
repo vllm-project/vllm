@@ -18,7 +18,12 @@ Configuration via kv_connector_extra_config:
     registered via CachePolicyFactory
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
-      - type: (required) Type of secondary tier (e.g., "example", "storage", "network")
+      - type: (required) Type of secondary tier (e.g., "example", "fs",
+        "p2p", "obj"), or the class name of an out-of-tree
+        SecondaryTierManager paired with module_path.
+      - module_path: (optional) Python import path to load 'type' from
+        when it names an out-of-tree SecondaryTierManager not registered
+        via SecondaryTierFactory.register_tier()
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
 
@@ -31,6 +36,18 @@ Example configuration:
         {
             "type": "example",
             "custom_param": 67
+        }
+    ]
+}
+
+Example out-of-tree tier configuration:
+{
+    "cpu_bytes_to_use": 10737418240,
+    "secondary_tiers": [
+        {
+            "type": "MyCustomTier",
+            "module_path": "my_package.my_module",
+            "custom_param": "value"
         }
     ]
 }
