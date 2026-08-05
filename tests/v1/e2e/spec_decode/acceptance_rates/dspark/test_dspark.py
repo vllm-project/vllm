@@ -46,8 +46,7 @@ def test_gemma4_dspark_correctness_and_acceptance_rate(
         enforce_eager=True,
         enable_chunked_prefill=None,
         enable_prefix_caching=False,
-        # GSM8K is text-only; avoid profiling unused multimodal towers.
-        limit_mm_per_prompt={"image": 0, "audio": 0, "video": 0},
+        language_model_only=True,
         disable_log_stats=False,
         compilation_config=CompilationConfig(),
     ) as spec_runner:
