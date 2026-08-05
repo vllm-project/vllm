@@ -49,6 +49,10 @@ update_request = WeightTransferUpdateRequest(
 )
 ```
 
+At the LLM/API layer, call `start_draft_weight_update()` instead of
+`start_weight_update()` to target the speculative draft model;
+`update_weights` / `finish_weight_update` are unchanged.
+
 ### WeightTransferUpdateInfo
 
 The base `WeightTransferUpdateInfo` is a marker class for backend-specific update info:

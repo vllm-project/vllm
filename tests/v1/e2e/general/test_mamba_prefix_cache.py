@@ -39,12 +39,17 @@ from vllm.v1.worker.mamba_utils import get_mamba_groups
 class StepAction:
     num_computed_tokens_start: int
     num_scheduled_tokens: int
-    kv_cache_block_ids: list[int]  # [] to follow last step
+    kv_cache_block_ids: list[int]  # per-block mask: 1=held, 0=freed/nulled
     preprocess_copy_idx: tuple[int, int]  # -1, -1 for no copy
     postprocess_copy_idx: tuple[int, int]  # -1, -1 for no copy
 
 
 num_speculative_tokens = 3
+
+# Whether the run under test uses async scheduling. Set by each test entrypoint
+# before generation; consulted where the scheduler's optimistic token count must
+# be corrected for in-flight (possibly-rejected) speculative tokens.
+async_scheduling_mode = False
 
 num_accepted_tokens = 1
 prompt_token_ids: list[int] = []
@@ -249,7 +254,8 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
             )
             if (
-                self.num_spec_tokens
+                async_scheduling_mode
+                and self.num_spec_tokens
                 and num_prompt_tokens is not None
                 and num_computed_tokens > num_prompt_tokens
             ):
@@ -332,6 +338,30 @@ def get_fake_process_mamba_fn(
             assert copy_info[0][-1] == expected_temporal_src
             assert copy_info[1][-1] == expected_temporal_dest
 
+    def check_fused_copy_info(
+        action: tuple[int, int],
+        align_ctx: mamba_utils.MambaSpecDecodeGPUContext,
+    ):
+        # Align + spec-decode on a hybrid model routes the pre-copy through the
+        # fused kernel (preprocess_mamba -> run_fused_precopy) instead of
+        # do_mamba_copy_block, so copy_info is never populated. Verify from the
+        # fused buffers (req-0 scope, mirroring check_copy_info):
+        #   - the copy DECISION: src_col is -1 iff no pre-copy is scheduled;
+        #   - the DESTINATION column: state_idx == action[1] (curr_state_idx;
+        #     maps directly through block_ids, exactly as check_copy_info's dst).
+        # The source column is NOT asserted here: on the scalar path the source
+        # address is produced by the per-state copy func with an accept-token
+        # bias offset (collect_mamba_copy_meta), so prev_state_idx does not map
+        # to action[0] by plain equality. Source block-level exactness (incl.
+        # the accept-bias) is covered by test_precopy_mamba_align.py.
+        src_col = int(align_ctx.precopy_src_col_buf.np[0])
+        state_idx = int(align_ctx.mamba_state_idx_buf.np[0])
+        if action == (-1, -1):
+            assert src_col == -1
+        else:
+            assert src_col != -1
+            assert state_idx == action[1]
+
     def fake_preprocess_mamba_fn(
         scheduler_output: SchedulerOutput,
         kv_cache_config: KVCacheConfig,
@@ -342,6 +372,7 @@ def get_fake_process_mamba_fn(
         forward_context: dict[str, Any],
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
         copy_bufs: mamba_utils.MambaCopyBuffers,
+        align_ctx: mamba_utils.MambaSpecDecodeGPUContext | None = None,
     ):
         nonlocal copy_info
         copy_info = None
@@ -355,14 +386,21 @@ def get_fake_process_mamba_fn(
             forward_context,
             mamba_state_copy_funcs,
             copy_bufs,
+            align_ctx,
         )
         if cur_step_action is not None:
-            check_copy_info(
-                cur_step_action.preprocess_copy_idx,
-                kv_cache_config,
-                forward_context,
-                input_batch,
-            )
+            if align_ctx is not None:
+                check_fused_copy_info(
+                    cur_step_action.preprocess_copy_idx,
+                    align_ctx,
+                )
+            else:
+                check_copy_info(
+                    cur_step_action.preprocess_copy_idx,
+                    kv_cache_config,
+                    forward_context,
+                    input_batch,
+                )
         return ret
 
     def fake_copy_fn(copy_bufs: mamba_utils.MambaCopyBuffers):
@@ -496,7 +534,10 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
-def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
+def get_mamba_prefix_cache_step_configs(
+    async_scheduling: bool = False,
+) -> dict[str, TestConfig]:
+    a = async_scheduling
     tests = {
         "accept_1": TestConfig(
             num_prompt_tokens=554,
@@ -504,14 +545,24 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=1,
             step_actions=[
                 StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [], (0, 1), (-1, -1)),
-                StepAction(558, 4, [], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [], (-1, -1), (1, 0)),
-                StepAction(560, 4, [], (-1, -1), (-1, -1)),
-                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    555, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                ),
+                StepAction(
+                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                ),
+                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(558, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(559, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
+                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    561,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
             ],
         ),
         # test case 2.1: no hit, accept 2 tokens
@@ -521,11 +572,19 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=2,
             step_actions=[
                 StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [], (1, 1), (2, 0)),
-                StepAction(560, 4, [], (-1, -1), (-1, -1)),
-                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                ),
+                StepAction(558, 4, [1, 1, 1, 1, 1], (1, 1), (2, 0)),
+                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    562,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
             ],
         ),
         # test case 2.2: no hit, accept 2 tokens
@@ -535,10 +594,16 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=2,
             step_actions=[
                 StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
+                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(557, 4, [1, 1, 1, 1, 1], (1, 1), (-1, -1)),
-                StepAction(559, 4, [], (-1, -1), (1, 0)),
-                StepAction(561, 4, [], (-1, -1), (-1, -1)),
+                StepAction(559, 4, [1, 1, 1, 1, 1], (-1, -1), (1, 0)),
+                StepAction(
+                    561,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
                 StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -548,10 +613,18 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=3,
             step_actions=[
                 StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [], (2, 1), (1, 0)),
-                StepAction(562, 4, [], (-1, -1), (-1, -1)),
+                StepAction(553, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    556, 4, [1, 1, 1, 1, 1] if a else [1, 1, 1, 1], (-1, -1), (-1, -1)
+                ),
+                StepAction(559, 4, [1, 1, 1, 1, 1], (2, 1), (1, 0)),
+                StepAction(
+                    562,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
                 StepAction(565, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -561,10 +634,16 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=3,
             step_actions=[
                 StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
+                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(557, 4, [1, 1, 1, 1, 1], (2, 1), (3, 0)),
-                StepAction(560, 4, [], (-1, -1), (-1, -1)),
-                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(560, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    563,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
             ],
         ),
         "accept_3_3": TestConfig(
@@ -573,9 +652,15 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=3,
             step_actions=[
                 StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
+                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(558, 4, [1, 1, 1, 1, 1], (2, 1), (2, 0)),
-                StepAction(561, 4, [], (-1, -1), (-1, -1)),
+                StepAction(
+                    561,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
                 StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -585,9 +670,15 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=4,
             step_actions=[
                 StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [], (-1, -1), (-1, -1)),
+                StepAction(553, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(557, 4, [1, 1, 1, 1, 1], (3, 1), (3, 0)),
-                StepAction(561, 4, [], (-1, -1), (-1, -1)),
+                StepAction(
+                    561,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
                 StepAction(565, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -597,9 +688,15 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=4,
             step_actions=[
                 StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
+                StepAction(554, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(558, 4, [1, 1, 1, 1, 1], (3, 1), (2, 0)),
-                StepAction(562, 4, [], (-1, -1), (-1, -1)),
+                StepAction(
+                    562,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
                 StepAction(566, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -609,9 +706,15 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=4,
             step_actions=[
                 StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
+                StepAction(555, 4, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(559, 4, [1, 1, 1, 1, 1], (3, 1), (1, 0)),
-                StepAction(563, 4, [], (-1, -1), (-1, -1)),
+                StepAction(
+                    563,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
                 StepAction(567, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
@@ -621,9 +724,15 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             num_accepted_tokens=4,
             step_actions=[
                 StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (3, 0)),
+                StepAction(556, 4, [1, 1, 1, 1], (-1, -1), (3, 0)),
                 StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    564,
+                    4,
+                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
             ],
         ),
         "prompt_block_size": TestConfig(
@@ -642,7 +751,13 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             step_actions=[
                 StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(560, 560, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(560 * 2, 4, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
+                StepAction(
+                    560 * 2,
+                    4,
+                    [1, 1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1, 1],
+                    (1, 2),
+                    (-1, -1),
+                ),
             ],
         ),
         "prompt_2_block_size_10": TestConfig(
@@ -652,7 +767,13 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             step_actions=[
                 StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(560, 570, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
-                StepAction(560 * 2 + 10, 4, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    560 * 2 + 10,
+                    4,
+                    [1, 0, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
             ],
         ),
         "prompt_3_block_size": TestConfig(
@@ -662,7 +783,13 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             step_actions=[
                 StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
-                StepAction(560 * 3, 4, [0, 0, 1, 1, 1, 1, 1], (2, 3), (-1, -1)),
+                StepAction(
+                    560 * 3,
+                    4,
+                    [0, 1, 1, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1, 1],
+                    (2, 3),
+                    (-1, -1),
+                ),
             ],
         ),
         "prompt_3_block_size_10": TestConfig(
@@ -672,7 +799,13 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
             step_actions=[
                 StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(560 * 2, 570, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
-                StepAction(560 * 3 + 10, 4, [0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    560 * 3 + 10,
+                    4,
+                    [0, 1, 0, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
+                    (-1, -1),
+                    (-1, -1),
+                ),
             ],
         ),
         "prompt_10_block_size": TestConfig(
@@ -691,14 +824,18 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
                 StepAction(
                     560 * 9,
                     560,
-                    [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1]
+                    if a
+                    else [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
                     (8, 9),
                     (-1, -1),
                 ),
                 StepAction(
                     560 * 10,
                     4,
-                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+                    if a
+                    else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
                     (9, 10),
                     (-1, -1),
                 ),
@@ -720,34 +857,28 @@ def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
                 StepAction(
                     560 * 9,
                     560 + 10,
-                    [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1]
+                    if a
+                    else [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
                     (8, 10),
                     (-1, -1),
                 ),
             ],
         ),
     }
-
     return tests
 
 
-def fill_following_kv_cache_block_ids(test_config: TestConfig) -> None:
-    for step_action_prev, step_action_next in zip(
-        test_config.step_actions[:-1], test_config.step_actions[1:]
-    ):
-        if len(step_action_next.kv_cache_block_ids) == 0:
-            step_action_next.kv_cache_block_ids = (
-                step_action_prev.kv_cache_block_ids.copy()
-            )
-
-
-@create_new_process_for_each_test()
-def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
+def _run_mamba_prefix_cache_mrv1(
+    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+):
+    global async_scheduling_mode
+    async_scheduling_mode = async_scheduling
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
     prompt_dataset = datasets.load_dataset("heheda/a_long_article")
     full_prompt = prompt_dataset["train"][0]["text"]
-    tests = get_mamba_prefix_cache_step_configs()
+    tests = get_mamba_prefix_cache_step_configs(async_scheduling)
 
     engine = LLM(
         model=MODEL,
@@ -761,6 +892,7 @@ def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
         },
         max_num_batched_tokens=3072,
         hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
+        async_scheduling=async_scheduling,
         seed=42,
     )
     global prompt_token_ids
@@ -777,7 +909,6 @@ def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
         )
         global cur_step_action_idx
         cur_step_action_idx = 0
-        fill_following_kv_cache_block_ids(test_config)
         global step_actions
         step_actions = test_config.step_actions
         _ = engine.generate(
@@ -800,7 +931,20 @@ def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
 
 
 @create_new_process_for_each_test()
-def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
+def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
+
+
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
+
+
+def _run_mamba_prefix_cache_mrv2(
+    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
+):
+    global async_scheduling_mode
+    async_scheduling_mode = async_scheduling
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     envs.disable_envs_cache()
@@ -998,11 +1142,12 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
         max_num_batched_tokens=3072,
         max_model_len=BLOCK_SIZE * 12,
         hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
+        async_scheduling=async_scheduling,
         seed=42,
     )
 
     try:
-        tests = get_mamba_prefix_cache_step_configs()
+        tests = get_mamba_prefix_cache_step_configs(async_scheduling)
 
         global step_actions
         global cur_step_action_idx
@@ -1010,7 +1155,6 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
         for test_name, test_config in tests.items():
             num_accepted_tokens = test_config.num_accepted_tokens
             cur_step_action_idx = 0
-            fill_following_kv_cache_block_ids(test_config)
             step_actions = test_config.step_actions
             sampling_params = SamplingParams(
                 temperature=0.0,
@@ -1053,3 +1197,13 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
         del engine
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=False)
+
+
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
+    _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)

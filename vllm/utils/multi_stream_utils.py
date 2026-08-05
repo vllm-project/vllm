@@ -8,10 +8,6 @@ from typing import Any
 import torch
 
 
-class AuxStreamType(Enum):
-    Attention = 1
-
-
 class EventType(Enum):
     Main = 0
     Attention = 1
@@ -20,15 +16,16 @@ class EventType(Enum):
 def maybe_execute_in_parallel(
     fn0: Callable[[], Any],
     fn1: Callable[[], Any],
-    event0: torch.Event,
-    event1: torch.Event,
+    event0: torch.cuda.Event,
+    event1: torch.cuda.Event,
     aux_stream: torch.cuda.Stream | None = None,
 ) -> tuple[Any, Any]:
     """Run two functions potentially in parallel on separate CUDA streams.
 
     When aux_stream is provided, fn0 runs on the current (default) stream and
-    fn1 runs on aux_stream, synchronized via CUDA events.  When aux_stream is
-    None, both functions execute sequentially on the current stream.
+    fn1 runs on aux_stream, synchronized via CUDA events. When aux_stream is
+    None or a breakable CUDA graph capture is active, both functions execute
+    sequentially on the current stream.
 
     This design follows TensorRT-LLM's maybe_execute_in_parallel pattern
     (tensorrt_llm/_torch/modules/multi_stream_utils.py).
@@ -39,11 +36,18 @@ def maybe_execute_in_parallel(
         event0: CUDA event recorded before fn0 so aux_stream can wait.
         event1: CUDA event recorded after fn1 so default stream can wait.
         aux_stream: The second CUDA stream for fn1.
-            Multi-stream is disabled when aux_stream is None.
+            Multi-stream is disabled when aux_stream is None or a breakable
+            CUDA graph capture is active.
 
     Returns:
         Tuple of (fn0_result, fn1_result).
     """
+    if aux_stream is not None:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+        if BreakableCUDAGraphCapture.is_active():
+            aux_stream = None
+
     if aux_stream is not None:
         event0.record()
         result0 = fn0()
@@ -61,8 +65,8 @@ def maybe_execute_in_parallel(
 def execute_in_parallel(
     default_fn: Callable[[], Any],
     aux_fns: list[Callable[[], Any] | None],
-    start_event: torch.Event,
-    done_events: list[torch.Event],
+    start_event: torch.cuda.Event,
+    done_events: list[torch.cuda.Event],
     aux_streams: list[torch.cuda.Stream] | None = None,
     enable: bool = False,
 ) -> tuple[Any, list[Any]]:
@@ -108,7 +112,7 @@ def execute_in_parallel(
     )
 
     aux_results = [None] * len(aux_fns)
-    pending: list[torch.Event] = []
+    pending: list[torch.cuda.Event] = []
 
     start_event.record()
     for i, fn in enumerate(aux_fns):

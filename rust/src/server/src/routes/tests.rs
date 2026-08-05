@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 // Route tests should use `Service::call` rather than `ServiceExt::oneshot`.
 // `oneshot` consumes the router and can drop `AppState` before a streaming
 // response body is fully drained, which closes the mock engine connection too
@@ -76,6 +79,7 @@ fn request_output_with_stop_reason(
         stop_reason,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -101,6 +105,7 @@ fn request_output_with_logprobs(
         stop_reason,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -116,6 +121,7 @@ fn request_output_with_logprobs_and_kv(
     new_logprobs: Option<Logprobs>,
     new_prompt_logprobs_tensors: Option<Logprobs>,
     kv_transfer_params: Option<serde_json::Value>,
+    ec_transfer_params: Option<serde_json::Value>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
@@ -127,6 +133,7 @@ fn request_output_with_logprobs_and_kv(
         stop_reason,
         events: None,
         kv_transfer_params,
+        ec_transfer_params,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -143,6 +150,20 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
         (vec![b'h' as u32], None),
         (vec![b'i' as u32], None),
         (vec![b'!' as u32], Some(EngineCoreFinishReason::Stop)),
+    ]
+}
+
+fn weather_tool_call_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+    vec![
+        (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
+        (
+            bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
+            None,
+        ),
+        (
+            bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
+            Some(EngineCoreFinishReason::Stop),
+        ),
     ]
 }
 
@@ -504,7 +525,7 @@ impl ChatRenderer for FakeChatBackend {
         let placeholder = self
             .multimodal_model_info
             .as_ref()
-            .map(|info| info.placeholder_token())
+            .and_then(|info| info.placeholder_token(llm_multimodal::Modality::Image))
             .unwrap_or("<image>");
         let mut prompt = String::new();
         for message in &request.messages {
@@ -544,7 +565,10 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
             for part in parts {
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } => out.push_str(placeholder),
+                    ChatContentPart::ImageUrl { .. }
+                    | ChatContentPart::VideoUrl { .. }
+                    | ChatContentPart::InputAudio { .. }
+                    | ChatContentPart::AudioUrl { .. } => out.push_str(placeholder),
                 }
             }
             out
@@ -553,6 +577,12 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
 }
 
 fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
+    qwen_multimodal_model_info_with_limits(std::collections::HashMap::new())
+}
+
+fn qwen_multimodal_model_info_with_limits(
+    limit_mm_per_prompt: vllm_chat::multimodal::MmLimitPerPrompt,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-server-qwen-config-{}.json",
         uuid::Uuid::new_v4()
@@ -565,9 +595,12 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
     let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
         "qwen2-vl-test".to_string(),
         Some("qwen2_vl".to_string()),
-        Some(&config_path),
-        None,
+        vllm_chat::multimodal::MultimodalConfigFiles {
+            config: Some(&config_path),
+            ..Default::default()
+        },
         Arc::new(fake_chat_tokenizer()),
+        limit_mm_per_prompt,
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -2191,6 +2224,28 @@ async fn non_stream_chat_returns_json_response() {
     assert_eq!(json["usage"]["prompt_tokens"], 22);
     assert_eq!(json["usage"]["completion_tokens"], 3);
     assert_eq!(json["usage"]["total_tokens"], 25);
+
+    // Unset optional fields are serialized as explicit `null` on
+    // non-streaming responses...
+    let response_object = json.as_object().expect("response object");
+    let choice = json["choices"][0].as_object().expect("choice object");
+    let message = choice["message"].as_object().expect("message object");
+    for (object, key) in [
+        (response_object, "system_fingerprint"),
+        (response_object, "prompt_token_ids"),
+        (response_object, "kv_transfer_params"),
+        (choice, "logprobs"),
+        (choice, "stop_reason"),
+        (choice, "token_ids"),
+        (message, "reasoning"),
+    ] {
+        assert!(
+            object.contains_key(key) && object[key].is_null(),
+            "expected explicit null `{key}`: {json}"
+        );
+    }
+    // ...except `tool_calls`, which Python pops from the payload when empty.
+    assert!(!message.contains_key("tool_calls"), "{json}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2257,6 +2312,74 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
     assert_eq!(json["object"], "chat.completion");
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() {
+    // The request is rejected by `--limit-mm-per-prompt` validation before
+    // ever reaching the engine, so the mock engine task is never awaited.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-mm-limit",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
+                vllm_chat::multimodal::MmLimitModality::Image,
+                vllm_chat::multimodal::MmLimitSpec::Count(1),
+            )])),
+        )),
+    )
+    .await;
+    let app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    }
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        json["error"]["message"],
+        "At most 1 image(s) may be provided in one prompt."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2345,6 +2468,14 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     assert_eq!(
         json["choices"][0]["logprobs"]["content"][1]["token"],
         json!("i")
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][0]["top_logprobs"],
+        json!([])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"],
+        json!([])
     );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert!(json["prompt_logprobs"][1].is_object());
@@ -2956,6 +3087,25 @@ async fn non_stream_completions_return_json_response() {
     assert_eq!(json["choices"][0]["text"], "hi");
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
     assert_eq!(json["usage"]["completion_tokens"], 3);
+
+    // Unset optional fields are serialized as explicit `null` on
+    // non-streaming responses.
+    let response_object = json.as_object().expect("response object");
+    let choice = json["choices"][0].as_object().expect("choice object");
+    for (object, key) in [
+        (response_object, "system_fingerprint"),
+        (response_object, "kv_transfer_params"),
+        (choice, "logprobs"),
+        (choice, "stop_reason"),
+        (choice, "prompt_logprobs"),
+        (choice, "token_ids"),
+        (choice, "prompt_token_ids"),
+    ] {
+        assert!(
+            object.contains_key(key) && object[key].is_null(),
+            "expected explicit null `{key}`: {json}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3589,6 +3739,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                                 Some(sample_logprobs_for_token(44, 45)),
                                 None,
                                 Some(json!({"connector": "x"})),
+                                None,
                             ),
                         ],
                         ..Default::default()
@@ -4371,10 +4522,10 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     let json: serde_json::Value = serde_json::from_str(&text).expect("decode json");
 
     assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    // Suppressed fields are serialized as explicit `null` on non-streaming
+    // responses.
     assert!(
-        json["choices"][0]["message"]
-            .as_object()
-            .is_some_and(|message| !message.contains_key("reasoning")),
+        json["choices"][0]["message"]["reasoning"].is_null(),
         "{text}"
     );
 }
@@ -4476,14 +4627,14 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
     let choice = json["choices"][0].as_object().expect("choice object");
 
     assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    // Suppressed fields are serialized as explicit `null` on non-streaming
+    // responses.
     assert!(
-        json["choices"][0]["message"]
-            .as_object()
-            .is_some_and(|message| !message.contains_key("reasoning")),
+        json["choices"][0]["message"]["reasoning"].is_null(),
         "{text}"
     );
-    assert!(!choice.contains_key("logprobs"), "{text}");
-    assert!(!choice.contains_key("token_ids"), "{text}");
+    assert!(choice["logprobs"].is_null(), "{text}");
+    assert!(choice["token_ids"].is_null(), "{text}");
     assert!(json["prompt_token_ids"].is_array(), "{text}");
 }
 
@@ -4492,17 +4643,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
 async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
-        vec![
-            (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
-            (
-                bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
-                None,
-            ),
-            (
-                bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
-                Some(EngineCoreFinishReason::Stop),
-            ),
-        ],
+        weather_tool_call_output_specs(),
     )
     .await;
 
@@ -4549,6 +4690,63 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
         "{text}"
     );
     assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn named_tool_choice_uses_stop_finish_reason() {
+    for stream in [false, true] {
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            weather_tool_call_output_specs(),
+        )
+        .await;
+
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "stream": stream,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "tools": [{
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "description": "Get weather",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {"city": {"type": "string"}}
+                                    }
+                                }
+                            }],
+                            "tool_choice": {
+                                "type": "function",
+                                "function": {"name": "get_weather"}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        assert!(text.contains("\"tool_calls\":"), "{text}");
+        assert!(text.contains("\"name\":\"get_weather\""), "{text}");
+        assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
+        assert!(!text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4755,7 +4953,10 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("json body"),
+        json!({"success": true})
+    );
     engine_task.await.expect("mock engine task");
 }
 
@@ -5228,10 +5429,12 @@ async fn abort_requests_route_returns_ok_for_well_formed_body() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn abort_requests_route_rejects_missing_request_ids() {
+async fn abort_requests_route_aborts_all_when_request_ids_missing() {
     let (app, engine_task) =
         test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
 
+    // Missing `request_ids` means "abort all in-flight requests"; with no
+    // in-flight requests this is a no-op that still succeeds.
     let response = app
         .clone()
         .call(
@@ -5245,11 +5448,10 @@ async fn abort_requests_route_rejects_missing_request_ids() {
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
-    assert_eq!(json["error"]["param"], "request_ids");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
     engine_task.abort_and_join().await;
 }
 
@@ -5865,6 +6067,75 @@ async fn tokenize_chat_includes_generation_prompt_in_token_count() {
     let with_len = with_prompt["tokens"].as_array().unwrap().len();
     let without_len = without_prompt["tokens"].as_array().unwrap().len();
     assert!(with_len > without_len);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_with_tools_does_not_require_output_parser() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!json["tokens"].as_array().expect("tokens").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_allows_prompts_at_or_above_max_model_len() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        max_model_len: 4,
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+
+    let (completion_status, completion_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    assert_eq!(completion_status, StatusCode::OK);
+    assert_eq!(completion_json["count"], 5);
+    assert_eq!(completion_json["max_model_len"], 4);
+
+    let (chat_status, chat_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "add_generation_prompt": false,
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    assert_eq!(chat_status, StatusCode::OK);
+    assert!(chat_json["count"].as_u64().expect("count") > 4);
+    assert_eq!(chat_json["max_model_len"], 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

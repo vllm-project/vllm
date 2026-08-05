@@ -83,7 +83,10 @@ class DPMetadata:
         num_tokens_across_dp_cpu: torch.Tensor,
     ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
-        assert parallel_config.data_parallel_size > 1
+        assert (
+            parallel_config.data_parallel_size > 1
+            or parallel_config.use_sequence_parallel_moe
+        )
         assert parallel_config.is_moe_model is not False
         dp_rank = parallel_config.data_parallel_rank
         batchsize = num_tokens
@@ -277,14 +280,20 @@ def set_forward_context(
 
     dp_metadata: DPMetadata | None = None
     if (
-        vllm_config.parallel_config.data_parallel_size > 1
+        (
+            vllm_config.parallel_config.data_parallel_size > 1
+            or vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         and vllm_config.parallel_config.is_moe_model is not False
         and (attn_metadata is not None or num_tokens is not None)
     ):
         # If num_tokens_across_dp hasn't already been initialized, then
         # initialize it here. Both DP padding and Microbatching will be
         # disabled.
-        if num_tokens_across_dp is None:
+        if (
+            num_tokens_across_dp is None
+            and vllm_config.parallel_config.data_parallel_size > 1
+        ):
             assert ubatch_slices is None
             assert num_tokens is not None
             _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
@@ -293,6 +302,9 @@ def set_forward_context(
                 allow_microbatching=False,
             )
             assert num_tokens_across_dp is not None
+        elif num_tokens_across_dp is None:
+            assert num_tokens is not None
+            num_tokens_across_dp = torch.tensor([num_tokens], dtype=torch.int32)
         dp_metadata = DPMetadata.make(
             vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )

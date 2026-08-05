@@ -21,6 +21,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -448,24 +449,6 @@ def run_exaone4_5(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Fuyu
-def run_fuyu(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    prompts = [f"{question}\n" for question in questions]
-    engine_args = EngineArgs(
-        model="adept/fuyu-8b",
-        max_model_len=2048,
-        max_num_seqs=2,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Gemma 3
 def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -514,6 +497,45 @@ def run_gemma3n(questions: list[str], modality: str) -> ModelRequestData:
         )
         for question in questions
     ]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Gemma 4
+def run_gemma4(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality in ("image", "video")
+    model_name = "google/gemma-4-31B-it"
+
+    # NOTE: Gemma-4-31B is a large model. Users running into Out-Of-Memory (OOM)
+    # errors might need to set `tensor_parallel_size` to > 1.
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        prompts = [
+            (
+                "<bos><start_of_turn>user\n"
+                f"<|image|>\n{question}<end_of_turn>\n"
+                "<start_of_turn>model\n"
+            )
+            for question in questions
+        ]
+    else:  # video
+        prompts = [
+            (
+                "<bos><start_of_turn>user\n"
+                f"<|video|>\n{question}<end_of_turn>\n"
+                "<start_of_turn>model\n"
+            )
+            for question in questions
+        ]
+
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
@@ -2318,9 +2340,9 @@ model_example_map = {
     "eagle2_5": run_eagle2_5,
     "ernie45_vl": run_ernie45_vl,
     "exaone4_5": run_exaone4_5,
-    "fuyu": run_fuyu,
     "gemma3": run_gemma3,
     "gemma3n": run_gemma3n,
+    "gemma4": run_gemma4,
     "glm4v": run_glm4v,
     "glm4_1v": run_glm4_1v,
     "glm4_5v": run_glm4_5v,
@@ -2392,6 +2414,7 @@ MODELS_NEED_VIDEO_METADATA = [
 
 MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "llama4",
+    "gemma4",
     "qwen2_vl",
     "qwen2_5_vl",
     "qwen3_vl",
@@ -2665,6 +2688,8 @@ def main(args):
     if args.tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = args.tensor_parallel_size
     engine_args = maybe_add_vit_cuda_graph_compilation_config(args, engine_args)
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.

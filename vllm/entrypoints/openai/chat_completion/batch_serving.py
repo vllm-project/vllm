@@ -174,6 +174,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(single_request, raw_request)
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -181,8 +182,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority if hasattr(request, "priority") else 0,
+                    priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                     reasoning_ended=None,
                 )
             )
@@ -251,12 +253,15 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
 
-                if request.logprobs and request.top_logprobs is not None:
+                if request.logprobs and (
+                    request.top_logprobs is not None or request.logprob_token_ids
+                ):
                     assert output.logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_chat_logprobs(
                         token_ids=output.token_ids,
                         top_logprobs=output.logprobs,
                         num_output_top_logprobs=request.top_logprobs,
+                        logprob_token_ids=request.logprob_token_ids,
                         tokenizer=tokenizer,
                         return_as_token_id=request.return_tokens_as_token_ids,
                     )

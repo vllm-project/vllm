@@ -31,12 +31,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "DeepSeekV31ToolParser",
     ),
     "deepseek_v32": (
-        "deepseekv32_tool_parser",
-        "DeepSeekV32ToolParser",
+        "deepseekv32_engine_tool_parser",
+        "DeepSeekV32EngineToolParser",
     ),
     "deepseek_v4": (
-        "deepseekv4_tool_parser",
-        "DeepSeekV4ToolParser",
+        "deepseekv4_engine_tool_parser",
+        "DeepSeekV4EngineToolParser",
     ),
     "cohere_command3": (
         "cohere_command_tool_parser",
@@ -57,6 +57,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "glm47": (
         "glm47_moe_tool_parser",
         "Glm47MoeModelToolParser",
+    ),
+    "ling3": (
+        "ling3_tool_parser",
+        "Ling3ToolParser",
     ),
     "granite-20b-fc": (
         "granite_20b_fc_tool_parser",
@@ -101,6 +105,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "kimi_k2": (
         "kimi_k2_tool_parser",
         "KimiK2ToolParser",
+    ),
+    "kimi_k3": (
+        "kimi_k3_tool_parser",
+        "KimiK3ToolParser",
     ),
     "llama3_json": (
         "llama_tool_parser",
@@ -173,6 +181,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "step3p5": (
         "step3p5_tool_parser",
         "Step3p5ToolParser",
+    ),
+    "inkling": (
+        "inkling_tool_parser",
+        "InklingEngineToolParser",
     ),
     "xlam": (
         "xlam_tool_parser",

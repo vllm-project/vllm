@@ -43,11 +43,22 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
         cache_config = vllm_config.cache_config
         quant_config = get_draft_quant_config(vllm_config)
 
+        # Resolve per-layer sliding window from draft config
+        sliding_window = None
+        layer_types = getattr(config, "layer_types", None)
+        if (
+            layer_types
+            and layer_idx < len(layer_types)
+            and layer_types[layer_idx] == "sliding_attention"
+        ):
+            sliding_window = getattr(config, "sliding_window", None)
+
         super().__init__(
             config=config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
+            per_layer_sliding_window=sliding_window,
         )
 
         # First layer uses 2*hidden_size (embeds + hidden_states concatenated)
