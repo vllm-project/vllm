@@ -99,6 +99,7 @@ def _worker_parallel_launch(
             # Bypass a ROCm teardown use-after-free (SIGSEGV in HIP's atexit
             # handler; fixed by https://github.com/ROCm/rocm-systems/pull/6942).
             # Flush first since os._exit skips it, to keep a failing traceback.
+            # TODO (Rohan138): Remove after ROCm 10.0 lands
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(exit_code)
