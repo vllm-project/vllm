@@ -54,6 +54,15 @@ class ToolCallSlot:
         "name_sent",
         "string_keys",
         "streamed_json",
+        "_arg_value_start",
+        "_safe_prefix_cursor",
+        "_safe_prefix_last_colon",
+        "_safe_prefix_last_key",
+        "_safe_prefix_pending_key",
+        "_safe_prefix_depth",
+        "_safe_prefix_in_string",
+        "_safe_prefix_escape",
+        "_safe_prefix_string_start",
     )
 
     def __init__(self) -> None:
@@ -64,6 +73,15 @@ class ToolCallSlot:
         self.name_sent: bool = False
         self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
+        self._arg_value_start: int | None = None
+        self._safe_prefix_cursor: int = 0
+        self._safe_prefix_last_colon: int = -1
+        self._safe_prefix_last_key: str | None = None
+        self._safe_prefix_pending_key: str | None = None
+        self._safe_prefix_depth: int = 0
+        self._safe_prefix_in_string: bool = False
+        self._safe_prefix_escape: bool = False
+        self._safe_prefix_string_start: int = -1
 
     @property
     def args(self) -> str:
@@ -339,6 +357,84 @@ class ParserEngine(Parser):
                 continue
             if c == "\\":
                 escape = True
+                continue
+            if c == '"':
+                return json_str[:i]
+        return json_str
+
+    @staticmethod
+    def _incremental_safe_prefix(
+        json_str: str,
+        string_keys: set[str] | None,
+        slot: ToolCallSlot,
+    ) -> str:
+        """Like ``_safe_arg_prefix`` but resumes from cached scanner state.
+
+        The first call on a slot scans from byte 0; subsequent calls
+        resume from ``slot._safe_prefix_cursor``, giving amortized O(delta)
+        work instead of O(n) per call.
+        """
+        cursor = slot._safe_prefix_cursor
+        last_colon = slot._safe_prefix_last_colon
+        last_key = slot._safe_prefix_last_key
+        pending_key = slot._safe_prefix_pending_key
+        depth = slot._safe_prefix_depth
+        in_string = slot._safe_prefix_in_string
+        escape = slot._safe_prefix_escape
+        string_start = slot._safe_prefix_string_start
+
+        for i in range(cursor, len(json_str)):
+            c = json_str[i]
+            if escape:
+                escape = False
+                continue
+            if in_string:
+                if c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_string = False
+                    if depth == 1 and string_start >= 0:
+                        pending_key = json_str[string_start + 1 : i]
+                continue
+            if c == '"':
+                in_string = True
+                string_start = i
+            elif c in ("{", "["):
+                depth += 1
+            elif c in ("}", "]"):
+                depth -= 1
+            elif c == ":" and depth == 1:
+                last_colon = i
+                last_key = pending_key
+                pending_key = None
+
+        slot._safe_prefix_cursor = len(json_str)
+        slot._safe_prefix_last_colon = last_colon
+        slot._safe_prefix_last_key = last_key
+        slot._safe_prefix_pending_key = pending_key
+        slot._safe_prefix_depth = depth
+        slot._safe_prefix_in_string = in_string
+        slot._safe_prefix_escape = escape
+        slot._safe_prefix_string_start = string_start
+
+        if last_colon < 0:
+            return ""
+        end = last_colon + 1
+        while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
+            end += 1
+        if end >= len(json_str) or json_str[end] != '"':
+            return json_str[:end]
+        if string_keys is not None and last_key not in string_keys:
+            return json_str[:end]
+
+        esc = False
+        for i in range(end + 1, len(json_str)):
+            c = json_str[i]
+            if esc:
+                esc = False
+                continue
+            if c == "\\":
+                esc = True
                 continue
             if c == '"':
                 return json_str[:i]
@@ -945,11 +1041,20 @@ class ParserEngine(Parser):
             return None
 
         slot = self._tool_slots[idx]
-        try:
-            current_json = converter(slot.args, True)
-        except (json.JSONDecodeError, ValueError, TypeError):
-            logger.debug("arg converter failed (streaming): %s", slot.args[:80])
-            return None
+
+        if slot._arg_value_start is not None:
+            current_json = slot.args[slot._arg_value_start :]
+        else:
+            try:
+                current_json = converter(slot.args, True)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                logger.debug("arg converter failed (streaming): %s", slot.args[:80])
+                return None
+
+            if current_json and slot._arg_value_start is None:
+                offset = len(slot.args) - len(current_json)
+                if offset >= 0 and slot.args[offset:] == current_json:
+                    slot._arg_value_start = offset
 
         if not current_json:
             return None
@@ -958,7 +1063,7 @@ class ParserEngine(Parser):
             current_json = self._fix_arg_types(current_json, slot.name)
 
         prev = slot.streamed_json
-        safe_json = self._safe_arg_prefix(current_json, slot.string_keys)
+        safe_json = self._incremental_safe_prefix(current_json, slot.string_keys, slot)
 
         if not safe_json or safe_json == prev:
             return None

@@ -869,3 +869,69 @@ def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
         EventType.TEXT_CHUNK,
     ]
     assert events[1].value == TOOL_JSON
+
+
+class TestIncrementalArgParsing:
+    """Verify that the incremental arg-delta caching produces correct output
+    and avoids quadratic behaviour for large tool arguments."""
+
+    def test_large_arg_streaming_is_subquadratic(self, parser, mock_request):
+        """Stream a 10K-character tool argument one character at a time.
+
+        With the O(n^2) bug, this would take many seconds. With
+        incremental caching, it completes quickly.
+        """
+        import time
+
+        size = 10_000
+        data = "A" * size
+        wrapper = f'{{"name":"echo","args":{{"data":"{data}"}}}}'
+        text = f"{TOOL_JSON}{wrapper}{END_MESSAGE}"
+
+        start_time = time.monotonic()
+        results = _stream_text_only(parser, mock_request, text, chunk_size=1)
+        elapsed = time.monotonic() - start_time
+
+        args = collect_tool_arguments(results)
+        parsed = json.loads(args)
+        assert parsed == {"data": data}
+        assert elapsed < 5.0, (
+            f"Streaming {size}-char tool arg took {elapsed:.1f}s; "
+            f"expected < 5s with incremental parsing"
+        )
+
+    def test_cached_offset_matches_uncached(self, parser, mock_request):
+        """Verify that caching the wrapper offset produces identical output
+        to the full converter call for several wrapper shapes."""
+        cases = [
+            '{"name":"f","args":{"key":"value"}}',
+            '{"name":"args","args":{"k":1}}',
+            '{ "name" : "x" , "args" : {"a": 1, "b": "hello"} }',
+            '{"name":"get_weather","args":{"city":"SF","units":"metric"}}',
+        ]
+        for wrapper in cases:
+            text = f"{TOOL_JSON}{wrapper}{END_MESSAGE}"
+            results_chunked = _stream_text_only(
+                parser, mock_request, text, chunk_size=1
+            )
+            args_chunked = collect_tool_arguments(results_chunked)
+
+            parser2 = InklingParser(parser.model_tokenizer)
+            results_full = _stream_text_only(
+                parser2, mock_request, text, chunk_size=len(text)
+            )
+            args_full = collect_tool_arguments(results_full)
+
+            assert json.loads(args_chunked) == json.loads(args_full), (
+                f"Mismatch for wrapper: {wrapper}"
+            )
+
+    def test_structural_chars_gate_skips_nonstructural(self, parser, mock_request):
+        """Verify that the Inkling config has arg_structural_chars set,
+        which gates converter calls for non-structural content."""
+        from vllm.parser.inkling import inkling_config
+
+        config = inkling_config()
+        assert config.arg_structural_chars is not None
+        assert '"' in config.arg_structural_chars
+        assert "{" in config.arg_structural_chars
