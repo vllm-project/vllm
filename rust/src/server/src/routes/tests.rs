@@ -703,11 +703,11 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
 /// stays alive for the duration of the test.
 async fn test_dev_mode_app_with_ready(
     ready_response: vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse,
+    configured_data_parallel_size: usize,
 ) -> (axum::Router, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-world-size".to_vec();
-
     let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id.clone(),
@@ -728,10 +728,10 @@ async fn test_dev_mode_app_with_ready(
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let app = build_router_with_dev_mode(
-        Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        )),
+        Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_configured_data_parallel_size(configured_data_parallel_size),
+        ),
         true,
     );
     (app, engine_task)
@@ -6362,10 +6362,10 @@ async fn world_size_endpoint_is_dev_mode_only() {
 async fn world_size_includes_data_parallelism_by_default() {
     let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
         world_size: 2,
-        data_parallel_size: 4,
+        data_parallel_size: 1,
         ..default_ready_response()
     };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready, 4).await;
 
     let response = app
         .call(
@@ -6391,7 +6391,7 @@ async fn world_size_excludes_data_parallelism_when_include_dp_false() {
         data_parallel_size: 4,
         ..default_ready_response()
     };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready, 4).await;
 
     let response = app
         .call(
