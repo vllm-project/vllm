@@ -8,10 +8,15 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.models.interfaces import (
+    SupportsEncoderCudaGraph,
+    supports_encoder_cudagraph,
+)
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
@@ -59,25 +64,21 @@ class ModelState(ABC):
 
         self.supports_mm_inputs = encoder_cache is not None
         if encoder_cache is not None:
-            from vllm.model_executor.models.interfaces import (
-                SupportsEncoderCudaGraph,
-                supports_encoder_cudagraph,
-            )
-
-            cudagraph_manager = None
-            if (
+            enable_encoder_cuda_graph = (
                 not self.model_config.enforce_eager
                 and vllm_config.compilation_config.cudagraph_mm_encoder
                 and supports_encoder_cudagraph(model)
-            ):
-                from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
-
-                cudagraph_manager = EncoderCudaGraphManager(
+            )
+            cudagraph_manager = (
+                EncoderCudaGraphManager(
                     vllm_config=vllm_config,
                     device=device,
                     dtype=self.dtype,
                     model=cast(SupportsEncoderCudaGraph, model),
                 )
+                if enable_encoder_cuda_graph
+                else None
+            )
 
             self.encoder_cache = encoder_cache
             self.encoder_runner = EncoderRunner(
