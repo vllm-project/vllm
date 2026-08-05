@@ -5,16 +5,16 @@ use itertools::Itertools as _;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
-    GenerationPromptMode, SamplingParams,
+    GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
 
 use super::types::ChatCompletionRequest;
 use super::validate;
-use crate::error::{ApiError, bail_invalid_request};
+use crate::error::{ApiError, bail_invalid_request, chat_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
-    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
+    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue, ToolReference,
 };
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
@@ -130,6 +130,14 @@ pub(super) fn prepare_chat_request(
         request.vllm_xargs.as_ref(),
     );
 
+    let tool_context = ResolvedToolContext::new(
+        &messages,
+        convert_tools(request.tools)?,
+        request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
+        request.parallel_tool_calls.unwrap_or(true),
+    )
+    .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
+
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
         messages,
@@ -168,9 +176,7 @@ pub(super) fn prepare_chat_request(
             response_format,
             template_kwargs,
         },
-        tools: convert_tools(request.tools)?,
-        tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
-        parallel_tool_calls: request.parallel_tool_calls.unwrap_or(true),
+        tool_context,
         decode_options: vllm_text::output::TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: request.include_stop_str_in_output,
@@ -399,17 +405,21 @@ fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool
     Ok((!tools.is_empty()).then_some(tools))
 }
 
-fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoice, ApiError> {
+fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiError> {
     match tool_choice {
-        None | Some(ToolChoice::Value(ToolChoiceValue::Auto)) => Ok(ChatToolChoice::Auto),
-        Some(ToolChoice::Value(ToolChoiceValue::None)) => Ok(ChatToolChoice::None),
-        Some(ToolChoice::Value(ToolChoiceValue::Required)) => Ok(ChatToolChoice::Required),
-        Some(ToolChoice::Function {
+        ToolChoice::Value(ToolChoiceValue::Auto) => Ok(ChatToolChoice::Auto),
+        ToolChoice::Value(ToolChoiceValue::None) => Ok(ChatToolChoice::None),
+        ToolChoice::Value(ToolChoiceValue::Required) => Ok(ChatToolChoice::Required),
+        ToolChoice::Function {
             tool_type,
             function,
-        }) if tool_type == "function" => Ok(ChatToolChoice::Function {
+        } if tool_type == "function" => Ok(ChatToolChoice::Function {
             name: function.name.clone(),
         }),
+        ToolChoice::AllowedTools { tools, .. } => bail_invalid_request!(
+            "allowed_tools tool_choice is not supported yet: {}.",
+            tools.iter().map(ToolReference::identifier).join(", ")
+        ),
         _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
     }
 }
@@ -478,7 +488,7 @@ mod tests {
         )
         .expect("request is valid");
 
-        assert!(!prepared.chat_request.parallel_tool_calls);
+        assert!(!prepared.chat_request.parallel_tool_calls());
     }
 
     #[test]
@@ -490,7 +500,7 @@ mod tests {
         )
         .expect("request is valid");
 
-        assert!(prepared.chat_request.parallel_tool_calls);
+        assert!(prepared.chat_request.parallel_tool_calls());
     }
 
     #[test]
@@ -596,8 +606,8 @@ mod tests {
                 min_tokens: 0,
             }
         );
-        assert!(prepared.chat_request.tools.is_empty());
-        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+        assert!(prepared.chat_request.initial_tools().is_empty());
+        assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
     }
 
     #[test]
@@ -671,8 +681,8 @@ mod tests {
                 min_tokens: 0,
             }
         );
-        assert!(prepared.chat_request.tools.is_empty());
-        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+        assert!(prepared.chat_request.initial_tools().is_empty());
+        assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
     }
 
     #[test]
@@ -1009,8 +1019,8 @@ mod tests {
                 },
             ])]
         );
-        assert!(prepared.chat_request.tools.is_empty());
-        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+        assert!(prepared.chat_request.initial_tools().is_empty());
+        assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
     }
 
     #[test]
@@ -1105,7 +1115,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            prepared.chat_request.tools,
+            prepared.chat_request.initial_tools(),
             vec![VllmChatTool {
                 name: "get_weather".to_string(),
                 description: Some("Get weather".to_string()),
@@ -1116,7 +1126,7 @@ mod tests {
                 strict: None,
             }]
         );
-        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::None);
+        assert_eq!(prepared.chat_request.tool_choice(), &ChatToolChoice::None);
     }
 
     #[test]
@@ -1145,7 +1155,10 @@ mod tests {
         )
         .expect("request is valid");
 
-        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Required);
+        assert_eq!(
+            prepared.chat_request.tool_choice(),
+            &ChatToolChoice::Required
+        );
         assert!(!prepared.options.is_named_tool_choice);
     }
 
@@ -1181,8 +1194,8 @@ mod tests {
         .expect("request is valid");
 
         assert_eq!(
-            prepared.chat_request.tool_choice,
-            ChatToolChoice::Function {
+            prepared.chat_request.tool_choice(),
+            &ChatToolChoice::Function {
                 name: "get_weather".to_string(),
             }
         );
