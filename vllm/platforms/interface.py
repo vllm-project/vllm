@@ -762,6 +762,17 @@ class Platform:
             cache_config.mamba_page_size_padded = shared_page
 
     @classmethod
+    def _get_indexer_block_alignment(cls, vllm_config: "VllmConfig") -> int | None:
+        """Extra ``block_size`` multiple a sparse indexer needs, else ``None``.
+
+        The CUDA kpool paged-MQA indexer virtually splits each storage block
+        into pool pages, so ``block_size`` must be a multiple of
+        ``index_kpool * min(PAGED_MQA_PAGE_SIZES)`` — implemented in the CUDA
+        platform override. Other platforms impose no extra constraint.
+        """
+        return None
+
+    @classmethod
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
@@ -906,16 +917,9 @@ class Platform:
                 mamba_page_size,
                 kernel_block_alignment_size * attn_page_size_1_token,
             )
-            index_kpool = getattr(model_config.hf_text_config, "index_kpool", None)
-            if index_kpool and index_kpool > 1:
-                from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
-
-                # kpool sparse indexer: the storage block (block_size /
-                # index_kpool) is virtually split into paged-MQA pool pages,
-                # so block_size must be a multiple of index_kpool times the
-                # smallest supported page (512 for GLM-5-Next).
-                pool_align = index_kpool * min(PAGED_MQA_PAGE_SIZES)
-                attn_block_size = pool_align * cdiv(attn_block_size, pool_align)
+            indexer_align = cls._get_indexer_block_alignment(vllm_config)
+            if indexer_align:
+                attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size

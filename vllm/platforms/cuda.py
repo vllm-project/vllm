@@ -394,6 +394,20 @@ class CudaPlatformBase(Platform):
         return valid_backends_priorities, invalid_reasons
 
     @classmethod
+    def _get_indexer_block_alignment(cls, vllm_config: VllmConfig) -> int | None:
+        index_kpool = getattr(
+            vllm_config.model_config.hf_text_config, "index_kpool", None
+        )
+        if not index_kpool or index_kpool <= 1:
+            return None
+        from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
+
+        # kpool paged-MQA indexer: the storage block (block_size /
+        # index_kpool) is virtually split into pool pages, so block_size
+        # must be a multiple of index_kpool * min(PAGED_MQA_PAGE_SIZES).
+        return index_kpool * min(PAGED_MQA_PAGE_SIZES)
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: AttentionBackendEnum | None,
