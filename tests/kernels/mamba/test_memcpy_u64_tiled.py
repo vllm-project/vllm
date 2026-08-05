@@ -75,15 +75,11 @@ def _memcpy_wrapper_kernel(
     )
 
 
-# Copy sizes: 0/1/7 (all-head), 8 (all-body when dst-aligned), 15 (head+body
-# or body+tail), 16/17 (small tiled body), 1024 and 4 KiB (spans all 16
-# tiles at COPY_BLOCK_SIZE=8; single-tile at COPY_BLOCK_SIZE=1024).
-_COPY_SIZES = [0, 1, 7, 8, 15, 16, 17, 1024, 4 * 1024]
-# COPY_BLOCK_SIZE: 1024 matches the production launch; 8 shrinks the
-# per-tile rounding so ``_COPY_SIZES``' 1024/4096 cases actually cross
-# tile boundaries under NUM_TILES=_TEMPORAL_TILES (partitioning math is
-# COPY_BLOCK_SIZE-agnostic, so a small value proves it for all values).
-_COPY_BLOCK_SIZES = [8, 1024]
+# Copy sizes: 0/1/7 (all-head), 8 (all-body when dst-aligned), 15 (body+tail,
+# tail-mask path), 16 (small tiled body), 1024 and 4 KiB (spans all 16 tiles
+# at COPY_BLOCK_SIZE=8, with 4 KiB adding multi-iteration-per-tile coverage;
+# both single-tile at COPY_BLOCK_SIZE=1024).
+_COPY_SIZES = [0, 1, 7, 8, 15, 16, 1024, 4 * 1024]
 # (src_off, dst_off) pairs. Torch tensors are 256B-aligned at data_ptr, so
 # slicing by these bytes yields a controlled sub-8B alignment. The kernel
 # branches on ``(src ^ dst) & 7``, so we cover both sides plus the aligned
@@ -91,20 +87,28 @@ _COPY_BLOCK_SIZES = [8, 1024]
 _ALIGN_PAIRS = [
     (0, 0),  # fully aligned; head/tail masked out
     (3, 3),  # shared misalignment; fast path with head_bytes=5
-    (7, 7),  # shared, extreme; head_bytes=1
+    (7, 7),  # shared, extreme; head_bytes=1 with non-empty body
     (1, 3),  # mismatched; byte load/store fallback
     (3, 1),  # mismatched, opposite direction
 ]
 _MAX_ALIGN_OFF = max(o for pair in _ALIGN_PAIRS for o in pair)
-# NUM_TILES: 1 matches the SD conv callsite, _TEMPORAL_TILES matches the
-# temporal callsite. Intermediate values add no new codegen coverage.
-_NUM_TILES = [1, _TEMPORAL_TILES]
+# (NUM_TILES, COPY_BLOCK_SIZE) configs. NUM_TILES=1 is the SD conv callsite
+# (single-CTA memcpy) where tile partitioning collapses, so COPY_BLOCK_SIZE
+# is not observable — one value suffices. NUM_TILES=_TEMPORAL_TILES is the
+# temporal callsite: 1024 matches the production launch; 8 shrinks per-tile
+# rounding so ``_COPY_SIZES``' 1024/4096 cases cross tile boundaries
+# end-to-end (partitioning math is COPY_BLOCK_SIZE-agnostic, so a small
+# value proves it for all values).
+_TILE_BLOCK_CONFIGS = [
+    (1, 1024),
+    (_TEMPORAL_TILES, 1024),
+    (_TEMPORAL_TILES, 8),
+]
 
 
 @_parametrize("copy_size", _COPY_SIZES)
 @_parametrize("src_off,dst_off", _ALIGN_PAIRS)
-@_parametrize("num_tiles", _NUM_TILES)
-@_parametrize("copy_block_size", _COPY_BLOCK_SIZES)
+@_parametrize("num_tiles,copy_block_size", _TILE_BLOCK_CONFIGS)
 def test_memcpy_u64_tiled_matches_slice_copy(
     copy_size, src_off, dst_off, num_tiles, copy_block_size
 ):
@@ -138,7 +142,6 @@ def test_memcpy_u64_tiled_matches_slice_copy(
 if __name__ == "__main__":
     for cs in _COPY_SIZES:
         for so, do in _ALIGN_PAIRS:
-            for nt in _NUM_TILES:
-                for cbs in _COPY_BLOCK_SIZES:
-                    test_memcpy_u64_tiled_matches_slice_copy(cs, so, do, nt, cbs)
+            for nt, cbs in _TILE_BLOCK_CONFIGS:
+                test_memcpy_u64_tiled_matches_slice_copy(cs, so, do, nt, cbs)
     print("ok")
