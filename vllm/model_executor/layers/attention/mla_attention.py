@@ -1984,11 +1984,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             64 * 1024,
         )
 
-        # A chunk covers whole requests and splits a request only when its
-        # context alone does not fit, so the workspace only has to hold one
-        # page; it does not scale with `max_num_seqs`. This matters for models
-        # whose page size is inflated to cover a hybrid state page (Kimi K3,
-        # where `block_size` reaches ~11000 rows at DEP16).
         return max(chunked_prefill_workspace_size, cache_config.block_size)
 
     @staticmethod
