@@ -130,7 +130,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
-    AITER_SITUV2_A8W4: bool = False
+    VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
@@ -195,6 +195,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -227,6 +228,7 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
+    VLLM_RAISE_ON_LOGIT_NANS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
     ] = "NONE"
@@ -1210,9 +1212,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
     # interleaved flydsl kernels instead of the default a16w4 separated path.
-    # Shared with the AITER runtime, which reads the same env var directly.
-    "AITER_SITUV2_A8W4": lambda: (
-        os.getenv("AITER_SITUV2_A8W4", "0").lower() in ("true", "1")
+    # This is the only flag users need: vLLM picks the kernels by passing
+    # gate_mode to AITER and sets the AITER-side workaround env at init.
+    "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
@@ -1524,6 +1527,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
+    # are replicated on every rank, so each rank streams the whole weight to
+    # serve its own token shard. Shard them across TP instead: the MLP then
+    # all-gathers the full token set, computes this rank's partial, and
+    # reduce-scatters (which both sums across TP and restores the sequence
+    # sharding). Trades weight bandwidth and resident memory for two collectives
+    # per layer, so it only wins at low token counts: intended for decode
+    # instances in a P/D disaggregated deployment, not for prefill or unified
+    # serving.
+    "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "0"))
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -1706,6 +1721,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # or bad hardware but it may add compute overhead.
     "VLLM_COMPUTE_NANS_IN_LOGITS": lambda: bool(
         int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))
+        or int(os.getenv("VLLM_RAISE_ON_LOGIT_NANS", "0"))
+    ),
+    # Raise an exception when generated logits contain NaNs. Enabling this
+    # also enables the NaN computation required to detect them.
+    "VLLM_RAISE_ON_LOGIT_NANS": lambda: bool(
+        int(os.getenv("VLLM_RAISE_ON_LOGIT_NANS", "0"))
     ),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
