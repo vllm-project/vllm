@@ -41,12 +41,12 @@ from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
     WeightSource,
+    layerwise_groups,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
     RdtRouter,
     arena_alloc_bytes,
-    layerwise_groups,
 )
 from vllm.logger import init_logger
 
@@ -904,18 +904,13 @@ class ShardedRDTTrainerWeightTransferEngine(
         gather0 = time.perf_counter()
         assert self.source is not None  # guaranteed by trainer_init
         self._rpc("begin_sync")
-        # A source may expose the optional iter_groups() extension — (names,
-        # tensors) parallel lists per layerwise group — so the handoff is one
-        # generator resume per GROUP rather than per tensor. On a per-expert MoE
-        # model that is ~95 resumes instead of ~37k, worth ~0.9s of pure Python
-        # per sync; sources without it use the per-name iterator unchanged.
-        # The source yields only the groups this rank owns (all of them unless it
-        # declares ownership), in metadata order; the checks below hold it to
-        # that. Every owner of a group must reach it in the same order or their
-        # shared gather collective mismatches.
-        _iter_groups = getattr(self.source, "iter_groups", None)
-        git = _iter_groups() if _iter_groups is not None else None
-        it = iter(self.source) if git is None else None
+        # One generator resume per GROUP, not per tensor: `iter_groups` yields
+        # (names, tensors) for each group this rank owns, in metadata order.
+        # Sources that can materialize a whole group at once override it; the
+        # base default batches `__iter__` and checks the order as it goes. Every
+        # owner of a group must reach it in the same order or their shared gather
+        # collective mismatches.
+        groups = self.source.iter_groups()
         # Publishes are fired without an inline ray.get and harvested this
         # window deep, so the publish RPC + server-side rebuild overlap the
         # NEXT group's gather/export instead of serializing the loop. The
@@ -929,27 +924,13 @@ class ShardedRDTTrainerWeightTransferEngine(
             for gi in self._owned_idx:
                 group = self._groups[gi]
                 key = tuple(group)
-                if git is not None:
-                    names, tensors = next(git)
-                    if list(names) != list(group):
-                        raise RuntimeError(
-                            f"WeightSource group yielded {len(names)} names "
-                            f"starting {names[:2]!r} but expected {len(group)} "
-                            f"starting {group[:2]!r}; iteration order must "
-                            "match metadata."
-                        )
-                else:
-                    assert it is not None  # set whenever git is None
-                    names, tensors = [], []
-                    for expected in group:
-                        name, tensor = next(it)
-                        if name != expected:
-                            raise RuntimeError(
-                                f"WeightSource yielded {name!r} but expected "
-                                f"{expected!r}; iteration order must match metadata."
-                            )
-                        names.append(name)
-                        tensors.append(tensor)
+                names, tensors = next(groups)
+                if list(names) != list(group):
+                    raise RuntimeError(
+                        f"WeightSource group yielded {len(names)} names starting "
+                        f"{names[:2]!r} but expected {len(group)} starting "
+                        f"{group[:2]!r}; iteration order must match metadata."
+                    )
                 free_target = self._free_targets.get(gi, 0)
                 if free_target <= 0:
                     # Gathered (the group's collective spans every owner) but no

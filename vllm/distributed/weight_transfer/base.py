@@ -33,6 +33,43 @@ TTrainerInitInfo = TypeVar("TTrainerInitInfo", bound="TrainerInitInfo")
 # channel. The built-in `ModuleSource` uses `materialize_full_tensor`.
 
 
+def layerwise_groups(names: list[str]) -> list[list[str]]:
+    """Partition flat parameter names into the pre block, one group per decoder
+    layer, then the post block (keys on ``model.layers.<N>.``).
+
+    This defines what a *group index* means for `WeightSource.owned_groups` and
+    `WeightSource.iter_groups`: index *g* names the same group on every trainer
+    rank and every consumer, because it is derived from one rank's `metadata()`
+    order. The split is by POSITION relative to the first layer name, not by name
+    class, so flattening a partition always reproduces the input order.
+
+    Backends that gather and free per group (sharded RDT) also use it as the unit
+    of transfer, which bounds their arena sizes: without it a whole model becomes
+    one chunk.
+    """
+    pre: list[str] = []
+    layers: dict[int, list[str]] = {}
+    post: list[str] = []
+    seen = False
+    for n in names:
+        if n.startswith("model.layers."):
+            seen = True
+            idx = int(n[len("model.layers.") :].split(".", 1)[0])
+            layers.setdefault(idx, []).append(n)
+        elif not seen:
+            pre.append(n)
+        else:
+            post.append(n)
+    groups: list[list[str]] = []
+    if pre:
+        groups.append(pre)
+    for i in sorted(layers):
+        groups.append(layers[i])
+    if post:
+        groups.append(post)
+    return groups
+
+
 def materialize_full_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Return a full, locally-materialized tensor ready to send.
 
@@ -70,6 +107,9 @@ class WeightSource(ABC):
       the same order in lockstep, or they deadlock.
     * `owned_groups()` — which gather groups this rank holds, for producers that
       are split so each rank holds only part of the model. Defaults to all.
+    * `iter_groups()` — the same stream batched per gather group (see
+      `layerwise_groups`). Defaults to batching `__iter__`; override to
+      materialize a whole group in one step.
 
     `iter(source)` must yield a *fresh* pass each round. Backends with custom
     producer logic (Megatron export, RDT plans, MoE re-fusing) subclass this.
@@ -109,6 +149,42 @@ class WeightSource(ABC):
             Sorted group indices, or None to own every group.
         """
         return None
+
+    def groups(self) -> list[list[str]]:
+        """This rank's gather groups, in metadata order: `layerwise_groups` over
+        `metadata()`, restricted to `owned_groups()` when that is overridden."""
+        groups = layerwise_groups([m.name for m in self.metadata()])
+        owned = self.owned_groups()
+        return groups if owned is None else [groups[g] for g in owned]
+
+    def iter_groups(self) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
+        """Yield one `(names, tensors)` batch per group from `groups()`.
+
+        The default drives `__iter__` and batches its output, checking as it goes
+        that the names arrive in metadata order — ranks sharing a parameter
+        materialize it with a collective, so a rank that iterates out of order
+        deadlocks its peers rather than returning wrong data.
+
+        Override when a backend can produce a whole group at once. Materializing
+        is usually a collective, and driving it per group instead of per tensor
+        turns ~37k generator resumes into ~95 on a per-expert MoE model (worth
+        ~0.9s per sync there). An override must yield the same batches in the same
+        order as this default.
+        """
+        it = iter(self)
+        for group in self.groups():
+            names: list[str] = []
+            tensors: list[torch.Tensor] = []
+            for expected in group:
+                name, tensor = next(it)
+                if name != expected:
+                    raise RuntimeError(
+                        f"WeightSource yielded {name!r} but expected "
+                        f"{expected!r}; iteration order must match metadata()."
+                    )
+                names.append(name)
+                tensors.append(tensor)
+            yield names, tensors
 
 
 class ModuleSource(WeightSource):
@@ -224,6 +300,19 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     update_info_cls: type[TUpdateInfo]
 
     supports_draft_weight_update: bool = True
+
+    defers_processing: bool = False
+    """Whether `update_weights` returns before the weights are on the device.
+
+    An engine that pipelines its GPU post-processing onto background threads
+    cannot let `update_weights` synchronize the device — that would block on those
+    threads and serialize the pipeline. Such an engine sets this True, omits the
+    per-update sync, and guarantees completion in `finish_weight_update` instead.
+
+    Callers that drive the update protocol themselves must read this: with it set,
+    a returned `update_weights` means "queued", not "applied", so any state that
+    depends on the weights being resident has to wait for `finish_weight_update`.
+    """
 
     def __init__(
         self,
