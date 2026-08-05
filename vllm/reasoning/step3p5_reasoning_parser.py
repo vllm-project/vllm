@@ -97,11 +97,22 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         model_output: str,
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
-        reasoning, content = super().extract_reasoning(model_output, request)
-        if reasoning is not None:
-            reasoning = reasoning.removesuffix("\n")
-        if content is not None:
-            content = content.removeprefix("\n")
+        # Partition here rather than post-processing the base result so the
+        # newline trims target the reasoning/content boundary only. Any text
+        # before <think> is preserved and must not have its own newline stripped.
+        content_before, start, after_start = model_output.partition(self.start_token)
+        if not start:
+            # Models that omit <think>: treat everything up to </think> as
+            # reasoning, with no preserved prefix.
+            content_before, after_start = "", model_output
+
+        reasoning, end, content_after = after_start.partition(self.end_token)
+        if not end:
+            return reasoning or None, content_before or None
+
+        reasoning = reasoning.removesuffix("\n")
+        content_after = content_after.removeprefix("\n")
+        content = content_before + content_after
         return reasoning or None, content or None
 
     def extract_reasoning_streaming(

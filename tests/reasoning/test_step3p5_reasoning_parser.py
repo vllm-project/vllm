@@ -113,7 +113,7 @@ EMPTY_STREAMING = {
 NEW_LINE = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
     "reasoning": "This is a reasoning section",
-    "content": "This is the rest",
+    "content": "\nThis is the rest",
     "is_reasoning_end": True,
 }
 
@@ -326,6 +326,36 @@ def test_reasoning(
     else:
         content = parser.extract_content_ids(output)
         assert content == []
+
+
+@pytest.mark.parametrize(
+    "model_output, expected_reasoning, expected_content",
+    [
+        # Text before <think> is preserved; only the newline right after
+        # </think> is stripped (issue #51164).
+        (
+            "\nIntro<think>reasoning</think>\nAnswer",
+            "reasoning",
+            "\nIntroAnswer",
+        ),
+        # No prefix: newline after </think> is dropped, none invented.
+        ("<think>calc</think>\nAnswer", "calc", "Answer"),
+        # Newline right before </think> is trimmed off the reasoning.
+        ("<think>reasoning\n</think>\nAnswer", "reasoning", "Answer"),
+        # Reasoning not yet ended: prefix becomes the content so far.
+        ("before<think>still thinking", "still thinking", "before"),
+    ],
+)
+def test_step3p5_preserves_prefix_before_think(
+    step3p5_tokenizer, model_output, expected_reasoning, expected_content
+):
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(step3p5_tokenizer)
+
+    reasoning, content = parser.extract_reasoning(model_output, request=None)
+
+    assert reasoning == expected_reasoning
+    assert content == expected_content
 
 
 def test_step3p5_streaming_drops_leading_newline(step3p5_tokenizer):
