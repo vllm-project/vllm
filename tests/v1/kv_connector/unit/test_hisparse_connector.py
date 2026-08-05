@@ -95,6 +95,20 @@ def test_hisparse_connector_composes_without_replacing_existing_connector():
     assert get_hisparse_connector_metadata(metadata) is metadata.metadata[1]
 
 
+def test_hisparse_composition_preserves_existing_connector_stats_schema():
+    config = _vllm_config()
+    primary = MagicMock()
+    primary._kv_transfer_config = config.kv_transfer_config
+    primary_stats = MagicMock()
+    primary.get_kv_connector_stats.return_value = primary_stats
+
+    connector = attach_hisparse_connector(
+        primary, config, KVConnectorRole.WORKER, _kv_cache_config()
+    )
+
+    assert connector.get_kv_connector_stats() is primary_stats
+
+
 def test_hisparse_initializes_as_the_only_worker_connector(monkeypatch):
     from vllm.distributed.kv_transfer import kv_transfer_state
 

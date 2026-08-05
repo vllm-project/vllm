@@ -59,6 +59,18 @@ def test_expand_hisparse_source_blocks_into_kernel_pages():
     assert expanded.tolist() == [6, 7, 14]
 
 
+def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
+    worker = object.__new__(HiSparseOffloadWorker)
+    worker.request_state_indices = torch.arange(4, dtype=torch.int32)
+    original_ptr = worker.request_state_indices.data_ptr()
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    worker.set_request_state_indices(torch.tensor([3, 1], dtype=torch.int32))
+
+    assert worker.request_state_indices.data_ptr() == original_ptr
+    assert worker.request_state_indices.tolist() == [3, 1, 2, 3]
+
+
 def test_hisparse_layers_join_index_groups_during_construction(monkeypatch):
     """Followers must release duplicate LRU state before memory profiling."""
     config = SimpleNamespace(

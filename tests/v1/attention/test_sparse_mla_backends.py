@@ -1512,6 +1512,38 @@ def _hisparse_hot_slot(
     return int(block.item()) * block_size + logical % block_size
 
 
+@requires_hisparse_ops
+def test_hisparse_uses_graph_stable_request_state_mapping():
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_width = 64, 8
+    offload = _make_hisparse_offload_layer(
+        top_k=1,
+        device_buffer_size=2,
+        max_num_reqs=2,
+        row_width=row_width,
+        block_size=block_size,
+    )
+    offload.bind_source_cache(
+        torch.arange(block_size * row_width, dtype=torch.float32)
+        .view(1, block_size, row_width)
+        .pin_memory()
+    )
+    offload.request_state_indices = torch.tensor([1], dtype=torch.int32, device=device)
+
+    offload.swap_in(
+        request_state_indices=torch.tensor([0], dtype=torch.int32, device=device),
+        req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
+        block_table=torch.tensor([[0]], dtype=torch.int32, device=device),
+        topk_indices=torch.tensor([[0]], dtype=torch.int32, device=device),
+        block_size=block_size,
+    )
+    torch.accelerator.synchronize()
+
+    assert offload.device_global_indices is not None
+    assert (offload.device_global_indices[0] == -1).all()
+    assert (offload.device_global_indices[1] == 0).any()
+
+
 def test_hisparse_resident_rows_bypass_hot_lru():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8

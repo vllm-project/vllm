@@ -449,6 +449,7 @@ class HiSparseOffloadLayer:
         self._host_cache: torch.Tensor | None = None
         self.eager_host_mirror = False
         self.resident_source_index = -1
+        self.request_state_indices: torch.Tensor | None = None
 
     def join_group(self, leader: HiSparseOffloadLayer) -> None:
         self.leader = leader
@@ -621,7 +622,7 @@ class HiSparseOffloadLayer:
         self,
         *,
         resident: HiSparseLayer | None = None,
-        request_state_indices: torch.Tensor,
+        request_state_indices: torch.Tensor | None = None,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
@@ -637,6 +638,12 @@ class HiSparseOffloadLayer:
             and self.hot.block_size == block_size
             and self.hot_block_table is not None
         )
+        request_state_indices = (
+            self.request_state_indices
+            if self.request_state_indices is not None
+            else request_state_indices
+        )
+        assert request_state_indices is not None
 
         relative_indices = topk_indices[:num_tokens].contiguous()
 

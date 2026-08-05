@@ -29,6 +29,7 @@ from vllm.v1.kv_offload.sparse.base import SparseKVOffloadCommand
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.hisparse_residency import HiSparseManager
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -165,6 +166,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         return False, None
 
 
+class _HiSparseMultiConnector(MultiConnector):
+    """Compose HiSparse without changing the configured connector's telemetry."""
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        return self._connectors[0].get_kv_connector_stats()
+
+
 def attach_hisparse_connector(
     connector: KVConnectorBase_V1 | None,
     vllm_config: VllmConfig,
@@ -175,7 +183,7 @@ def attach_hisparse_connector(
     hisparse = HiSparseConnector(vllm_config, role, kv_cache_config, manager)
     if connector is None:
         return hisparse
-    return MultiConnector.from_connectors(
+    return _HiSparseMultiConnector.from_connectors(
         vllm_config, role, kv_cache_config, [connector, hisparse]
     )
 

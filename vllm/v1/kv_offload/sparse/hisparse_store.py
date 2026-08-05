@@ -90,6 +90,11 @@ class HiSparseOffloadWorker:
         self.dst_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
         self.layers = layers
         self.lru_layers = [layer for layer in layers if layer.offload.leader is None]
+        self.request_state_indices = torch.arange(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        for layer in layers:
+            layer.offload.request_state_indices = self.request_state_indices
         self.hot_backing = hot_backing
         self._block_staging: torch.Tensor | None = None
         self._block_staging_event: torch.Event | None = None
@@ -98,6 +103,16 @@ class HiSparseOffloadWorker:
         self._metrics_calls = 0
         self._metrics_last = HiSparseStats()
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
+
+    def set_request_state_indices(self, indices: torch.Tensor) -> None:
+        if indices.numel() > self.request_state_indices.numel():
+            raise ValueError(
+                "HiSparse request-state mapping exceeds max_num_seqs: "
+                f"{indices.numel()} > {self.request_state_indices.numel()}."
+            )
+        if torch.cuda.is_current_stream_capturing():
+            return
+        self.request_state_indices[: indices.numel()].copy_(indices)
 
     def _init_backup_plan(
         self,

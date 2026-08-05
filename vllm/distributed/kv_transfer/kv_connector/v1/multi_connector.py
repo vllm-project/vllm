@@ -651,7 +651,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         return MultiKVConnectorStats(data=reconstructed_data)
 
-    def get_kv_connector_stats(self) -> MultiKVConnectorStats | None:
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
         # Group connector stats by connector type.
         stats_by_connector: MultiKVConnectorStats | None = None
         for c in self._connectors:
