@@ -29,7 +29,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         bos_token_id: int | None = None,
         eos_token_id: int | list[int] | None = None,
         rope_parameters: dict | None = None,
-        max_position_embeddings: int = 1013760,
+        max_position_embeddings: int = 1048576,
         tie_word_embeddings: bool = False,
         moe_intermediate_size: int = 2048,
         moe_renormalize: bool = True,
@@ -66,7 +66,10 @@ class Glm5NextTextConfig(PretrainedConfig):
         index_n_heads: int | None = None,
         index_dsa_use_layernorm: bool = True,
         index_kpool_compress: bool = True,
-        index_kpool: int | None = 16,
+        # Every ``index_kpool`` indexer K entries pool into one stored entry
+        # (compress_ratio). The 300B checkpoint ships 4; topk runs at pool
+        # granularity (select_k = index_topk // index_kpool).
+        index_kpool: int | None = 4,
         index_kpool_always_select_tail: bool = True,
         mhc: bool | None = True,
         mhc_num_residual_streams: int = 4,
@@ -91,6 +94,22 @@ class Glm5NextTextConfig(PretrainedConfig):
         mhc_sinkhorn_iterations = kwargs.get(
             "hc_sinkhorn_iters", mhc_sinkhorn_iterations
         )
+        # Checkpoint ships ``mla_use_nope`` (not ``mla_nope``); without this
+        # alias self.mla_nope silently stays at the param default.
+        mla_nope = kwargs.get("mla_use_nope", mla_nope)
+        # Checkpoints ship the KDA head config as the ``linear_attn_config``
+        # dict (head_dim / num_heads / short_conv_kernel_size /
+        # gate_lower_bound) rather than the flattened top-level fields; fold it
+        # in so the trained values are read instead of the param defaults
+        # (which only match this checkpoint by coincidence).
+        linear_cfg = kwargs.get("linear_attn_config") or {}
+        if linear_cfg:
+            linear_head_dim = linear_cfg.get("head_dim", linear_head_dim)
+            linear_num_heads = linear_cfg.get("num_heads", linear_num_heads)
+            linear_conv_kernel_dim = linear_cfg.get(
+                "short_conv_kernel_size", linear_conv_kernel_dim
+            )
+            linear_lower_bound = linear_cfg.get("gate_lower_bound", linear_lower_bound)
 
         self.model_type = model_type
         self.vocab_size = vocab_size

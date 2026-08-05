@@ -139,7 +139,7 @@ class Glm5NextImageProcessorFast(BaseImageProcessorFast):
     patch_size = 14
     temporal_patch_size = 2
     merge_size = 2
-    patch_expand_factor = 1
+    patch_expand_factor = 2
     valid_kwargs = Glm5NextImageProcessorKwargs
     model_input_names = ["pixel_values", "image_grid_thw"]
 
@@ -338,7 +338,7 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
     do_sample_frames = True
     patch_size = 14
     temporal_patch_size = 2
-    patch_expand_factor = 4
+    patch_expand_factor = 2
     max_duration = 300
     merge_size = 2
     valid_kwargs = Glm5NextVideoProcessorKwargs
