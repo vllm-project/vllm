@@ -108,7 +108,11 @@ class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
 
 class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5MoeConfig)
+        # transformers 5.x renames the top-level Qwen3.5-MoE config class to
+        # Qwen3_5MoeTextConfig for text-only models, while transformers ≤4.x
+        # returns Qwen3_5MoeConfig (the multimodal wrapper).  Accept both so
+        # that vLLM works regardless of which transformers version is installed.
+        return self.ctx.get_hf_config((Qwen3_5MoeConfig, Qwen3_5MoeTextConfig))
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -282,6 +286,7 @@ class Qwen3_5Model(Qwen3NextModel):
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    IsHybrid,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -360,6 +365,45 @@ class Qwen3_5ForCausalLMBase(
         )
 
         return hidden_states
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_text_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            tp_size,
+            hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads,
+            hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim,
+            hf_config.linear_conv_kernel_dim,
+            num_spec,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(
+        cls,
+    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
     def compute_logits(
         self,

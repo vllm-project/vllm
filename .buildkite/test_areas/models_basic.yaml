@@ -69,9 +69,11 @@ steps:
   - vllm/models/kimi_k3/
   - csrc/libtorch_stable/kimi_k3/
   - tests/models/kimi_k3/
+  - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
+  - tests/kernels/test_bf16_skinny_gemm.py
   commands:
-    # The native NVIDIA AttnRes kernel requires the SM100 family.
-    - pytest -v -s models/kimi_k3
+    # The native NVIDIA Kimi K3 kernels require the SM100 family.
+    - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
 
 - label: Basic Models Test (Other CPU) # 5min
   key: basic-models-test-other-cpu
@@ -82,7 +84,8 @@ steps:
   - vllm/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
+  - tests/models/test_adapters.py
   - tests/models/transformers/fusers/
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/transformers/fusers/
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/

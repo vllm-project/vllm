@@ -11,6 +11,13 @@
 #include "cpu/cpu_arch_macros.h"
 #include "cpu/utils.hpp"
 
+#if defined(DEFINE_FAST_EXP)
+  #define DEFINE_CPU_FUSED_MOE_EXP DEFINE_FAST_EXP
+#else
+  #define DEFINE_CPU_FUSED_MOE_EXP \
+    auto fast_exp = [](const vec_op::FP32Vec16& vec) { return vec.exp(); };
+#endif
+
 namespace cpu_fused_moe_utils {
 enum class FusedMOEAct {
   SiluAndMul,
@@ -39,7 +46,7 @@ void swigluoai_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
                        const int32_t input_stride,
                        const int32_t output_stride) {
   using scalar_vec_t = typename cpu_utils::VecTypeTrait<scalar_t>::vec_t;
-#if !defined(__aarch64__)
+#if defined(__AVX512F__)
   // For GPT-OSS interleaved gate-up weights
   alignas(64) static int32_t index[16] = {0,  2,  4,  6,  8,  10, 12, 14,
                                           16, 18, 20, 22, 24, 26, 28, 30};
@@ -50,7 +57,7 @@ void swigluoai_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
   vec_op::FP32Vec16 alpha_vec(1.702);
   vec_op::FP32Vec16 one_vec(1.0);
 
-  DEFINE_FAST_EXP
+  DEFINE_CPU_FUSED_MOE_EXP
 
   for (int32_t m = 0; m < m_size; ++m) {
     for (int32_t n = 0; n < n_size; n += 32) {
@@ -59,9 +66,19 @@ void swigluoai_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
       vec_op::FP32Vec16 gate_vec(vec_op::uninit);
       vec_op::FP32Vec16 up_vec(vec_op::uninit);
       vec_op::FP32Vec16::load_even_odd(input + n, gate_vec, up_vec);
-#else
+#elif defined(__AVX512F__)
       vec_op::FP32Vec16 gate_vec(input + n, index_vec);
       vec_op::FP32Vec16 up_vec(input + n + 1, index_vec);
+#else
+      alignas(64) float gate_values[16];
+      alignas(64) float up_values[16];
+      const float* interleaved = input + n;
+      for (int32_t i = 0; i < 16; ++i) {
+        gate_values[i] = interleaved[2 * i];
+        up_values[i] = interleaved[2 * i + 1];
+      }
+      vec_op::FP32Vec16 gate_vec(gate_values);
+      vec_op::FP32Vec16 up_vec(up_values);
 #endif
       gate_vec = gate_vec.min(gate_up_max_vec);
       up_vec = up_vec.clamp(up_min_vec, gate_up_max_vec);
@@ -86,7 +103,7 @@ void silu_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
   float* __restrict__ up = input + dim;
   vec_op::FP32Vec16 one_vec(1.0);
 
-  DEFINE_FAST_EXP
+  DEFINE_CPU_FUSED_MOE_EXP
 
   for (int32_t m = 0; m < m_size; ++m) {
     for (int32_t n = 0; n < dim; n += 16) {
@@ -115,21 +132,13 @@ void gelu_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
   vec_op::FP32Vec16 one_vec(1.0);
   vec_op::FP32Vec16 w1_vec(M_SQRT1_2);
   vec_op::FP32Vec16 w2_vec(0.5);
-  alignas(64) float temp[16];
-
-  DEFINE_FAST_EXP
 
   for (int32_t m = 0; m < m_size; ++m) {
     for (int32_t n = 0; n < dim; n += 16) {
       vec_op::FP32Vec16 gate_vec(gate + n);
       vec_op::FP32Vec16 up_vec(up + n);
       auto er_input_vec = gate_vec * w1_vec;
-
-      er_input_vec.save(temp);
-      for (int32_t i = 0; i < 16; ++i) {
-        temp[i] = std::erf(temp[i]);
-      }
-      vec_op::FP32Vec16 er_vec(temp);
+      auto er_vec = er_input_vec.er();
       auto gelu = gate_vec * w2_vec * (one_vec + er_vec);
       auto gated_output_fp32 = up_vec * gelu;
       scalar_vec_t gated_output = scalar_vec_t(gated_output_fp32);
@@ -200,5 +209,7 @@ FORCE_INLINE void apply_gated_act(const FusedMOEAct act,
   }
 }
 }  // namespace cpu_fused_moe_utils
+
+#undef DEFINE_CPU_FUSED_MOE_EXP
 
 #endif

@@ -127,7 +127,7 @@ def should_bundle_tcmalloc() -> bool:
     return (
         VLLM_TARGET_DEVICE == "cpu"
         and sys.platform.startswith("linux")
-        and platform.machine() in ("aarch64", "x86_64")
+        and platform.machine() in ("aarch64", "x86_64", "s390x")
     )
 
 
@@ -783,6 +783,7 @@ class precompiled_wheel_utils:
                             "vllm/_qutlass_C.abi3.so",
                             "vllm/_flashmla_C.abi3.so",
                             "vllm/_flashmla_extension_C.abi3.so",
+                            "vllm/_flashkda_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
@@ -1121,7 +1122,7 @@ if _is_cuda() or _is_hip():
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
-if sys.version_info >= (3, 11):
+if not _is_xpu() and sys.version_info >= (3, 11):
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
     ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 
@@ -1150,6 +1151,10 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+    if USE_PRECOMPILED_EXTENSIONS or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.0")
+    ):
+        ext_modules.append(CMakeExtension(name="vllm._flashkda_C", optional=True))
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
     ):
@@ -1286,7 +1291,7 @@ setup(
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.1.0"],
+        "helion": ["helion==1.4.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing

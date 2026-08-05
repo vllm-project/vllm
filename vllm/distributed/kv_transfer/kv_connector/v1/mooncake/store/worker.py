@@ -37,9 +37,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
-    get_mooncake_dp_engine_index,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -1156,7 +1153,7 @@ class MooncakeStoreWorker:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
 
-        self.dp_rank = get_mooncake_dp_engine_index(parallel_config)
+        self.dp_rank = parallel_config.data_parallel_index
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
@@ -1171,6 +1168,12 @@ class MooncakeStoreWorker:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", True
+        )
+        # Mirrors MooncakeStoreConnector._capacity_only.
+        self._capacity_only = self.kv_role == "kv_consumer" and not (
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "enable_lookup", True
+            )
         )
         self.cache_config = vllm_config.cache_config
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
@@ -1266,6 +1269,17 @@ class MooncakeStoreWorker:
         self.kv_connector_stats = MooncakeStoreConnectorStats()
 
         self._kv_cache_config = kv_cache_config
+        self.token_dbs: list[ChunkedTokenDatabase] = []
+
+        # a capacity-only instance does not need below utils
+        if self._capacity_only:
+            logger.info(
+                "Mooncake store in capacity-only mode: segment mounted "
+                "(global_segment_size=%d), KV transfer disabled.",
+                store_config.global_segment_size,
+            )
+            return
+
         # Single-group + PCP/DCP > 1: scale the lone group's spec.block_size to
         # self.block_size (= scheduler_block_size) so the coordinator's
         # ``block_size % hash_block_size == 0`` invariant holds.
@@ -1314,7 +1328,7 @@ class MooncakeStoreWorker:
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
         )
-        self.token_dbs: list[ChunkedTokenDatabase] = [
+        self.token_dbs = [
             ChunkedTokenDatabase(
                 dataclasses.replace(
                     metadata,
@@ -1405,6 +1419,8 @@ class MooncakeStoreWorker:
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
     ) -> None:
         """Register KV cache tensors and start transfer threads."""
+        if self._capacity_only:
+            return
         if not kv_caches:
             logger.warning("No KV caches to offload.")
             return
@@ -1541,6 +1557,9 @@ class MooncakeStoreWorker:
         compute is launched on the compute stream) for better
         compute-I/O overlap.
         """
+        if self._capacity_only:
+            return set(), set()
+
         # Issue async loads
         for request in meta.requests:
             load_spec = request.load_spec
@@ -1659,6 +1678,9 @@ class MooncakeStoreWorker:
         hit covering all ``num_tokens`` is re-derived below the request end so
         the last token is recomputed for sampling.
         """
+        if self._capacity_only:
+            return 0
+
         token_len = self.coord.align_lookup_length(num_tokens)
         if not block_hashes or token_len <= 0:
             return 0
@@ -1948,7 +1970,7 @@ class LookupKeyClient:
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     """Construct IPC path for ZMQ lookup socket."""
     assert vllm_config.kv_transfer_config is not None
-    dp_rank = get_mooncake_dp_engine_index(vllm_config.parallel_config)
+    dp_rank = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
     rpc_port = 0
     hostname = socket.gethostname()

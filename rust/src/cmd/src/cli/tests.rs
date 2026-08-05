@@ -64,6 +64,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -666,7 +667,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)
 
         For more information, try '--help'.
     "#]]
@@ -762,6 +763,7 @@ fn frontend_args_accept_json() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -1118,6 +1120,24 @@ fn frontend_args_json_rejects_malformed_json() {
 }
 
 #[test]
+fn serve_args_reject_unsupported_modality_in_limit_mm_per_prompt() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--limit-mm-per-prompt",
+        r#"{"unsupported_modality": 1}"#,
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value '{"unsupported_modality": 1}' for '--limit-mm-per-prompt <JSON>': invalid JSON object: unknown variant `unsupported_modality`, expected one of `image`, `audio`, `video` at line 1 column 23
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
+}
+
+#[test]
 fn serve_args_reject_flags_before_model() {
     let error = Cli::try_parse_from(["vllm-rs", "serve", "--python", "python3", "Qwen/Qwen3-0.6B"])
         .unwrap_err();
@@ -1331,6 +1351,7 @@ fn serve_args_accept_handshake_aliases() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -1474,6 +1495,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {
@@ -1558,6 +1580,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {
@@ -1660,6 +1683,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {

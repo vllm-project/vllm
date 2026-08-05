@@ -12,6 +12,7 @@ import vllm._custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.cpu import gdn_attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -25,6 +26,13 @@ NUM_HEADS = [
 HEAD_DIMS = [
     (32, 32),
     (64, 32),
+]
+# chunk_gated_delta_rule_cpu (the chunked-prefill kernel) only supports
+# head_dim == head_dim_v in {64, 128}; the decode-path update kernel above
+# has no such restriction and keeps using the wider HEAD_DIMS list.
+CHUNK_HEAD_DIMS = [
+    (64, 64),
+    (128, 128),
 ]
 CHUNK_SIZE = 64
 CONV_DIM = 128
@@ -258,7 +266,7 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu(
 # prefill path
 @pytest.mark.parametrize("seq_lens", PREFILL_SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_dims", HEAD_DIMS)
+@pytest.mark.parametrize("head_dims", CHUNK_HEAD_DIMS)
 @torch.inference_mode()
 def test_chunk_gated_delta_rule_cpu(
     seq_lens: list[int],
@@ -307,6 +315,7 @@ def test_chunk_gated_delta_rule_cpu(
         cu_seqlens=cu_seqlens,
         head_first=False,
         use_qk_l2norm_in_kernel=True,
+        initial_state_indices=torch.arange(len(seq_lens), dtype=torch.int32),
     )
 
     torch.testing.assert_close(out, out_ref, atol=1e-2, rtol=1e-2)
@@ -331,7 +340,7 @@ TWO_CALL_SPLITS = [
 
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_dims", HEAD_DIMS)
+@pytest.mark.parametrize("head_dims", CHUNK_HEAD_DIMS)
 @torch.inference_mode()
 def test_chunk_gated_delta_rule_cpu_two_call_split(
     total_tokens: int,
@@ -370,6 +379,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
         cu_seqlens=torch.tensor([0, total_tokens], dtype=torch.int32),
         head_first=False,
         use_qk_l2norm_in_kernel=True,
+        initial_state_indices=torch.zeros(1, dtype=torch.int32),
     )
 
     # Call 1: tokens [0:split], no initial state, capture final state.
@@ -384,6 +394,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
         cu_seqlens=torch.tensor([0, split], dtype=torch.int32),
         head_first=False,
         use_qk_l2norm_in_kernel=True,
+        initial_state_indices=torch.zeros(1, dtype=torch.int32),
     )
     # Call 2: tokens [split:T] seeded with call 1's final state and a cu_seqlens
     # rebased to start at 0, as cpu_gdn_attention_core continues a prefill chunk.
@@ -399,6 +410,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
         cu_seqlens=torch.tensor([0, tail], dtype=torch.int32),
         head_first=False,
         use_qk_l2norm_in_kernel=True,
+        initial_state_indices=torch.zeros(1, dtype=torch.int32),
     )
 
     out_split = torch.cat([out1, out2], dim=1)
@@ -441,12 +453,17 @@ def test_spec_aware_mixed_routing_preserves_token_order(
 
     spec_indices = torch.tensor([0, 2])
     nonspec_indices = torch.tensor([1, 3])
-    metadata = types.SimpleNamespace(
+    metadata = GDNAttentionMetadata(
+        num_prefills=1,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=0,
         spec_sequence_masks=torch.ones(1, dtype=torch.bool),
         spec_token_indx=spec_indices,
         non_spec_token_indx=nonspec_indices,
-        num_prefills=1,
-        num_decodes=0,
     )
     routed = []
 
@@ -490,13 +507,16 @@ def test_spec_aware_nonspec_materializes_state_indices(
     state_indices = block_table[:, 0]
     assert not state_indices.is_contiguous()
 
-    metadata = types.SimpleNamespace(
-        non_spec_state_indices_tensor=state_indices,
-        non_spec_query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
-        num_decodes=0,
-        num_decode_tokens=0,
+    metadata = GDNAttentionMetadata(
         num_prefills=2,
         num_prefill_tokens=4,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=4,
+        non_spec_state_indices_tensor=state_indices,
+        non_spec_query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
         has_initial_state=torch.tensor([False, False]),
     )
 
@@ -564,8 +584,14 @@ def test_spec_forward_prepares_native_conv_metadata(
     state_indices = block_table[:, 0]
     accepted_counts = torch.tensor([1, 4], dtype=torch.int32)
     assert not state_indices.is_contiguous()
-    metadata = types.SimpleNamespace(
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
         num_spec_decodes=2,
+        num_spec_decode_tokens=8,
+        num_actual_tokens=8,
         spec_state_indices_tensor=block_table,
         spec_query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
         num_accepted_tokens=accepted_counts,
