@@ -17,6 +17,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 45
       depends_on:
       - image-build-amd
 
@@ -39,6 +40,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -61,7 +63,6 @@ steps:
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
-    # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     # Shard the hybrid language model tests that are numerically stable on Hopper.
@@ -69,8 +70,9 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 70
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       commands:
@@ -102,7 +104,6 @@ steps:
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
-    # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
@@ -130,14 +131,15 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 120
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 95
       depends_on:
       - image-build-amd
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb
-  timeout_in_minutes: 45
+  timeout_in_minutes: 68
   device: h200_18gb
   optional: true
   source_file_dependencies:

@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
-import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache
 from typing import (
@@ -39,7 +37,6 @@ import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, BatchFeature
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
@@ -108,6 +105,7 @@ from vllm.multimodal.video import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import _merge_mm_kwargs
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -165,13 +163,10 @@ def _load_ov2_processor(
     # codec video backend keeps its configured defaults.
     codec_config: dict = {}
     try:
-        config_file = os.path.join(path, "preprocessor_config.json")
-        if not os.path.isfile(config_file):
-            config_file = hf_hub_download(
-                path, "preprocessor_config.json", revision=revision
-            )
-        with open(config_file, encoding="utf-8") as f:
-            codec_config = json.load(f).get("codec", {}) or {}
+        preprocessor_config = get_hf_file_to_dict(
+            "preprocessor_config.json", path, revision
+        )
+        codec_config = (preprocessor_config or {}).get("codec", {}) or {}
     except Exception:
         logger.debug("OV2: no codec defaults found in preprocessor_config.json")
 
@@ -606,10 +601,6 @@ def _expand_video_markers_in_prompt(
 # indices by one frame on those files. Downstream metrics stay within noise.
 _OV2_FRAME_FACTOR = 2
 _OV2_FPS_MIN_FRAMES = 4
-
-
-def _round_by_factor(n: float, factor: int) -> int:
-    return round(n / factor) * factor
 
 
 def _ceil_by_factor(n: float, factor: int) -> int:
@@ -1354,7 +1345,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
             preprocessed = ImageSize(width=rw, height=rh)
         else:
             preprocessed = ImageSize(width=image_width, height=image_height)
-        padded_frames = num_frames + num_frames % temporal_patch_size
+        padded_frames = num_frames + (-num_frames % temporal_patch_size)
         grid_t = max(padded_frames // temporal_patch_size, 1)
         grid_h = preprocessed.height // patch_size
         grid_w = preprocessed.width // patch_size
@@ -1540,13 +1531,6 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
 class LlavaOnevision2MultiModalProcessor(
     BaseMultiModalProcessor[LlavaOnevision2ProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        # Retained for symmetry; vLLM actually fetches the parser via
-        # info.get_data_parser() (see ProcessingInfo override above).
-        return LlavaOnevision2MultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,

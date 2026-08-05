@@ -15,7 +15,9 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -143,7 +145,7 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
         else:
             self.gate.e_score_correction_bias = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -255,8 +257,8 @@ class Lfm2MoeAttention(nn.Module):
         n_tokens, _ = hidden_states.shape
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.view(n_tokens, self.num_heads, self.head_dim).contiguous()
-        k = k.view(n_tokens, self.num_kv_heads, self.head_dim).contiguous()
+        q = q.view(n_tokens, self.num_heads, self.head_dim)
+        k = k.view(n_tokens, self.num_kv_heads, self.head_dim)
         q = self.q_layernorm(q)
         k = self.k_layernorm(k)
         q, k = self.rotary_emb(positions, q, k)
