@@ -580,3 +580,75 @@ def run_dp_sharded_mrope_vision_model(
         "Found unassigned embeddings"
     )
     return out_embeddings
+
+
+def get_llm_pos_ids_for_vision(
+    start_idx: int,
+    vision_idx: int,
+    spatial_merge_size: int,
+    t_index: list[int],
+    grid_hs: torch.Tensor,
+    grid_ws: torch.Tensor,
+) -> torch.Tensor:
+    llm_pos_ids_list = []
+    llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
+    llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
+    h_index = (
+        torch.arange(llm_grid_h)
+        .view(1, -1, 1)
+        .expand(len(t_index), -1, llm_grid_w)
+        .flatten()
+    )
+    w_index = (
+        torch.arange(llm_grid_w)
+        .view(1, 1, -1)
+        .expand(len(t_index), llm_grid_h, -1)
+        .flatten()
+    )
+    t_index_tensor = (
+        torch.Tensor(t_index)
+        .to(llm_grid_h.device)
+        .view(-1, 1)
+        .expand(-1, llm_grid_h * llm_grid_w)
+        .long()
+        .flatten()
+    )
+    _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
+    llm_pos_ids_list.append(_llm_pos_ids + start_idx)
+    llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
+    return llm_pos_ids
+
+
+# ---------------------------------------------------------------------------
+# NPU Vision Backend Support
+# ---------------------------------------------------------------------------
+
+
+def use_npu_vision_backend() -> bool:
+    """Check if NPU vision is enabled via VLLM_VISION_NPU_CACHE."""
+    import vllm.envs as envs
+
+    return bool(envs.VLLM_VISION_NPU_CACHE)
+
+
+def get_npu_vision_backend():
+    """Get FlexMLRT NPU vision backend instance if VLLM_VISION_NPU_CACHE is set.
+
+    Returns:
+        FlexMLRTVisionBackend if NPU vision is enabled, None otherwise.
+
+    Raises:
+        ValueError: If VLLM_VISION_NPU_CACHE is set but initialization fails.
+        ImportError: If backend dependencies are not available.
+    """
+    import vllm.envs as envs
+
+    model_cache = envs.VLLM_VISION_NPU_CACHE
+    if not model_cache:
+        return None
+
+    device_name = envs.VLLM_VISION_NPU_DEVICE or "stx"
+
+    from vllm.vision_npu.flexmlrt_backend import FlexMLRTVisionBackend
+
+    return FlexMLRTVisionBackend(model_cache, device_name)

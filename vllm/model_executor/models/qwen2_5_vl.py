@@ -99,6 +99,7 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
+from .qwen2_5_vl_npu import Qwen2_5_VisionTransformerNPU
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (
     Qwen2VLMultiModalProcessor,
@@ -1129,6 +1130,29 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+def build_qwen2_5_vision_transformer(
+    vision_config: Qwen2_5_VLVisionConfig,
+    norm_eps: float = 1e-6,
+    quant_config: QuantizationConfig | None = None,
+    prefix: str = "",
+) -> nn.Module:
+    """Build the Qwen2.5-VL vision tower for GPU or NPU execution."""
+    from vllm.model_executor.models.vision import use_npu_vision_backend
+
+    if use_npu_vision_backend():
+        return Qwen2_5_VisionTransformerNPU(
+            vision_config=vision_config,
+            prefix=prefix,
+        )
+
+    return Qwen2_5_VisionTransformer(
+        vision_config=vision_config,
+        norm_eps=norm_eps,
+        quant_config=quant_config,
+        prefix=prefix,
+    )
+
+
 class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5_VLConfig)
@@ -1357,7 +1381,7 @@ class Qwen2_5_VLForConditionalGeneration(
         )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Qwen2_5_VisionTransformer(
+            self.visual = build_qwen2_5_vision_transformer(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
@@ -1648,6 +1672,8 @@ class Qwen2_5_VLForConditionalGeneration(
                     **kwargs
                 )
         return mm_input_by_modality
+
+    embed_input_ids = SupportsMultiModal.embed_input_ids
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -2025,6 +2051,22 @@ class Qwen2_5_VLForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if isinstance(self.visual, Qwen2_5_VisionTransformerNPU):
+            logger.info(
+                "[Qwen2.5VL Model] Filtering out visual weights (using NPU backend)"
+            )
+            filtered_weights = []
+            visual_weight_count = 0
+            for name, weight in weights:
+                if name.startswith("visual."):
+                    visual_weight_count += 1
+                    continue
+                filtered_weights.append((name, weight))
+            logger.info(
+                "[Qwen2.5VL Model] Skipped %s visual weights", visual_weight_count
+            )
+            weights = filtered_weights
+
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
