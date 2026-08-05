@@ -289,6 +289,10 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    dspark_draft_topk: int | None = Field(default=None, ge=1)
+    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
+    top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -1032,6 +1036,61 @@ class SpeculativeConfig:
                         "Inkling MTP currently supports exactly one speculative token"
                     )
 
+                if self.dspark_draft_topk is not None and self.method != "dspark":
+                    raise ValueError("dspark_draft_topk is only supported by DSpark")
+
+                dspark_draft_topk = None
+                if self.method == "dspark":
+                    # DSpark is a semi-autoregressive *block* drafter. A
+                    # speculative length smaller than the checkpoint's block
+                    # feeds the block / Markov-head machinery an unsupported
+                    # layout and yields incorrect (garbled) output rather than
+                    # merely lower acceptance. Require num_speculative_tokens to
+                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
+                    dspark_block_size = getattr(
+                        self.draft_model_config.hf_config,
+                        "dspark_block_size",
+                        None,
+                    )
+                    if (
+                        dspark_block_size is not None
+                        and self.num_speculative_tokens < dspark_block_size
+                    ):
+                        raise ValueError(
+                            "DSpark requires num_speculative_tokens >= "
+                            f"dspark_block_size ({dspark_block_size}); got "
+                            f"{self.num_speculative_tokens}. Smaller values "
+                            "produce incorrect output. Use "
+                            f"num_speculative_tokens={dspark_block_size} or "
+                            "larger (e.g. 7)."
+                        )
+
+                    hf_config = self.draft_model_config.hf_config
+                    dspark_draft_topk = self.dspark_draft_topk
+                    if dspark_draft_topk is None:
+                        dspark_draft_topk = getattr(
+                            hf_config, "dspark_draft_topk", None
+                        )
+                    if dspark_draft_topk is not None:
+                        draft_vocab_size = (
+                            getattr(hf_config, "draft_vocab_size", None)
+                            or hf_config.vocab_size
+                        )
+                        if not 1 <= dspark_draft_topk <= draft_vocab_size:
+                            raise ValueError(
+                                "dspark_draft_topk must be between 1 and the "
+                                f"draft vocabulary size ({draft_vocab_size})"
+                            )
+                        if (
+                            "Qwen3DSparkModel"
+                            not in self.draft_model_config.architectures
+                        ):
+                            raise ValueError(
+                                "dspark_draft_topk is only supported by "
+                                "Qwen3DSparkModel"
+                            )
+                        hf_config.dspark_draft_topk = dspark_draft_topk
+
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(
                         self.target_parallel_config,
@@ -1039,7 +1098,6 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config,
                     )
                 )
-
                 self.draft_model_config.max_model_len = (
                     SpeculativeConfig._maybe_override_draft_max_model_len(
                         self.max_model_len,
