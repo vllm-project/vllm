@@ -78,10 +78,6 @@ class RdtRouter:
         )
         self.num_groups = len(self._owners) if self._owners else max(0, num_groups)
 
-    @property
-    def homogeneous(self) -> bool:
-        return self._owners is None
-
     def owners(self, group_idx: int) -> list[int]:
         """Producer ranks that gather and publish ``group_idx``."""
         if self._owners is None:
