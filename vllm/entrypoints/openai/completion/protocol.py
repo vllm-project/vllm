@@ -19,6 +19,7 @@ from vllm.entrypoints.generate.base.protocol import (
     resolve_return_mm_kwargs_alias,
     structured_outputs_from_response_format,
     validate_cache_salt,
+    validate_kv_transfer_params,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -662,6 +663,13 @@ class CompletionRequest(OpenAIBaseModel):
                 parameter="prompt_embeds",
             )
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_kv_transfer_params_fields(cls, data):
+        if isinstance(data, dict) and data.get("kv_transfer_params") is not None:
+            validate_kv_transfer_params(data["kv_transfer_params"])
         return data
 
 
