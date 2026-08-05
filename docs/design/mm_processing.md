@@ -61,3 +61,45 @@ Some HF processors, such as the one for Qwen2-VL, are [very slow](https://github
 When new data is passed in, we first check which items are in the cache, and which ones are missing. The missing items are passed into the HF processor in a single batch and cached, before being merged with the existing items in the cache.
 
 Since we only process the missing multi-modal data items, the number of input placeholder tokens no longer corresponds to the number of the multi-modal inputs, so they can't be passed alongside the text prompt to HF processor. Therefore, we process the text and multi-modal inputs separately, using [dummy text](#dummy-text) to avoid HF errors. Since this skips HF's prompt updating code, we apply [automatic prompt updating](#automatic-prompt-updating) afterwards to keep the output tokens and multi-modal data consistent with each other.
+
+## Speeding Up Multi‑Modal Data Processing
+
+### Fused Normalisation on the Device
+
+To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation, and rescaling), we offload the heavy numerical preprocessing from the CPU to the GPU and optimise data movement.
+
+#### Fusing Normalisation and Rescaling on the GPU
+
+Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
+
+- **How it works**: We use a helper called `make_input_norm` (backed by `nn.BatchNorm1d(3, eps=0.0)`) and bake the rescale factor (typically 1/255) directly into the mean and standard deviation:
+  - Effective mean = `image_mean * (1/rescale_factor)`
+  - Effective std  = `image_std  * (1/rescale_factor)`
+- **At runtime**: The layer takes raw uint8 pixel values (0–255) and does the full normalised mapping in a single GPU kernel—no CPU involvement.
+
+#### Keeping Data in UINT8 All the Way
+
+To get the most out of this GPU‑side fused normalisation, we keep image data as `uint8` throughout the whole path—from the entry point, through the engine core, right up to GPU memory. We don’t convert to the model’s `bf16` dtype early.
+
+`Entrypoint → Engine Core → GPU memory` – every transfer carries `uint8` data.  
+
+The actual cast to `bf16` is **deferred** until just before the fused normalisation layer, and that cast also happens on the GPU. This cuts PCIe bandwidth usage in half and lowers CPU memory footprint.
+
+#### Toggle: `mm_device_do_normalize`
+
+This GPU‑side fusion is controlled by a config flag called **`mm_device_do_normalize`**.
+
+- When `True`, normalisation and rescaling are done on the GPU using the fused layer; when `False`, we fall back to the old CPU‑side path.
+- The flag is **enabled by default** for all models that support it.
+- Currently, it’s on by default for these architectures:
+
+| name         | Architecture                         | Example HF Models                   |
+|--------------|--------------------------------------|-------------------------------------|
+| `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.   |
+| `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc. |
+
+#### What We Gain Overall
+
+- **CPU offload**: The arithmetic for normalisation and rescaling is completely gone from the CPU.
+- **PCIe savings**: Sending `uint8` (1 byte) instead of `bf16` (2 bytes) slashes data transfer volume by **50%** .
+- **GPU overhead**: The fused kernel is very lightweight and can often be merged with subsequent CUDA operations, so it hardly adds any extra cost.
