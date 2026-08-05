@@ -545,7 +545,10 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         ("state-spaces/mamba-1.4b-hf", 16, 1)
     ],
 )
-def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
+@pytest.mark.parametrize("mamba_cache_mode", ["align", "all"])
+def test_mamba_align_cpu_offload(
+    model: str, block_size: int, tp_size: int, mamba_cache_mode: str
+):
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
@@ -562,7 +565,7 @@ def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
         kv_transfer_config=kv_transfer_config,
         language_model_only=True,
         enable_prefix_caching=True,
-        mamba_cache_mode="align",
+        mamba_cache_mode=mamba_cache_mode,
         disable_hybrid_kv_cache_manager=False,
     )
 
