@@ -50,7 +50,6 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     graph_capture,
     is_global_first_rank,
-    prepare_communication_buffer_for_model,
 )
 from vllm.forward_context import (
     BatchDescriptor,
@@ -5387,12 +5386,7 @@ class GPUModelRunner(
             format_gib(self.model_memory_usage),
             time_after_load - time_before_load,
         )
-        if not load_dummy_weights:
-            prepare_communication_buffer_for_model(self.model)
-            if (drafter := getattr(self, "drafter", None)) and (
-                drafter_model := getattr(drafter, "model", None)
-            ):
-                prepare_communication_buffer_for_model(drafter_model)
+
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
@@ -5553,7 +5547,10 @@ class GPUModelRunner(
                 )
 
             if weights_path is not None:
+                # The revision belongs to the model we are reloading away from,
+                # so it must not be carried over to the new path.
                 self.model_config.model = weights_path
+                self.model_config.revision = None
             weights_iterator = model_loader.get_all_weights(self.model_config, model)
             weights_iterator = cast(
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
