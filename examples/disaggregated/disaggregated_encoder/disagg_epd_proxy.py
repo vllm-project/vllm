@@ -216,8 +216,8 @@ async def fanout_encoder_primer(
                     ],
                 },
             ],
-            # Only need 1 token so the server actually runs the encoder path
-            "max_tokens": 1,
+            # No max_tokens cap: the encoder instance never samples, it finishes
+            # once the prompt is encoded and its embeddings are published.
             "stream": False,
         }
         tasks.append(

@@ -1443,6 +1443,9 @@ class ModelConfig:
     def get_num_experts(self) -> int:
         return self.model_arch_config.num_experts
 
+    def get_num_experts_per_tok(self) -> int:
+        return self.model_arch_config.num_experts_per_token
+
     def get_total_num_hidden_layers(self) -> int:
         return self.model_arch_config.total_num_hidden_layers
 
