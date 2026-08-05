@@ -15,8 +15,6 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
-use vllm_chat::{NewChatOutputProcessorOptions, ParserSelection};
-use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
 use crate::error::{ApiError, server_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -87,30 +85,16 @@ fn tokenize_completion(
     req: TokenizeCompletionRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
     check_model(state, req.model.as_deref())?;
-    let text_request = TextRequest {
-        request_id: request_id.to_string(),
-        prompt: Prompt::Text(req.prompt),
-        mm_features: None,
-        sampling_params: SamplingParams::default(),
-        decode_options: TextDecodeOptions::default(),
-        intermediate: false,
-        priority: 0,
-        cache_salt: None,
-        add_special_tokens: req.add_special_tokens,
-        data_parallel_rank: None,
-        reasoning_parser_kwargs: None,
-        lora_request: None,
-        arrival_time: None,
-    };
+    let return_token_strs = req.return_token_strs;
     let prepared = state
         .chat
         .text()
         .request_processor()
-        .prepare(text_request)
+        .prepare(req.into_text_request(request_id.to_string()))
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
     Ok((
         prepared.generate_request.prompt_token_ids,
-        req.return_token_strs,
+        return_token_strs,
     ))
 }
 
@@ -127,17 +111,10 @@ async fn tokenize_chat(
     let return_token_strs = req.return_token_strs;
     // `continue_final_message` / `add_generation_prompt` mutual exclusion is
     // enforced in `normalize_generation_prompt_mode` inside `into_chat_request`.
-    let parser_selection = ParserSelection::Auto;
-    let (text_request, _output_processor) = state
+    let text_request = state
         .chat
         .request_processor()
-        .prepare(
-            req.into_chat_request(request_id.to_string())?,
-            NewChatOutputProcessorOptions {
-                tool_call_parser: &parser_selection,
-                reasoning_parser: &parser_selection,
-            },
-        )
+        .prepare_for_tokenization(req.into_chat_request(request_id.to_string())?)
         .await
         .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
     let prepared = state

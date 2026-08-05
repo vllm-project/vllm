@@ -6071,6 +6071,36 @@ async fn tokenize_chat_includes_generation_prompt_in_token_count() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_chat_with_tools_does_not_require_output_parser() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!json["tokens"].as_array().expect("tokens").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tokenize_chat_conflicting_generation_flags_returns_400() {
     let mut app = test_app().await;
 
