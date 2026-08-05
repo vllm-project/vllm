@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
 )
@@ -497,6 +498,9 @@ class FusedMoEExperts(ABC):
 
         self.moe_config = moe_config
         self.quant_config = quant_config
+        self.activation_config = ApplyMoEActivationConfig.from_configs(
+            moe_config, quant_config
+        )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -885,33 +889,16 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         output: torch.Tensor,
         input: torch.Tensor,
         *,
-        clamp_limit: float | None = None,
-        alpha: float = 1.0,
-        beta: float = 0.0,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
-        activation_situ_beta: float | None = None,
-        activation_situ_linear_beta: float | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
             output,
             input,
-            clamp_limit=clamp_limit,
-            alpha=alpha,
-            beta=beta,
+            activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            activation_situ_beta=(
-                self.moe_config.activation_situ_beta
-                if activation_situ_beta is None
-                else activation_situ_beta
-            ),
-            activation_situ_linear_beta=(
-                self.moe_config.activation_situ_linear_beta
-                if activation_situ_linear_beta is None
-                else activation_situ_linear_beta
-            ),
         )
 
     @abstractmethod
