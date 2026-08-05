@@ -87,7 +87,9 @@ MM_DATA_PATCHES = {
 _XPU_EXCLUDED_MODEL_IDS = {
     "baidu/Unlimited-OCR",
     "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+    "moonshotai/Kimi-K3",
     "Qwen/Qwen2.5-Omni-7B-AWQ",
+    "thinkingmachines/Inkling-NVFP4",
 }
 
 
