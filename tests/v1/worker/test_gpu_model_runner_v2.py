@@ -37,10 +37,8 @@ _PER_LAYER_BUFFERS = frozenset(
         "resident_main_kv",
         "resident_logical_ids",
         "resident_last_access",
-        "resident_generation",
         "newest_main_kv",
         "newest_logical_ids",
-        "newest_generation",
         "provisional_slots",
     ]
 )
@@ -232,7 +230,7 @@ def _sparse_mla_rank(
             request_wide = set(manager._local_buffers) - per_layer
             entries = {entry.name: entry for entry in plan.manifest}
             view_contract = (
-                len(per_layer) == 8
+                len(per_layer) == 6
                 and all(
                     view.local_buffers[name].data_ptr()
                     == manager._local_buffers[name][0].data_ptr()
@@ -1365,21 +1363,44 @@ def test_gpu_model_runner_v2_sparse_mla_manager_failure_unwind_and_shutdown(
 def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
     import vllm.v1.worker.gpu.model_runner as model_runner_module
 
+    generation_names = {
+        "request_generation",
+        "resident_generation",
+        "newest_generation",
+    }
+
+    class GenerationFreeBuffers(dict):
+        def __init__(self, buffers):
+            super().__init__(buffers)
+            self.generation_accesses = []
+            self.legacy_generation = {
+                "request_generation": torch.zeros(3, dtype=torch.int64),
+                "resident_generation": torch.full((2, 3, 2), -1, dtype=torch.int64),
+                "newest_generation": torch.full((2, 3, 2), -1, dtype=torch.int64),
+            }
+
+        def __missing__(self, name):
+            if name in self.legacy_generation:
+                self.generation_accesses.append(name)
+                return self.legacy_generation[name]
+            raise KeyError(name)
+
     manager = SparseMLAOffloadManager.__new__(SparseMLAOffloadManager)
     manager._closing = manager._closed = False
     manager._row_request_ids = [None, None, None]
-    manager._local_buffers = {
-        "resident_logical_ids": torch.full((2, 3, 2), 41, dtype=torch.int64),
-        "resident_last_access": torch.full((2, 3, 2), 42, dtype=torch.int64),
-        "resident_generation": torch.full((2, 3, 2), 43, dtype=torch.int64),
-        "newest_logical_ids": torch.full((2, 3, 2), 44, dtype=torch.int64),
-        "newest_generation": torch.full((2, 3, 2), 45, dtype=torch.int64),
-        "request_block_ids": torch.full((3, 2), -1, dtype=torch.int32),
-        "request_num_blocks": torch.zeros(3, dtype=torch.int32),
-        "request_num_tokens": torch.zeros(3, dtype=torch.int32),
-        "request_generation": torch.zeros(3, dtype=torch.int64),
-        "request_active": torch.zeros(3, dtype=torch.bool),
-    }
+    manager._local_buffers = GenerationFreeBuffers(
+        {
+            "resident_main_kv": torch.full((2, 3, 2, 2), 101, dtype=torch.float32),
+            "resident_logical_ids": torch.full((2, 3, 2), 41, dtype=torch.int64),
+            "resident_last_access": torch.full((2, 3, 2), 42, dtype=torch.int64),
+            "newest_main_kv": torch.full((2, 3, 2, 2), 102, dtype=torch.float32),
+            "newest_logical_ids": torch.full((2, 3, 2), 44, dtype=torch.int64),
+            "request_block_ids": torch.full((3, 2), -1, dtype=torch.int32),
+            "request_num_blocks": torch.zeros(3, dtype=torch.int32),
+            "request_num_tokens": torch.zeros(3, dtype=torch.int32),
+            "request_active": torch.zeros(3, dtype=torch.bool),
+        }
+    )
 
     runner = model_runner_module.GPUModelRunner.__new__(
         model_runner_module.GPUModelRunner
@@ -1445,17 +1466,26 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
     )
     assert buffers["request_num_blocks"].tolist() == [1, 2, 0]
     assert buffers["request_num_tokens"].tolist() == [9, 8, 0]
-    assert buffers["request_generation"].tolist() == [1, 1, 0]
     assert buffers["request_active"].tolist() == [True, True, False]
+    assert not buffers.generation_accesses
+    assert generation_names.isdisjoint(buffers)
+    assert manager._row_request_ids == ["request-a", "request-b", None]
+    assert torch.all(buffers["resident_logical_ids"][:, :2] == -1)
+    assert torch.all(buffers["newest_logical_ids"][:, :2] == -1)
+    assert torch.all(buffers["resident_last_access"][:, :2] == 0)
+    assert torch.all(buffers["resident_main_kv"] == 101)
+    assert torch.all(buffers["newest_main_kv"] == 102)
 
-    for name in (
-        "resident_logical_ids",
-        "resident_generation",
-        "newest_logical_ids",
-        "newest_generation",
-    ):
-        buffers[name].fill_(71)
+    buffers["resident_logical_ids"].copy_(
+        torch.arange(12, dtype=torch.int64).view(2, 3, 2)
+    )
+    buffers["newest_logical_ids"].copy_(
+        torch.arange(24, 36, dtype=torch.int64).view(2, 3, 2)
+    )
     buffers["resident_last_access"].fill_(72)
+    preserved_resident_ids = buffers["resident_logical_ids"].clone()
+    preserved_newest_ids = buffers["newest_logical_ids"].clone()
+    preserved_last_access = buffers["resident_last_access"].clone()
     manager._prepare_decode_batch(
         ["request-a", "request-b"],
         (),
@@ -1465,23 +1495,61 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([18, 0, 20], dtype=torch.int32),
         2,
     )
-    assert buffers["request_generation"].tolist() == [1, 1, 0]
-    assert torch.all(buffers["resident_logical_ids"][:, :2] == 71)
+    assert torch.equal(buffers["resident_logical_ids"], preserved_resident_ids)
+    assert torch.equal(buffers["newest_logical_ids"], preserved_newest_ids)
+    assert torch.equal(buffers["resident_last_access"], preserved_last_access)
     assert buffers["request_num_tokens"].tolist() == [18, 20, 0]
 
     manager._prepare_decode_batch(
-        ["request-b", "request-a"],
-        (),
+        ["request-a", "request-b"],
+        ("request-a",),
         torch.tensor([2, 0], dtype=torch.int32),
         (torch.tensor([[51, 52], [61, 62]], dtype=torch.int32),),
         torch.tensor([[1, 0, 2]], dtype=torch.int32),
         torch.tensor([28, 0, 30], dtype=torch.int32),
         2,
     )
-    assert buffers["request_generation"].tolist() == [2, 2, 0]
-    assert torch.all(buffers["resident_logical_ids"][:, :2] == -1)
-    assert torch.all(buffers["resident_last_access"][:, :2] == 0)
+    assert torch.all(buffers["resident_logical_ids"][:, 0] == -1)
+    assert torch.all(buffers["newest_logical_ids"][:, 0] == -1)
+    assert torch.all(buffers["resident_last_access"][:, 0] == 0)
+    assert torch.equal(
+        buffers["resident_logical_ids"][:, 1], preserved_resident_ids[:, 1]
+    )
+    assert torch.equal(buffers["newest_logical_ids"][:, 1], preserved_newest_ids[:, 1])
+    assert torch.equal(
+        buffers["resident_last_access"][:, 1], preserved_last_access[:, 1]
+    )
+    assert manager._row_request_ids == ["request-a", "request-b", None]
+    assert buffers["request_active"].tolist() == [True, True, False]
+    assert torch.all(buffers["resident_main_kv"] == 101)
+    assert torch.all(buffers["newest_main_kv"] == 102)
 
+    clear_targets = {
+        buffers[name][:, 1].data_ptr(): name
+        for name in (
+            "resident_logical_ids",
+            "newest_logical_ids",
+            "resident_last_access",
+        )
+    }
+    clear_calls = []
+    original_fill = torch.Tensor.fill_
+    original_zero = torch.Tensor.zero_
+
+    def track_fill(tensor, value):
+        name = clear_targets.get(tensor.data_ptr())
+        if name is not None and value == -1:
+            clear_calls.append(name)
+        return original_fill(tensor, value)
+
+    def track_zero(tensor):
+        name = clear_targets.get(tensor.data_ptr())
+        if name is not None:
+            clear_calls.append(name)
+        return original_zero(tensor)
+
+    monkeypatch.setattr(torch.Tensor, "fill_", track_fill)
+    monkeypatch.setattr(torch.Tensor, "zero_", track_zero)
     manager._prepare_decode_batch(
         ["request-a"],
         (),
@@ -1491,50 +1559,115 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([38, 0, 0], dtype=torch.int32),
         3,
     )
-    assert buffers["request_generation"].tolist() == [3, 3, 0]
+    assert sorted(clear_calls) == [
+        "newest_logical_ids",
+        "resident_last_access",
+        "resident_logical_ids",
+    ]
+    assert torch.all(buffers["resident_logical_ids"][:, 1] == -1)
+    assert torch.all(buffers["newest_logical_ids"][:, 1] == -1)
+    assert torch.all(buffers["resident_last_access"][:, 1] == 0)
+    assert torch.equal(
+        buffers["request_block_ids"],
+        torch.tensor([[61, 62], [-1, -1], [-1, -1]], dtype=torch.int32),
+    )
+    assert buffers["request_num_blocks"].tolist() == [1, 0, 0]
+    assert buffers["request_num_tokens"].tolist() == [38, 0, 0]
     assert buffers["request_active"].tolist() == [True, False, False]
     assert manager._row_request_ids == ["request-a", None, None]
+    clear_calls.clear()
+    manager._prepare_decode_batch(
+        ["request-a"],
+        (),
+        torch.tensor([0], dtype=torch.int32),
+        (torch.tensor([[61, 62], [0, 0], [0, 0]], dtype=torch.int32),),
+        torch.tensor([[1, 0, 0]], dtype=torch.int32),
+        torch.tensor([38, 0, 0], dtype=torch.int32),
+        3,
+    )
+    assert not clear_calls
 
-    unchanged = buffers["request_generation"].clone()
+    manager._prepare_decode_batch(
+        ["request-a", "request-b"],
+        (),
+        torch.tensor([0, 1], dtype=torch.int32),
+        (torch.tensor([[71, 72], [81, 82]], dtype=torch.int32),),
+        torch.tensor([[1, 1, 0]], dtype=torch.int32),
+        torch.tensor([48, 49, 0], dtype=torch.int32),
+        2,
+    )
+    buffers["resident_logical_ids"].fill_(77)
+    buffers["newest_logical_ids"].fill_(78)
+    buffers["resident_last_access"].fill_(79)
+    manager._prepare_decode_batch(
+        ["request-b", "request-a"],
+        (),
+        torch.tensor([1, 0], dtype=torch.int32),
+        (torch.tensor([[91, 92], [101, 102]], dtype=torch.int32),),
+        torch.tensor([[1, 1, 0]], dtype=torch.int32),
+        torch.tensor([58, 59, 0], dtype=torch.int32),
+        2,
+    )
+    assert torch.all(buffers["resident_logical_ids"][:, :2] == -1)
+    assert torch.all(buffers["newest_logical_ids"][:, :2] == -1)
+    assert torch.all(buffers["resident_last_access"][:, :2] == 0)
+    assert manager._row_request_ids == ["request-b", "request-a", None]
+    assert buffers["request_active"].tolist() == [True, True, False]
+    assert torch.all(buffers["resident_main_kv"] == 101)
+    assert torch.all(buffers["newest_main_kv"] == 102)
+
+    unchanged = {
+        name: tensor.clone()
+        for name, tensor in buffers.items()
+        if name not in generation_names
+    }
     scheduler_output.total_num_scheduled_tokens = 0
     scheduler_output.num_scheduled_tokens = {}
     assert runner.execute_model(scheduler_output) == "no-forward"
-    assert torch.equal(buffers["request_generation"], unchanged)
-
-    scheduler_output.total_num_scheduled_tokens = 1
-    scheduler_output.num_scheduled_tokens = {"request-a": 1}
-    scheduler_output.scheduled_new_reqs = [SimpleNamespace(req_id="request-a")]
-    input_batch.req_ids = ["request-a"]
-    input_batch.idx_mapping = torch.tensor([0], dtype=torch.int32)
-    input_batch.num_reqs_after_padding = 1
-    runner.prepare_attn = lambda batch: (
-        (torch.tensor([[71, 72]], dtype=torch.int32),),
-        torch.zeros(1, dtype=torch.int64),
-    )
-    with pytest.raises(RuntimeError, match="stop after publication"):
-        runner.execute_model(scheduler_output)
-    assert buffers["request_generation"].tolist() == [4, 3, 0]
-    assert torch.all(buffers["resident_logical_ids"][:, 0] == -1)
+    assert all(torch.equal(buffers[name], value) for name, value in unchanged.items())
 
 
 def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
     import vllm.v1.worker.gpu.model_runner as model_runner_module
 
+    generation_names = {
+        "request_generation",
+        "resident_generation",
+        "newest_generation",
+    }
+
+    class GenerationFreeBuffers(dict):
+        def __init__(self, buffers):
+            super().__init__(buffers)
+            self.generation_accesses = []
+            self.legacy_generation = {
+                "request_generation": torch.zeros(2, dtype=torch.int64),
+                "resident_generation": torch.full((1, 2, 2), -1, dtype=torch.int64),
+                "newest_generation": torch.full((1, 2, 2), -1, dtype=torch.int64),
+            }
+
+        def __missing__(self, name):
+            if name in self.legacy_generation:
+                self.generation_accesses.append(name)
+                return self.legacy_generation[name]
+            raise KeyError(name)
+
     manager = SparseMLAOffloadManager.__new__(SparseMLAOffloadManager)
     manager._closing = manager._closed = False
     manager._row_request_ids = [None, None]
-    manager._local_buffers = {
-        "resident_logical_ids": torch.full((1, 2, 2), 1, dtype=torch.int64),
-        "resident_last_access": torch.full((1, 2, 2), 2, dtype=torch.int64),
-        "resident_generation": torch.full((1, 2, 2), 3, dtype=torch.int64),
-        "newest_logical_ids": torch.full((1, 2, 2), 4, dtype=torch.int64),
-        "newest_generation": torch.full((1, 2, 2), 5, dtype=torch.int64),
-        "request_block_ids": torch.full((2, 2), -1, dtype=torch.int32),
-        "request_num_blocks": torch.zeros(2, dtype=torch.int32),
-        "request_num_tokens": torch.zeros(2, dtype=torch.int32),
-        "request_generation": torch.zeros(2, dtype=torch.int64),
-        "request_active": torch.zeros(2, dtype=torch.bool),
-    }
+    manager._local_buffers = GenerationFreeBuffers(
+        {
+            "resident_main_kv": torch.full((1, 2, 2, 2), 11, dtype=torch.float32),
+            "resident_logical_ids": torch.full((1, 2, 2), 1, dtype=torch.int64),
+            "resident_last_access": torch.full((1, 2, 2), 2, dtype=torch.int64),
+            "newest_main_kv": torch.full((1, 2, 2, 2), 12, dtype=torch.float32),
+            "newest_logical_ids": torch.full((1, 2, 2), 4, dtype=torch.int64),
+            "request_block_ids": torch.full((2, 2), -1, dtype=torch.int32),
+            "request_num_blocks": torch.zeros(2, dtype=torch.int32),
+            "request_num_tokens": torch.zeros(2, dtype=torch.int32),
+            "request_active": torch.zeros(2, dtype=torch.bool),
+        }
+    )
     inventory = {
         name: (tensor.data_ptr(), tensor.shape, tensor.stride())
         for name, tensor in manager._local_buffers.items()
@@ -1576,8 +1709,9 @@ def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
     )
     assert manager._local_buffers["request_num_blocks"].tolist() == [1, 2]
     assert manager._local_buffers["request_num_tokens"].tolist() == [8, 7]
-    assert manager._local_buffers["request_generation"].tolist() == [1, 1]
     assert manager._local_buffers["request_active"].tolist() == [True, True]
+    assert not manager._local_buffers.generation_accesses
+    assert generation_names.isdisjoint(manager._local_buffers)
     assert set(manager._local_buffers) == inventory_names
     assert {
         name: (tensor.data_ptr(), tensor.shape, tensor.stride())
@@ -1588,7 +1722,9 @@ def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
     valid_table = torch.tensor([[1, 2]], dtype=torch.int32)
     valid_counts = torch.tensor([[1, 0]], dtype=torch.int32)
     valid_tokens = torch.tensor([1, 0], dtype=torch.int32)
-    generation_before_rejection = manager._local_buffers["request_generation"].clone()
+    buffers_before_rejection = {
+        name: tensor.clone() for name, tensor in manager._local_buffers.items()
+    }
     malformed = (
         ((), valid_idx, (valid_table,), valid_counts, valid_tokens, 1),
         (("a",), valid_idx, (valid_table, valid_table), valid_counts, valid_tokens, 1),
@@ -1658,8 +1794,9 @@ def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
             valid_tokens,
             1,
         )
-    assert torch.equal(
-        manager._local_buffers["request_generation"], generation_before_rejection
+    assert all(
+        torch.equal(manager._local_buffers[name], value)
+        for name, value in buffers_before_rejection.items()
     )
 
     runner = model_runner_module.GPUModelRunner.__new__(
@@ -1705,6 +1842,7 @@ def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
     )
     with pytest.raises(ValueError, match="blocks_per_kv_block"):
         runner.execute_model(scheduler_output)
-    assert torch.equal(
-        manager._local_buffers["request_generation"], generation_before_rejection
+    assert all(
+        torch.equal(manager._local_buffers[name], value)
+        for name, value in buffers_before_rejection.items()
     )

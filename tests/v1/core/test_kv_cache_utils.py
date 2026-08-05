@@ -229,6 +229,8 @@ def test_glm_dsa_kv_specs_assign_sparse_offload_roles():
 
 
 def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
+    from math import prod
+
     role = kv_cache_utils.MLAKVCacheRole
     worker_specs = _make_sparse_mla_worker_specs(role.MAIN_HOST, role.INDEXER_DEVICE)
     worker_ceilings = [2 << 20, 3 << 20]
@@ -277,12 +279,6 @@ def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
     assert (plan0.num_dp_replicas, plan0.tensor_parallel_size) == (2, 2)
     assert plan0.host_pool_bytes_per_dp_replica == 1 << 20
     assert plan0.host_bytes_total == 2 << 20
-    assert plan0.fixed_offload_hbm_bytes_per_tp_rank == 7168
-    assert plan0.effective_available_hbm_bytes_per_tp_rank == (2 << 20) - 7168
-    assert plan1.effective_available_hbm_bytes_per_tp_rank == (3 << 20) - 7168
-    assert plan0.device_bytes_per_tp_rank == 7168 + (256 << 10)
-    assert plan0.device_bytes_total == (7168 + (256 << 10)) * 4
-
     manager = "offload_manager"
     generic = "generic_kv_allocator"
     hbm = "hbm_local"
@@ -293,19 +289,16 @@ def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
         ("resident_main_kv", (2, 2, 8, 16), torch.bfloat16, 256, 1, manager, hbm),
         ("resident_logical_ids", (2, 2, 8), torch.int64, 256, 1, manager, hbm),
         ("resident_last_access", (2, 2, 8), torch.int64, 256, 1, manager, hbm),
-        ("resident_generation", (2, 2, 8), torch.int64, 256, 1, manager, hbm),
         ("newest_main_kv", (2, 2, 1, 16), torch.bfloat16, 256, 1, manager, hbm),
         ("newest_logical_ids", (2, 2, 1), torch.int64, 256, 1, manager, hbm),
-        ("newest_generation", (2, 2, 1), torch.int64, 256, 1, manager, hbm),
         ("request_block_ids", (2, 16), torch.int32, 256, 1, manager, hbm),
         ("request_num_blocks", (2,), torch.int32, 256, 1, manager, hbm),
         ("request_num_tokens", (2,), torch.int32, 256, 1, manager, hbm),
-        ("request_generation", (2,), torch.int64, 256, 1, manager, hbm),
         ("request_active", (2,), torch.bool, 256, 1, manager, hbm),
-        ("topk_logical_ids", (2, 1, 4), torch.int64, 256, 1, manager, hbm),
+        ("topk_logical_ids", (2, 1, 4), torch.int32, 256, 1, manager, hbm),
         ("topk_physical_ids", (2, 1, 4), torch.int32, 256, 1, manager, hbm),
         ("topk_hit_mask", (2, 1, 4), torch.bool, 256, 1, manager, hbm),
-        ("miss_logical_ids", (2, 1, 4), torch.int64, 256, 1, manager, hbm),
+        ("miss_logical_ids", (2, 1, 4), torch.int32, 256, 1, manager, hbm),
         ("miss_victim_slots", (2, 1, 4), torch.int32, 256, 1, manager, hbm),
         ("miss_counts", (2, 1), torch.int32, 256, 1, manager, hbm),
         ("provisional_slots", (2, 2, 1, 4), torch.int32, 256, 1, manager, hbm),
@@ -329,6 +322,31 @@ def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
         for entry in plan0.manifest
     )
     assert actual_manifest == expected_manifest
+    assert {
+        "request_generation",
+        "resident_generation",
+        "newest_generation",
+    }.isdisjoint(entry.name for entry in plan0.manifest)
+    expected_fixed_hbm_bytes = sum(
+        entry.allocation_count
+        * (
+            (prod(entry.shape) * entry.dtype.itemsize + entry.alignment_bytes - 1)
+            // entry.alignment_bytes
+            * entry.alignment_bytes
+        )
+        for entry in plan0.manifest
+        if entry.owner.value == manager and entry.tier.value == hbm
+    )
+    assert expected_fixed_hbm_bytes == 6400
+    assert plan0.fixed_offload_hbm_bytes_per_tp_rank == expected_fixed_hbm_bytes
+    assert plan0.effective_available_hbm_bytes_per_tp_rank == (
+        (2 << 20) - expected_fixed_hbm_bytes
+    )
+    assert plan1.effective_available_hbm_bytes_per_tp_rank == (
+        (3 << 20) - expected_fixed_hbm_bytes
+    )
+    assert plan0.device_bytes_per_tp_rank == expected_fixed_hbm_bytes + (256 << 10)
+    assert plan0.device_bytes_total == (expected_fixed_hbm_bytes + (256 << 10)) * 4
 
     assert [tensor.shared_by for tensor in configs[0].kv_cache_tensors] == [
         ["indexer.0"]
@@ -365,22 +383,37 @@ def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
         )
 
     auto_fit_config = _make_sparse_mla_config(original_max_model_len=-1)
-    auto_fit = get_kv_cache_configs(auto_fit_config, worker_specs, [7168 + 512] * 2)[0]
+    auto_fit = get_kv_cache_configs(
+        auto_fit_config, worker_specs, [expected_fixed_hbm_bytes + 512] * 2
+    )[0]
     auto_fit_plan = auto_fit.sparse_mla_offload_plan
     assert auto_fit_plan is not None
     assert auto_fit_config.model_config.max_model_len == 32
-    assert (auto_fit.num_blocks, auto_fit_plan.manifest[9].shape) == (8, (2, 8))
+    assert (
+        auto_fit.num_blocks,
+        next(
+            entry.shape
+            for entry in auto_fit_plan.manifest
+            if entry.name == "request_block_ids"
+        ),
+    ) == (8, (2, 8))
 
     exact_reserve = get_kv_cache_configs(
-        _make_sparse_mla_config(), worker_specs, [7168 + 1024] * 2
+        _make_sparse_mla_config(), worker_specs, [expected_fixed_hbm_bytes + 1024] * 2
     )[0]
     assert exact_reserve.num_blocks == 16
     assert exact_reserve.sparse_mla_offload_plan is not None
-    assert exact_reserve.sparse_mla_offload_plan.device_bytes_per_tp_rank == 8192
+    assert exact_reserve.sparse_mla_offload_plan.device_bytes_per_tp_rank == (
+        expected_fixed_hbm_bytes + 1024
+    )
     with pytest.raises(ValueError, match="fixed offload HBM reserve"):
-        get_kv_cache_configs(_make_sparse_mla_config(), worker_specs, [7167] * 2)
+        get_kv_cache_configs(
+            _make_sparse_mla_config(), worker_specs, [expected_fixed_hbm_bytes - 1] * 2
+        )
     with pytest.raises(ValueError, match="max seq len"):
-        get_kv_cache_configs(_make_sparse_mla_config(), worker_specs, [7168] * 2)
+        get_kv_cache_configs(
+            _make_sparse_mla_config(), worker_specs, [expected_fixed_hbm_bytes] * 2
+        )
 
     host_boundary = get_kv_cache_configs(
         _make_sparse_mla_config(host_pool_bytes=8192),

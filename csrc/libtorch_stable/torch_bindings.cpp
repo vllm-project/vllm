@@ -37,26 +37,26 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "sparse_mla_cache_plan("
       "Tensor current_main_kv, Tensor request_block_ids, "
       "Tensor request_num_blocks, Tensor request_num_tokens, "
-      "Tensor request_generation, Tensor request_active, "
-      "Tensor req_id_per_token, Tensor topk_logical_ids, "
+      "Tensor request_active, Tensor req_id_per_token, "
+      "Tensor topk_logical_ids, "
       "Tensor! resident_main_kv, Tensor! resident_logical_ids, "
-      "Tensor! resident_last_access, Tensor! resident_generation, "
+      "Tensor! resident_last_access, "
       "Tensor! newest_main_kv, Tensor! newest_logical_ids, "
-      "Tensor! newest_generation, Tensor! topk_physical_ids, "
-      "Tensor! topk_hit_mask, Tensor! miss_logical_ids, "
+      "Tensor! topk_physical_ids, Tensor! topk_hit_mask, "
+      "Tensor! miss_logical_ids, "
       "Tensor! miss_victim_slots, Tensor! miss_counts, Tensor! hit_counts, "
       "int num_host_blocks) -> ()");
   ops.def(
       "sparse_mla_offload_transfer("
       "Tensor! main_host_kv_uva, Tensor request_block_ids, "
       "Tensor request_num_blocks, Tensor request_num_tokens, "
-      "Tensor request_generation, Tensor request_active, "
-      "Tensor req_id_per_token, Tensor newest_main_kv, "
+      "Tensor request_active, Tensor req_id_per_token, "
+      "Tensor newest_main_kv, "
       "Tensor newest_logical_ids, Tensor miss_logical_ids, "
       "Tensor miss_victim_slots, Tensor miss_counts, Tensor hit_counts, "
       "Tensor! resident_main_kv, Tensor! resident_logical_ids, "
-      "Tensor! resident_last_access, Tensor! resident_generation, "
-      "bool is_host_writer, int block_size) -> ()");
+      "Tensor! resident_last_access, bool is_host_writer, int block_size) -> "
+      "()");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
