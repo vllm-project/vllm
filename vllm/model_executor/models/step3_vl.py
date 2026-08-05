@@ -725,6 +725,7 @@ class Step3VLForConditionalGeneration(
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
+            EncoderCudaGraphPathConfig,
         )
 
         return EncoderCudaGraphConfig(
@@ -734,9 +735,15 @@ class Step3VLForConditionalGeneration(
                 "patch_pixel_values",
             ],
             out_hidden_size=self.config.hidden_size,
-            enable_dual_path_graph=True,
-            global_token_per_image=self.img_output_tokens,
-            local_token_per_patch=self.patch_output_tokens,
+            paths={
+                "global": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.img_output_tokens
+                ),
+                "local": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.patch_output_tokens,
+                    allow_zero_tokens=True,
+                ),
+            },
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -771,8 +778,10 @@ class Step3VLForConditionalGeneration(
                 output_tokens=(
                     self.img_output_tokens + num_patch * self.patch_output_tokens
                 ),
-                global_output_tokens=self.img_output_tokens,
-                local_output_tokens=num_patch * self.patch_output_tokens,
+                path_output_tokens={
+                    "global": self.img_output_tokens,
+                    "local": num_patch * self.patch_output_tokens,
+                },
             )
             for num_patch in num_patches
         ]
@@ -876,19 +885,21 @@ class Step3VLForConditionalGeneration(
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ):
         """CPU-side per-item merge after dual-path graph replay.
 
-        ``output`` contains global-image features and ``local_output``
+        ``outputs['global']`` contains global-image features and ``outputs['local']``
         contains local-patch features (or ``None`` when there are no patches).
         """
+        output = outputs["global"]
+        local_output = outputs.get("local")
+        assert batch_mm_kwargs is not None
         num_patches = batch_mm_kwargs["num_patches"]
         hidden = output.shape[-1]
         bsz = len(indices)
@@ -899,7 +910,7 @@ class Step3VLForConditionalGeneration(
         patch_tokens = total_patches * self.patch_output_tokens
 
         global_part = output[:img_tokens].reshape(bsz, self.img_output_tokens, hidden)
-        if total_patches > 0:
+        if total_patches > 0 and local_output is not None:
             patch_part = local_output[:patch_tokens].reshape(
                 -1, self.patch_output_tokens, hidden
             )

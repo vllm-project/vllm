@@ -14,6 +14,7 @@ methods only.
 """
 
 import logging
+from typing import Literal
 
 import pytest
 from transformers import PretrainedConfig
@@ -77,7 +78,7 @@ def test_override_ignores_missing_attribute(vllm_caplog: pytest.LogCaptureFixtur
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 def test_eagle_draft_inherits_target_max_model_len(
-    method: str, vllm_caplog: pytest.LogCaptureFixture
+    method: Literal["eagle", "eagle3"], vllm_caplog: pytest.LogCaptureFixture
 ):
     target_model_config = ModelConfig(LLAMA3_TARGET)
     assert target_model_config.max_model_len > 2048
