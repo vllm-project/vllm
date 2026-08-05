@@ -681,8 +681,6 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
             intermediate_size = round_up(intermediate_size, 128)
             hidden_size = round_up(hidden_size, 128)
         else:
-            # SiTU FlyDSL kernel pads per gate/up half internally; rounding up
-            # to 256 would inflate weight tensors and OOM on native sizes.
             intermediate_size = round_up(intermediate_size, 256)
             hidden_size = round_up(hidden_size, 256)
     elif backend == Mxfp4MoeBackend.CPU:
@@ -1468,6 +1466,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
+
+        import os
+
+        # TODO: Remove this once AITER is fixed
+        # Necessary for AITER side from crashing
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
         if activation == MoEActivation.SITU:
             from aiter.utility.fp4_utils import e8m0_shuffle
