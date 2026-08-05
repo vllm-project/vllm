@@ -537,17 +537,15 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         workspace = prefill.topk_mask_workspace
         if workspace is None or prefill.query_lens_cpu is None:
             return False
+        max_context_chunk_seq_len = 0
+        if prefill.chunked_context is not None:
+            max_context_chunk_seq_len = max(
+                chunk.max_seq_len for chunk in prefill.chunked_context.chunks
+            )
         fits = _masked_mha_workspace_fits(
             batch_size=len(prefill.query_lens_cpu),
             max_query_len=prefill.max_query_len,
-            max_context_chunk_seq_len=(
-                0
-                if prefill.chunked_context is None
-                else max(
-                    (chunk.max_seq_len for chunk in prefill.chunked_context.chunks),
-                    default=0,
-                )
-            ),
+            max_context_chunk_seq_len=max_context_chunk_seq_len,
             workspace_numel=workspace.numel(),
         )
         if not fits:
