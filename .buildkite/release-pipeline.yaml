@@ -210,8 +210,9 @@ steps:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "bash .buildkite/scripts/setup-release-buildx.sh"
           - |
-            DOCKER_BUILDKIT=1 docker build \
+            docker buildx build \
               $(bash .buildkite/scripts/docker-build-metadata-args.sh) \
               --build-arg max_jobs=16 \
               --build-arg USE_SCCACHE=1 \
@@ -222,7 +223,10 @@ steps:
               --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
               --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
+              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu130-ubuntu2204,mode=max \
+              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu130-ubuntu2204,mode=max,compression=zstd,ignore-error=true \
               --target vllm-openai \
+              --load \
               --progress plain \
               -f docker/Dockerfile .
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
@@ -263,8 +267,9 @@ steps:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "bash .buildkite/scripts/setup-release-buildx.sh"
           - |
-            DOCKER_BUILDKIT=1 docker build \
+            docker buildx build \
               $(bash .buildkite/scripts/docker-build-metadata-args.sh cu129) \
               --build-arg max_jobs=16 \
               --build-arg USE_SCCACHE=1 \
@@ -274,7 +279,10 @@ steps:
               --build-arg INSTALL_KV_CONNECTORS=true \
               --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_35}" \
               --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
+              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu129-ubuntu2204,mode=max \
+              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu129-ubuntu2204,mode=max,compression=zstd,ignore-error=true \
               --target vllm-openai \
+              --load \
               --progress plain \
               -f docker/Dockerfile .
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129"
@@ -314,8 +322,9 @@ steps:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "bash .buildkite/scripts/setup-release-buildx.sh"
           - |
-            DOCKER_BUILDKIT=1 docker build \
+            docker buildx build \
               $(bash .buildkite/scripts/docker-build-metadata-args.sh ubuntu2404) \
               --build-arg max_jobs=16 \
               --build-arg USE_SCCACHE=1 \
@@ -328,7 +337,10 @@ steps:
               --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
               --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
               --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu24.04 \
+              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu130-ubuntu2404,mode=max \
+              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu130-ubuntu2404,mode=max,compression=zstd,ignore-error=true \
               --target vllm-openai \
+              --load \
               --progress plain \
               -f docker/Dockerfile .
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404"
@@ -370,8 +382,9 @@ steps:
           queue: cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "bash .buildkite/scripts/setup-release-buildx.sh"
           - |
-            DOCKER_BUILDKIT=1 docker build \
+            docker buildx build \
               $(bash .buildkite/scripts/docker-build-metadata-args.sh cu129-ubuntu2404) \
               --build-arg max_jobs=16 \
               --build-arg USE_SCCACHE=1 \
@@ -383,7 +396,10 @@ steps:
               --build-arg INSTALL_KV_CONNECTORS=true \
               --build-arg MOONCAKE_WHEEL_AARCH64="${MOONCAKE_WHEEL_AARCH64_2_39}" \
               --build-arg MOONCAKE_WHEEL_X86_64="${MOONCAKE_WHEEL_X86_64}" \
+              --cache-from type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu129-ubuntu2404,mode=max \
+              --cache-to type=registry,ref=936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:release-x86_64-cu129-ubuntu2404,mode=max,compression=zstd,ignore-error=true \
               --target vllm-openai \
+              --load \
               --progress plain \
               -f docker/Dockerfile .
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404"
