@@ -138,3 +138,31 @@ def test_get_diff_sampling_param_includes_penalties():
     assert diff["presence_penalty"] == 1.5
     assert diff["frequency_penalty"] == 0.5
     assert diff["temperature"] == 0.6
+
+
+def test_generation_config_penalties_survive_diff_sampling_filter():
+    """``generation_config.json`` penalties must survive the diff-sampling
+    whitelist (regression for #50767, auto path).
+
+    Covers the ``generation_config="auto"`` branch, where the override
+    dict is empty and the values come from ``try_get_generation_config``.
+    """
+    from types import SimpleNamespace
+
+    from vllm.config.model import ModelConfig
+
+    fake = SimpleNamespace(
+        generation_config="auto",
+        override_generation_config={},
+        try_get_generation_config=lambda: {
+            "presence_penalty": 1.1,
+            "frequency_penalty": 0.7,
+            "temperature": 0.9,
+        },
+    )
+
+    diff = ModelConfig.get_diff_sampling_param(fake)
+
+    assert diff["presence_penalty"] == 1.1
+    assert diff["frequency_penalty"] == 0.7
+    assert diff["temperature"] == 0.9
