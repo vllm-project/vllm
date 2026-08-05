@@ -29,7 +29,8 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     PullSink,
     ShardedRDTWeightTransferEngine,
     _BakedCopy,
-    _BakedGroup,
+    _BakedModule,
+    _CallPlan,
     _dtype_from_name,
     _UnsupportedLazyOp,
 )
@@ -82,7 +83,7 @@ def _planner(baked, *, name_meta, live=None, split=1):
     gather-to-all router is installed too.
     """
     eng = object.__new__(ShardedRDTWeightTransferEngine)
-    eng._name_to_group = dict(baked)
+    eng._name_to_module = dict(baked)
     eng._name_meta = dict(name_meta)
     eng._live_names = set(live or name_meta)
     eng._split = split
@@ -103,7 +104,7 @@ def _one_module_per_layer(n_layers, *, dtype="bfloat16", numel=4):
     baked = {}
     for n in names:
         layer = _FakeLayer(n)
-        baked[n] = _BakedGroup(layer=layer, copies=[_copy(n, shape=(numel,))])
+        baked[n] = _BakedModule(layer=layer, copies=[_copy(n, shape=(numel,))])
     name_meta = {n: (dtype, [numel]) for n in names}
     group_lens = [1] * len(names)
     return baked, name_meta, names, group_lens
@@ -344,7 +345,7 @@ class TestPackedLayout:
         for name, dtype_name, shape in specs:
             name_meta[name] = (dtype_name, shape)
             copies.append(_copy(name, shape=tuple(shape)))
-        group = _BakedGroup(layer=layer, copies=copies)
+        group = _BakedModule(layer=layer, copies=copies)
         for name, _d, _s in specs:
             baked[name] = group
 
@@ -362,7 +363,7 @@ class TestPackedLayout:
         specs = [(f"w{i}", "bfloat16", [i * 3 + 1]) for i in range(6)]
         layer = _FakeLayer("l")
         copies = [_copy(n, shape=tuple(s)) for n, _d, s in specs]
-        group = _BakedGroup(layer=layer, copies=copies)
+        group = _BakedModule(layer=layer, copies=copies)
         eng = _planner(
             {n: group for n, _d, _s in specs},
             name_meta={n: (d, s) for n, d, s in specs},
@@ -386,7 +387,7 @@ class TestPackedLayout:
             _BakedCopy(src=shared, param_name="b", offset=0, shape=(4,), stride=(1,)),
         ]
         eng = _planner(
-            {"w": _BakedGroup(layer=layer, copies=copies)},
+            {"w": _BakedModule(layer=layer, copies=copies)},
             name_meta={"w": ("bfloat16", [4])},
         )
         (chunk,) = eng._build_call_plan(["w"], [1]).chunks
@@ -405,11 +406,11 @@ class TestChunkGroupScatters:
         layer = _FakeLayer("l")
         copies = [_copy(f"w{i}", shape=(4,)) for i in range(5)]
         eng = _planner(
-            {f"w{i}": _BakedGroup(layer=layer, copies=copies) for i in range(5)},
+            {f"w{i}": _BakedModule(layer=layer, copies=copies) for i in range(5)},
             name_meta={f"w{i}": ("bfloat16", [4]) for i in range(5)},
             split=1,
         )
-        chunks = eng._chunk_group_scatters([_BakedGroup(layer=layer, copies=copies)])
+        chunks = eng._chunk_module_scatters([_BakedModule(layer=layer, copies=copies)])
         assert len(chunks) == 1
         assert len(chunks[0]) == 5
 
@@ -419,7 +420,7 @@ class TestChunkGroupScatters:
         eng = _planner(
             {}, name_meta={f"w{i}": ("bfloat16", [4]) for i in range(6)}, split=3
         )
-        chunks = eng._chunk_group_scatters([_BakedGroup(layer=layer, copies=copies)])
+        chunks = eng._chunk_module_scatters([_BakedModule(layer=layer, copies=copies)])
         assert [len(c) for c in chunks] == [2, 2, 2]
 
     def test_a_single_oversized_copy_becomes_its_own_chunk(self):
@@ -432,22 +433,22 @@ class TestChunkGroupScatters:
             name_meta={"small": ("bfloat16", [1]), "huge": ("bfloat16", [1000])},
             split=2,
         )
-        chunks = eng._chunk_group_scatters([_BakedGroup(layer=layer, copies=copies)])
+        chunks = eng._chunk_module_scatters([_BakedModule(layer=layer, copies=copies)])
         assert [[s.src[0] for s in c] for c in chunks] == [["small"], ["huge"]]
 
     def test_a_single_copy_never_splits(self):
         layer = _FakeLayer("l")
         eng = _planner({}, name_meta={"w": ("bfloat16", [8])}, split=4)
-        chunks = eng._chunk_group_scatters(
-            [_BakedGroup(layer=layer, copies=[_copy("w", shape=(8,))])]
+        chunks = eng._chunk_module_scatters(
+            [_BakedModule(layer=layer, copies=[_copy("w", shape=(8,))])]
         )
         assert len(chunks) == 1
 
     def test_scatters_carry_their_own_dtype_and_nbytes(self):
         layer = _FakeLayer("l")
         eng = _planner({}, name_meta={"w": ("float32", [10])})
-        (scatters,) = eng._chunk_group_scatters(
-            [_BakedGroup(layer=layer, copies=[_copy("w", shape=(10,))])]
+        (scatters,) = eng._chunk_module_scatters(
+            [_BakedModule(layer=layer, copies=[_copy("w", shape=(10,))])]
         )
         (sc,) = scatters
         assert sc.dtype is torch.float32
@@ -473,7 +474,7 @@ class TestBuildCallPlan:
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
-        group = _BakedGroup(layer=layer, copies=copies)
+        group = _BakedModule(layer=layer, copies=copies)
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -486,7 +487,7 @@ class TestBuildCallPlan:
         """Empty HF params are allocated once per module, by construction."""
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
-        group = _BakedGroup(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
+        group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -498,7 +499,7 @@ class TestBuildCallPlan:
     def test_quant_defers_to_a_modules_last_chunk(self):
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
-        group = _BakedGroup(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
+        group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -524,7 +525,7 @@ class TestBuildCallPlan:
         gather buffers while a later chunk's RDMA is still reading them."""
         layer = _FakeLayer("l")
         names = [f"w{i}" for i in range(4)]
-        group = _BakedGroup(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
+        group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -541,7 +542,7 @@ class TestBuildCallPlan:
         baked, name_meta = {}, {}
         for names in (names_a, names_b):
             layer = _FakeLayer(names[0])
-            group = _BakedGroup(
+            group = _BakedModule(
                 layer=layer, copies=[_copy(n, shape=(4,)) for n in names]
             )
             for n in names:
@@ -597,18 +598,21 @@ class TestBuildCallPlan:
         plan = eng._build_call_plan(names, group_lens)
         assert plan.residual == []
 
-    def test_name_to_group_index_covers_every_name(self):
+    def test_the_plan_carries_a_name_to_module_map(self):
+        """It selects the owning producer for a residual name's on-demand pull.
+        The planner returns it rather than writing engine state, so the plan stays
+        a pure function of its inputs."""
         baked, name_meta, names, group_lens = _one_module_per_layer(3)
         eng = _planner(baked, name_meta=name_meta)
-        eng._build_call_plan(names, group_lens)
-        assert eng._name_group_idx == {n: i for i, n in enumerate(names)}
+        plan = eng._build_call_plan(names, group_lens)
+        assert plan.name_group_idx == {n: i for i, n in enumerate(names)}
 
     def test_modules_are_deduped_within_a_group(self):
-        """Several names of one fused module map to the same _BakedGroup; the
+        """Several names of one fused module map to the same _BakedModule; the
         plan must not chunk it twice."""
         layer = _FakeLayer("fused")
         names = ["qkv.q", "qkv.k", "qkv.v"]
-        group = _BakedGroup(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
+        group = _BakedModule(layer=layer, copies=[_copy(n, shape=(4,)) for n in names])
         eng = _planner(
             {n: group for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
@@ -634,11 +638,7 @@ class TestBuildCallPlan:
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
         eng = _planner(baked, name_meta=name_meta)
         plan = eng._build_call_plan(names, group_lens)
-        for chunk in plan.chunks:
-            (owner, run_keys, start, end) = chunk.subpulls[0]
-            assert owner == 0
-            assert run_keys == chunk.keys
-            assert (start, end) == (0, chunk.pack_bytes)
+        assert [c.owner for c in plan.chunks] == [0] * len(plan.chunks)
 
 
 class TestCallPlanRouting:
@@ -673,15 +673,16 @@ class TestCallPlanRouting:
         owners = [[0], [0], [1], [1]]
         eng, names, group_lens = self._routed_planner(owners, 1, 0, 2)
         plan = eng._build_call_plan(names, group_lens)
-        locals_ = [c.subpulls[0][0] for c in plan.chunks]
-        assert locals_ == [0, 0, 1, 1]
+        assert [c.owner for c in plan.chunks] == [0, 0, 1, 1]
 
-    def test_every_group_is_served_by_exactly_one_owner(self):
+    def test_a_multi_owner_group_still_resolves_to_one_producer(self):
+        """Every group is served by exactly ONE producer per consumer: splitting a
+        pull only multiplies produce calls, since the consumer's NIC bounds it."""
         owners = [[0, 1], [0, 1], [0, 1], [0, 1]]
         eng, names, group_lens = self._routed_planner(owners, 1, 0, 2)
         plan = eng._build_call_plan(names, group_lens)
-        for chunk in plan.chunks:
-            assert len(chunk.subpulls) == 1
+        assert all(isinstance(c.owner, int) for c in plan.chunks)
+        assert all(0 <= c.owner < 2 for c in plan.chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -865,7 +866,9 @@ class TestUnbakedPullRouting:
     def _engine(self, consumer_id, name_group_idx, owners_by_group):
         eng = object.__new__(ShardedRDTWeightTransferEngine)
         eng._name_meta = {n: ("bfloat16", [2]) for n in name_group_idx}
-        eng._name_group_idx = dict(name_group_idx)
+        eng._cached_plan = _CallPlan(
+            chunks=[], pre_free=[], residual=[], name_group_idx=dict(name_group_idx)
+        )
         eng._consumer_id = consumer_id
         n_prod = max(max(o) for o in owners_by_group) + 1
         eng._router = RdtRouter(n_prod, 1, owners_by_group, len(owners_by_group))
