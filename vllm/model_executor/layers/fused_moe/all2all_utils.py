@@ -30,8 +30,12 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_mori
 
 logger = init_logger(__name__)
+
+if current_platform.is_rocm() and has_mori():
+    from .prepare_finalize.mori import MoriPrepareAndFinalize
 
 
 def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
@@ -241,8 +245,6 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_mori_kernels:
-        from .prepare_finalize.mori import MoriPrepareAndFinalize
-
         assert quant_config is not None
 
         # Note: We may want to use FP8 dispatch just to reduce
