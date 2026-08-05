@@ -32,7 +32,7 @@ MAX_CHUNK_BYTES = 2**30  # 1GB
 _FP32_BYTES = 4
 
 
-def max_chunk_logits(vocab_size: int) -> int:
+def get_max_chunk_logits(vocab_size: int) -> int:
     """Largest number of logits rows one verification chunk may hold."""
     return max(1, MAX_CHUNK_BYTES // (vocab_size * _FP32_BYTES))
 
@@ -250,7 +250,7 @@ class RejectionSampler:
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np
         )
-        chunk_logit_limit = max_chunk_logits(logits.shape[1])
+        chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
         sampled, num_sampled, logprobs_tensors = self._verify_in_chunks(
             logits,
             input_batch,

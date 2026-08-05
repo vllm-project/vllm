@@ -132,7 +132,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
-    max_chunk_logits,
+    get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
@@ -525,7 +525,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states,
                 self.input_buffers.query_start_loc,
                 self.model_state.num_new_sampled_tokens_per_step,
-                max_total_logits=max_chunk_logits(self.vocab_size),
+                max_total_logits=get_max_chunk_logits(self.vocab_size),
             )
 
         self.block_tables = BlockTables(
