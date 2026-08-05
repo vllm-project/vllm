@@ -24,14 +24,16 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     greedy_run_starts,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
-    BakeSink,
-    LazyRDTTensor,
-    PullSink,
     ShardedRDTWeightTransferEngine,
-    _BakedCopy,
     _BakedModule,
     _CallPlan,
     _dtype_from_name,
+)
+from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
+    BakeSink,
+    LazyRDTTensor,
+    PullSink,
+    _BakedCopy,
     _UnsupportedLazyOp,
 )
 
