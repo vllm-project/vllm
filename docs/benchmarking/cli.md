@@ -120,6 +120,11 @@ P99 ITL (ms):                            8.39
     If cache reuse is not intended, vary `--seed`, reset or restart the server,
     or use `vllm bench sweep serve`, which resets server caches between runs.
 
+!!! tip
+    Start the server with `--enable-prompt-tokens-details` to additionally
+    report `Total cached tokens:` (prompt tokens served from the prefix cache)
+    in the summary and a `total_cached_tokens` field in the saved result JSON.
+
 #### Understanding the Latency Metrics
 
 `vllm bench serve` measures latency at the benchmark client:
