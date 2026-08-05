@@ -39,6 +39,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import (
     FusedRMSNormGated,
     chunk_kda_with_fused_gate,
@@ -47,6 +48,12 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
 )
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+
+@torch.compile(backend=current_platform.simple_compile_backend)
+def _cast_sigmoid(x: torch.Tensor) -> torch.Tensor:
+    """Fuse the fp32 cast + sigmoid into one Inductor kernel."""
+    return x.float().sigmoid()
 
 
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
@@ -267,7 +274,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         k = self.k_proj(hidden_states)[0]
         v = self.v_proj(hidden_states)[0]
 
-        beta = self.b_proj(hidden_states)[0].float().sigmoid()
+        beta = _cast_sigmoid(self.b_proj(hidden_states)[0])
         g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
         beta = beta.unsqueeze(0)
         g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
