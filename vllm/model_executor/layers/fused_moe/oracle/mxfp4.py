@@ -1737,8 +1737,17 @@ def make_mxfp4_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
     logger.info_once("Using %s", experts_cls.__name__)
 
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+
     extra_kwargs = {}
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+        assert layer is not None
+        extra_kwargs["layer"] = layer
+    elif experts_cls is FlashInferExperts:
+        # FlashInferExperts registers its per-expert constants on the layer
+        # so they keep their storage across kernel rebuilds (see #48312).
         assert layer is not None
         extra_kwargs["layer"] = layer
 
