@@ -180,6 +180,34 @@ mod tests {
     }
 
     #[test]
+    fn required_initial_and_dynamic_tools_build_one_structural_tag() {
+        let messages = vec![ChatMessage::developer(
+            "",
+            Some(vec![chat_tool("lookup", None)]),
+        )];
+        let tool_context = ResolvedToolContext::new(
+            &messages,
+            vec![chat_tool("search", None)],
+            Some(ChatToolChoice::Required),
+            true,
+        )
+        .expect("tool context should resolve");
+        let mut request = ChatRequest {
+            messages,
+            tool_context,
+            ..ChatRequest::for_test()
+        };
+        let parser = qwen3_coder_parser(request.tools());
+
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
+            .expect("structural tag should build");
+
+        let tag = structural_tag_value(&request).to_string();
+        assert!(tag.contains("search"));
+        assert!(tag.contains("lookup"));
+    }
+
+    #[test]
     fn auto_non_strict_tool_choice_skips_structural_tag() {
         let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", None)]);
         let parser = qwen3_coder_parser(request.tools());
