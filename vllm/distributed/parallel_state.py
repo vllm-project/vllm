@@ -127,6 +127,28 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def _apply_to_device_comms(
+    action: Callable[[DeviceCommunicatorBase], None],
+) -> None:
+    """Apply ``action`` to every group's device communicator.
+
+    Walks the registered parallel groups and skips those without a device
+    communicator (absent at ``world_size == 1``).
+    """
+    comms = []
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is None:
+            continue
+        dc = group.device_communicator
+        if dc is None:
+            continue
+        comms.append(dc)
+
+    for dc in comms:
+        action(dc)
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
@@ -392,6 +414,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        use_all2all: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -486,6 +509,7 @@ class GroupCoordinator:
                 device=self.device,
                 device_group=self.device_group,
                 unique_name=self.unique_name,
+                use_all2all=use_all2all,
             )
 
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
@@ -1299,6 +1323,7 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
+    use_all2all: bool = False,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1307,6 +1332,7 @@ def init_model_parallel_group(
         use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        use_all2all=use_all2all,
     )
 
 
@@ -1317,6 +1343,7 @@ def _init_stateless_group(
     backend: str,
     coord_store: Store,
     use_device_communicator: bool = True,
+    use_all2all: bool = False,
 ) -> "StatelessGroupCoordinator":
     """Create a StatelessGroupCoordinator with the given parameters."""
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -1332,6 +1359,7 @@ def _init_stateless_group(
         coord_store=coord_store,
         global_rank=world.rank,
         global_world_size=world.world_size,
+        use_all2all=use_all2all,
     )
 
 
@@ -1902,6 +1930,7 @@ def initialize_model_parallel(
             .unbind(0)
         )
         group_ranks = [x.tolist() for x in group_ranks]
+        use_all2all = parallel_config.use_all2all
         if enable_elastic_ep:
             _EP = _init_stateless_group(
                 group_ranks,
@@ -1909,10 +1938,15 @@ def initialize_model_parallel(
                 parallel_config.data_parallel_master_ip,
                 backend,
                 coord_store=coord_store,
+                use_all2all=use_all2all,
             )
         else:
             _EP = init_model_parallel_group(
-                group_ranks, get_world_group().local_rank, backend, group_name="ep"
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                group_name="ep",
+                use_all2all=use_all2all,
             )
 
         # Create EPLB group with the same ranks as EP if EPLB is enabled.
@@ -2028,12 +2062,23 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _EPLB.prepare_communication_buffer_for_model(model)
 
 
+def checkpoint_prepare_distributed_state() -> None:
+    """Prepare every device communicator for a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_prepare())
+    torch.accelerator.synchronize()
+
+
+def checkpoint_restore_distributed_state() -> None:
+    """Restore every device communicator after a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_restore())
+    torch.accelerator.synchronize()
+
+
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return _TP is not None and _PP is not None
-
-
-_TP_STATE_PATCHED = False
 
 
 def get_tensor_model_parallel_world_size() -> int:

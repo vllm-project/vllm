@@ -208,6 +208,10 @@ impl Tokenizer for TestTokenizer {
         Ok(ids)
     }
 
+    fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
+        Ok(text.as_bytes().iter().copied().map(u32::from).collect())
+    }
+
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         let mut output = String::new();
         let mut pending_bytes = Vec::new();
@@ -372,6 +376,32 @@ mod tests {
         );
         assert!(tokenizer.is_special_id(0xF001));
         assert!(!tokenizer.is_special_id(0xF002));
+    }
+
+    #[test]
+    fn ordinary_encoding_bypasses_all_configured_tokens() {
+        let tokenizer = TestTokenizer::new()
+            .with_bos_token("<bos>", 256)
+            .with_special_token("<control>", 257)
+            .with_regular_token("<visible>", 258);
+        let ordinary_text = "user <control> and <visible>";
+
+        assert_eq!(tokenizer.encode("<control>", false).unwrap(), vec![257]);
+        assert_eq!(tokenizer.encode("<visible>", false).unwrap(), vec![258]);
+        assert_eq!(
+            tokenizer.encode_ordinary(ordinary_text).unwrap(),
+            ordinary_text.as_bytes().iter().copied().map(u32::from).collect::<Vec<_>>()
+        );
+
+        let mut segmented = tokenizer.encode("<control>", false).unwrap();
+        segmented.extend(tokenizer.encode_ordinary(ordinary_text).unwrap());
+        segmented.extend(tokenizer.encode("<visible>", false).unwrap());
+        assert_eq!(segmented.first(), Some(&257));
+        assert_eq!(segmented.last(), Some(&258));
+        assert_eq!(
+            tokenizer.decode(&segmented, false).unwrap(),
+            format!("<control>{ordinary_text}<visible>")
+        );
     }
 
     #[test]

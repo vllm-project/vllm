@@ -44,25 +44,6 @@ from .utils import (
 )
 
 
-def _restore_full_token_layout_if_needed(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor,
-    num_tokens: int,
-    is_sequence_parallel: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Restore full token rows for the MTP proposer after SP MoE layers."""
-    if not is_sequence_parallel and hidden_states.shape[0] == num_tokens:
-        return hidden_states, residual
-
-    combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-    combined_states = combined_states[:num_tokens]
-    hidden_states, residual = combined_states.split(
-        [hidden_states.shape[-1], residual.shape[-1]], dim=-1
-    )
-    return hidden_states, residual
-
-
 class SharedHead(nn.Module):
     def __init__(
         self,
@@ -142,13 +123,10 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             hidden_states=hidden_states,
             residual=None,
         )
-        hidden_states, residual = _restore_full_token_layout_if_needed(
-            hidden_states,
-            residual,
-            positions.shape[0],
-            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
-        )
         hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
+        if self.mtp_block.use_sequence_parallel_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[0]]
         # Recycle the post-final-norm hidden into the next draft step.
         # compute_logits applies shared_head (== final norm) to the pre-norm
         # element, so logits and the recycle each get exactly one final-norm.
