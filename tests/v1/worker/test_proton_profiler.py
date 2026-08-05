@@ -16,6 +16,13 @@ from vllm.profiler.wrapper import ProtonProfilerWrapper
 from vllm.v1.worker.gpu_worker import Worker
 
 
+@pytest.fixture(autouse=True)
+def valid_amd_proton_environment(monkeypatch):
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+
 def make_proton(
     session_id: int | None = 7,
 ):
