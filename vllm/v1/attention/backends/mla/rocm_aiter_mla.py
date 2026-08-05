@@ -129,7 +129,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     # The max query output length: int
     max_qo_len: int | None = None
     # Minimum KV length used by Gluon to choose a safe split count.
-    min_kv_seq_len: int = 1
+    min_kv_seq_len: int = 16384
     # Small-head decode uses Gluon (avoids padding to 16).
     use_gluon_decode: bool = False
     # Whether persistent MLA metadata was computed
