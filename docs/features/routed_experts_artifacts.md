@@ -27,9 +27,8 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <model> \
   --kv-offloading-backend native
 ```
 
-By default, the SHM capacity covers the larger of the local KV cache and the
-capacity reported by the KV connector. A connector that cannot report its
-capacity requires an explicit limit:
+Without a KV connector, the SHM capacity defaults to the local GPU KV-cache
+capacity. With a KV connector, set the SHM capacity explicitly:
 
 ```bash
 --artifact-config '{"max_shm_bytes": 1073741824}'

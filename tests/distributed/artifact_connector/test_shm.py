@@ -40,9 +40,6 @@ from vllm.distributed.artifact_connector.worker import (
     ArtifactWorkerConnector,
     _WorkerRequestState,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
-    OffloadingConnector,
-)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 
@@ -84,18 +81,6 @@ def test_background_store_put_is_async_and_ordered():
     assert store.get(["key"]) == [b"value"]
     store.close()
     assert underlying.closed
-
-
-def test_offloading_connector_reports_artifact_hash_capacity():
-    connector = object.__new__(OffloadingConnector)
-    connector._spec = SimpleNamespace(
-        num_blocks=100,
-        blocks_per_chunk=2,
-        tokens_per_block=(32,),
-        tokens_per_hash=16,
-    )
-
-    assert connector.get_num_stored_block_hashes() == 400
 
 
 def test_background_store_surfaces_publication_failure():

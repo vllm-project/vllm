@@ -111,7 +111,6 @@ class ArtifactWorkerConnector:
         model: torch.nn.Module,
         kv_cache_config: KVCacheConfig,
         max_num_batched_tokens: int,
-        external_capacity_blocks: int | None,
     ) -> None:
         capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=max_num_batched_tokens,
@@ -143,20 +142,12 @@ class ArtifactWorkerConnector:
         block_nbytes = block_size * int(np.prod(shape_per_token)) * self._dtype.itemsize
         max_bytes = vllm_config.artifact_config.max_shm_bytes
         if max_bytes is None:
-            if external_capacity_blocks is None:
-                raise ValueError(
-                    "artifact_config.max_shm_bytes is required when the KV "
-                    "connector does not report its storage capacity"
-                )
-            max_bytes = (
-                max(
-                    kv_cache_config.num_blocks * hashes_per_kv_block,
-                    (vllm_config.cache_config.num_cpu_blocks or 0)
-                    * hashes_per_kv_block,
-                    external_capacity_blocks,
-                )
-                * block_nbytes
+            kv_transfer_config = vllm_config.kv_transfer_config
+            assert (
+                kv_transfer_config is None
+                or not kv_transfer_config.is_kv_transfer_instance
             )
+            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
         self._store = BackgroundArtifactStore(
             LocalSharedMemoryArtifactStore(
                 vllm_config.artifact_config.shm_dir,

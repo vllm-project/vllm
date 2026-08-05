@@ -4,6 +4,7 @@ import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -302,8 +303,6 @@ def test_model_runner_initializes_capture(monkeypatch):
     runner.max_num_tokens = 32
     runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=0))
     runner.model = Mock()
-    runner.kv_connector = Mock()
-    runner.kv_connector.get_num_stored_block_hashes.return_value = 128
     kv_cache_config = Mock()
 
     runner.init_artifact_connector(kv_cache_config)
@@ -312,7 +311,6 @@ def test_model_runner_initializes_capture(monkeypatch):
         model=runner.model,
         kv_cache_config=kv_cache_config,
         max_num_batched_tokens=32,
-        external_capacity_blocks=128,
         vllm_config=runner.vllm_config,
     )
     assert runner.artifact_connector is connector
@@ -344,7 +342,6 @@ def test_artifact_worker_connector_owns_capture(monkeypatch):
         model=model,
         kv_cache_config=SimpleNamespace(),
         max_num_batched_tokens=32,
-        external_capacity_blocks=0,
     )
 
     constructor.assert_called_once_with(
@@ -354,6 +351,56 @@ def test_artifact_worker_connector_owns_capture(monkeypatch):
     bind.assert_called_once_with(model, capturer)
     assert connector.capture_routed_experts(3) is snapshot
     capturer.get_routing_data.assert_called_once_with(3)
+
+
+def test_artifact_worker_connector_shm_capacity(monkeypatch, tmp_path):
+    import vllm.distributed.artifact_connector.worker as artifact_worker
+
+    tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
+    store_constructor = Mock()
+    monkeypatch.setattr(artifact_worker, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(artifact_worker, "RoutedExpertsCapturer", Mock())
+    monkeypatch.setattr(artifact_worker, "bind_routed_experts_capturer", Mock())
+    monkeypatch.setattr(
+        artifact_worker,
+        "get_routing_shape_and_dtype",
+        lambda _: ((2,), np.int32),
+    )
+    monkeypatch.setattr(
+        artifact_worker,
+        "resolve_kv_cache_block_sizes",
+        lambda *_: (32, 16),
+    )
+    monkeypatch.setattr(
+        artifact_worker, "LocalSharedMemoryArtifactStore", store_constructor
+    )
+    monkeypatch.setattr(artifact_worker, "BackgroundArtifactStore", Mock())
+    monkeypatch.setattr(artifact_worker, "RoutedExpertsArtifactBuffer", Mock())
+
+    config = SimpleNamespace(
+        artifact_config=SimpleNamespace(
+            max_shm_bytes=None,
+            shm_dir=str(tmp_path),
+            shm_ttl_seconds=60,
+        ),
+        kv_transfer_config=None,
+        instance_id="instance",
+        parallel_config=SimpleNamespace(data_parallel_rank=0),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+    )
+    kwargs = dict(
+        vllm_config=config,
+        model=Mock(),
+        kv_cache_config=SimpleNamespace(num_blocks=10),
+        max_num_batched_tokens=32,
+    )
+
+    artifact_worker.ArtifactWorkerConnector(**kwargs)
+    assert store_constructor.call_args.kwargs["max_bytes"] == 2560
+
+    config.kv_transfer_config = SimpleNamespace(is_kv_transfer_instance=True)
+    with pytest.raises(AssertionError):
+        artifact_worker.ArtifactWorkerConnector(**kwargs)
 
 
 def test_v2_model_runner_accepts_routed_experts(monkeypatch):

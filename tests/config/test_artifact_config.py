@@ -132,12 +132,19 @@ def test_artifact_connector_rejects_unsupported_topology(kwargs, error):
 def test_artifact_connector_is_independent_of_kv_connector_implementation(
     connector, spec_name
 ):
-    VllmConfig._verify_artifact_compatibility(
-        _config(
-            connector=connector,
-            spec_name=spec_name,
-        )
+    config = _config(
+        connector=connector,
+        spec_name=spec_name,
     )
+    config.artifact_config.max_shm_bytes = 1 << 20
+    VllmConfig._verify_artifact_compatibility(config)
+
+
+def test_artifact_connector_requires_explicit_capacity_with_kv_connector():
+    with pytest.raises(ValueError, match="max_shm_bytes must be set"):
+        VllmConfig._verify_artifact_compatibility(
+            _config(connector="OffloadingConnector")
+        )
 
 
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])

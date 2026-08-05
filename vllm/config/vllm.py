@@ -986,6 +986,11 @@ class VllmConfig:
                 "--enable-return-routed-experts with KV transfer requires "
                 "kv_role=kv_both; PD disaggregation is not supported."
             )
+        if self.artifact_config.max_shm_bytes is None:
+            raise ValueError(
+                "artifact_config.max_shm_bytes must be set when using "
+                "an Artifact Connector with a KV Connector."
+            )
 
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""

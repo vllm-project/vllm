@@ -43,9 +43,6 @@ class KVConnector:
     def set_disabled(self, disabled: bool) -> None:
         pass
 
-    def get_num_stored_block_hashes(self) -> int | None:
-        return 0
-
 
 class ActiveKVConnector(KVConnector):
     def __init__(
@@ -111,9 +108,6 @@ class ActiveKVConnector(KVConnector):
         # Ensure that layer-wise connector hooks aren't called when disabled.
         kv_transfer_state._KV_CONNECTOR_AGENT = None if disabled else self.kv_connector
         self._disabled = disabled
-
-    def get_num_stored_block_hashes(self) -> int | None:
-        return self.kv_connector.get_num_stored_block_hashes()
 
 
 NO_OP_KV_CONNECTOR = KVConnector()
