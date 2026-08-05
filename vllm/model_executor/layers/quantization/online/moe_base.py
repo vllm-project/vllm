@@ -5,7 +5,6 @@ from abc import abstractmethod
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     RoutedExperts,
@@ -99,15 +98,6 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
-        )
 
     @property
     def supports_eplb(self) -> bool:

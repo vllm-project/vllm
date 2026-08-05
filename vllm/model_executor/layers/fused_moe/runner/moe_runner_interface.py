@@ -66,10 +66,6 @@ class MoERunnerInterface(PluggableLayer, ABC):
     #
     ########################################################################
 
-    @abstractmethod
-    def maybe_init_modular_kernel(self) -> None:
-        raise NotImplementedError
-
     @property
     @abstractmethod
     def layer_id(self):

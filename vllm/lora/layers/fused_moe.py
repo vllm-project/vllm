@@ -19,11 +19,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEKernel,
     FusedMoEKernelModularImpl,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.platforms import current_platform
 
@@ -76,13 +72,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             assert isinstance(moe_kernel.impl, FusedMoEKernelModularImpl)
             moe_kernel.impl.shared_experts = None
         else:
-            prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
-            moe_kernel = FusedMoEKernel(
-                prepare_finalize,
-                routed_experts.quant_method.select_gemm_impl(
-                    prepare_finalize, routed_experts
-                ),
-            )
+            raise RuntimeError("Old-style modular kernel not supported.")
+
         assert moe_kernel.supports_lora(), (
             f"{type(moe_kernel.fused_experts).__name__} does not support LoRA. "
             "For unquantized MoE, set moe_backend='triton' or moe_backend='auto' "
