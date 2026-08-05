@@ -11,7 +11,6 @@ import pytest
 
 
 class _Platform:
-
     def __init__(self, *, is_cuda: bool, is_rocm: bool) -> None:
         self._is_cuda = is_cuda
         self._is_rocm = is_rocm
@@ -49,7 +48,6 @@ def _install_tilelang_kernel_stubs(
     tilelang = ModuleType("tilelang")
 
     def jit(**kwargs: Any) -> Any:
-
         def decorate(func: Any) -> Any:
             calls["jit_decorate"] += 1
 
@@ -68,7 +66,9 @@ def _install_tilelang_kernel_stubs(
     monkeypatch.setitem(sys.modules, "vllm.utils.import_utils", import_utils)
     monkeypatch.setitem(sys.modules, "vllm.utils.math_utils", math_utils)
     monkeypatch.setitem(sys.modules, "tilelang", tilelang)
-    monkeypatch.setitem(sys.modules, "tilelang.language", ModuleType("tilelang.language"))
+    monkeypatch.setitem(
+        sys.modules, "tilelang.language", ModuleType("tilelang.language")
+    )
 
     return calls
 
