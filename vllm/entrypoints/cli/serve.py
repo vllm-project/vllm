@@ -9,24 +9,19 @@ import uvloop
 
 import vllm
 import vllm.envs as envs
+from vllm.entrypoints.cli.headless_engine import run_headless
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.network_utils import get_tcp_uri
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import (
-    APIServerProcessManager,
-    RustFrontendProcessManager,
-    wait_for_completion_or_failure,
-)
+
+# NOTE: cli_args/api_server/dp_supervisor/v1.utils/v1.metrics.prometheus
+# imports live inside the functions that use them, not here, so
+# `run_headless` (defined in `vllm.entrypoints.cli.headless_engine`, and
+# re-exported here for `vllm serve --headless`) can be imported without
+# pulling in the OpenAI-server-only machinery it never uses.
 
 logger = init_logger(__name__)
 
@@ -139,6 +134,8 @@ class ServeSubcommand(CLISubcommand):
             args.api_server_count = 1
 
         if is_multi_port:
+            from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
+
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
@@ -146,15 +143,21 @@ class ServeSubcommand(CLISubcommand):
             run_multi_api_server(args)
         else:
             # Single API server (this process).
+            from vllm.entrypoints.launchers.api_server.entry import run_server
+
             args.api_server_count = None
             uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
         validate_parsed_serve_args(args)
 
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+
         serve_parser = subparsers.add_parser(
             self.name,
             help="Launch a local OpenAI-compatible API server to serve LLM "
@@ -172,91 +175,15 @@ def cmd_init() -> list[CLISubcommand]:
     return [ServeSubcommand()]
 
 
-def run_headless(args: argparse.Namespace):
-    if args.api_server_count > 1:
-        raise ValueError("api_server_count can't be set in headless mode")
-
-    # Create the EngineConfig.
-    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
-    usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(
-        usage_context=usage_context, headless=True
-    )
-
-    if engine_args.data_parallel_hybrid_lb:
-        raise ValueError("data_parallel_hybrid_lb is not applicable in headless mode")
-
-    parallel_config = vllm_config.parallel_config
-    local_engine_count = parallel_config.data_parallel_size_local
-
-    if local_engine_count <= 0:
-        raise ValueError("data_parallel_size_local must be > 0 in headless mode")
-
-    shutdown_requested = False
-
-    # Catch SIGTERM and SIGINT to allow graceful shutdown.
-    def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        logger.debug("Received %d signal.", signum)
-        if not shutdown_requested:
-            shutdown_requested = True
-            raise SystemExit
-
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-    if parallel_config.node_rank_within_dp > 0:
-        from vllm.version import __version__ as VLLM_VERSION
-
-        # Run headless workers (for multi-node PP/TP).
-        host = parallel_config.master_addr
-        head_node_address = f"{host}:{parallel_config.master_port}"
-        logger.info(
-            "Launching vLLM (v%s) headless multiproc executor, "
-            "with head node address %s for torch.distributed process group.",
-            VLLM_VERSION,
-            head_node_address,
-        )
-
-        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
-        executor.start_worker_monitor(inline=True)
-        return
-
-    host = parallel_config.data_parallel_master_ip
-    port = parallel_config.data_parallel_rpc_port
-    handshake_address = get_tcp_uri(host, port)
-
-    logger.info(
-        "Launching %d data parallel engine(s) in headless mode, "
-        "with head node address %s.",
-        local_engine_count,
-        handshake_address,
-    )
-
-    # Create the engines.
-    engine_manager = CoreEngineProcManager(
-        local_engine_count=local_engine_count,
-        start_index=vllm_config.parallel_config.data_parallel_rank,
-        local_start_index=0,
-        vllm_config=vllm_config,
-        local_client=False,
-        handshake_address=handshake_address,
-        executor_class=Executor.get_class(vllm_config),
-        log_stats=not engine_args.disable_log_stats,
-    )
-
-    try:
-        engine_manager.monitor_engine_liveness()
-    finally:
-        timeout = None
-        if shutdown_requested:
-            timeout = vllm_config.shutdown_timeout
-            logger.info("Waiting up to %d seconds for processes to exit", timeout)
-        engine_manager.shutdown(timeout=timeout)
-        logger.info("Shutting down.")
-
-
 def run_multi_api_server(args: argparse.Namespace):
+    from vllm.entrypoints.launchers.api_server.entry import setup_server
+    from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
+    from vllm.v1.utils import (
+        APIServerProcessManager,
+        RustFrontendProcessManager,
+        wait_for_completion_or_failure,
+    )
+
     assert not args.headless
     rust_frontend_path = (
         envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
@@ -310,7 +237,7 @@ def run_multi_api_server(args: argparse.Namespace):
         None
     )
 
-    from vllm.v1.engine.utils import get_engine_zmq_addresses
+    from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
 
     # Defer port allocation to the child's bind() to avoid TOCTOU, except
     # for Rust front-end and Ray DP, which can't see the post-bind rebind

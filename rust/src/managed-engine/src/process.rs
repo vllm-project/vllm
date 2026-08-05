@@ -31,7 +31,7 @@ pub fn allocate_handshake_port(host: &str) -> Result<u16> {
 /// Spawn configuration for one managed headless Python vLLM engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedEngineConfig {
-    /// Python executable used to launch `vllm.entrypoints.cli.main`.
+    /// Python executable used to launch `vllm.entrypoints.cli.headless_engine`.
     pub python: String,
     /// Model identifier passed to `vllm ... serve <model>`.
     pub model: String,
@@ -55,14 +55,18 @@ impl ManagedEngineConfig {
     }
 
     /// Build the concrete Python command line for the managed headless engine.
+    ///
+    /// Uses `vllm.entrypoints.cli.headless_engine` instead of `vllm serve
+    /// --headless`, which skips building the full OpenAI-server CLI schema
+    /// that a headless engine never reads. See
+    /// `vllm/entrypoints/cli/headless_engine.py` for details.
     pub fn to_command(&self) -> StdCommand {
         let mut command = StdCommand::new(&self.python);
         command
             .arg("-m")
-            .arg("vllm.entrypoints.cli.main")
-            .arg("serve")
+            .arg("vllm.entrypoints.cli.headless_engine")
+            .arg("--model")
             .arg(&self.model)
-            .arg("--headless")
             .arg("--data-parallel-address")
             .arg(&self.handshake_host)
             .arg("--data-parallel-rpc-port")
@@ -235,10 +239,9 @@ mod tests {
         expect![[r#"
             [
                 "-m",
-                "vllm.entrypoints.cli.main",
-                "serve",
+                "vllm.entrypoints.cli.headless_engine",
+                "--model",
                 "Qwen/Qwen3-0.6B",
-                "--headless",
                 "--data-parallel-address",
                 "127.0.0.1",
                 "--data-parallel-rpc-port",
