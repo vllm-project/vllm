@@ -25,12 +25,6 @@ MOE_LAYER_ROUTER_GATE_SUFFIXES = {
 }
 
 
-def is_layer_moe_router_gate(prefix: str) -> bool:
-    if not prefix:
-        return False
-    return prefix.rsplit(".", 1)[-1] in MOE_LAYER_ROUTER_GATE_SUFFIXES
-
-
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
@@ -233,7 +227,7 @@ direct_register_custom_op(
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     return (
         torch.cpu._is_amx_tile_supported()
-        and (dtype in (torch.bfloat16, torch.int8))
+        and (dtype in (torch.bfloat16, torch.float16, torch.int8))
         and k % 32 == 0
         and n % 16 == 0
     )
@@ -271,9 +265,6 @@ def dispatch_cpu_unquantized_gemm(
             layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
         return
 
-    N, K = layer.weight.size()
-    dtype = layer.weight.dtype
-
     # Zen CPU path: zentorch_linear_unary with optional eager weight prepacking.
     if current_platform.is_zen_cpu() and hasattr(
         torch.ops.zentorch, "zentorch_linear_unary"
@@ -302,22 +293,7 @@ def dispatch_cpu_unquantized_gemm(
         )
         return
 
-    if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
-        packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
-        if getattr(layer, "bias", None) is not None:
-            bias_f32 = layer.bias.to(torch.float32)
-        else:
-            bias_f32 = None
-        layer.cpu_linear = lambda x, weight, bias: torch.ops._C.weight_packed_linear(
-            x, packed_weight, bias_f32 if bias is not None else None, True
-        )
-        if remove_weight:
-            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        logger.debug_once(
-            "CPU unquantized GEMM dispatch: using sgl-kernel weight_packed_linear"
-        )
-        return
-    elif (
+    if (
         ops._supports_onednn
         and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
     ):
