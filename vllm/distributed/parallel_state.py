@@ -2081,9 +2081,6 @@ def model_parallel_is_initialized():
     return _TP is not None and _PP is not None
 
 
-_TP_STATE_PATCHED = False
-
-
 def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused ops for deepseek_v32 (eager / breakable-cudagraph path).
+"""Fused all-reduce + residual-add + RMSNorm for eager model paths.
 
-These recover fusions that vLLM's torch.compile passes would normally do but
-that don't fire when running eager under the breakable CUDA graph.
+This recovers a fusion that vLLM's torch.compile passes would normally do but
+that doesn't fire for models running eager (or under a breakable CUDA graph).
 """
 
 import torch
