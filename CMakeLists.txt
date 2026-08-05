@@ -976,10 +976,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set(FP4_SM120_SRCS
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
+    "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+      "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu"
+   "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu"
       "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
+    if(NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
+      message(STATUS
+        "Building mxfp4_experts_quant unsupported stubs for SM12x because CUDA compiler version is not >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}).")
+    endif()
     set_gencode_flags_for_srcs(
       SRCS "${FP4_SM120_SRCS}"
       CUDA_ARCHS "${FP4_SM120_ARCHS}")
@@ -991,8 +997,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Not building SM12x NVFP4 as no compatible archs were found.")
   endif()
 
-  # SM10x/11x FP4 kernels. MXFP4 experts quantization is currently compiled
-  # only in this block; SM12x has separate NVFP4 matmul/MoE kernels above.
+  # SM10x/11x FP4 kernels. The MXFP4 experts-quant and grouped-GEMM sources
+  # are shared with the SM12x block above: CUTLASS resolves the same
+  # block-scaled scale-factor layout for arch::Sm100 and arch::Sm120, so a
+  # single SF swizzle serves both families.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(FP4_SM100_ARCHS "10.0f;10.7f;11.0f" "${CUDA_ARCHS}")
   else()
