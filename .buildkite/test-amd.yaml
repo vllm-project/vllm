@@ -2663,7 +2663,7 @@ steps:
   dind: false
   agent_pool: mi300_2
   num_gpus: 2
-  working_dir: "/vllm-workspace/tests"
+  working_dir: /vllm-workspace/
   source_file_dependencies:
   - vllm/config/speculative.py
   - vllm/distributed/kv_transfer/kv_connector/
@@ -2687,7 +2687,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - PYTHONPATH=/vllm-workspace pytest -v -s v1/kv_connector/extract_hidden_states_integration
+  - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: V1 attention (H100-MI300) %N # TBD
   timeout_in_minutes: 180
