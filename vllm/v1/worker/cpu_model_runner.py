@@ -8,7 +8,10 @@ import torch
 import torch.nn as nn
 
 import vllm.utils.cpu_triton_utils as cpu_tl
-from vllm.config import VllmConfig
+from vllm.config import (
+    CompilationMode,
+    VllmConfig,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
@@ -142,6 +145,8 @@ class CPUModelRunner(GPUModelRunner):
 
     @instrument(span_name="Warmup (CPU)")
     def warming_up_model(self) -> None:
+        if self.vllm_config.compilation_config.mode == CompilationMode.NONE:
+            return
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
         with _set_global_compilation_settings(self.vllm_config):
@@ -235,5 +240,10 @@ def _set_torch_accelerator_to_noop() -> None:
     def noop(*args: Any, **kwargs: Any) -> None:
         pass
 
+    # Distinct no-op so empty_cache does not alias synchronize: Dynamo's
+    # handle_synchronize is keyed on that object and asserts on CPU-only hosts.
+    def empty_cache_noop(*args: Any, **kwargs: Any) -> None:
+        pass
+
     torch.accelerator.synchronize = noop
-    torch.accelerator.empty_cache = noop
+    torch.accelerator.empty_cache = empty_cache_noop

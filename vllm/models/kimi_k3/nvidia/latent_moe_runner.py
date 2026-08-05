@@ -1,42 +1,81 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from enum import IntEnum
+
 import torch
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.utils.torch_utils import aux_stream, current_stream
-
-from .moe_runner import MoERunner, _unpack
+from vllm.platforms import current_platform
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+from vllm.utils.torch_utils import aux_stream
 
 logger = init_logger(__name__)
+
+
+class LatentTailTier(IntEnum):
+    """Which tail implementation the fused path runs, by token count.
+
+    The tiers share the same replicated up-projection weight, so the choice is
+    per batch and needs no weight relayout: tiers 0 and 2 read it as a
+    column-parallel row-shard, tier 1 reads it whole.
+    """
+
+    # ``_small_batch_tail``. Decode-sized (<= the op's max_num_tokens): one
+    # CuTeDSL collective fuses the latent reduce, RMSNorm and the shared
+    # reduce-scatter, then a sharded up-projection multicasts through a Lamport
+    # copy. Requires SM100, TP 8/16, BF16
+    TAIL_FUSION = 0
+
+    # ``_overlap_allreduce_tail``. The portable default, up to
+    # VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD tokens: reduce the latent,
+    # up-project the full hidden dim from the replicated weight, and add the
+    # separately reduced shared output, hiding that shared all-reduce behind the
+    # up-projection GEMM on the aux stream.
+    ALLREDUCE_OVERLAP = 1
+
+    # ``_shard_up_proj_tail``. Prefill-sized: each rank up-projects only its
+    # hidden shard and accumulates into the shared partial, so the shared
+    # all-reduce also stitches the routed shards. Same two all-reduces as tier 1
+    # at 1/tp of the up-projection FLOPs; it gives up tier 1's aux-stream
+    # overlap, since the reduce now has to follow the accumulate.
+    COLUMN_PARALLEL = 2
 
 
 class LatentMoERunner(MoERunner):
     """MoE runner for latent MoE with a replicated routed up-projection.
 
-    Fused path (tp>1, un-reduced combine output, shared expert, no SP):
-    concatenates the un-reduced latent partial (dim d) and the un-reduced
-    shared partial (dim D) into one contiguous buffer, all-reduces once, then
-    splits. The latent half is normed and up-projected locally (replicated
-    up-proj -> full hidden), and the shared add folds into the GEMM epilogue
-    (``torch.addmm``). One collective total, no post-reduction communication.
+    The fused path (tp>1, un-reduced combine output, shared expert, no SP)
+    dispatches over ``LatentTailTier`` by token count; see that enum for what
+    each tier does and when it applies.
 
     Native path: the replicated up-proj produces the full hidden dim on every
-    rank, so the base runner combines routed + shared correctly at any TP size
-    (using two collectives instead of the fused path's one).
+    rank, so the base runner combines routed + shared correctly at any TP size.
     """
 
     def __init__(
         self,
         *args,
-        enable_k3_latent_moe_tail_fusion: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.enable_k3_latent_moe_tail_fusion = enable_k3_latent_moe_tail_fusion
+
+        # The tail-fusion kernels are tcgen05-based, so they require an
+        # SM100 NVIDIA device; the runner falls back to the default latent
+        # MoE path everywhere else.
+        self.enable_k3_latent_moe_tail_fusion = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        )
+        # Overlap the shared-expert all-reduce with the tier-1 up-projection.
+        self._shared_ar_events = (torch.cuda.Event(), torch.cuda.Event())
         use_fused_path = self._use_fused_path()
         if (
             self.enable_k3_latent_moe_tail_fusion
@@ -113,6 +152,121 @@ class LatentMoERunner(MoERunner):
             and not self.moe_config.is_sequence_parallel
         )
 
+    def _select_tail_tier(
+        self,
+        fused_output: torch.Tensor,
+        shared_output: torch.Tensor,
+    ) -> LatentTailTier:
+        num_tokens = fused_output.shape[0]
+        # tier 0
+        if self.enable_k3_latent_moe_tail_fusion and (
+            0 < num_tokens <= self._k3_latent_moe_tail_op.contract.max_num_tokens
+        ):
+            return LatentTailTier.TAIL_FUSION
+
+        transform = self.routed_output_transform
+        assert transform is not None
+        # tier 1
+        if (
+            num_tokens <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
+        ):
+            return LatentTailTier.ALLREDUCE_OVERLAP
+        # tier 2
+        return LatentTailTier.COLUMN_PARALLEL
+
+    def _small_batch_tail(
+        self,
+        fused_output: torch.Tensor,
+        shared_output: torch.Tensor,
+        trunc_size: int | None,
+    ) -> torch.Tensor:
+        """Tier 0: the CuTeDSL operator fuses the whole tail."""
+        transform = self.routed_output_transform
+        assert transform is not None
+        norm = transform.norm
+        assert norm is not None
+
+        result = self._k3_latent_moe_tail_op(
+            fused_output,
+            shared_output,
+            norm.weight,
+            transform.up_proj.weight,
+        )
+        # The operator already reduced; this only strips padding.
+        return self._maybe_reduce_final_output(
+            result, trunc_size, output_is_reduced=True
+        )
+
+    def _overlap_allreduce_tail(
+        self,
+        fused_output: torch.Tensor,
+        shared_output: torch.Tensor,
+        trunc_size: int | None,
+    ) -> torch.Tensor:
+        """Tier 1: reduce the latent, up-project the full hidden dim from the
+        replicated weight, and add the separately reduced shared output.
+
+        Small enough batches hide that shared all-reduce behind the up-projection
+        GEMM on the aux stream.
+        """
+        transform = self.routed_output_transform
+        assert transform is not None
+        assert shared_output.size(0) <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+        if transform.norm is not None:
+            fused_latent = self.allreduce_norm_latent_out(fused_output, transform.norm)
+        else:
+            fused_latent = tensor_model_parallel_all_reduce(fused_output)
+
+        # Overlap the shared-expert all-reduce with the up-projection GEMM while
+        # the batch is small enough for it to pay off.
+        result, shared_output = maybe_execute_in_parallel(
+            lambda: torch.mm(fused_latent, transform.up_proj.weight.t()),
+            lambda: tensor_model_parallel_all_reduce(shared_output),
+            self._shared_ar_events[0],
+            self._shared_ar_events[1],
+            aux_stream(),
+        )
+        result.add_(shared_output)
+
+        # Output is already fully reduced; this only strips padding.
+        return self._maybe_reduce_final_output(
+            result, trunc_size, output_is_reduced=True
+        )
+
+    def _shard_up_proj_tail(
+        self,
+        fused_output: torch.Tensor,
+        shared_output: torch.Tensor,
+        trunc_size: int | None,
+    ) -> torch.Tensor:
+        """
+        Tier 2: column-parallel up-projection folded into the final reduce.
+        """
+        transform = self.routed_output_transform
+        assert transform is not None
+
+        if transform.norm is not None:
+            latent = self.allreduce_norm_latent_out(fused_output, transform.norm)
+        else:
+            latent = tensor_model_parallel_all_reduce(fused_output)
+
+        weight = transform.up_proj.weight
+        shard_size = weight.shape[0] // self.moe_config.tp_size
+        shard_start = get_tensor_model_parallel_rank() * shard_size
+
+        # column-parallel
+        up_proj_shard = weight.narrow(0, shard_start, shard_size)
+        hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
+
+        # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
+        # beta-add epilogue so folding in the shared partial costs no kernel.
+        hidden_shard.addmm_(latent, up_proj_shard.t())
+
+        return self._maybe_reduce_final_output(
+            shared_output, trunc_size, output_is_reduced=False
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -167,54 +321,15 @@ class LatentMoERunner(MoERunner):
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
-        transform = self.routed_output_transform
-        assert transform is not None
-
-        if self.enable_k3_latent_moe_tail_fusion:
-            op = self._k3_latent_moe_tail_op
-            if 0 < fused_output.shape[0] <= op.contract.max_num_tokens:
-                norm = transform.norm
-                assert norm is not None
-                result = op(
-                    fused_output,
-                    shared_output,
-                    norm.weight,
-                    transform.up_proj.weight,
-                )
-                result = self._maybe_reduce_final_output(
-                    result, og_hidden_dim_post_xform, output_is_reduced=True
-                )
-                return self._maybe_add_zero_expert_output(result)
-
-        fused_latent = None
-        if transform.norm is not None:
-            fused_latent = self.allreduce_norm_latent_out(fused_output, transform.norm)
+        tier = self._select_tail_tier(fused_output, shared_output)
+        if tier is LatentTailTier.TAIL_FUSION:
+            latent_tail = self._small_batch_tail
+        elif tier is LatentTailTier.ALLREDUCE_OVERLAP:
+            latent_tail = self._overlap_allreduce_tail
         else:
-            fused_latent = tensor_model_parallel_all_reduce(fused_output)
+            latent_tail = self._shard_up_proj_tail
 
-        shared_expert_stream = (
-            aux_stream()
-            if shared_output.size(0) <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-            else None
-        )
-        if shared_expert_stream is not None:
-            # overlap shared expert allreduce with latent up_proj
-            main = current_stream()
-            shared_output.record_stream(shared_expert_stream)
-            shared_expert_stream.wait_stream(main)
-            with torch.cuda.stream(shared_expert_stream):
-                shared_output = tensor_model_parallel_all_reduce(shared_output)
-            result = torch.mm(fused_latent, transform.up_proj.weight.t())
-            main.wait_stream(shared_expert_stream)
-        else:
-            shared_output = tensor_model_parallel_all_reduce(shared_output)
-            result = torch.mm(fused_latent, transform.up_proj.weight.t())
-        result.add_(shared_output)
-
-        # Output is already fully reduced; this only strips padding.
-        result = self._maybe_reduce_final_output(
-            result, og_hidden_dim_post_xform, output_is_reduced=True
-        )
+        result = latent_tail(fused_output, shared_output, og_hidden_dim_post_xform)
 
         return self._maybe_add_zero_expert_output(result)
 

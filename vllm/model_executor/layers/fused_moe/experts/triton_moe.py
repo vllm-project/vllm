@@ -140,6 +140,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
+            MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
@@ -592,7 +593,6 @@ class TritonWNA16Experts(TritonExperts):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        # Why?
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels

@@ -84,12 +84,12 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
 
     shapes = _ll_bf16_router_shapes_from_model(model)
     if not shapes:
-        logger.info(
+        logger.debug_once(
             "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
         )
         return
 
-    logger.info("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
+    logger.info_once("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
     ll_bf16_gemm_kernel.warmup(
         shapes=shapes,
         m_values=_LL_BF16_WARMUP_M_RANGE,
@@ -163,7 +163,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     )
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
     if enable_flashinfer_autotune is False:
-        logger.info("Skipping FlashInfer autotune because it is disabled.")
+        logger.info_once("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
@@ -188,7 +188,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             for group in groups
         )
     ):
-        logger.info("Warming up FlashInfer attention.")
+        logger.info_once("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
         # This is to warm up both prefill and decode attention kernels
         worker.model_runner._dummy_run(
@@ -238,9 +238,9 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     autotune_kwargs: dict = {}
     skip_ops = _flashinfer_autotune_skip_ops(runner)
     if skip_ops:
-        logger.info(
+        logger.info_once(
             "Skipping FlashInfer autotuning for ops %s",
-            sorted(skip_ops),
+            tuple(sorted(skip_ops)),
         )
         autotune_kwargs["skip_ops"] = skip_ops
 
@@ -265,7 +265,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     cache_path = resolve_flashinfer_autotune_file(runner)
     if is_leader:
-        logger.info("Using FlashInfer autotune cache file: %s", cache_path)
+        logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
     # We skip EPLB here since we don't want to record dummy metrics.
     # When autotuning with number of tokens m, flashinfer will autotune
@@ -296,9 +296,9 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     tune_results = world.broadcast_object(tune_results, src=0)
 
     if tune_results is None:
-        logger.warning(
-            "No FlashInfer autotune cache entries found."
-            "Falling back to default tactics."
+        logger.warning_once(
+            "No FlashInfer autotune cache entries found; "
+            "falling back to default tactics."
         )
     else:
         write_flashinfer_autotune_cache(cache_path, tune_results)
@@ -306,7 +306,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         from flashinfer.autotuner import AutoTuner
 
         AutoTuner.get().load_configs(str(cache_path))
-        logger.info(
+        logger.info_once(
             "FlashInfer autotune cache loaded on rank %d from %s.",
             world.rank_in_group,
             cache_path,

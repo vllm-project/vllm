@@ -563,6 +563,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             quant_config=self.quant_config,
             may_have_zp=self.quant_config.zero_point,
             may_have_bias=True,
+            allow_tile_padding=True,
         )
 
     def create_weights(
@@ -780,16 +781,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
         )
 
     def apply(

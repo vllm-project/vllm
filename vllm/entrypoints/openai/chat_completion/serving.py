@@ -60,7 +60,6 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.renderers import ChatParams
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -177,15 +176,6 @@ class OpenAIServingChat(GenerateBaseServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
-
-    def warmup(self) -> None:
-        self.renderer.warmup(
-            ChatParams(
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                chat_template_kwargs=self.default_chat_template_kwargs,
-            )
-        )
 
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
@@ -328,6 +318,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -336,6 +327,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    session_id=session_id,
                 )
             else:
                 if not request.include_reasoning:
@@ -358,6 +350,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     trace_headers=trace_headers,
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": chat_template_kwargs,
@@ -400,6 +393,34 @@ class OpenAIServingChat(GenerateBaseServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
+
+    def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
+        """Construct the response :class:`ChatMessage` for the non-streaming path.
+
+        The full-generator calls this at every construction site so
+        subclasses can swap in a specialized :class:`ChatMessage`
+        subclass (e.g. :class:`CohereServingChatV2` returning
+        :class:`CohereChatMessage`) without duplicating the branchy
+        tool-choice / auto-tools logic that decides which fields are
+        populated. The default returns a plain :class:`ChatMessage`.
+        """
+        return ChatMessage(*args, **kwargs)
+
+    def _finalize_response_message(
+        self,
+        message: ChatMessage,
+        *,
+        parser: Parser | None,
+    ) -> ChatMessage:
+        """Subclass hook to enrich a fully-constructed :class:`ChatMessage`.
+
+        Default is a no-op. Subclasses that need to surface parser-side
+        extras (e.g. :class:`CohereServingChatV2` reading grounding
+        citations off the reasoning parser and populating
+        :class:`CohereChatMessage.citations`) override this to inspect
+        ``parser`` and mutate/replace ``message``.
+        """
+        return message
 
     async def chat_completion_stream_generator(
         self,
@@ -904,13 +925,19 @@ class OpenAIServingChat(GenerateBaseServing):
             )
             is_required_tool_choice = request.tool_choice == "required"
 
+            # All six construction sites route through ``self._create_chat_message``
+            # so subclasses can swap in a specialized :class:`ChatMessage`
+            # (e.g. the Cohere v2 handler's ``CohereChatMessage``) without
+            # having to duplicate this branch logic.
             if (not self.enable_auto_tools or not tool_parser_cls) and (
                 not is_named_tool_choice and not is_required_tool_choice
             ):
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
 
             elif is_named_tool_choice or is_required_tool_choice:
-                message = ChatMessage(
+                message = self._create_chat_message(
                     role=role,
                     reasoning=reasoning,
                     content=content or "",
@@ -923,7 +950,9 @@ class OpenAIServingChat(GenerateBaseServing):
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
 
             # handle when there are tools and tool choice is auto
             elif (
@@ -934,7 +963,7 @@ class OpenAIServingChat(GenerateBaseServing):
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
-                    message = ChatMessage(
+                    message = self._create_chat_message(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -945,7 +974,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
 
                 else:
-                    message = ChatMessage(
+                    message = self._create_chat_message(
                         role=role,
                         reasoning=reasoning,
                         content=content,
@@ -958,7 +987,17 @@ class OpenAIServingChat(GenerateBaseServing):
                     " if tools should be extracted. Returning a standard chat "
                     "completion."
                 )
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
+                message = self._create_chat_message(
+                    role=role, reasoning=reasoning, content=content
+                )
+
+            # Subclass hook: enrich the constructed message with any
+            # parser-side extras that don't fit through the plain
+            # ``(reasoning, content, tool_calls)`` tuple. Base is a no-op;
+            # citation-aware handlers use this to surface grounding
+            # metadata cached on the reasoning parser.
+            message = self._finalize_response_message(message, parser=parser)
+
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,
             # and "stop" for named tool calls.

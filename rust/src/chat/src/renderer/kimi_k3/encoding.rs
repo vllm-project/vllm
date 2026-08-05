@@ -291,12 +291,17 @@ fn write_tool_declare(
     let mut specs = Vec::with_capacity(tools.len());
     for tool in tools {
         let mut function = Map::new();
-        function.insert(
-            "description".to_string(),
-            Value::String(tool.description.clone().unwrap_or_default()),
-        );
+        if let Some(description) = &tool.description {
+            function.insert(
+                "description".to_string(),
+                Value::String(description.clone()),
+            );
+        }
         function.insert("name".to_string(), Value::String(tool.name.clone()));
         function.insert("parameters".to_string(), sort_json(&tool.parameters));
+        if let Some(strict) = tool.strict {
+            function.insert("strict".to_string(), Value::Bool(strict));
+        }
         specs.push(json!({
             "function": Value::Object(function),
             "type": "function",

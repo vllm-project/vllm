@@ -19,6 +19,7 @@ def _make_bare_scheduler(
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = "kv_both"
     scheduler.lookup_async = False
+    scheduler.enable_lookup = True
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
@@ -634,6 +635,30 @@ def test_sub_block_prompt_not_looked_up_without_fine_grained():
     assert need_to_allocate == 0
     assert load_async is False
     assert "req-0" not in scheduler.load_specs
+
+
+def test_disabled_lookup_reports_no_hit_without_querying_client():
+    # With enable_lookup=False the connector reports no external hit without
+    # consulting the lookup client, so admission is never deferred on a store
+    # lookup. Used by instances that only contribute store capacity.
+    scheduler = _make_bare_scheduler()
+    scheduler.enable_lookup = False
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    )
+
+    assert need_to_allocate == 0
+    assert load_async is False
+    assert scheduler.client.num_tokens == []
+    assert scheduler.load_specs == {}
 
 
 def test_pending_partial_tail_emits_offload_only_reqmeta():

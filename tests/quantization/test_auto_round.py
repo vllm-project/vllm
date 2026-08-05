@@ -496,7 +496,7 @@ def test_qwen3_1p7b_mxfp4_autoround_uses_mxfp4_linear_scheme(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_mxfp4_linear.init_mxfp4_linear_kernel",
-        lambda: DummyKernel(),
+        lambda **kwargs: DummyKernel(),
     )
 
     from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
@@ -614,7 +614,7 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_mxfp4_linear.init_mxfp4_linear_kernel",
-        lambda: DummyKernel(),
+        lambda **kwargs: DummyKernel(),
     )
     monkeypatch.setattr(
         "vllm.model_executor.parameter.get_tensor_model_parallel_rank",

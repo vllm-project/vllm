@@ -257,7 +257,7 @@ endif()
 
 
 # Build oneDNN for GEMM kernels
-if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND)
+if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND OR S390_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
     set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")
@@ -345,7 +345,7 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
             FetchContent_Declare(
                 oneDNN
                 GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-                GIT_TAG        v3.10
+                GIT_TAG        v3.13
                 GIT_PROGRESS   TRUE
                 GIT_SHALLOW    TRUE
             )
@@ -368,7 +368,23 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
 
     set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "Release") # remove oneDNN debug symbols to reduce size
-    FetchContent_MakeAvailable(oneDNN)
+
+    if(S390_FOUND)
+        FetchContent_GetProperties(oneDNN)
+        if(NOT onednn_POPULATED)
+            FetchContent_Populate(oneDNN)
+            # Patch s390x helpers.h: ALWAYS_INLINE on operator+= breaks C++20/GCC14
+            file(READ "${onednn_SOURCE_DIR}/src/cpu/s390x/helpers.h" _helpers_content)
+            string(REPLACE
+                "vec_type_t<T> &ALWAYS_INLINE operator+="
+                "ALWAYS_INLINE vec_type_t<T> &operator+="
+                _helpers_content "${_helpers_content}")
+            file(WRITE "${onednn_SOURCE_DIR}/src/cpu/s390x/helpers.h" "${_helpers_content}")
+            add_subdirectory("${onednn_SOURCE_DIR}" "${onednn_BINARY_DIR}")
+        endif()
+    else()
+        FetchContent_MakeAvailable(oneDNN)
+    endif()
     set(CMAKE_BUILD_TYPE ${VLLM_BUILD_TYPE})
     add_library(dnnl_ext OBJECT "csrc/cpu/dnnl_helper.cpp")
     target_include_directories(
@@ -445,6 +461,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/mamba_cpu.cpp"
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
+    "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
@@ -462,7 +479,6 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
         "csrc/cpu/cpu_tanhf_neon.hpp"
         ${VLLM_EXT_SRC})
     if (ARM_BF16_FOUND)
-        set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe.cpp" ${VLLM_EXT_SRC})
         if (ARM_I8MM_FOUND)
             set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe_int8.cpp" ${VLLM_EXT_SRC})
         endif()
@@ -519,6 +535,7 @@ if (ENABLE_X86_ISA)
 
     set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/sgl-kernels/fla.cpp"
+        "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"

@@ -320,7 +320,7 @@ class NomicMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.router(hidden_states)
         # FIXME(Isotr0py): This implementation is too tricky,
-        # we should use FusedMoE instead in the future
+        # we should use FusedMoEFactory instead in the future
         # after supporting ungated activation for it.
         topk_weights, topk_ids, _ = fused_topk(
             hidden_states, router_logits, self.top_k, renormalize=False

@@ -91,11 +91,17 @@ def test_map_wna16_backend_supports_triton():
 def test_wna16_oracle_rejects_incompatible_quant_structures(
     backend, quant_config, may_have_zp, may_have_bias, expected
 ):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    moe_config = make_dummy_moe_config()
+
     reason = _backend_incompatibility_reason(
         backend=backend,
+        moe_config=moe_config,
         quant_config=quant_config,
         may_have_zp=may_have_zp,
         may_have_bias=may_have_bias,
+        allow_tile_padding=True,
     )
 
     assert reason is not None

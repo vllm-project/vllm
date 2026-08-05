@@ -421,6 +421,7 @@ full_transcription = " ".join(transcriptions)
 
 The `split_audio` function:
 
+- Expects 1D mono audio (`load_audio` downmixes by default)
 - Splits audio at quiet points to avoid cutting through speech
 - Uses RMS energy to find low-amplitude regions within the overlap window
 - Preserves all audio samples (no data loss)

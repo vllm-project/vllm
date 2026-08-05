@@ -22,4 +22,5 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      pytest -v -s ir &&
       pytest -v -s kernels/ir'

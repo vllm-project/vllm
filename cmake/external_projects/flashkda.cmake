@@ -13,7 +13,7 @@ else()
   FetchContent_Declare(
     flashkda
     GIT_REPOSITORY https://github.com/vllm-project/FlashKDA.git
-    GIT_TAG a3e42bbbece3bb38f7c426b880315294a336e82f
+    GIT_TAG b5d11010ff01c1d4a683c0dde42e76cbeaa8107f
     GIT_PROGRESS TRUE
     GIT_SUBMODULES cutlass
   )
@@ -62,6 +62,12 @@ if(FLASH_KDA_ARCHS)
     INCLUDE_DIRECTORIES ${FLASH_KDA_INCLUDES}
     USE_SABI 3
     WITH_SOABI)
+
+  target_compile_definitions(_flashkda_C PRIVATE
+    TORCH_TARGET_VERSION=0x020B000000000000ULL)
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    target_compile_definitions(_flashkda_C PRIVATE USE_CUDA)
+  endif()
 
   target_compile_options(_flashkda_C PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:-UPy_LIMITED_API --expt-relaxed-constexpr --expt-extended-lambda --use_fast_math -O3>

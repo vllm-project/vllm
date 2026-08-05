@@ -21,6 +21,7 @@ from vllm.v1.worker.mamba_utils import (
     collect_mamba_copy_meta,
     do_mamba_copy_block,
     preprocess_mamba,
+    stage_postprocess_inputs_to_gpu,
 )
 
 MambaStateCopyFunc = Callable[..., Any]
@@ -369,6 +370,123 @@ def _make_gpu_ctx(
         device=device,
         make_buffer=make_buffer,
     )
+
+
+# -----------------------------------------------------------------------------
+# stage_postprocess_inputs_to_gpu: single-pass staging into pinned views
+# -----------------------------------------------------------------------------
+
+
+def _make_staging_ctx(max_num_reqs: int, device: torch.device) -> MagicMock:
+    """Build a MambaSpecDecodeGPUContext stand-in exposing only the four
+    per-request staging buffers touched by stage_postprocess_inputs_to_gpu."""
+    ctx = MagicMock()
+    ctx.mamba_state_idx_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.num_scheduled_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.num_computed_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.num_draft_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    return ctx
+
+
+def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
+    """stage_postprocess_inputs_to_gpu writes each request's state_idx and
+    scheduled/computed/draft counts into slot `i` for `req_ids[i]`, leaves
+    slots past `num_reqs` untouched, and mirrors the values to the GPU buffers."""
+    device = torch.device("cpu")
+    max_num_reqs = 8
+    ctx = _make_staging_ctx(max_num_reqs, device)
+
+    # Any negative int32 works as a sentinel: all staged values (state_idx,
+    # scheduled/computed/draft token counts) are non-negative, so a negative
+    # entry surviving in slots [num_reqs:] proves the loop didn't overrun.
+    sentinel = np.int32(-1)
+    bufs = (
+        ctx.mamba_state_idx_buf,
+        ctx.num_scheduled_tokens_buf,
+        ctx.num_computed_tokens_buf,
+        ctx.num_draft_tokens_buf,
+    )
+    for buf in bufs:
+        buf.np[:] = sentinel
+
+    req_ids = ["req_a", "req_b", "req_c"]
+    num_reqs = len(req_ids)
+    scheduler_output = _make_postprocess_scheduler_output(
+        req_ids=req_ids,
+        num_scheduled_tokens={"req_a": 5, "req_b": 12, "req_c": 3},
+        # req_b intentionally absent -> defaults to 0 drafts.
+        scheduled_spec_decode_tokens={
+            "req_a": [1, 2],
+            "req_c": [1, 2, 3, 4],
+        },
+    )
+    requests = _make_requests(
+        req_ids=req_ids,
+        num_computed_tokens=[10, 20, 30],
+        block_ids_per_req=[[0], [0], [0]],
+    )
+    mamba_state_idx = {"req_a": 100, "req_b": 200, "req_c": 300}
+    # A trailing entry past num_reqs must not be read.
+    req_ids_padded = req_ids + ["not_scheduled"]
+
+    stage_postprocess_inputs_to_gpu(
+        ctx,
+        scheduler_output,
+        req_ids_padded,
+        num_reqs,
+        requests,
+        mamba_state_idx,
+    )
+
+    np.testing.assert_array_equal(
+        ctx.mamba_state_idx_buf.np[:num_reqs], [100, 200, 300]
+    )
+    np.testing.assert_array_equal(
+        ctx.num_scheduled_tokens_buf.np[:num_reqs], [5, 12, 3]
+    )
+    np.testing.assert_array_equal(
+        ctx.num_computed_tokens_buf.np[:num_reqs], [10, 20, 30]
+    )
+    np.testing.assert_array_equal(ctx.num_draft_tokens_buf.np[:num_reqs], [2, 0, 4])
+    for buf in bufs:
+        assert (buf.np[num_reqs:] == sentinel).all()
+
+    assert torch.equal(
+        ctx.mamba_state_idx_buf.gpu[:num_reqs],
+        torch.tensor([100, 200, 300], dtype=torch.int32),
+    )
+    assert torch.equal(
+        ctx.num_draft_tokens_buf.gpu[:num_reqs],
+        torch.tensor([2, 0, 4], dtype=torch.int32),
+    )
+
+
+def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
+    """If preprocess_mamba didn't populate mamba_state_idx for a req in the
+    batch, staging must fail loudly rather than silently writing a stale index."""
+    device = torch.device("cpu")
+    ctx = _make_staging_ctx(max_num_reqs=4, device=device)
+    scheduler_output = _make_postprocess_scheduler_output(
+        req_ids=["req_a"],
+        num_scheduled_tokens={"req_a": 1},
+    )
+    requests = _make_requests(["req_a"], [0], [[0]])
+
+    # mamba_state_idx has an entry for a *different* request but not for
+    # req_a (the one being staged). This is the realistic failure mode:
+    # preprocess_mamba ran, populated some reqs, but missed this one.
+    # The safety assert in stage_postprocess_inputs_to_gpu must fire on
+    # req_a's missing entry rather than silently writing None.
+    mamba_state_idx: dict[str, int] = {"other_req": 42}
+    with pytest.raises(AssertionError, match="mamba_state_idx missing entry"):
+        stage_postprocess_inputs_to_gpu(
+            ctx,
+            scheduler_output,
+            ["req_a"],
+            1,
+            requests,
+            mamba_state_idx,
+        )
 
 
 def _run_gpu_postprocess(

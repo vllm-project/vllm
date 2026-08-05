@@ -162,6 +162,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             routing_tables=layer._expert_routing_tables(),
             layer=layer,
         )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def maybe_make_prepare_finalize(
         self,

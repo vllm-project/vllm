@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.inputs import MultiModalHashes
 
 from ..hasher import MultiModalHasher
@@ -22,7 +23,11 @@ class ProcessorInputs:
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
     tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
-    def get_mm_hashes(self, model_id: str) -> MultiModalHashes:
+    def get_mm_hashes(
+        self,
+        model_id: str,
+        hash_algorithm: MMHasherAlgorithm,
+    ) -> MultiModalHashes:
         mm_data_items = self.mm_data_items
         mm_uuid_items = self.mm_uuid_items or {}
         hf_processor_mm_kwargs = self.hf_processor_mm_kwargs
@@ -49,6 +54,7 @@ class ProcessorInputs:
                         item = uuid_item if uuid_item is not None else item
                         hashes.append(
                             hasher.hash_kwargs(
+                                hash_algorithm,
                                 model_id=model_id,
                                 **{modality: item},
                                 **hf_processor_mm_kwargs,
@@ -61,6 +67,7 @@ class ProcessorInputs:
             else:
                 mm_hashes[modality] = [
                     hasher.hash_kwargs(
+                        hash_algorithm,
                         model_id=model_id,
                         **{modality: item},
                         **hf_processor_mm_kwargs,

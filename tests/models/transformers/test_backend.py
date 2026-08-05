@@ -35,6 +35,12 @@ def get_num_fused(model) -> tuple[int, int]:
     return glu, qkv
 
 
+def count_mla_layers(model) -> int:
+    from vllm.model_executor.layers.attention import MLAAttention
+
+    return sum(isinstance(m, MLAAttention) for m in model.attention_instances.values())
+
+
 def check_implementation(
     runner_ref: type[HfRunner | VllmRunner],
     runner_test: type[VllmRunner],
@@ -97,17 +103,6 @@ def test_models(
     model_impl: str,
     num_fused: tuple[int, int],
 ) -> None:
-    import transformers
-    from packaging.version import Version
-
-    installed = Version(transformers.__version__)
-    required = Version("5.0.0")
-    if model == "allenai/OLMoE-1B-7B-0924" and installed < required:
-        pytest.skip(
-            "MoE models with the Transformers modeling backend require "
-            f"transformers>={required}, but got {installed}"
-        )
-
     check_implementation(
         hf_runner,
         vllm_runner,
@@ -129,6 +124,42 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
         model="hmellor/tiny-random-Gemma2ForCausalLM",
         kwargs_ref=kwargs_ref,
         kwargs_test=kwargs_test,
+    )
+
+
+def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
+    import transformers
+    from packaging.version import Version
+
+    installed = Version(transformers.__version__)
+    required = Version("5.15.0.dev0")
+    if installed < required:
+        pytest.skip(
+            "MLA models with the Transformers modeling backend require "
+            f"transformers>={required}, but got {installed}"
+        )
+
+    model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE
+    args = (example_prompts, 32, 5)
+    kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
+
+    with vllm_runner(
+        model, model_impl="transformers", trust_remote_code=False, **kwargs
+    ) as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+        num_layers = model_config.hf_config.get_text_config().num_hidden_layers
+        assert model_test.apply_model(count_mla_layers) == [num_layers]
+        outputs_test = model_test.generate_greedy_logprobs(*args)
+
+    with vllm_runner(model, model_impl="auto") as model_ref:
+        outputs_ref = model_ref.generate_greedy_logprobs(*args)
+
+    check_logprobs_close(
+        outputs_0_lst=outputs_ref,
+        outputs_1_lst=outputs_test,
+        name_0="native",
+        name_1="transformers",
     )
 
 

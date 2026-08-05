@@ -398,7 +398,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantization
 #if defined(__AVX512F__) || defined(__AVX2__) ||                               \
     (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__) || \
-    defined(__riscv_v)
+    defined(__riscv_v) || defined(__s390x__)
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -614,7 +614,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // fused moe
-#if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) && !defined(__APPLE__))
   ops.def(
       "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
       "-> ()");
@@ -625,8 +624,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) &&
-        // !defined(__APPLE__))
 #if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
     !defined(__APPLE__)
   ops.def(

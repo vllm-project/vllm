@@ -25,6 +25,8 @@ from vllm.reasoning.cohere_command_reasoning_parser import (
     CohereCommand3ReasoningParser,
     CohereCommand4ReasoningParser,
     _has_effective_tools,
+    _melody_citations_to_vllm,
+    _melody_sources_to_vllm,
     _response_format_type,
     _schema_dict_from_structured_outputs,
     convert_schema_to_structural_tags,
@@ -623,3 +625,68 @@ class TestAdjustRequestTools:
         types = _content_types(o.structured_outputs.structural_tag)
         assert "grammar" in types
         assert "json_schema" in types
+
+
+class TestMelodySourceResolution:
+    """Pin the parser-side source resolution (see
+    ``_melody_sources_to_vllm``). The parser receives melody's numeric
+    ``(tool_call_index, tool_result_indices)`` addressing and resolves
+    it against a ``position_to_source`` map handed in by
+    ``CohereServingChatV2._apply_cohere_template_kwargs`` -- the same
+    map that would otherwise live in the serving layer's resolver.
+    """
+
+    @staticmethod
+    def _fake_melody_source(bucket: int, indices: list[int]) -> Any:
+        return SimpleNamespace(tool_call_index=bucket, tool_result_indices=indices)
+
+    def test_multi_index_source_fans_out(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0", document={"id": "d0"}),
+            (0, 1): CitationSource(type="document", id="d1", document={"id": "d1"}),
+        }
+        raw = [self._fake_melody_source(0, [0, 1])]
+        out = _melody_sources_to_vllm(raw, position_map)
+        assert [s.id for s in out] == ["d0", "d1"]
+        # Verify type / payload were plumbed through, not just the id.
+        assert out[0].type == "document"
+        assert out[0].document == {"id": "d0"}
+
+    def test_unresolvable_position_skipped(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0"),
+        }
+        raw = [self._fake_melody_source(9, [0])]
+        assert _melody_sources_to_vllm(raw, position_map) == []
+
+    def test_missing_position_map_drops_all_sources(self):
+        # A parser instance without a position map (parser wired
+        # outside of ``CohereServingChatV2``) can't attribute anything,
+        # so every source is dropped. Callers downstream will see the
+        # citation with empty ``sources`` and drop it entirely.
+        raw = [self._fake_melody_source(0, [0])]
+        assert _melody_sources_to_vllm(raw, None) == []
+
+    def test_citations_pass_through_is_thinking_tag(self):
+        from vllm.entrypoints.cohere.cohere_chat_message import CitationSource
+
+        position_map: dict[tuple[int, int], CitationSource] = {
+            (0, 0): CitationSource(type="document", id="d0"),
+        }
+        raw = [
+            SimpleNamespace(
+                start_index=0,
+                end_index=5,
+                text="hello",
+                is_thinking=True,
+                sources=[self._fake_melody_source(0, [0])],
+            )
+        ]
+        out = _melody_citations_to_vllm(raw, position_map)
+        assert out is not None
+        assert out[0].type == "THINKING_CONTENT"
+        assert out[0].sources[0].id == "d0"

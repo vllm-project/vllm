@@ -45,7 +45,7 @@ prompts = [
 
 
 class TestMMRSModel(torch.nn.Module):
-    def __init__(self, hidden_size=16, dtype=torch.float16):
+    def __init__(self, hidden_size=16, dtype=torch.bfloat16):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
@@ -77,7 +77,7 @@ class TestMMRSModel(torch.nn.Module):
 
 
 class TestAGMMModel(torch.nn.Module):
-    def __init__(self, hidden_size=16, dtype=torch.float16):
+    def __init__(self, hidden_size=16, dtype=torch.bfloat16):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
@@ -106,7 +106,7 @@ class TestAGMMModel(torch.nn.Module):
 
 
 class _BaseScaledMMModel(torch.nn.Module):
-    def __init__(self, hidden_size=16, dtype=torch.float16):
+    def __init__(self, hidden_size=16, dtype=torch.bfloat16):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
@@ -254,7 +254,7 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("dynamic", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_async_tp_pass_replace(
@@ -265,21 +265,6 @@ def test_async_tp_pass_replace(
     dtype: torch.dtype,
     dynamic: bool,
 ):
-    if (
-        test_model
-        in (
-            TestScaledMMRSModel,
-            TestAGScaledMMModel,
-            TestCutlassScaledMMRSModel,
-            TestAGCutlassScaledMMModel,
-        )
-        and dtype == torch.float16
-    ):
-        pytest.skip(
-            "Only bf16 high precision output types are supported for "
-            "per-token (row-wise) scaling"
-        )
-
     num_processes = 2
     master_port = str(get_open_port())
 

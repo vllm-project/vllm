@@ -140,7 +140,7 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/distributed/kv_transfer/kv_connector/
     - vllm/v1/worker/kv_connector_model_runner_mixin.py
     - tests/v1/kv_connector/nixl_integration/
     - vllm/platforms/xpu.py

@@ -217,7 +217,10 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         )
 
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+            mm_hashes = inputs.get_mm_hashes(
+                self.info.model_id,
+                self.info.ctx.get_mm_config().mm_hasher_algorithm,
+            )
 
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 

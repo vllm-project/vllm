@@ -29,7 +29,11 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.fused_moe import FusedMoE, MoERunner, RoutedExperts
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    MoERunner,
+    RoutedExperts,
+)
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
@@ -53,7 +57,7 @@ class TransformersMoEState:
 # --8<-- [start:transformers_fused_moe]
 @PluggableLayer.register("transformers_fused_moe")
 class TransformersMoERunner(MoERunner):
-    """Custom FusedMoE for the Transformers modeling backend."""
+    """Custom MoERunner for the Transformers modeling backend."""
 
     # --8<-- [end:transformers_fused_moe]
     def __init__(self, *args, moe_state: TransformersMoEState, **kwargs):
@@ -297,7 +301,7 @@ class MoEMixin(MixtureOfExperts):
                         )
                     if fuser is not None and not reaches_fp16_trick:
                         # MoE block forward is fully replaced.
-                        # gate/router and shared expert (if any) runs in FusedMoE.
+                        # gate/router and shared expert (if any) runs in MoERunner.
                         shared_experts = fuser.shared_experts(moe_block, prefix)
                         # Store shared experts for later down projection adjustment
                         if shared_experts is not None:
@@ -331,7 +335,7 @@ class MoEMixin(MixtureOfExperts):
                         if fuser.shared_name:
                             routed += " + shared experts"
                         logger.info_once(
-                            "Fused: %s (%s) -> FusedMoE (internal routing)",
+                            "Fused: %s (%s) -> MoERunner (internal routing)",
                             routed,
                             moe_block_cls,
                         )
@@ -373,10 +377,10 @@ class MoEMixin(MixtureOfExperts):
                             runner_args={"moe_state": moe_state},
                         )
                         logger.info_once(
-                            "Fused: experts (%s) -> FusedMoE (external routing)",
+                            "Fused: experts (%s) -> MoERunner (external routing)",
                             experts_cls,
                         )
-                    fused_experts = FusedMoE(**kwargs)
+                    fused_experts = FusedMoEFactory(**kwargs)
                     moe_block.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
                     # Update MixtureOfExperts mixin state

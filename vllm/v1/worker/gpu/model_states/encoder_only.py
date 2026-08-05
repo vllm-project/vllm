@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -15,11 +15,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    EncoderOnlyAttentionSpec,
-    KVCacheConfig,
-)
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -152,7 +148,7 @@ class EncoderOnlyModelState(DefaultModelState):
         for group in self.encoder_attn_groups:
             builder = group.get_metadata_builder(0)
             cg_support = builder.get_cudagraph_support(
-                self.vllm_config, cast(AttentionSpec, group.kv_cache_spec)
+                self.vllm_config, group.kv_cache_spec
             )
             if cg_support.value < support.value:
                 support = cg_support

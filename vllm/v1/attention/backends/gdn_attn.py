@@ -21,7 +21,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -80,18 +80,18 @@ class GDNAttentionMetadata:
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
+    kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: int = 1
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        assert isinstance(kv_cache_spec, MambaSpec)
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config

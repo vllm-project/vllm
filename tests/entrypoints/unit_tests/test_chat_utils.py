@@ -2092,7 +2092,7 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
     image_url,
 ):
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match=r"Found more '<|image_1|>' placeholders in input prompt "
         "than actual multimodal data items.",
     ):

@@ -10,7 +10,13 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, PrivateAttr, model_serializer, model_validator
+from pydantic import (
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    model_serializer,
+    model_validator,
+)
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
@@ -91,7 +97,12 @@ class ChatCompletionLogProbs(OpenAIBaseModel):
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
-    message: ChatMessage
+    # ``SerializeAsAny`` lets pydantic honor subclasses of ``ChatMessage``
+    # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereChatMessage``)
+    # so that added fields like ``citations`` survive JSON serialization
+    # instead of being stripped down to the base schema. Plain
+    # ``ChatMessage`` instances serialize identically to before.
+    message: SerializeAsAny[ChatMessage]
     logprobs: ChatCompletionLogProbs | None = None
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
@@ -139,7 +150,11 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
-    delta: DeltaMessage
+    # ``SerializeAsAny`` lets pydantic honor subclasses of ``DeltaMessage``
+    # (e.g. ``vllm.entrypoints.cohere.cohere_chat_message.CohereDeltaMessage``)
+    # so streaming ``citations`` survive JSON serialization. Plain
+    # ``DeltaMessage`` instances serialize identically to before.
+    delta: SerializeAsAny[DeltaMessage]
     logprobs: ChatCompletionLogProbs | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
@@ -179,6 +194,7 @@ class ChatCompletionToolsParam(OpenAIBaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        data = {k: v for k, v in data.items() if k in type(self).model_fields}
         if self.defer_loading is None:
             data.pop("defer_loading", None)
         return data
@@ -378,6 +394,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
+        ),
+    )
 
     return_tokens_as_token_ids: bool | None = Field(
         default=None,
@@ -436,6 +460,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -949,18 +974,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
                 "`add_generation_prompt` to True.",
-            )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None and (
-            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
-        ):
-            raise VLLMValidationError(
-                "Parameter 'cache_salt' must be a non-empty string if provided.",
-                parameter="cache_salt",
             )
         return data
 

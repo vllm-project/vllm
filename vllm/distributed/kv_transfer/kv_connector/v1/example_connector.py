@@ -170,7 +170,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
                 # Only process layers that have kv_cache
                 # attribute (attention layers) Skip non-attention
-                # layers like FusedMoE/MLP etc.
+                # layers like FusedMoEFactory/MLP etc.
                 kv_cache_layer = getattr(layer, "kv_cache", None)
                 if kv_cache_layer is None:
                     continue

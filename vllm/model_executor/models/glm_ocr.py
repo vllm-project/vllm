@@ -242,10 +242,6 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
         )
 
 
-class GlmOcrVisionPatchEmbed(Glm4vVisionPatchEmbed):
-    pass
-
-
 class GlmOcrPatchMerger(Glm4vPatchMerger):
     pass
 

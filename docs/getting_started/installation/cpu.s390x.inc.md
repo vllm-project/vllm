@@ -10,7 +10,7 @@ Currently, the CPU implementation for s390x architecture supports FP32, BF16 and
 
 - OS: `Linux`
 - SDK: `gcc/g++ >= 14.0.0` or later with Command Line Tools
-- Instruction Set Architecture (ISA): VXE support is required. Works with Z14 and above.
+- Instruction Set Architecture (ISA): VXE support is required. Works with Z15 and above.
 - Build from source python packages (no pre-built s390x wheels): `torchvision`, `llvmlite`, `numba`, `opencv-python-headless`, `hf-xet`
 
 --8<-- [end:requirements]

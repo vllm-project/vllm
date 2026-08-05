@@ -5,7 +5,6 @@
 import torch
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationStrategy,
     QuantizationType,
 )
@@ -18,9 +17,6 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_moe_marlin_supports_layer,
 )
 from vllm.platforms import current_platform
 
@@ -78,9 +74,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW8A8Mxfp8MoEMethod(layer.moe_config)
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
-            # group_size=None means channelwise
-            group_size = weight_quant.group_size or -1
-
             valid_format_and_bits = (
                 weight_quant.num_bits in WNA16_SUPPORTED_BITS
                 and format == CompressionFormat.pack_quantized.value
@@ -95,87 +88,53 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f" and bits: {weight_quant.num_bits}",
                 )
 
-            # Prefer to use the MarlinMoE kernel when it is supported.
-            is_actorder = (
-                weight_quant.strategy == QuantizationStrategy.GROUP
-                and weight_quant.actorder
-                in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
-            )
-            if (
-                not check_moe_marlin_supports_layer(
-                    layer, group_size, allow_tile_padding=not is_actorder
-                )
-                or current_platform.is_rocm()
-            ):
-                if is_actorder:
-                    raise ValueError(
-                        "WNA16MoE is not supported with actorder=group/dynamic."
+            # Native ROCm HIP kernels (RDNA3, etc.)
+            if current_platform.is_rocm():
+                from . import rocm_moe_rdna
+
+                if rocm_moe_rdna.is_supported(weight_quant):
+                    return rocm_moe_rdna.make_method(
+                        weight_quant, input_quant, layer.moe_config
+                    )
+                from vllm.platforms.rocm import on_gfx950
+
+                vllm_config = get_current_vllm_config()
+                is_lora_disabled = vllm_config.lora_config is None
+                moe_backend = vllm_config.kernel_config.moe_backend
+                group_size = weight_quant.group_size or -1
+                if (
+                    weight_quant.strategy == QuantizationStrategy.GROUP
+                    and weight_quant.type == QuantizationType.INT
+                    and group_size == 32
+                    and weight_quant.num_bits == 4
+                    and is_lora_disabled
+                    and on_gfx950()
+                    and moe_backend == "flydsl"
+                ):
+                    from .compressed_tensors_moe_w4a16_flydsl import (
+                        CompressedTensorsW4A16FlydslMoEMethod,
                     )
 
-                # Native ROCm HIP kernels (RDNA3, etc.)
-                if current_platform.is_rocm():
-                    from . import rocm_moe_rdna
+                    logger.info_once("Using CompressedTensorsW4A16FlydslMoEMethod")
+                    return CompressedTensorsW4A16FlydslMoEMethod(
+                        weight_quant, input_quant, layer.moe_config
+                    )
+                elif moe_backend == "emulation":
+                    logger.info_once(
+                        "Using CompressedTensorsWNA16MoEMethod "
+                        "(emulation backend requested)"
+                    )
 
-                    if rocm_moe_rdna.is_supported(weight_quant):
-                        return rocm_moe_rdna.make_method(
-                            weight_quant, input_quant, layer.moe_config
-                        )
-                    from vllm.platforms.rocm import on_gfx950
+            from .compressed_tensors_moe_wna16 import (
+                CompressedTensorsWNA16MoEMethod,
+            )
 
-                    vllm_config = get_current_vllm_config()
-                    is_lora_disabled = vllm_config.lora_config is None
-                    moe_backend = vllm_config.kernel_config.moe_backend
-                    if (
-                        weight_quant.strategy == QuantizationStrategy.GROUP
-                        and weight_quant.type == QuantizationType.INT
-                        and group_size == 32
-                        and weight_quant.num_bits == 4
-                        and is_lora_disabled
-                        and on_gfx950()
-                        and moe_backend == "flydsl"
-                    ):
-                        from .compressed_tensors_moe_w4a16_flydsl import (
-                            CompressedTensorsW4A16FlydslMoEMethod,
-                        )
-
-                        logger.info_once("Using CompressedTensorsW4A16FlydslMoEMethod")
-                        return CompressedTensorsW4A16FlydslMoEMethod(
-                            weight_quant, input_quant, layer.moe_config
-                        )
-                    elif moe_backend == "emulation":
-                        # Although this is called 'Marlin', actually it selects
-                        # emulation backend by calling select_wna16_moe_backend.
-                        # TODO: we need to update CompressedTensorsWNA16MoeMethod
-                        # to honor "--moe-backend" option
-                        from .compressed_tensors_moe_wna16_marlin import (
-                            CompressedTensorsWNA16MarlinMoEMethod,
-                        )
-
-                        logger.info_once(
-                            "Using CompressedTensorsWNA16MarlinMoEMethod "
-                            "(emulation backend requested)"
-                        )
-                        return CompressedTensorsWNA16MarlinMoEMethod(
-                            weight_quant, input_quant, layer.moe_config, layer_name
-                        )
-
-                from .compressed_tensors_moe_wna16 import (
-                    CompressedTensorsWNA16MoEMethod,
-                )
-
-                logger.info_once("Using CompressedTensorsWNA16MoEMethod")
-                return CompressedTensorsWNA16MoEMethod(
-                    weight_quant, input_quant, layer.moe_config
-                )
-            else:
-                from .compressed_tensors_moe_wna16_marlin import (
-                    CompressedTensorsWNA16MarlinMoEMethod,
-                )
-
-                logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
-                return CompressedTensorsWNA16MarlinMoEMethod(
-                    weight_quant, input_quant, layer.moe_config
-                )
+            logger.info_once("Using CompressedTensorsWNA16MoEMethod")
+            return CompressedTensorsWNA16MoEMethod(
+                weight_quant,
+                input_quant,
+                layer.moe_config,
+            )
         elif quant_config._is_nvfp4_format(weight_quant):
             from .compressed_tensors_moe_w4a4_nvfp4 import (
                 CompressedTensorsW4A4Nvfp4MoEMethod,
