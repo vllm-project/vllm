@@ -496,6 +496,9 @@ def main():
         ],
     )
     prompts = ["The capital of France is", "The future of AI is"]
+    # The consumer's timing sink is append-only and lives in the vLLM worker's
+    # EngineCore subprocess, so it accumulates across runs. Truncate it here so
+    # this run's records are the only ones in the file.
     consumer_jsonl = "/tmp/rdt_profile/consumer.jsonl"
     with contextlib.suppress(OSError):
         os.remove(consumer_jsonl)
