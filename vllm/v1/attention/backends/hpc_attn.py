@@ -80,19 +80,7 @@ class HpcAttnMetadata(AttentionMetadata):
     # HpcAttentionImpl.forward().  Defaults are safe for the standard
     # (non-RopeNorm) path and for profiling runs (attn_metadata=None).
     hpc_kv_written: bool = False
-    """True when HpcRopeNorm has already written K/V into the paged cache.
-
-    Set by ``HpcRopeNorm._forward_impl`` after ``rope_norm_store_kv[_fp8]``
-    runs; ``HpcAttentionImpl.forward`` uses it to decide whether to run a
-    standard ``reshape_and_cache_flash`` write itself. This is the sole
-    contract between the backend and the (optional) upstream fused op:
-    - False (default): the backend writes K/V via ``reshape_and_cache_flash``
-      (e.g. any model whose attention layer forwards standard bf16 K/V
-      through ``self.attn(q, k, v, ...)``, without wiring HpcRopeNorm).
-    - True: skip the write (e.g. HunYuan V3 with the fused rope_norm path).
-    Note: fp8_e4m3 KV cache always requires HpcRopeNorm — the backend errors
-    out if this is still False in fp8 mode when forward() runs.
-    """
+    """True when HpcRopeNorm has already written K/V into the paged cache."""
     hpc_prefill_q_scale: torch.Tensor | None = None
     """FP8 per-token-per-head Q scale for prefill (from RopeNorm)."""
     hpc_decode_q_scale: torch.Tensor | None = None
@@ -164,7 +152,6 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         #   - bf16 KV cache path only uses task_map when the installed hpc
         #     version supports it (hpc >= 6e2eced / PR #73). Older builds
         #     take the static split-K path with no task_map.
-        # This matches sglang's HPCOpsAttnBackend behavior.
         kv_cache_dtype = kv_cache_spec.dtype
         self.use_fp8 = kv_cache_dtype == torch.float8_e4m3fn
         self._dynamic_sched = True
@@ -580,8 +567,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                 # Older hpc's bf16 decode has no task_map kwarg; the map is
                 # only ever built when the installed hpc supports it (see
                 # HpcAttnMetadataBuilder._dynamic_sched). Pass task_map
-                # conditionally to stay compatible with both versions -
-                # matches sglang's HPCOpsAttnBackend.forward_decode.
+                # conditionally to stay compatible with both versions
                 task_map_kwargs = (
                     {"task_map": attn_metadata.task_map}
                     if attn_metadata.task_map is not None
