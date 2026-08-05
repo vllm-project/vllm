@@ -281,5 +281,29 @@ class TestKvCacheScaleMapper:
         )
 
 
+class TestQuarkScaleMapper:
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            (
+                "model.layers.0.mlp.down_proj.weight_quantizer.scale",
+                "model.layers.0.mlp.down_proj.weight_scale",
+            ),
+            (
+                "model.layers.0.mlp.down_proj.input_quantizer.scale",
+                "model.layers.0.mlp.down_proj.input_scale",
+            ),
+            (
+                "model.layers.0.self_attn.k_scale",
+                "model.layers.0.self_attn.attn.k_scale",
+            ),
+        ],
+    )
+    def test_remap(self, name: str, expected: str):
+        from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
+        assert QuarkConfig.get_cache_scale_mapper()._map_name(name) == expected
+
+
 if __name__ == "__main__":
     test_download_weights_from_hf()

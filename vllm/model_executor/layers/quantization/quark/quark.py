@@ -689,7 +689,7 @@ class QuarkConfig(QuantizationConfig):
 
     @staticmethod
     def get_cache_scale_mapper() -> "WeightsMapper":
-        """Map Quark KV-cache scale names to vLLM names."""
+        """Map Quark checkpoint scale names to vLLM parameter names."""
         orig_to_new_suffix = {
             ".weight_quantizer.scale": ".weight_scale",
             ".input_quantizer.scale": ".input_scale",
