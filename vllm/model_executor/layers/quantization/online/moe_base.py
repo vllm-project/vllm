@@ -41,7 +41,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
                 device="meta",
                 dtype=params_dtype,
@@ -70,7 +70,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     device="meta",
                     dtype=layer.orig_dtype,
                 ),

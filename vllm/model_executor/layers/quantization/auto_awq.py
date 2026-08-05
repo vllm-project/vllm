@@ -592,7 +592,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 hidden_size,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                self.moe.w13_num_shards
+                * intermediate_size_per_partition
+                // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -623,7 +625,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                intermediate_size_per_partition * 2,
+                intermediate_size_per_partition * self.moe.w13_num_shards,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -644,7 +646,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                self.moe.w13_num_shards
+                * intermediate_size_per_partition
+                // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
