@@ -2545,6 +2545,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     seq_starts=chunk.starts,
                 )
 
+            # Extract kv_c_normed from workspace
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
             if kv_b_proj_input_dtype is not None:
                 kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
@@ -2553,11 +2554,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+
             # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
             if use_fp8_prefill:
                 kv_nope = kv_nope.to(prefill_metadata.q_data_type)
                 k_pe = k_pe.to(prefill_metadata.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
