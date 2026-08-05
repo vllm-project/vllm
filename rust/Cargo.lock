@@ -5766,6 +5766,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-startup-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "expect-test",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "vllm-tracing",
+]
+
+[[package]]
 name = "vllm-text"
 version = "0.1.0"
 dependencies = [

@@ -11,6 +11,7 @@ members = [
     "src/parser",
     "src/parser/python",
     "src/server",
+    "src/startup-bench",
     "src/text",
     "src/tokenizer",
     "src/tracing",
