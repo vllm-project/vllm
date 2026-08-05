@@ -895,7 +895,7 @@ def _prepare_gluon_gfx942_graph_inputs(
     kv_lora_rank: int,
     qk_rope_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    if type(q) is tuple:
+    if isinstance(q, tuple):
         q_nope, q_pe = q
     else:
         expected_q_dim = kv_lora_rank + qk_rope_head_dim
