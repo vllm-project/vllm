@@ -209,14 +209,18 @@ def maybe_make_prepare_finalize(
             local_expert_global_ids=local_expert_global_ids,
         )
     elif moe.use_deepep_v2_kernels:
-        from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
+        from .prepare_finalize.deepep_v2 import (
+            DeepEPV2PrepareAndFinalize,
+            dispatch_quant_dtype,
+        )
 
         assert moe.dp_size == all2all_manager.dp_world_size
 
+        # Size the buffer for the widest case: `defer_input_quant` is a
+        # per-call decision, and an oversized buffer is harmless.
         use_fp8_dispatch = (
             quant_config is not None
-            and quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.is_block_quantized
+            and dispatch_quant_dtype(quant_config, defer_input_quant=False) is not None
         )
         all_to_all_args = dict(
             num_max_tokens_per_rank=moe.max_num_tokens,

@@ -20,6 +20,43 @@ from vllm.v1.worker.ubatching import (
 )
 
 
+def dispatch_quant_dtype(
+    quant_config: FusedMoEQuantConfig,
+    defer_input_quant: bool,
+) -> torch.dtype | str | None:
+    """Activation dtype to quantize into *before* dispatch, or None for bf16.
+
+    Quantizing on the send side halves the bytes the all-to-all moves. DeepEP
+    carries the scales as opaque 4-byte packs (`sf_pack_t`: one fp32, or four
+    UE8M0 exponents) attached to each token, so it can only carry a scale
+    layout that is contiguous and per-token:
+
+      * 1x128 blocked fp8: one fp32 per 128 channels.
+      * mxfp8: one UE8M0 byte per 32 channels, four per pack.
+
+    Swizzled MX layouts tile scales across 128 tokens and cannot be permuted
+    per token, so those dispatch in bf16 and quantize after receive.
+    """
+    if defer_input_quant:
+        return None
+    if quant_config.is_block_quantized:
+        return quant_config.quant_dtype
+    if quant_config.quant_dtype == "mxfp8" and not quant_config.is_scale_swizzled:
+        return "mxfp8"
+    return None
+
+
+def _pack_mx_scales(scales: torch.Tensor) -> torch.Tensor:
+    """View row-major UE8M0 scales `[T, K // 32]` as `sf_pack_t` `[T, K // 128]`."""
+    assert scales.dtype == torch.uint8 and scales.ndim == 2, (
+        f"Expected 2D uint8 mxfp8 scales, got {scales.shape} {scales.dtype}"
+    )
+    assert scales.shape[1] % 4 == 0, (
+        f"mxfp8 dispatch requires hidden_size % 128 == 0, got {scales.shape[1] * 32}"
+    )
+    return scales.contiguous().view(torch.int32)
+
+
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
@@ -44,6 +81,12 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     Both modes use async_with_compute_stream=False (synchronous from
     caller's perspective). The ElasticBuffer handles comm internally.
+
+    Activations are quantized before dispatch when the scale layout allows it
+    (see `dispatch_quant_dtype`), otherwise they are dispatched in bf16 and
+    quantized after receive. `use_fp8_dispatch` must agree with that choice:
+    it sizes the ElasticBuffer for 1-byte elements plus one `sf_pack_t` per
+    128 channels.
     """
 
     @staticmethod
@@ -105,6 +148,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_experts: int,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
+        dispatch_quant_dtype: torch.dtype | str | None,
         defer_input_quant: bool,
     ) -> Callable:
         has_scales = token_scales is not None
@@ -171,6 +215,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             handle.psum_num_recv_tokens_per_scaleup_rank,
             a1_scale,
             quant_config,
+            dispatch_quant_dtype=dispatch_quant_dtype,
             defer_input_quant=defer_input_quant,
         )
 
@@ -186,6 +231,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         psum_recv_per_rank: torch.Tensor,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
+        dispatch_quant_dtype: torch.dtype | str | None,
         defer_input_quant: bool,
     ) -> mk.PrepareResultType:
         if event.event is not None:
@@ -195,6 +241,10 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_x, expert_x_scale = recv_x
         else:
             expert_x, expert_x_scale = recv_x, None
+
+        if dispatch_quant_dtype == "mxfp8" and expert_x_scale is not None:
+            # Undo the `sf_pack_t` packing: back to UE8M0 [N, hidden // 32].
+            expert_x_scale = expert_x_scale.view(torch.uint8)
 
         if recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
@@ -248,7 +298,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             device=expert_x.device,
         )
 
-        if not quant_config.is_block_quantized and not defer_input_quant:
+        if dispatch_quant_dtype is None and not defer_input_quant:
             expert_x_scale = None
             if expert_x.numel() != 0:
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
@@ -258,6 +308,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape,
                     is_scale_swizzled=quant_config.is_scale_swizzled,
+                    mx_alignment=quant_config.mx_alignment,
                 )
 
         return (
@@ -289,16 +340,22 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.is_block_quantized and not defer_input_quant:
+        quant_dtype = dispatch_quant_dtype(quant_config, defer_input_quant)
+        if quant_dtype is not None:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_scale,
-                quant_dtype=quant_config.quant_dtype,
+                quant_dtype=quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
+                is_scale_swizzled=False,
+                mx_alignment=quant_config.mx_alignment,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
+            if quant_dtype == "mxfp8":
+                assert a1q_scale is not None
+                a1q_scale = _pack_mx_scales(a1q_scale)
             a1_post_scale = None
         else:
             a1q = a1
@@ -317,6 +374,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             num_experts=num_experts,
             a1_scale=a1_post_scale,
             quant_config=quant_config,
+            dispatch_quant_dtype=quant_dtype,
             defer_input_quant=defer_input_quant,
         )
 
