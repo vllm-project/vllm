@@ -215,6 +215,7 @@ class ServingTokens(GenerateBaseServing):
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        session_id = self._get_session_id_from_headers(raw_request)
 
         result_generator = self.engine_client.generate(
             engine_input,
@@ -224,6 +225,7 @@ class ServingTokens(GenerateBaseServing):
             trace_headers=trace_headers,
             priority=request.priority,
             data_parallel_rank=data_parallel_rank,
+            session_id=session_id,
         )
 
         assert result_generator is not None
@@ -330,6 +332,7 @@ class ServingTokens(GenerateBaseServing):
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             kv_transfer_params=final_res.kv_transfer_params,
+            ec_transfer_params=final_res.ec_transfer_params,
         )
 
         # Log complete response if output logging is enabled

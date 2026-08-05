@@ -14,6 +14,7 @@ __all__ = [
     "BagelProcessor",
     "CheersProcessor",
     "CohereASRProcessor",
+    "Cosmos3EdgeProcessor",
     "DeepseekVLV2Processor",
     "FireRedASR2Processor",
     "FireRedLIDProcessor",
@@ -26,6 +27,7 @@ __all__ = [
     "IsaacProcessor",
     "KimiAudioProcessor",
     "KimiK25Processor",
+    "KimiK3Processor",
     "MiMoOmniProcessor",
     "MiniCPMOProcessor",
     "MiniCPMVProcessor",
@@ -43,12 +45,16 @@ __all__ = [
     "Ovis2_5Processor",
     "Qwen3ASRProcessor",
     "Step3VLProcessor",
+    "InklingProcessor",
+    "InklingImageProcessor",
+    "InklingAudioFeatureExtractor",
 ]
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "BagelProcessor": "vllm.transformers_utils.processors.bagel",
     "CheersProcessor": "vllm.transformers_utils.processors.cheers",
     "CohereASRProcessor": "vllm.transformers_utils.processors.cohere_asr",
+    "Cosmos3EdgeProcessor": "vllm.transformers_utils.processors.cosmos3_edge",
     "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
     "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
     "FireRedLIDProcessor": "vllm.transformers_utils.processors.fireredlid",
@@ -60,6 +66,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "IsaacProcessor": "vllm.transformers_utils.processors.isaac",
     "KimiAudioProcessor": "vllm.transformers_utils.processors.kimi_audio",
     "KimiK25Processor": "vllm.transformers_utils.processors.kimi_k25",
+    "KimiK3Processor": "vllm.transformers_utils.processors.kimi_k3",
     "MiMoOmniProcessor": "vllm.transformers_utils.processors.mimo_v2_omni",
     "MiniCPMOProcessor": "vllm.transformers_utils.processors.minicpmo",
     "MiniCPMVProcessor": "vllm.transformers_utils.processors.minicpmv",
@@ -78,6 +85,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
     "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
     "Step3VLProcessor": "vllm.transformers_utils.processors.step3_vl",
+    "InklingProcessor": "vllm.transformers_utils.processors.inkling",
+    "InklingImageProcessor": "vllm.transformers_utils.processors.inkling",
+    "InklingAudioFeatureExtractor": "vllm.transformers_utils.processors.inkling",
 }
 
 

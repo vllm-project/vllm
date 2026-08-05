@@ -33,14 +33,14 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{instance_id}.mmap
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
 
     def __init__(
         self,
-        instance_id: str,
+        engine_id: str,
         num_blocks: int,
         rank: int | None,
         kv_bytes_per_block: int,
@@ -53,7 +53,7 @@ class SharedOffloadRegion:
         self._row_stride = kv_bytes_per_block
         self.total_size_bytes = self.num_blocks * self._row_stride
 
-        self.mmap_path = f"/dev/shm/vllm_offload_{instance_id}.mmap"
+        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
         if rank is not None:

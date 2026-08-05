@@ -404,6 +404,23 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result["backend"] == "pynvvideocodec"
 
+    def test_strips_request_level_hw_decoders_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"video_backend": "pynvvideocodec"},
+            runtime_kwargs={"hw_decoders": 4},
+        )
+        assert "hw_decoders" not in result
+
+    def test_prevents_request_level_hw_decoders_override(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={
+                "video_backend": "pynvvideocodec",
+                "hw_decoders": 2,
+            },
+            runtime_kwargs={"hw_decoders": 4},
+        )
+        assert result["hw_decoders"] == 2
+
     @pytest.mark.parametrize("backend", ["opencv", "pyav", "torchcodec"])
     def test_software_video_backend_passes_through(self, backend: str):
         result = VideoMediaIO.merge_kwargs(
@@ -453,3 +470,31 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result.get("backend") != "pynvvideocodec"
         assert result["video_backend"] == "pynvvideocodec"
+
+    def test_deepstream_requires_gpu(self):
+        assert VIDEO_LOADER_REGISTRY.backend_requires_gpu("deepstream")
+
+    def test_strips_backend_deepstream_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"backend": "deepstream"},
+        )
+        assert result.get("backend") != "deepstream"
+
+    def test_preserves_backend_deepstream_when_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "deepstream"},
+            runtime_kwargs={"backend": "deepstream", "num_frames": 8},
+        )
+        assert result["backend"] == "deepstream"
+        assert result["num_frames"] == 8
+
+    def test_strips_pool_size_from_runtime(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "deepstream"},
+            runtime_kwargs={"backend": "deepstream", "pool_size": 4},
+        )
+        assert "pool_size" not in result
+
+    def test_unknown_backend_not_treated_as_gpu(self):
+        assert not VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")

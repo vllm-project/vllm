@@ -99,6 +99,7 @@ class SparseNCCLWeightTransferEngine(
 
     init_info_cls = NCCLWeightTransferInitInfo
     update_info_cls = SparseNCCLWeightTransferUpdateInfo
+    supports_draft_weight_update = False
 
     def __init__(
         self,
