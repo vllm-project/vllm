@@ -975,31 +975,25 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
-        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
-        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
-    fi
-
-# Optional override: install mooncake-transfer-engine from a URL instead of the
-# PyPI release pulled in above. Use this for wheels built with non-default CMake
-# flags (e.g. `STORE_USE_ETCD=ON` for master HA). The URL's manylinux glibc
-# floor must be <= the FINAL_BASE_IMAGE's glibc.
-ARG MOONCAKE_WHEEL_AARCH64
-ARG MOONCAKE_WHEEL_X86_64
-RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-            WHEEL="${MOONCAKE_WHEEL_AARCH64}"; \
-        else \
-            WHEEL="${MOONCAKE_WHEEL_X86_64}"; \
-        fi && \
-        if [ -n "${WHEEL}" ]; then \
-            uv pip install --system "${WHEEL}" && \
-            CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
-            if [ ! -f /usr/local/cuda/lib64/libcudart.so ] && \
-               [ -f "/usr/local/cuda/lib64/libcudart.so.${CUDA_MAJOR}" ]; then \
-                ln -s "libcudart.so.${CUDA_MAJOR}" /usr/local/cuda/lib64/libcudart.so; \
-            fi; \
+        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is
+        # installed. Chained with && through the mooncake swap below: this RUN has no
+        # `set -e`, so its status is that of the last command, and a trailing no-op
+        # would otherwise mask a failure here.
+        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR} && \
+        # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
+        # cuda13 variant. Uninstall first; both ship the `mooncake` package.
+        # Mirrors .buildkite/scripts/install-kv-connectors.sh.
+        MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
+        if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
+            uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
+            uv pip install --system "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
         fi; \
     fi
+
+# Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
+# without that module loaded (e.g. GB200) must pass WITH_NVIDIA_PEERMEM=0 at run
+# time; see docs/features/mooncake_connector_usage.md. Deliberately not an ENV
+# here so the image does not override mooncake's own default.
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
