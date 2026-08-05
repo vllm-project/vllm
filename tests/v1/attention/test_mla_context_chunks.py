@@ -137,6 +137,31 @@ def test_continuation_is_confined_to_a_chunks_first_request():
         ]
 
 
+def test_tail_splitting_minimizes_chunks_and_preserves_request_order():
+    """A tail request may fill one chunk and continue at the next chunk's head.
+
+    Without tail splitting these contexts need three chunks. Splitting on the
+    block boundary reduces that to the workspace lower bound of two while
+    preserving the accumulator's single-continuation invariant.
+    """
+    metadata = build_chunked_context([768, 512, 512], [3, 5, 7], 1024)
+    assert metadata is not None
+
+    assert len(metadata.chunks) == 2
+    first, second = metadata.chunks
+    assert first.request_start == 0
+    assert first.request_end == 2
+    assert first.starts.tolist() == [0, 0]
+    assert first.seq_lens.tolist() == [768, 256]
+    assert not first.is_continuation
+
+    assert second.request_start == 1
+    assert second.request_end == 3
+    assert second.starts.tolist() == [256, 0]
+    assert second.seq_lens.tolist() == [256, 512]
+    assert second.is_continuation
+
+
 def test_prefills_without_context_are_skipped_and_reported():
     """A context-free prefill is never chunked, only reported as a gap.
 

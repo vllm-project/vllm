@@ -281,7 +281,7 @@ BATCH_SPECS = {
         seq_lens=[512, 1024, 2048, 512, 1024, 2048], query_lens=[8, 8, 8, 8, 8, 8]
     ),
     "chunked_context_prefill": BatchSpec(
-        seq_lens=[2080, 8, 80, 96], query_lens=[32, 8, 16, 16]
+        seq_lens=[1568, 520, 8, 80, 96], query_lens=[32, 8, 8, 16, 16]
     ),
 }
 

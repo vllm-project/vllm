@@ -137,15 +137,15 @@ W          Workspace rows, i.e. the context rows we may gather at once,
            used to bound the memory usage
 
 The context is scheduled per request rather than per batch column: requests are
-packed whole into a chunk while their contexts fit in `W`, and a request whose
-context alone does not fit is emitted on its own across `ceil(C / W)` chunks.
+packed in order, splitting the next request on an aligned boundary when needed
+to fill `W`.
 So a chunk covers a contiguous run of prefills and only ever the tokens and
 context rows of those prefills — attention, up-projection and merging are
 charged only to the requests it covers, and no chunk contains an empty context
 span. See `plan_mla_context_chunks`.
 
-A continuation chunk contains only its split request, so accumulation performs
-either one request-slice merge or one bulk write per chunk.
+Only a chunk's first request can be a continuation, so accumulation performs at
+most one request-slice merge and one bulk write per chunk.
 
 q_c        = h_t @ W_DQ
 q_nope     = (q_c @ W_UQ).view(Sq, N, P)
@@ -1632,50 +1632,68 @@ def plan_mla_context_chunks(
     context_lens: list[int],
     row_budget: int,
     max_context_chunk: int,
+    split_alignment: int,
     padded_rows: Callable[[int], int],
 ) -> list[_ContextChunkPlan]:
     """Pack per-request contexts into workspace-sized chunks."""
     assert max_context_chunk > 0
+    assert split_alignment > 0
+
+    def aligned_split_len(start: int, remaining: int, available: int) -> int:
+        max_split = min(
+            max_context_chunk,
+            round_down(remaining - 1, split_alignment),
+        )
+        low, high = 0, max_split // split_alignment
+        while low < high:
+            mid = (low + high + 1) // 2
+            length = mid * split_alignment
+            rows = padded_rows(start + length) - padded_rows(start)
+            if rows <= available:
+                low = mid
+            else:
+                high = mid - 1
+        return low * split_alignment
+
     plans: list[_ContextChunkPlan] = []
     num_requests = len(context_lens)
     request = 0
+    start = 0
     while request < num_requests:
         context_len = context_lens[request]
         if context_len == 0:
-            request += 1
-            continue
-
-        if padded_rows(context_len) > row_budget:
-            for start in range(0, context_len, max_context_chunk):
-                plans.append(
-                    _ContextChunkPlan(
-                        request_start=request,
-                        request_end=request + 1,
-                        starts=[start],
-                        seq_lens=[min(max_context_chunk, context_len - start)],
-                        is_continuation=start > 0,
-                    )
-                )
+            assert start == 0
             request += 1
             continue
 
         request_start = request
+        starts: list[int] = []
         seq_lens: list[int] = []
         rows = 0
         while request < num_requests and context_lens[request] > 0:
-            request_rows = padded_rows(context_lens[request])
+            remaining = context_lens[request] - start
+            request_rows = padded_rows(start + remaining) - padded_rows(start)
             if rows + request_rows > row_budget:
+                split_len = aligned_split_len(start, remaining, row_budget - rows)
+                if split_len > 0:
+                    starts.append(start)
+                    seq_lens.append(split_len)
+                    rows += padded_rows(start + split_len) - padded_rows(start)
+                    start += split_len
                 break
             rows += request_rows
-            seq_lens.append(context_lens[request])
+            starts.append(start)
+            seq_lens.append(remaining)
             request += 1
+            start = 0
+        assert seq_lens
         plans.append(
             _ContextChunkPlan(
                 request_start=request_start,
-                request_end=request,
-                starts=[0] * len(seq_lens),
+                request_end=request_start + len(seq_lens),
+                starts=starts,
                 seq_lens=seq_lens,
-                is_continuation=False,
+                is_continuation=starts[0] > 0,
             )
         )
     return plans
@@ -1753,7 +1771,11 @@ def build_mla_chunked_context_metadata(
     )
 
     plans = plan_mla_context_chunks(
-        context_lens, row_budget, max_context_chunk, padded_rows
+        context_lens,
+        row_budget,
+        max_context_chunk,
+        chunk_alignment,
+        padded_rows,
     )
 
     query_start_loc = prefill_query_start_loc_cpu.tolist()
@@ -2394,8 +2416,8 @@ def accumulate_mla_context_chunk(
 ) -> None:
     """Fold one chunk's partial into the running context partial.
 
-    Continuation chunks merge a split request; other chunks initialize their
-    token range.
+    Only the first request may be a continuation; its tokens are merged and the
+    remaining token range is initialized.
     """
     init_start = chunk.token_start
     if chunk.is_continuation:
