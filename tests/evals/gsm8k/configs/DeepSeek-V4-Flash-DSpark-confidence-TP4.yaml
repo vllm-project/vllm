@@ -6,13 +6,13 @@ startup_max_wait_seconds: 1800
 server_args: >-
   --tokenizer-mode deepseek_v4
   --trust-remote-code
-  --dtype bfloat16
   --max-model-len 8192
   --tensor-parallel-size 4
   --enable-expert-parallel
   --block-size 256
   --gpu-memory-utilization 0.5
   --kv-cache-dtype fp8
+  --attention_config.use_fp4_indexer_cache=True
   --max-num-batched-tokens 16384
   --max-num-seqs 32
   --speculative-config '{"method":"dspark",
