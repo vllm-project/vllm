@@ -82,7 +82,7 @@ connecting to a Python inference engine:
 
 ```bash
 cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
-  render Qwen/Qwen2.5-0.5B-Instruct \
+  render Qwen/Qwen3-32B \
   --host 127.0.0.1 --max-model-len 32768
 ```
 
@@ -105,7 +105,7 @@ unified parsers require the same selection for both options.
 curl http://127.0.0.1:8000/v1/chat/completions/render \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "model": "Qwen/Qwen3-32B",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_completion_tokens": 16
   }'
