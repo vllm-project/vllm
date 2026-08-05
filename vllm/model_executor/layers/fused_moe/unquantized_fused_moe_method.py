@@ -52,17 +52,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     @property
     def supports_expert_lru_cache(self) -> bool:
-        # Only backends that do not reorder or shuffle weights at load time.
-        # FLASHINFER_TRTLLM: tiled block layout, incompatible with slot remapping.
-        # FLASHINFER_CUTLASS: requires swap_w13_to_w31.
-        # AITER: requires shuffle_weights + is_shuffled flag.
-        # TPU/OOT: untested, conservative exclusion.
-        return self.unquantized_backend in (
-            UnquantizedMoeBackend.TRITON,
-            UnquantizedMoeBackend.BATCHED_TRITON,
-            UnquantizedMoeBackend.CPU,
-            UnquantizedMoeBackend.XPU,
-        )
+        # Only TRITON: it genuinely honors expert_map via moe_align_block_size.
+        # BATCHED_TRITON: expert_map is signature-only, tokens dispatched by
+        #   global id into slot-indexed weights.
+        # CPU: prepack reads layer.w13_weight which the cache empties.
+        # XPU: expert_map signature-only, snapshots w1/w2 on first call.
+        # FLASHINFER_*: tiled layouts or swap_w13_to_w31 required.
+        # AITER: requires shuffle_weights.
+        return self.unquantized_backend == UnquantizedMoeBackend.TRITON
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)

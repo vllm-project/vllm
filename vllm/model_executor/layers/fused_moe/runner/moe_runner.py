@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_ep_group,
@@ -124,11 +124,13 @@ def _moe_forward(
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer._forward_impl(
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids,
+    return layer._maybe_stabilize_output(
+        layer._forward_impl(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+        )
     )
 
 
@@ -158,11 +160,13 @@ def _moe_forward_shared(
     hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer._forward_impl(
-        hidden_states,
-        router_logits,
-        shared_experts_input,
-        input_ids,
+    return layer._maybe_stabilize_output(
+        layer._forward_impl(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+        )
     )
 
 
@@ -289,8 +293,77 @@ class MoERunner(MoERunnerInterface):
 
         self._forward_entry = self._select_forward()
 
+        vllm_config = get_current_vllm_config()
+
+        # Piecewise CUDA graphs replay each captured piece against the input
+        # addresses recorded at capture time (see CUDAGraphWrapper) -- piece
+        # inputs are never copied. When the moe op is a splitting op (the
+        # expert cache's mode), its output feeds the next piece from eager
+        # code, so it must land at a capture-stable address on every step.
+        # The kernels return workspace views, and the workspace reallocates
+        # as capture sizes grow, so that address moves between capture and
+        # replay and the downstream piece reads stale memory. Route the
+        # output through a per-runner persistent buffer instead. Only
+        # PIECEWISE passes need it (batches above the capture limit run
+        # unreplayed with real dataflow), so the buffer is bounded by the
+        # largest capture size, not the scheduler limit.
+        cc = vllm_config.compilation_config
+        self._stable_moe_output = (
+            vllm_config.model_config is not None
+            and not vllm_config.model_config.enforce_eager
+            and cc.cudagraph_mode != CUDAGraphMode.NONE
+            and "vllm::moe_forward" in (cc.splitting_ops or [])
+        )
+        self._stable_output_rows = (
+            cc.max_cudagraph_capture_size or 0 if self._stable_moe_output else 0
+        )
+        self._stable_output_bufs: dict[tuple, torch.Tensor] = {}
+
         # For smuggling this layer into the fused moe custom op
-        register_layer_for_moe_forward_op(get_current_vllm_config(), self)
+        register_layer_for_moe_forward_op(vllm_config, self)
+
+    def _maybe_stabilize_output(
+        self, result: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Return *result* at a capture-stable address on PIECEWISE passes.
+
+        See the contract note in ``__init__``. Each layer owns its own buffer
+        keyed by (role, width, dtype); the buffer is allocated lazily and
+        reused across forward calls.
+        """
+        if not self._stable_moe_output:
+            return result
+        if not is_forward_context_available():
+            return result
+        ctx = get_forward_context()
+        if ctx.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE:
+            return result
+        if isinstance(result, tuple):
+            shared_out, fused_out = result
+            return (
+                self._stable_copy(shared_out, 0),
+                self._stable_copy(fused_out, 1),
+            )
+        return self._stable_copy(result, 0)
+
+    def _stable_copy(self, t: torch.Tensor, role: int) -> torch.Tensor:
+        if t.dim() != 2 or t.size(0) > self._stable_output_rows:
+            raise RuntimeError(
+                f"MoE output shape {tuple(t.shape)} exceeds stabilization "
+                f"buffer (max rows {self._stable_output_rows}); CUDA graph "
+                f"replay would read stale addresses. This indicates a bug in "
+                f"capture-size configuration or an unsupported batch size."
+            )
+        key = (role, t.size(-1), t.dtype)
+        buf = self._stable_output_bufs.get(key)
+        if buf is None:
+            buf = torch.empty(
+                self._stable_output_rows, t.size(-1), dtype=t.dtype, device=t.device
+            )
+            self._stable_output_bufs[key] = buf
+        out = buf[: t.size(0)]
+        out.copy_(t)
+        return out
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]

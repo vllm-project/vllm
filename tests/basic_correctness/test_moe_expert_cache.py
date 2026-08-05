@@ -62,6 +62,21 @@ def test_moe_expert_cache_with_enforce_eager() -> None:
     )
 
 
+def test_moe_expert_cache_piecewise_vs_eager() -> None:
+    """Piecewise CUDA graphs must match enforce-eager with cache enabled.
+
+    Validates the address-stability fix: MoE output is copied to a persistent
+    buffer on PIECEWISE passes so captured graph segments replay against the
+    same address. Without the fix, the workspace buffer relocates during
+    capture and downstream pieces read stale memory.
+    """
+    compare_two_settings(
+        model=_TINY_MOE_MODEL,
+        arg1=_COMMON_ARGS + ["--enforce-eager", "--moe-expert-cache-size", "4"],
+        arg2=_COMMON_ARGS + ["--moe-expert-cache-size", "4"],
+    )
+
+
 @pytest.mark.skipif(
     not _HAS_LARGE_GPU,
     reason="FP8 MoE e2e needs ~16 GB of weights plus KV for two servers; "

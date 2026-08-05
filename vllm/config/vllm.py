@@ -1532,6 +1532,19 @@ class VllmConfig:
             data_parallel_size=effective_dp_size,
         )
 
+        # Expert cache + LoRA: incompatible due to indexing mismatch.
+        # LoRA adapters index by global expert id; the cache serves slot-indexed
+        # weights. moe_lora_align_block_size would apply wrong adapters.
+        if (
+            self.lora_config is not None
+            and self.offload_config.moe_expert_cache_size > 0
+        ):
+            raise ValueError(
+                "MoE expert caching (--moe-expert-cache-size) is incompatible "
+                "with LoRA. LoRA adapters index by global expert id, but the "
+                "cache serves slot-indexed weights. Disable one or the other."
+            )
+
         # Expert LRU cache: run MoE ops eagerly between piecewise graph segments.
         # The cache's prepare() is dynamic host code (LFRU bookkeeping, D2H
         # routing sync, H2D weight copies) and must never be captured.
