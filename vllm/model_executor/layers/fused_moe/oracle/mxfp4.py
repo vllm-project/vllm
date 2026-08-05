@@ -430,6 +430,25 @@ def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
     return f"{base} since {reason}." if reason else f"{base}."
 
 
+def _check_explicit_backend_platform(
+    runner_backend: MoEBackend, backends: list[Mxfp4MoeBackend]
+) -> None:
+    """Fail fast on an explicitly requested backend that this device can never
+    run, so the user gets a hardware hint instead of the generic
+    "does not support the deployment configuration" from `_return_or_raise`."""
+    if Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING not in backends:
+        return
+    if current_platform.is_cuda() and current_platform.is_device_capability(90):
+        return
+    raise ValueError(
+        f"moe_backend={runner_backend!r} selects the FlashInfer CUTLASS "
+        "humming MXFP4-weight x FP8-activation MoE kernel, which is "
+        "implemented for SM90 (Hopper) only; this device reports compute "
+        f"capability {current_platform.get_device_capability()}. Drop the "
+        "flag to fall back to the automatic backend selection."
+    )
+
+
 def _return_or_raise(
     backend: Mxfp4MoeBackend,
     config: FusedMoEConfig,
@@ -511,6 +530,7 @@ def select_mxfp4_moe_backend(
         requested_backends = _get_requested_backends(
             runner_backend, requested_activation_key
         )
+        _check_explicit_backend_platform(runner_backend, requested_backends)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -620,6 +640,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backends = _get_requested_backends(runner_backend, None)
+        _check_explicit_backend_platform(runner_backend, requested_backends)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
@@ -948,6 +969,20 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_weight_scale,
             w13_bias,
             w2_bias,
+        )
+
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING:
+        # The humming weight preprocessing (see
+        # convert_weight_to_mxfp4_moe_kernel_format) assumes the DeepSeek-V4
+        # block layout (gate/up as two contiguous halves) and only swaps the
+        # halves. GPT-OSS-style checkpoints store w13 row-interleaved, which
+        # would run through the kernel with the right shapes but the wrong
+        # numerics, so refuse it instead of returning silently wrong values.
+        raise ValueError(
+            "moe_backend='flashinfer_cutlass_humming' only supports the "
+            "DeepSeek-V4 MXFP4 expert layout; this checkpoint uses the "
+            "GPT-OSS row-interleaved w13 layout, which the humming weight "
+            "preprocessing does not handle. Use --moe-backend auto instead."
         )
 
     elif mxfp4_backend in (
@@ -1363,6 +1398,19 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_FP8_HUMMING:
+        # The SM90 mixed-gemm interleave assumes both GEMM dims are already
+        # rounded to 128 (see
+        # mxfp4_round_up_hidden_size_and_intermediate_size); check here so a
+        # bad shape reports the dimension instead of failing inside FlashInfer.
+        humming_n = w13_weight.shape[1] // 2
+        humming_k = w13_weight.shape[2] * 2
+        if humming_n % 128 != 0 or humming_k % 128 != 0:
+            raise ValueError(
+                "moe_backend='flashinfer_cutlass_humming' requires "
+                "intermediate_size and hidden_size to be multiples of 128, "
+                f"got intermediate_size={humming_n}, hidden_size={humming_k}."
+            )
+
         from flashinfer.fused_moe import (
             interleave_moe_scales_for_sm90_mixed_gemm,
             interleave_moe_weights_for_sm90_mixed_gemm,
@@ -1888,12 +1936,20 @@ def make_mxfp4_moe_quant_config(
             _a1=FusedMoEQuantDesc(),
             _a2=FusedMoEQuantDesc(),
             _w1=FusedMoEQuantDesc(
-                "mxfp4", None, w1_scale,
-                getattr(layer, "humming_w13_residual", None), None, w1_bias,
+                "mxfp4",
+                None,
+                w1_scale,
+                getattr(layer, "humming_w13_residual", None),
+                None,
+                w1_bias,
             ),
             _w2=FusedMoEQuantDesc(
-                "mxfp4", None, w2_scale,
-                getattr(layer, "humming_w2_residual", None), None, w2_bias,
+                "mxfp4",
+                None,
+                w2_scale,
+                getattr(layer, "humming_w2_residual", None),
+                None,
+                w2_bias,
             ),
             use_wfp4afp8_humming=True,
         )

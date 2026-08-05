@@ -128,6 +128,7 @@ MoEBackend = Literal[
     "cutlass",
     "flashinfer_trtllm",
     "flashinfer_cutlass",
+    "flashinfer_cutlass_humming",
     "flashinfer_cutedsl",
     "flashinfer_b12x",
     "b12x",
@@ -244,6 +245,10 @@ class KernelConfig:
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
+    - "flashinfer_cutlass_humming": Use the FlashInfer CUTLASS "humming"
+      MXFP4-weight x FP8-activation fused MoE kernel (SM90 only, activations
+      are quantized to FP8 inside the kernel). Unrelated to the "humming"
+      backend below, which is a separate third-party package.
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
@@ -257,7 +262,8 @@ class KernelConfig:
       an NVFP4 checkpoint is consumed prequantized, MXFP4 weights are
       requantized at load
     - "marlin": Use Marlin kernels (weight-only quantization)
-    - "humming": Use Humming Mixed Precision kernels
+    - "humming": Use Humming Mixed Precision kernels (third-party `humming`
+      package; not the FlashInfer CUTLASS path above)
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
