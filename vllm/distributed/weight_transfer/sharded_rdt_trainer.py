@@ -15,11 +15,11 @@ broadcasts) this engine does not push anything from `send_weights`; instead it
     sender) drives the inference-side `start/update/finish` handshake — the
     single empty `update_weights` unblocks the workers to pull.
 
-Everything the old `RDTShardedProducer` example mixin held — gather cache, serve
-rings, free ref-counting, arena registration — now lives on the server actor,
-spawned and owned by this engine. Trainer processes need no mixin, no named
-actors, and no `enable_tensor_transport` / `max_concurrency` actor options: any
-process that can reach Ray and (for multi-rank) `torch.distributed` works.
+The serve-side state — gather cache, serve rings, free ref-counting, arena
+registration — all lives on the server actor, spawned and owned by this engine.
+Trainer processes therefore need no mixin, no named actors, and no
+`enable_tensor_transport` / `max_concurrency` actor options: any process that can
+reach Ray and (for multi-rank) `torch.distributed` works.
 """
 
 import contextlib
@@ -28,7 +28,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import ray
 import torch
@@ -50,13 +50,10 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
 )
 from vllm.logger import init_logger
 
-if TYPE_CHECKING:
-    pass
-
 logger = init_logger(__name__)
 
 # How many gathered groups may be resident (and served) at once before the
-# gather loop blocks. Matches the old RDTShardedProducer GATHER_LOOKAHEAD.
+# gather loop blocks. Bounds resident gathered groups on the trainer.
 DEFAULT_GATHER_LOOKAHEAD = 2
 
 # The actor method name the worker engine dials for the NIXL pull. Fixed by
@@ -106,10 +103,9 @@ class _RDTProducerServer:
     """Per-rank NIXL serve surface for the sharded-RDT backend.
 
     Spawned by the engine as an internal Ray actor sharing the trainer rank's
-    GPU (via CUDA IPC). Absorbs the serve half of the old `RDTShardedProducer`
-    example mixin: a gather cache of rebuilt IPC tensors, per-consumer serve
-    rings, free ref-counting, and the byte-exact packed serve. The engine feeds
-    it gathered weights with `publish_group`; the workers pull with
+    GPU (via CUDA IPC). Holds a gather cache of rebuilt IPC tensors, per-consumer
+    serve rings, free ref-counting, and the byte-exact packed serve. The engine
+    feeds it gathered weights with `publish_group`; the workers pull with
     `rdt_produce_weights_batched` and free with `free_gather`.
 
     This is a plain class; the engine wraps it with `ray.remote(...)` at spawn
@@ -165,7 +161,8 @@ class _RDTProducerServer:
         self._arena_presize = int(arena_presize_gb * (1 << 30))
 
         # [RDT-NOSYNC] Scoped-sync serve stream + per-name completion events.
-        self._scoped_sync = nosync
+        # The stream's presence IS the mode: everything downstream branches on
+        # ``self._serve_stream is not None``.
         self._serve_stream = torch.cuda.Stream() if nosync else None
         self._cache_event: dict[str, torch.cuda.Event] = {}
 

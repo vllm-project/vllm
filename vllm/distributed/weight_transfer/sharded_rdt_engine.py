@@ -251,8 +251,6 @@ class _PendingPull:
     targets: "list[torch.Tensor]"
     blob: "list[torch.Tensor]"
     slot: int
-    pack_arena: "torch.Tensor | None"  # packed uint8 arena (for pack_check)
-    pack_span: int  # packed bytes this pull (for pack_check)
     # [RDT-SLOT-WAIT diagnostic] time the RPC thread spent blocked reusing the
     # slot: generation wait (bg thread reaching the item's record) + CUDA event
     # synchronize (the scatters actually finishing). Quantifies how much of the
@@ -582,21 +580,14 @@ class LazyRDTTensor(torch.Tensor):
 class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     """Initialization info for the sharded RDT backend."""
 
-    trainer_actor_name: str | None = None
-    """Name of a single trainer Ray actor (set via ``.options(name=...)``).
-
-    Back-compat single-producer form. Prefer ``trainer_actor_names`` when the
-    trainer exposes more than one NIXL producer (see below). Exactly one of
-    ``trainer_actor_name`` / ``trainer_actor_names`` must be non-empty."""
-
     trainer_actor_names: list[str] = field(default_factory=list)
-    """Names of all trainer Ray actors that expose the producer method, ordered
-    by trainer rank. Every rank that gathers a layer can serve NIXL pulls for it,
-    so workers spread their pulls across this list to parallelize the
-    trainer-side clone + NIC egress instead of funneling through rank 0.
-    ``RdtRouter`` decides which of them serves each gather group for this worker
-    (see ``group_owners`` and ``_select_producer_indices``). If empty,
-    ``trainer_actor_name`` is used."""
+    """Names of all trainer Ray actors that expose the producer method (set via
+    ``.options(name=...)``), ordered by trainer rank. Every rank that gathers a
+    layer can serve NIXL pulls for it, so workers spread their pulls across this
+    list to parallelize the trainer-side clone + NIC egress instead of funneling
+    through rank 0. ``RdtRouter`` decides which of them serves each gather group
+    for this worker (see ``group_owners`` and ``_select_producer_indices``).
+    Must be non-empty; a single-producer trainer passes a one-element list."""
 
     trainer_actor_namespace: str | None = None
     """Optional Ray namespace the trainer actor(s) live in."""
@@ -654,8 +645,10 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     ``data_parallel_index * world_size + rank`` (see ``_global_worker_index``)."""
 
     num_rdt_buffers: int = 2
-    """[RDT-RING] Depth of the consumer receive-arena ring (the producer mirrors
-    it from the NUM_RDT_BUFFERS env var). 2 = double buffer: chunk i+1's
+    """[RDT-RING] Depth of the consumer receive-arena ring; the producer mirrors
+    it from ``ShardedRDTTrainerInitInfo.num_rdt_buffers``, and the two MUST
+    agree (the producer-ring safety argument in ``_run_chunk_pipeline`` rests on
+    it). 2 = double buffer: chunk i+1's
     produce/serve overlaps chunk i's RDMA read, and scatter(i-1) overlaps
     RDMA(i) in the other slot. Tune with ``layerwise_split`` so
     num_rdt_buffers x chunk_bytes stays under the fabric's address-translation
@@ -682,8 +675,9 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     """[RDT-PACK-CHECK diagnostic] After every pull, checksum the received
     packed blob and append {pid, bytes, sum} to
     /tmp/rdt_profile/packcheck_cons.jsonl; the producer logs the matching sum
-    when RDT_PACK_CHECK=1. Diffing the streams localizes any producer/consumer
-    packed-layout divergence (the core invariant of the packed contract)."""
+    when ``ShardedRDTTrainerInitInfo.pack_check`` is set. Diffing the streams
+    localizes any producer/consumer packed-layout divergence (the core invariant
+    of the packed contract)."""
 
     replica_rank: int = 0
     """This inference engine's ordinal in the fleet (0..``num_replicas``-1).
@@ -721,10 +715,10 @@ class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 
     group_lens: list[int] = field(default_factory=list)
     """Partition of ``names`` into gather groups (group-major;
-    ``sum(group_lens) == len(names)``), in the SAME order the driver sent to
-    the trainers' ``run_gather_plan``. The engine fires ``free_gather`` on the
-    bound producer as each group's last chunk completes. Empty = treat all of
-    ``names`` as one group (e.g. a gather-free trainer serving live params)."""
+    ``sum(group_lens) == len(names)``), in the SAME order the trainers gather and
+    publish them. The engine fires ``free_gather`` on the bound producer as each
+    group's last chunk completes. Empty = treat all of ``names`` as one group
+    (e.g. a gather-free trainer serving live params)."""
 
 
 class ShardedRDTWeightTransferEngine(
@@ -892,7 +886,7 @@ class ShardedRDTWeightTransferEngine(
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
-        self._num_consumers_override = int(getattr(init_info, "num_consumers", 0) or 0)
+        self._num_consumers_override = int(init_info.num_consumers or 0)
         self._pack_check = bool(init_info.pack_check)
         # [RDT-RING] Ring depth K + chunk split S. Must be set before
         # _ensure_proc_worker creates the per-slot events/counters and before
@@ -920,13 +914,10 @@ class ShardedRDTWeightTransferEngine(
             ) from e
 
         producer_names = list(init_info.trainer_actor_names)
-        if not producer_names and init_info.trainer_actor_name is not None:
-            producer_names = [init_info.trainer_actor_name]
         if not producer_names:
             raise RuntimeError(
                 "Sharded RDT engine requires a trainer producer: set "
-                "init_info.trainer_actor_names (preferred) or "
-                "trainer_actor_name."
+                "init_info.trainer_actor_names."
             )
 
         # M:N routing: each worker pulls every gather group from ONE producer that
@@ -946,8 +937,8 @@ class ShardedRDTWeightTransferEngine(
         # defaults to 1 (offset 0), preserving single-engine / single-DP-deployment
         # behavior. C is the driver-supplied ``init_info.num_consumers`` (else
         # inferred).
-        num_replicas = max(1, int(getattr(init_info, "num_replicas", 1) or 1))
-        replica_rank = max(0, int(getattr(init_info, "replica_rank", 0) or 0))
+        num_replicas = max(1, int(init_info.num_replicas or 1))
+        replica_rank = max(0, int(init_info.replica_rank or 0))
         workers_per_replica = self._num_consumers() // num_replicas
         self._consumer_id = (
             replica_rank * workers_per_replica + self._global_worker_index()
@@ -1114,10 +1105,7 @@ class ShardedRDTWeightTransferEngine(
         with EP on or off, ray or mp: dense served via TP (index = tp_rank) and MoE
         served via DP+EP (index = dp rank) both yield distinct 0..C-1."""
         pc = self.parallel_config
-        dp_index = getattr(pc, "data_parallel_index", 0) or 0
-        world_size_per_dp = getattr(pc, "world_size", 1) or 1  # TP * PP
-        rank_within_dp = getattr(pc, "rank", 0) or 0
-        return dp_index * world_size_per_dp + rank_within_dp
+        return pc.data_parallel_index * pc.world_size + pc.rank  # world_size = TP*PP
 
     def _num_consumers(self) -> int:
         """Total inference-worker count. Prefer the driver-supplied
@@ -1129,9 +1117,7 @@ class ShardedRDTWeightTransferEngine(
         if self._num_consumers_override > 0:
             return self._num_consumers_override
         pc = self.parallel_config
-        tp_size = getattr(pc, "tensor_parallel_size", 1) or 1
-        dp_size = getattr(pc, "data_parallel_size", 1) or 1
-        return dp_size * tp_size
+        return pc.data_parallel_size * pc.tensor_parallel_size
 
     def _select_producer_indices(self, num_producers: int) -> list[int]:
         """The producers this worker pulls from, over all gather groups.
@@ -1307,7 +1293,6 @@ class ShardedRDTWeightTransferEngine(
                 for off, dt, n, shape in chunk.pack_layout
             ]
             chunk.targets_cache[slot] = (arena.data_ptr(), targets)
-        pack_arena, pack_span = arena, cur
         # Stamp pull-start so the NIXL patch can cleave this pull into
         # produce_wait vs recv_wall. With chunks in flight the cleave is
         # approximate (issues overlap completions) but the transfer sums stand.
@@ -1338,8 +1323,6 @@ class ShardedRDTWeightTransferEngine(
             targets=targets,
             blob=blob,
             slot=slot,
-            pack_arena=pack_arena,
-            pack_span=pack_span,
             slot_wait_seconds=_slot_wait,
             slot_sync_seconds=_slot_sync,
         )
@@ -1680,10 +1663,11 @@ class ShardedRDTWeightTransferEngine(
             self._quant_stream.synchronize()
         self._raise_proc_error()
         # [RDT-SINGLE-CALL] Ensure every fired free_gather has EXECUTED on the
-        # producer before the sync ends: the producer recreates its 2-deep
-        # gather-lookahead semaphore per run_gather_plan, so a free landing
-        # after the next sync's plan started would over-credit it (extra ~17GiB
-        # gather resident -> trainer OOM risk).
+        # producer before the sync ends: ``begin_sync`` resets the producer's
+        # per-group free counts, so a free landing after the next sync started
+        # would credit a group it does not belong to, over-crediting the
+        # gather-lookahead backpressure (extra ~17GiB gather resident ->
+        # trainer OOM risk).
         if self._pending_frees:
             import ray
 
