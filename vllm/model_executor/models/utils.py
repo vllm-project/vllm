@@ -540,6 +540,7 @@ def init_vllm_registered_model(
     prefix: str = "",
     hf_config: "PretrainedConfig | None" = None,
     architectures: list[str] | None = None,
+    copy_tie_word_embeddings: bool = True,
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
@@ -552,7 +553,11 @@ def init_vllm_registered_model(
         hf_config = vllm_config.model_config.hf_config
 
     if hf_config is not None:
-        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+        vllm_config = vllm_config.with_hf_config(
+            hf_config,
+            architectures=architectures,
+            copy_tie_word_embeddings=copy_tie_word_embeddings,
+        )
 
     return initialize_model(vllm_config=vllm_config, prefix=prefix)
 
