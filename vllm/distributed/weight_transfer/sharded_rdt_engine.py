@@ -46,18 +46,15 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
-from vllm.distributed.weight_transfer.sharded_rdt_common import (
-    RdtRouter,
-)
 
-# M:N binding / arena sizing / split helpers live in sharded_rdt_common so the
-# producer (trainer) side agrees with the consumer here. Re-exported under the
-# names the engine body already uses.
+# The op allowlist, M:N binding, arena sizing and the chunk split all live in
+# sharded_rdt_common so the producer (trainer) side agrees with the consumer
+# here.
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
-    arena_alloc_bytes as _arena_alloc_bytes,
-)
-from vllm.distributed.weight_transfer.sharded_rdt_common import (
-    greedy_run_starts as _greedy_run_starts,
+    SUPPORTED_OPS,
+    RdtRouter,
+    arena_alloc_bytes,
+    greedy_run_starts,
 )
 from vllm.logger import init_logger
 
@@ -73,30 +70,6 @@ logger = init_logger(__name__)
 OpSpec = tuple[str, tuple[Any, ...], tuple[tuple[str, Any], ...]]
 OpChain = tuple[OpSpec, ...]
 FetchKey = tuple[str, OpChain]
-
-# Allowlist: torch.Tensor methods that map to pure-view / shape-only / byte-
-# bounding operations. Every entry maps `torch.Tensor.fn` to the string name
-# the trainer uses to reach the method via getattr. Anything that escapes
-# this set (arithmetic, .to/.float/.cpu, .item, .data, bool-mask indexing,
-# .copy_ as source) lands in __torch_dispatch__ and raises with a clear
-# message — we'd rather fail loud than silently transfer the wrong bytes.
-_SUPPORTED_OPS: dict[Callable, str] = {
-    torch.Tensor.narrow: "narrow",
-    torch.Tensor.view: "view",
-    torch.Tensor.reshape: "reshape",
-    torch.Tensor.__getitem__: "__getitem__",
-    torch.Tensor.unsqueeze: "unsqueeze",
-    torch.Tensor.squeeze: "squeeze",
-    torch.Tensor.transpose: "transpose",
-    torch.Tensor.t: "t",
-    torch.Tensor.permute: "permute",
-    torch.Tensor.flatten: "flatten",
-    torch.Tensor.contiguous: "contiguous",
-    torch.Tensor.chunk: "chunk",
-    # Multi-return, handled like chunk: _intercept emits one child per output
-    # with a trailing __getitem__(i); the trainer replays unbind()[i].
-    torch.Tensor.unbind: "unbind",
-}
 
 
 def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
@@ -281,19 +254,32 @@ class _ProcItem:
     pull_bytes: int
 
 
-@dataclass
-class _BakeRecorder:
-    """Shared recording context for the dry-run bake.
+def _meta_copy_(dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
+    """Fire ``dest.copy_`` from a zero-storage meta source of ``src``'s geometry.
 
-    During the single dry-run ``load_weights`` pass, the engine stamps
+    Moves no data, but still counts against the layer's loaded numel -- vLLM's
+    layerwise ``CopyCounter`` drives ``_layerwise_process`` off that count, so a
+    skipped ``copy_`` would leave the layer looking unloaded forever.
+    """
+    meta_src = torch.empty(src.shape, dtype=src.dtype, device="meta")
+    with torch._C.DisableTorchFunctionSubclass():
+        return dest.copy_(meta_src)
+
+
+@dataclass
+class BakeSink:
+    """``copy_`` sink for the dry-run bake: record how each slice WOULD be
+    fetched and where it would land, and move nothing.
+
+    During the single dry-run ``load_weights`` pass the engine stamps
     ``current = (leaf_module, param_name)`` around each param's loader (see
-    ``_install_recording_stamps``). The lazy's ``copy_`` then reads ``current``
-    to attribute the copy to its destination param, appending a ``_BakedCopy``
-    (op chain from the source; ``offset/shape/stride`` from the meta dest view)
-    into ``copies_by_layer[leaf_module]``. ``None`` marks a copy_ we couldn't
-    attribute (its group then falls back to a plain load). The dict is keyed by
-    the module object, so iterating it after the pass yields each leaf module
-    once. No real storage, no transfer — everything is meta.
+    ``_install_recording_stamps``), so ``accept_copy`` can attribute the copy to
+    its destination param: the op chain comes from the source lazy, the
+    ``offset/shape/stride`` from the meta destination view (valid on meta; no real
+    storage needed). A ``copy_`` with no stamp cannot be attributed and is left
+    unrecorded, so its module fails the coverage gate and takes the plain load.
+    ``copies_by_layer`` is keyed by the module object, so iterating it after the
+    pass yields each leaf module once.
     """
 
     copies_by_layer: "dict[Any, list[_BakedCopy | None]]" = field(
@@ -305,6 +291,54 @@ class _BakeRecorder:
     # no-ops) -> ``receive_weights`` can skip them entirely instead of paying the
     # per-name ``_load_unbaked`` lazy-build + load_weights cost every sync.
     copied_names: "set[str]" = field(default_factory=set)
+
+    def accept_copy(self, dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
+        self.copied_names.add(src._name)
+        if self.current is not None:
+            layer, param_name = self.current
+            self.copies_by_layer[layer].append(
+                _BakedCopy(
+                    src._key(),
+                    param_name,
+                    dest.storage_offset(),
+                    tuple(dest.shape),
+                    tuple(dest.stride()),
+                )
+            )
+        return _meta_copy_(dest, src)
+
+
+class PullSink:
+    """``copy_`` sink for the plain (unbaked) load: fetch this one slice on
+    demand and copy it in.
+
+    Used only by ``_load_unbaked``, for names with no recorded plan (attention
+    scales, partial layers). ``pull`` takes a one-element key list and returns the
+    packed uint8 blob; the engine binds it per name to the producer that owns that
+    name's gather group AND to this worker's ``consumer_id``, so the producer
+    serves it from the right per-consumer ring.
+
+    Layerwise reload drives each param twice: pass 1 against a meta-restored param
+    (nothing to copy yet, so a meta no-op that still counts the numel) and pass 2
+    against the materialized param, which is the real fetch.
+    """
+
+    def __init__(self, pull: "Callable[[list[FetchKey]], torch.Tensor]") -> None:
+        self._pull = pull
+
+    def fetch(
+        self, key: "FetchKey", shape: torch.Size, dtype: torch.dtype
+    ) -> torch.Tensor:
+        blob = self._pull([key])
+        nbytes = prod(shape) * dtype.itemsize
+        return blob[:nbytes].view(dtype).reshape(shape)
+
+    def accept_copy(self, dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
+        if dest.device.type == "meta":
+            return _meta_copy_(dest, src)
+        mat = self.fetch(src._key(), src.shape, src.dtype)
+        with torch._C.DisableTorchFunctionSubclass():
+            return dest.copy_(mat)
 
 
 class _UnsupportedLazyOp(NotImplementedError):
@@ -322,16 +356,10 @@ class LazyRDTTensor(torch.Tensor):
     ``.size()``/``.dim()`` work without allocating storage. Every supported op
     (narrow/view/reshape/transpose/__getitem__/...) returns a new
     ``LazyRDTTensor`` with the spec appended to its chain; ``copy_`` is the data
-    sink. Its behaviour depends on the ``_ctx`` the engine installed:
+    sink, delegated whole to the ``sink`` the engine installed -- ``BakeSink``
+    during the dry run, ``PullSink`` on the plain-load path.
 
-    - ``_BakeRecorder`` (dry-run bake): record a ``_BakedCopy`` (the op chain
-      plus the bound ``param_name`` and the meta destination's
-      offset/shape/stride) and fire a meta ``copy_``. No data moves.
-    - the trainer's producer method (slow path): a meta destination is a no-op
-      meta ``copy_``; a real destination pulls this one slice via a single
-      ``produce_method`` RPC and copies it in.
-
-    Any op outside the allowlist (arithmetic, .item, .to, .float, .data,
+    Any op outside ``SUPPORTED_OPS`` (arithmetic, .item, .to, .float, .data,
     bool-mask indexing, etc.) raises ``_UnsupportedLazyOp`` in
     ``__torch_dispatch__`` so failures are loud rather than silently fetching
     the wrong bytes.
@@ -342,11 +370,8 @@ class LazyRDTTensor(torch.Tensor):
     # returns a tensor it can't annotate as ``self``).
     _name: str
     _ops: OpChain
-    # The collaborator that handles this lazy's copy_: a ``_BakeRecorder`` (bake
-    # — record the scatter, no data) or the trainer's producer method (slow path
-    # — pull this slice on demand). ``None`` only on bare construction.
-    _ctx: "_BakeRecorder | Callable | None"
-    _materialized: "torch.Tensor | None"
+    # Handles this lazy's copy_. ``None`` only on bare construction.
+    _sink: "BakeSink | PullSink | None"
 
     @staticmethod
     def __new__(
@@ -356,7 +381,7 @@ class LazyRDTTensor(torch.Tensor):
         dtype: torch.dtype,
         device: torch.device,
         ops: OpChain = (),
-        ctx: "_BakeRecorder | Callable | None" = None,
+        sink: "BakeSink | PullSink | None" = None,
     ) -> "LazyRDTTensor":
         t = torch.Tensor._make_wrapper_subclass(
             cls,
@@ -367,8 +392,7 @@ class LazyRDTTensor(torch.Tensor):
         )
         t._name = name
         t._ops = tuple(ops)
-        t._ctx = ctx
-        t._materialized = None
+        t._sink = sink
         return t
 
     def _key(self) -> FetchKey:
@@ -391,7 +415,7 @@ class LazyRDTTensor(torch.Tensor):
             dtype=new_dtype,
             device=self.device,
             ops=self._ops + new_ops,
-            ctx=self._ctx,
+            sink=self._sink,
         )
 
     def _meta(self) -> torch.Tensor:
@@ -403,25 +427,6 @@ class LazyRDTTensor(torch.Tensor):
         """
         return torch.empty(self.shape, dtype=self.dtype, device="meta")
 
-    def _materialize(self) -> torch.Tensor:
-        # Only the slow (unbaked) path materializes; the bake records and never
-        # pulls. So ``_ctx`` here is the trainer's producer method — pull this one
-        # slice on demand (no batching) via a single-tensor RPC.
-        if self._materialized is not None:
-            return self._materialized
-        assert self._ctx is not None and not isinstance(self._ctx, _BakeRecorder)
-        import ray
-
-        # ``_ctx`` here is the Ray actor producer method; ``.remote`` is
-        # injected by Ray and invisible to the type checker. It always answers
-        # with ONE byte-packed blob, so a single-spec request is the slice at
-        # offset 0 read back with this lazy's own dtype/shape.
-        blob = ray.get(self._ctx.remote([self._key()]))[0]  # type: ignore[attr-defined]
-        nbytes = self.numel() * self.dtype.itemsize
-        tensor = blob[:nbytes].view(self.dtype).reshape(self.shape)
-        self._materialized = tensor
-        return tensor
-
     @classmethod
     def __torch_function__(
         cls,
@@ -432,63 +437,20 @@ class LazyRDTTensor(torch.Tensor):
     ):
         kwargs = kwargs or {}
 
-        # copy_: this is the data sink. Handled before the generic allowlist
-        # because (a) we don't want to record copy_ in the chain, and (b)
-        # the meta-vs-device branching has special semantics.
+        # copy_ is the data sink, and the only op whose handling depends on which
+        # sink is installed. Checked before the allowlist because copy_ must not
+        # be recorded into the chain.
         if func is torch.Tensor.copy_:
             dest = args[0]
             src = args[1] if len(args) > 1 else kwargs.get("src")
-            if isinstance(src, cls):
-                ctx = src._ctx
-                if isinstance(ctx, _BakeRecorder):
-                    # Dry-run bake: dest is a meta view of the param the loader
-                    # is bound to. The engine's loader stamp set ctx.current =
-                    # (leaf_module, param_name) for this call, so we attribute the
-                    # copy to that param: record how to fetch the source slice
-                    # (the op chain) and where it lands (the meta view's
-                    # offset/shape/stride — valid on meta), then fire a meta
-                    # copy_ so the layer's numel still counts. No pull, no real
-                    # storage. A copy_ with no stamp (ctx.current is None) can't
-                    # be attributed — left unrecorded, so its group fails the
-                    # coverage gate and takes the plain load.
-                    # Mark this source name as "live" (its copy_ fired), so
-                    # receive_weights can skip names that never copy (no-ops).
-                    ctx.copied_names.add(src._name)
-                    if ctx.current is not None:
-                        layer, param_name = ctx.current
-                        ctx.copies_by_layer[layer].append(
-                            _BakedCopy(
-                                src._key(),
-                                param_name,
-                                dest.storage_offset(),
-                                tuple(dest.shape),
-                                tuple(dest.stride()),
-                            )
-                        )
-                    meta_src = torch.empty(src.shape, dtype=src.dtype, device="meta")
-                    with torch._C.DisableTorchFunctionSubclass():
-                        return dest.copy_(meta_src)
-                # Slow path (stock inline reload); ``ctx`` is the producer method.
-                # Pass 1 over a meta-restored param: fire a meta-backed copy_ so
-                # layerwise's `CopyCounter` still counts the numel (otherwise
-                # `load_numel` stays 0 and `_layerwise_process` never triggers).
-                if dest.device.type == "meta":
-                    meta_src = torch.empty(src.shape, dtype=src.dtype, device="meta")
-                    with torch._C.DisableTorchFunctionSubclass():
-                        return dest.copy_(meta_src)
-                # Pass 2 onto the materialized param: pull this slice on demand,
-                # copy it in, free immediately.
-                mat = src._materialize()
-                with torch._C.DisableTorchFunctionSubclass():
-                    result = dest.copy_(mat)
-                src._materialized = None
-                return result
+            if isinstance(src, cls) and src._sink is not None:
+                return src._sink.accept_copy(dest, src)
 
         # Allowlisted slice/view/shape ops: append to chain and return child.
-        op_name = _SUPPORTED_OPS.get(func)
+        op_name = SUPPORTED_OPS.get(func)
         if op_name is not None:
             self_ = args[0]
-            if isinstance(self_, cls) and self_._materialized is None:
+            if isinstance(self_, cls):
                 rest = tuple(args[1:])
                 return cls._intercept(self_, func, op_name, rest, kwargs)
 
@@ -550,28 +512,20 @@ class LazyRDTTensor(torch.Tensor):
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
 
-        # If any lazy arg made it down to the aten level un-materialized, the
-        # loader called an op we don't support. Raise loudly with the op and
-        # the recorded chain so the user can identify which loader/weight is
-        # at fault. We deliberately do NOT silently materialize here — that
-        # would mask correctness bugs.
-        for a in args:
-            if isinstance(a, cls) and a._materialized is None:
+        # A lazy reaching the aten level means the loader called an op we do not
+        # support. Raise loudly with the op and the recorded chain so the user can
+        # identify which loader/weight is at fault. We deliberately do NOT
+        # silently materialize here -- that would mask correctness bugs.
+        for arg in (*args, *kwargs.values()):
+            if isinstance(arg, cls):
                 raise _UnsupportedLazyOp(
                     f"LazyRDTTensor: unsupported op {func} reached "
-                    f"__torch_dispatch__ on lazy {a._name!r} (chain={a._ops}). "
-                    "Supported ops are: "
-                    f"{sorted(_SUPPORTED_OPS.values())}, plus copy_. "
+                    f"__torch_dispatch__ on lazy {arg._name!r} "
+                    f"(chain={arg._ops}). Supported ops are: "
+                    f"{sorted(SUPPORTED_OPS.values())}, plus copy_. "
                     "Loaders that need .to(), .float(), .item(), arithmetic, "
                     "bool-mask indexing, or .data access are not supported by "
                     "the sharded RDT backend."
-                )
-        for v in kwargs.values():
-            if isinstance(v, cls) and v._materialized is None:
-                raise _UnsupportedLazyOp(
-                    f"LazyRDTTensor: unsupported op {func} reached "
-                    f"__torch_dispatch__ on lazy {v._name!r} (chain={v._ops}); "
-                    "this loader is not supported by the sharded RDT backend."
                 )
         return func(*args, **kwargs)
 
@@ -1058,7 +1012,7 @@ class ShardedRDTWeightTransferEngine(
 
         # (a) consumer receive arenas — one per ring slot, at the largest chunk.
         max_pack = max(c.pack_bytes for c in plan.chunks)
-        alloc = _arena_alloc_bytes(max_pack, self._arena_presize)
+        alloc = arena_alloc_bytes(max_pack, self._arena_presize)
         for slot in range(self._NSLOTS):
             arena = self._dest_arenas[slot].get(torch.uint8)
             if arena is None or arena.numel() < alloc:
@@ -1207,31 +1161,28 @@ class ShardedRDTWeightTransferEngine(
     def _build_lazy_weights(
         self,
         names: list[str],
-        dtype_names: list[str],
-        shapes: list[list[int]],
-        ctx: "_BakeRecorder | Callable | list",
+        sinks: "list[BakeSink | PullSink]",
         device: torch.device,
     ) -> list[tuple[str, torch.Tensor]]:
-        # LazyRDTTensors are zero-storage, so building them upfront is just a
-        # few object allocations. ``ctx`` is the bake recorder (dry run) or the
-        # trainer's producer method (slow path, for on-demand per-copy pulls);
-        # a LIST gives each name its own producer, so names owned by different
-        # producers can still load in one pass.
-        ctxs = ctx if isinstance(ctx, list) else [ctx] * len(names)
+        """Zero-storage lazies for ``names``, dtype/shape from the init metadata.
+
+        One sink per name: the same ``BakeSink`` for all of them during the dry
+        run, a per-name ``PullSink`` on the plain-load path (names in different
+        gather groups are served by different producers). Building them upfront is
+        just a few object allocations.
+        """
         return [
             (
                 name,
                 LazyRDTTensor(
                     name=name,
-                    shape=torch.Size(shape),
-                    dtype=_dtype_from_name(dtype_name),
+                    shape=torch.Size(self._name_meta[name][1]),
+                    dtype=_dtype_from_name(self._name_meta[name][0]),
                     device=device,
-                    ctx=name_ctx,
+                    sink=sink,
                 ),
             )
-            for name, dtype_name, shape, name_ctx in zip(
-                names, dtype_names, shapes, ctxs
-            )
+            for name, sink in zip(names, sinks)
         ]
 
     def _issue_pull(self, chunk: "_Chunk", slot: int) -> "_PendingPull":
@@ -1280,7 +1231,7 @@ class ShardedRDTWeightTransferEngine(
             # desc cache (keyed by data_ptr, entries outlive their tensor)
             # can false-hit a recycled pointer and skip registering the new
             # extent -> NIXL_ERR_NOT_FOUND (see arena_presize_gb docstring).
-            alloc = _arena_alloc_bytes(cur, self._arena_presize)
+            alloc = arena_alloc_bytes(cur, self._arena_presize)
             arena = torch.empty(alloc, dtype=torch.uint8, device=self.device)
             register_nixl_memory(arena)
             arenas[torch.uint8] = arena
@@ -1374,29 +1325,40 @@ class ShardedRDTWeightTransferEngine(
         active for the sync, so each layer is processed as it completes and the
         lazy's Pass-2 ``copy_`` pulls its slice on demand. No recording, no
         batching; runs every sync for the call (the rare, unbaked case)."""
-        dtype_names = [self._name_meta[n][0] for n in names]
-        shapes = [self._name_meta[n][1] for n in names]
         device = torch.empty(0).device
         _t = time.perf_counter()
         self.model.load_weights(
+            # A producer is bound on this path: ``receive_weights`` raises before
+            # calling ``_load_unbaked`` if none is. Each name pulls from the
+            # producer that owns its gather group, so the load order (and the
+            # layerwise-reload completion order) is unaffected by routing.
             self._build_lazy_weights(
-                # Producer is bound on this path: ``receive_weights`` raises
-                # before calling ``_load_unbaked`` if none is. Each name pulls
-                # from the producer that owns its gather group, so the load order
-                # (and layerwise-reload completion) is unaffected by routing.
-                names,
-                dtype_names,
-                shapes,
-                [
-                    self._produce_methods[
-                        self._local_owner_of(self._name_group_idx.get(n, 0))
-                    ]
-                    for n in names
-                ],
-                device,
+                names, [self._pull_sink_for(n) for n in names], device
             )
         )
         self._log_timing("unbaked", time.perf_counter() - _t, 0.0, 0, 0.0)
+
+    def _pull_sink_for(self, name: str) -> "PullSink":
+        """A one-slice-at-a-time pull sink for ``name``, bound to the producer
+        that owns its gather group AND to this worker's ``consumer_id``.
+
+        The consumer id is what keeps the producer's per-consumer serve rings
+        apart. Without it every worker's residual pull is served out of consumer
+        0's ring, and concurrent pulls overwrite each other's packed blob.
+        """
+        method = self._produce_methods[
+            self._local_owner_of(self._name_group_idx.get(name, 0))
+        ]
+        consumer_id = self._consumer_id
+
+        def _pull(keys: "list[FetchKey]") -> torch.Tensor:
+            import ray
+
+            # The producer always answers with ONE byte-packed blob, so a
+            # single-key request is that slice at offset 0.
+            return ray.get(method.remote(keys, consumer_id=consumer_id))[0]
+
+        return PullSink(_pull)
 
     def _bake(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Bake the replay plan once, as a self-driven meta dry run.
@@ -1447,7 +1409,7 @@ class ShardedRDTWeightTransferEngine(
             return
 
         model = self.model
-        recorder = _BakeRecorder()
+        recorder = BakeSink()
 
         _t0 = time.perf_counter()
         with torch.device(self.device):
@@ -1459,9 +1421,7 @@ class ShardedRDTWeightTransferEngine(
             # lazy's copy_ — with no inline _layerwise_process, no deferral.
             self._install_recording_stamps(model, recorder)
             model.load_weights(
-                self._build_lazy_weights(
-                    names, dtype_names, shapes, recorder, self.device
-                )
+                self._build_lazy_weights(names, [recorder] * len(names), self.device)
             )
             # Build the plan from what was recorded, keeping only modules that
             # fully loaded — a partial module would leave unwritten regions that
@@ -1498,7 +1458,7 @@ class ShardedRDTWeightTransferEngine(
         )
 
     def _install_recording_stamps(
-        self, model: torch.nn.Module, recorder: "_BakeRecorder"
+        self, model: torch.nn.Module, recorder: "BakeSink"
     ) -> None:
         """Wrap each loadable param's ``weight_loader`` to stamp
         ``recorder.current = (leaf_module, param_name)`` before delegating to the
@@ -1720,7 +1680,7 @@ class ShardedRDTWeightTransferEngine(
         if s <= 1 or len(entries) <= 1:
             return [[self._scatter_of(layer, c) for layer, c in entries]]
         # numel is a fine byte proxy for balance; greedy contiguous cut.
-        starts = _greedy_run_starts([prod(c.shape) for _layer, c in entries], s)
+        starts = greedy_run_starts([prod(c.shape) for _layer, c in entries], s)
         scatters = [self._scatter_of(layer, c) for layer, c in entries]
         return [
             scatters[st : (starts[r + 1] if r + 1 < len(starts) else len(scatters))]

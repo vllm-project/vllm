@@ -15,28 +15,47 @@ defines what a group index means for ``WeightSource``, not just for this
 transport.
 """
 
-# Op chains the consumer's baked plan may request the producer to replay on a
-# cached tensor. The producer refuses any op outside this set so a misbehaving
-# or spoofed consumer cannot invoke arbitrary methods on trainer tensors.
-ALLOWED_OPS = frozenset(
-    (
-        "narrow",
-        "view",
-        "reshape",
-        "transpose",
-        "permute",
-        "contiguous",
-        "squeeze",
-        "unsqueeze",
-        "__getitem__",
-        "to",
-        "chunk",
-        "split",
-        "select",
-        "flatten",
-        "unbind",
-    )
-)
+from collections.abc import Callable
+
+import torch
+
+# The op-chain contract, in one place because it has two enforcers.
+#
+# CONSUMER: ``LazyRDTTensor`` intercepts exactly these ``torch.Tensor`` methods
+# during the bake and records the string name in the op chain. Anything else
+# reaches ``__torch_dispatch__`` and raises, so a loader that needs real data
+# (arithmetic, ``.to``, ``.float``, ``.item``, ``.data``, bool-mask indexing)
+# fails loudly at init rather than silently transferring the wrong bytes.
+#
+# PRODUCER: replaying a chain is ``getattr(tensor, op)(*args, **kwargs)`` on a
+# live trainer tensor, so it refuses any op outside ``ALLOWED_OPS`` -- a
+# misbehaving or spoofed consumer must not be able to invoke arbitrary methods.
+#
+# Every entry must be a pure view / shape-only / byte-bounding operation. The two
+# sets are DERIVED from this one table: when they were written out separately
+# they drifted, leaving ``t`` consumer-emittable but producer-rejected (a loader
+# calling ``.t()`` baked at init and then failed at first pull) while
+# ``to``/``split``/``select`` were producer-allowed but unreachable -- and ``to``
+# is exactly the dtype/device escape the bake exists to reject.
+SUPPORTED_OPS: dict[Callable, str] = {
+    torch.Tensor.narrow: "narrow",
+    torch.Tensor.view: "view",
+    torch.Tensor.reshape: "reshape",
+    torch.Tensor.__getitem__: "__getitem__",
+    torch.Tensor.unsqueeze: "unsqueeze",
+    torch.Tensor.squeeze: "squeeze",
+    torch.Tensor.transpose: "transpose",
+    torch.Tensor.t: "t",
+    torch.Tensor.permute: "permute",
+    torch.Tensor.flatten: "flatten",
+    torch.Tensor.contiguous: "contiguous",
+    torch.Tensor.chunk: "chunk",
+    # Multi-return, handled like chunk: the consumer emits one child per output
+    # with a trailing __getitem__(i); the producer replays unbind()[i].
+    torch.Tensor.unbind: "unbind",
+}
+
+ALLOWED_OPS = frozenset(SUPPORTED_OPS.values())
 
 
 def assign_producer_indices(

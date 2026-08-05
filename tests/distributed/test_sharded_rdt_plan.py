@@ -18,17 +18,18 @@ import torch
 from vllm.distributed.weight_transfer.base import layerwise_groups
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
+    SUPPORTED_OPS,
     RdtRouter,
     arena_alloc_bytes,
     greedy_run_starts,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
-    _SUPPORTED_OPS,
+    BakeSink,
     LazyRDTTensor,
+    PullSink,
     ShardedRDTWeightTransferEngine,
     _BakedCopy,
     _BakedGroup,
-    _BakeRecorder,
     _dtype_from_name,
     _UnsupportedLazyOp,
 )
@@ -118,9 +119,9 @@ class TestLazyOpChains:
     child whose shape/dtype PyTorch itself computed. The chain is the wire
     format the producer replays, so its exact contents are load-bearing."""
 
-    def _lazy(self, shape=(4, 6), dtype=torch.bfloat16, ctx=None):
+    def _lazy(self, shape=(4, 6), dtype=torch.bfloat16, sink=None):
         return LazyRDTTensor(
-            name="w", shape=torch.Size(shape), dtype=dtype, device=META, ctx=ctx
+            name="w", shape=torch.Size(shape), dtype=dtype, device=META, sink=sink
         )
 
     def test_bare_lazy_has_metadata_but_no_chain(self):
@@ -201,7 +202,7 @@ class TestLazyUnsupportedOps:
             shape=torch.Size((4,)),
             dtype=torch.bfloat16,
             device=META,
-            ctx=None,
+            sink=None,
         )
 
     @pytest.mark.parametrize(
@@ -236,13 +237,13 @@ class TestBakeRecording:
     source chain plus the meta destination's strided region and moves nothing."""
 
     def _recorder_and_lazy(self, shape=(4, 6)):
-        rec = _BakeRecorder()
+        rec = BakeSink()
         lazy = LazyRDTTensor(
             name="w",
             shape=torch.Size(shape),
             dtype=torch.bfloat16,
             device=META,
-            ctx=rec,
+            sink=rec,
         )
         return rec, lazy
 
@@ -285,7 +286,7 @@ class TestBakeRecording:
                 shape=torch.Size((4,)),
                 dtype=torch.bfloat16,
                 device=META,
-                ctx=rec,
+                sink=rec,
             )
             param = torch.empty((8,), dtype=torch.bfloat16, device=META)
             rec.current = (layer, "weight")
@@ -782,31 +783,168 @@ class TestDtypeFromName:
             _dtype_from_name("float9")
 
 
-class TestOpAllowlistAgreement:
-    """The consumer records op chains from ``_SUPPORTED_OPS``; the producer
-    replays them only if every op is in ``ALLOWED_OPS``. The two must describe
-    the same contract or a loader bakes at init and fails at first pull."""
+class TestPullSink:
+    """The plain-load path: one slice pulled on demand per copy_. Only reached
+    for names with no baked plan (attention scales, partial layers)."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="known defect: 't' is consumer-emittable but producer-rejected, "
-        "and 'to'/'split'/'select' are producer-allowed but unreachable",
-    )
-    def test_the_two_allowlists_describe_the_same_contract(self):
-        assert set(_SUPPORTED_OPS.values()) == set(ALLOWED_OPS)
-
-    def test_consumer_emittable_ops_are_all_producer_allowed(self):
-        """The direction that matters: anything the bake can record must be
-        replayable. Currently violated by ``t``."""
-        unserveable = sorted(set(_SUPPORTED_OPS.values()) - set(ALLOWED_OPS))
-        assert unserveable == ["t"], (
-            "the set of bake-recordable-but-unserveable ops changed; a loader "
-            f"using any of {unserveable} bakes at init and fails at first pull"
+    def _lazy(self, sink, shape=(4,)):
+        return LazyRDTTensor(
+            name="w",
+            shape=torch.Size(shape),
+            dtype=torch.bfloat16,
+            device=META,
+            sink=sink,
         )
 
-    def test_producer_allows_nothing_that_needs_data(self):
-        """``to`` would let a replay change dtype or device — exactly what the
-        bake refuses. It is unreachable today only because the consumer cannot
-        emit it."""
-        assert "to" in ALLOWED_OPS
-        assert "to" not in set(_SUPPORTED_OPS.values())
+    def test_a_meta_destination_pulls_nothing(self):
+        """Layerwise reload drives pass 1 against a meta-restored param; there is
+        no data to copy yet, but the numel must still count or
+        _layerwise_process never fires for the layer."""
+        calls = []
+        sink = PullSink(lambda keys: calls.append(keys))
+        dest = torch.empty((4,), dtype=torch.bfloat16, device=META)
+        dest.copy_(self._lazy(sink))
+        assert calls == []
+
+    def test_a_real_destination_pulls_and_copies_the_slice(self):
+        want = torch.arange(4, dtype=torch.bfloat16)
+        blob = want.view(torch.uint8).clone()
+        pulled = []
+
+        def _pull(keys):
+            pulled.append(keys)
+            return blob
+
+        dest = torch.zeros((4,), dtype=torch.bfloat16)
+        dest.copy_(self._lazy(PullSink(_pull)))
+        assert torch.equal(dest, want)
+        assert pulled == [[("w", ())]]
+
+    def test_the_op_chain_is_what_gets_requested(self):
+        pulled = []
+        blob = torch.zeros(2, dtype=torch.bfloat16).view(torch.uint8).clone()
+
+        def _pull(keys):
+            pulled.append(keys)
+            return blob
+
+        dest = torch.zeros((2,), dtype=torch.bfloat16)
+        dest.copy_(self._lazy(PullSink(_pull)).narrow(0, 1, 2))
+        assert pulled == [[("w", (("narrow", (0, 1, 2), ()),))]]
+
+    def test_fetch_reads_back_only_the_slices_bytes(self):
+        """The producer answers with one packed blob; a single-key request is
+        that slice at offset 0, and trailing arena bytes must be ignored."""
+        payload = torch.arange(3, dtype=torch.bfloat16)
+        blob = torch.cat(
+            [payload.view(torch.uint8), torch.full((32,), 0xFF, dtype=torch.uint8)]
+        )
+        sink = PullSink(lambda keys: blob)
+        got = sink.fetch(("w", ()), torch.Size((3,)), torch.bfloat16)
+        assert torch.equal(got, payload)
+
+
+class TestUnbakedPullRouting:
+    """A residual pull must go to the producer that owns the name's group AND
+    carry this worker's consumer id.
+
+    The consumer id keys the producer's per-consumer serve rings. Omitting it
+    made every worker's residual pull default to consumer 0, so concurrent pulls
+    from different workers were served out of one ring and overwrote each other's
+    packed blob.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_ray(self, monkeypatch):
+        """The sink's closure wraps its call in `ray.get`; the fake producer
+        already returns the resolved value, so make `ray.get` the identity."""
+        import ray
+
+        monkeypatch.setattr(ray, "get", lambda x: x)
+
+    def _engine(self, consumer_id, name_group_idx, owners_by_group):
+        eng = object.__new__(ShardedRDTWeightTransferEngine)
+        eng._name_meta = {n: ("bfloat16", [2]) for n in name_group_idx}
+        eng._name_group_idx = dict(name_group_idx)
+        eng._consumer_id = consumer_id
+        n_prod = max(max(o) for o in owners_by_group) + 1
+        eng._router = RdtRouter(n_prod, 1, owners_by_group, len(owners_by_group))
+        eng._local_of_producer = {p: i for i, p in enumerate(range(n_prod))}
+        eng._produce_methods = [_RecordingProducer(p) for p in range(n_prod)]
+        return eng
+
+    def test_the_pull_carries_this_workers_consumer_id(self):
+        eng = self._engine(7, {"w": 0}, [[0]])
+        eng._pull_sink_for("w").fetch(("w", ()), torch.Size((2,)), torch.bfloat16)
+        assert eng._produce_methods[0].calls == [([("w", ())], 7)]
+
+    def test_two_workers_do_not_share_a_serve_ring(self):
+        ids = []
+        for consumer_id in (0, 3):
+            eng = self._engine(consumer_id, {"w": 0}, [[0]])
+            eng._pull_sink_for("w").fetch(("w", ()), torch.Size((2,)), torch.bfloat16)
+            ids.append(eng._produce_methods[0].calls[0][1])
+        assert ids == [0, 3]
+
+    def test_a_name_is_pulled_from_the_owner_of_its_group(self):
+        eng = self._engine(0, {"a": 0, "b": 1}, [[0], [1]])
+        for name in ("a", "b"):
+            eng._pull_sink_for(name).fetch((name, ()), torch.Size((2,)), torch.bfloat16)
+        assert [p.calls for p in eng._produce_methods] == [
+            [([("a", ())], 0)],
+            [([("b", ())], 0)],
+        ]
+
+
+class _RecordingProducer:
+    """Stands in for a Ray actor's bound producer method: records `(keys,
+    consumer_id)` and answers the way the real one does, with a one-element list
+    holding the packed blob."""
+
+    def __init__(self, rank):
+        self.rank = rank
+        self.calls = []
+
+    def remote(self, keys, consumer_id=0):
+        self.calls.append((list(keys), consumer_id))
+        return [torch.zeros(64, dtype=torch.uint8)]
+
+
+class TestOpAllowlistAgreement:
+    """The consumer records op chains from ``SUPPORTED_OPS``; the producer
+    replays a chain only if every op is in ``ALLOWED_OPS``. The two must describe
+    the same contract, so they are derived from one table.
+
+    They used to be written out twice and had drifted: ``t`` was
+    consumer-emittable but producer-rejected, so a loader calling ``.t()`` baked
+    successfully at init and then failed at first pull with "disallowed op 't'".
+    """
+
+    def test_the_two_allowlists_describe_the_same_contract(self):
+        assert set(SUPPORTED_OPS.values()) == set(ALLOWED_OPS)
+
+    def test_every_bake_recordable_op_is_replayable(self):
+        """Anything the bake can record must be serveable, or the failure lands a
+        whole sync later than the mistake."""
+        assert not set(SUPPORTED_OPS.values()) - set(ALLOWED_OPS)
+
+    def test_the_producer_allows_nothing_the_consumer_cannot_emit(self):
+        """The allowlist is also a guard against a misbehaving or spoofed
+        consumer invoking arbitrary methods on trainer tensors, so it must not be
+        wider than the ops the bake can actually produce. ``to`` in particular
+        would let a replay change dtype or device."""
+        assert not set(ALLOWED_OPS) - set(SUPPORTED_OPS.values())
+        assert "to" not in ALLOWED_OPS
+
+    def test_transpose_via_t_is_serveable(self):
+        """The specific regression: a chain recorded from ``.t()`` must pass the
+        producer's guard."""
+        lazy = LazyRDTTensor(
+            name="w",
+            shape=torch.Size((4, 6)),
+            dtype=torch.bfloat16,
+            device=META,
+            sink=None,
+        )
+        (op, _args, _kwargs) = lazy.t()._key()[1][0]
+        assert op in ALLOWED_OPS
