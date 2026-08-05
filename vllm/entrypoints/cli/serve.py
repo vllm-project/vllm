@@ -10,25 +10,19 @@ import uvloop
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import run_server, setup_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.dp_supervisor import (
-    run_dp_supervisor,
-)
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
+from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import (
-    APIServerProcessManager,
-    RustFrontendProcessManager,
-    wait_for_completion_or_failure,
-)
+
+# NOTE: cli_args/api_server/dp_supervisor/v1.utils/v1.metrics.prometheus
+# imports live inside the functions that use them, not here, so
+# `run_headless` (used by `vllm.entrypoints.cli.headless_engine`) can be
+# imported without pulling in the OpenAI-server-only machinery it never uses.
 
 logger = init_logger(__name__)
 
@@ -141,6 +135,8 @@ class ServeSubcommand(CLISubcommand):
             args.api_server_count = 1
 
         if is_multi_port:
+            from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
+
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
@@ -148,15 +144,21 @@ class ServeSubcommand(CLISubcommand):
             run_multi_api_server(args)
         else:
             # Single API server (this process).
+            from vllm.entrypoints.openai.api_server import run_server
+
             args.api_server_count = None
             uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
         validate_parsed_serve_args(args)
 
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+
         serve_parser = subparsers.add_parser(
             self.name,
             help="Launch a local OpenAI-compatible API server to serve LLM "
@@ -259,6 +261,14 @@ def run_headless(args: argparse.Namespace):
 
 
 def run_multi_api_server(args: argparse.Namespace):
+    from vllm.entrypoints.openai.api_server import setup_server
+    from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
+    from vllm.v1.utils import (
+        APIServerProcessManager,
+        RustFrontendProcessManager,
+        wait_for_completion_or_failure,
+    )
+
     assert not args.headless
     rust_frontend_path = (
         envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
@@ -312,7 +322,7 @@ def run_multi_api_server(args: argparse.Namespace):
         None
     )
 
-    from vllm.v1.engine.utils import get_engine_zmq_addresses
+    from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
 
     # Defer port allocation to the child's bind() to avoid TOCTOU, except
     # for Rust front-end and Ray DP, which can't see the post-bind rebind
