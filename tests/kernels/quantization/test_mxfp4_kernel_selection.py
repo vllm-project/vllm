@@ -132,9 +132,15 @@ def test_emulation_kernel_accepts_any_config(activation_quant_key, monkeypatch):
     assert can_implement, reason
 
 
-def test_emulation_kernel_derives_quant_dequant_func_from_config():
+def test_emulation_kernel_derives_quant_dequant_func_from_config(monkeypatch):
     """quant_dequant_func must be derived purely from the config's activation
     QuantKey, not set externally."""
+    # `EmulationMxfp4LinearKernel.can_implement` gates on `has_quark()`,
+    # which we are not testing here.
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+        lambda: True,
+    )
     with patch(
         "vllm.model_executor.kernels.linear._get_linear_backend",
         return_value="emulation",
