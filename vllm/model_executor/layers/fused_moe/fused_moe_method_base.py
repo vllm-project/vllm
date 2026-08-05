@@ -157,6 +157,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @property
+    def supports_fused_shared_experts(self) -> bool:
+        """Whether the shared expert may be fused into the routed experts.
+
+        Fusion appends the shared expert as an extra expert in the routed
+        weight tensors, so it is only valid when the method runs the shared
+        expert at the same precision and through the same kernel as the
+        routed experts.
+        """
+        return True
+
+    @property
     def method_name(self) -> str:
         return self.__class__.__name__
 

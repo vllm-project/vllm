@@ -1050,6 +1050,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
         )
 
+    @property
+    def supports_fused_shared_experts(self) -> bool:
+        # Emulation dequantizes each routed expert and runs QDQ in bf16/fp16;
+        # a shared expert fused into the routed weights is not handled by that
+        # path and its contribution is silently wrong.
+        return self.mxfp4_backend is not Mxfp4MoeBackend.EMULATION
+
     def maybe_roundup_sizes(
         self,
         hidden_size: int,
