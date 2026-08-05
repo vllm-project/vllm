@@ -1612,16 +1612,17 @@ class TestBindHostPortDefaults:
         monkeypatch.setattr(
             manager_module,
             "NixlTransport",
-            lambda agent_name, *a, **k: calls.update(nixl_name=agent_name)
-            or SimpleNamespace(),
+            lambda agent_name, *a, **k: (
+                calls.update(nixl_name=agent_name) or SimpleNamespace()
+            ),
         )
         monkeypatch.setattr(
             manager_module,
             "ZmqTransport",
-            lambda local_id, host, port, *a, **k: calls.update(
-                zmq_id=local_id, zmq_host=host, zmq_port=port
-            )
-            or SimpleNamespace(),
+            lambda local_id, host, port, *a, **k: (
+                calls.update(zmq_id=local_id, zmq_host=host, zmq_port=port)
+                or SimpleNamespace()
+            ),
         )
         spec = SimpleNamespace(
             blocks_per_chunk=1,

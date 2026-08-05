@@ -163,25 +163,12 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/utils/import_utils.py
+  - scripts/benchmark_helion_kernels.py
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
-  - pip install helion==1.1.0
+  - pip install helion==1.4.0
   - pytest -v -s kernels/helion/
-
-- label: Kernels Mamba Test # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/mamba/
-  - tests/kernels/mamba
-  - vllm/model_executor/layers/mamba/ops
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s kernels/mamba
 
 #------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
 
@@ -344,7 +331,7 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
+  - pytest -v -s v1/e2e/spec_decode/draft_model/
 
 - label: Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
@@ -362,7 +349,8 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+  - pytest -v -s v1/e2e/spec_decode/speculators/
+  - pytest -v -s v1/e2e/spec_decode/mtp/
 
 - label: V1 others (CPU) # TBD
   timeout_in_minutes: 180
@@ -649,7 +637,7 @@ steps:
   - tests/compile
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+  - pytest -v -s compile/fullgraph/test_full_graph.py
 
 - label: Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
@@ -985,7 +973,7 @@ steps:
   - tests/test_logger
   - tests/test_vllm_port
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
 
 #--------------------------------------------------------  mi300 · entrypoints  --------------------------------------------------------#
 
@@ -1590,10 +1578,29 @@ steps:
   - vllm/third_party/flash_linear_attention/ops/kda.py
   - vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
   - vllm/third_party/flash_linear_attention/ops/l2norm.py
-  - tests/kernels/test_kda.py
+  - vllm/models/kimi_k3/nvidia/kda.py
+  - vllm/models/kimi_k3/nvidia/kda_metadata.py
+  - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
+  - tests/models/kimi_k3/test_kda.py
+  - tests/models/kimi_k3/test_kda_metadata.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/test_kda.py
+  - pytest -v -s models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
+
+- label: Kernels Mamba Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/ops
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/mamba
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
@@ -1831,7 +1838,7 @@ steps:
   - tests/v1/spec_decode/test_max_len.py
   - tests/v1/spec_decode/test_rejection_sampler_utils.py
   - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-  - tests/v1/e2e/spec_decode/test_spec_decode.py
+  - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
   - set -x
@@ -1839,7 +1846,9 @@ steps:
   - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
   - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+  - pytest -v -s v1/e2e/spec_decode/eagle/
+  - pytest -v -s v1/e2e/spec_decode/speculators/
+  - pytest -v -s v1/e2e/spec_decode/mtp/
 
 #------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
 
@@ -2288,7 +2297,7 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
-  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex and not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
   - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
@@ -2546,7 +2555,7 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
+  - pytest -v -s v1/e2e/spec_decode/draft_model/
 
 - label: Spec Decode Eagle # TBD
   timeout_in_minutes: 180
@@ -2564,7 +2573,7 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+  - pytest -v -s v1/e2e/spec_decode/eagle/
 
 - label: Spec Decode Ngram + Suffix # TBD
   timeout_in_minutes: 180
@@ -2582,7 +2591,7 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
+  - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
 
 - label: Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
@@ -2601,7 +2610,8 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+    - pytest -v -s v1/e2e/spec_decode/speculators/
+    - pytest -v -s v1/e2e/spec_decode/mtp/
 
 - label: Speculators Correctness # TBD
   timeout_in_minutes: 180
@@ -2802,7 +2812,10 @@ steps:
   - vllm/
   - tests/v1/e2e
   commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
+    - >-
+      pytest -v -s
+      v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism
+      v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
 
 - label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
   timeout_in_minutes: 180
@@ -2963,20 +2976,6 @@ steps:
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
-
-- label: V1 e2e (4 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1/e2e
-  commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 e2e (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180

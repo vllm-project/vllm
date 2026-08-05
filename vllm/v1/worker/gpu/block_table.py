@@ -127,6 +127,8 @@ class BlockTables:
             self.num_blocks.np[i, req_index] = end
 
     def apply_staged_writes(self) -> None:
+        if self.num_kv_cache_groups == 0:
+            return
         if self.num_kv_cache_groups == 1:
             # Single group: write directly, skipping the per-write group lookup.
             self.block_tables[0].apply_write()
@@ -145,6 +147,8 @@ class BlockTables:
         out: tuple[torch.Tensor, ...] | None = None,
         out_ptrs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
+        if self.num_kv_cache_groups == 0:
+            return ()
         if out is None:
             out = tuple(self.input_block_tables)
             out_ptrs = self.input_block_table_ptrs
@@ -170,7 +174,13 @@ class BlockTables:
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
-        return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
+        #
+        # Zero the rows so dummy runs write mamba state to the reserved null
+        # block rather than through the previous real step's (stale) block
+        # ids, which may point at blocks since freed and reallocated.
+        return tuple(
+            block_table[:num_reqs].zero_() for block_table in self.input_block_tables
+        )
 
     def compute_slot_mappings(
         self,
@@ -180,6 +190,8 @@ class BlockTables:
         num_tokens_padded: int,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.num_kv_cache_groups == 0:
+            return (self.slot_mappings if out is None else out)[:, :num_tokens_padded]
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
