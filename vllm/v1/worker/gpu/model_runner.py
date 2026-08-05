@@ -780,19 +780,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.pooling_runner.clear()
 
     def profile_cudagraph_memory(self) -> int:
-        # NOTE(woosuk): Decoder CUDA graph memory profiling for V2 is TBD.
-        if (
-            self.model_state.supports_mm_inputs
-            and self.model_state.encoder_runner.has_cudagraph()
-        ):
-            return self.model_state.encoder_runner.profile_memory()
+        # NOTE(woosuk): It is TBD whether we keep this API or not.
         return 0
-
-    def needs_cudagraph_memory_profile(self) -> bool:
-        return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE or (
-            self.model_state.supports_mm_inputs
-            and self.model_state.encoder_runner.has_cudagraph()
-        )
 
     @torch.inference_mode()
     def capture_model(self) -> int:
