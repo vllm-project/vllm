@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for the out-of-tree bitsandbytes plugin."""
 
+import types
+from unittest.mock import MagicMock, patch
+
 import pytest
 from packaging.version import Version
 from transformers import BitsAndBytesConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
+from vllm_bnb_plugin import bitsandbytes_loader as bnb
 
 from vllm.platforms import current_platform
 
@@ -13,11 +17,11 @@ from ...models.utils import check_embeddings_close, check_logprobs_close
 from ...utils import multi_gpu_test
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx9
+    from vllm.platforms.rocm import on_cdna
 
     pytestmark = pytest.mark.skipif(
-        on_gfx9(),
-        reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)",
+        on_cdna(),
+        reason="bitsandbytes not supported on CDNA (warp size 64 limitation)",
     )
 
 models_4bit_to_test = [
@@ -250,3 +254,25 @@ def test_4bit_bnb_embedding_model(
         name_1="vllm",
         tol=5e-2,
     )
+
+
+def test_bitsandbytes_passes_revision_by_name():
+    fake_self = types.SimpleNamespace(
+        load_config=types.SimpleNamespace(download_dir="/cache"),
+        _get_weight_files=MagicMock(
+            return_value=("/folder", ["/folder/model.safetensors"], "*.safetensors")
+        ),
+    )
+    with (
+        patch.object(bnb, "download_safetensors_index_file_from_hf") as mock_idx,
+        patch.object(
+            bnb,
+            "filter_duplicate_safetensors_files",
+            return_value=["/folder/model.safetensors"],
+        ),
+    ):
+        bnb.BitsAndBytesModelLoader._prepare_weights(fake_self, "org/model", "myrev")  # type: ignore[arg-type]
+
+    mock_idx.assert_called_once()
+    assert mock_idx.call_args.kwargs.get("revision") == "myrev"
+    assert "myrev" not in mock_idx.call_args.args

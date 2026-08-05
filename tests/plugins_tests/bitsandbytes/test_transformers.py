@@ -9,11 +9,11 @@ from vllm.platforms import current_platform
 from ...models.utils import check_logprobs_close
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx9
+    from vllm.platforms.rocm import on_cdna
 
     pytestmark = pytest.mark.skipif(
-        on_gfx9(),
-        reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)",
+        on_cdna(),
+        reason="bitsandbytes not supported on CDNA (warp size 64 limitation)",
     )
 
 

@@ -63,6 +63,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    bind_routed_experts_capturer,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -230,7 +231,7 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import is_residual_scattered_for_sp, raise_if_nan_logits
 from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
@@ -499,7 +500,6 @@ class GPUModelRunner(
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
-        self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
@@ -2351,8 +2351,7 @@ class GPUModelRunner(
             # by the next ``_prepare_inputs``; we need a stable snapshot
             # because the async D2H may still be in flight on the copy
             # stream when the next step runs.
-            attn_gid = self.routed_experts_attn_gid
-            slot_mapping_attn = slot_mappings[attn_gid]
+            slot_mapping_attn = slot_mappings[self.routed_experts_capturer.attn_gid]
             self.routed_experts_slot_mapping_device[:num_tokens].copy_(
                 slot_mapping_attn[:num_tokens]
             )
@@ -4174,9 +4173,6 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        if self.routed_experts_initialized:
-            self.routed_experts_capturer.clear_buffer()
-
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -4401,14 +4397,6 @@ class GPUModelRunner(
             ) = self._preprocess(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
-
-        # Set cudagraph mode to none if calc_kv_scales is true.
-        # KV scales calculation involves dynamic operations that are incompatible
-        # with CUDA graph capture.
-        if self.calculate_kv_scales:
-            cudagraph_mode = CUDAGraphMode.NONE
-            # Mark KV scales as calculated after the first forward pass
-            self.calculate_kv_scales = False
 
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
@@ -4798,24 +4786,16 @@ class GPUModelRunner(
             # copy stream can D2H later. Both tensors must be private
             # clones because:
             #   - ``routing_data`` source is the shared capturer buffer,
-            #     which is ``clear_buffer()``-ed at the start of the
-            #     next step on the default stream.
+            #     which the next forward overwrites on the default stream.
             #   - ``slot_mapping`` source is our own
             #     ``routed_experts_slot_mapping_device``, which the
             #     next ``_prepare_inputs`` overwrites on the default
             #     stream while the D2H is still pending on the copy
             #     stream.
             # Without clones, the copy stream would read torn data.
-            routed_experts_snapshot = None
-            if self.routed_experts_initialized:
-                buf = self.routed_experts_capturer.get_device_buffer()
-                total = scheduler_output.total_num_scheduled_tokens
-                routed_experts_snapshot = RoutedExpertsTensors(
-                    routing_data=buf[:total].clone(),
-                    slot_mapping=self.routed_experts_slot_mapping_device[
-                        :total
-                    ].clone(),
-                )
+            routed_experts_snapshot = self.get_routed_experts(
+                scheduler_output.total_num_scheduled_tokens
+            )
 
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
@@ -5573,7 +5553,10 @@ class GPUModelRunner(
                 )
 
             if weights_path is not None:
+                # The revision belongs to the model we are reloading away from,
+                # so it must not be carried over to the new path.
                 self.model_config.model = weights_path
+                self.model_config.revision = None
             weights_iterator = model_loader.get_all_weights(self.model_config, model)
             weights_iterator = cast(
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
@@ -5743,6 +5726,8 @@ class GPUModelRunner(
                     if num_nans_for_index is not None and req_index < logits.shape[0]
                     else 0
                 )
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(num_nans_in_logits)
             return num_nans_in_logits
         except IndexError:
             return {}
@@ -6935,6 +6920,10 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
             )
+        if num_warmups > 0:
+            # Warmups may use auxiliary streams. Ensure all of their work has
+            # completed before beginning CUDA graph capture.
+            torch.accelerator.synchronize()
         with (
             profiler,
             torch.profiler.record_function(
@@ -7668,19 +7657,18 @@ class GPUModelRunner(
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-    def _get_attention_kv_cache_gid(self) -> int:
-        """Find the KV cache group index for attention layers.
+    def get_routed_experts(
+        self,
+        num_tokens: int,
+    ) -> RoutedExpertsTensors | None:
+        if not self.routed_experts_initialized:
+            return None
 
-        Must match :attr:`RoutedExpertsManager.attn_gid` in the scheduler:
-        both pick the first ``FullAttentionSpec`` group so hybrid models
-        (Mamba / linear-attention layers that use other AttentionSpec
-        subclasses) end up indexing the same slot layout on both sides.
-        Falls back to 0 only for legacy single-group configs.
-        """
-        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, FullAttentionSpec):
-                return gid
-        return 0
+        device_buffer = self.routed_experts_capturer.get_device_buffer()
+        return RoutedExpertsTensors(
+            routing_data=device_buffer[:num_tokens].clone(),
+            slot_mapping=self.routed_experts_slot_mapping_device[:num_tokens].clone(),
+        )
 
     def init_routed_experts_capturer(self):
         logger.info(
@@ -7690,9 +7678,9 @@ class GPUModelRunner(
         self.routed_experts_capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             vllm_config=self.vllm_config,
+            kv_cache_config=self.kv_cache_config,
         )
-        self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
-        self._bind_routed_experts_capturer(self.routed_experts_capturer)
+        bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
 
         # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on
         # the sync scheduling path. Shape / dtype mirror the device
@@ -7723,41 +7711,6 @@ class GPUModelRunner(
             device=self.device,
         )
         self.routed_experts_initialized = True
-
-    def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
-        from vllm.model_executor.layers.fused_moe.layer import MoERunner
-        from vllm.model_executor.layers.fused_moe.modular_kernel import (
-            FusedMoEExpertsMonolithic,
-        )
-        from vllm.model_executor.layers.fused_moe.router.base_router import (
-            BaseRouter,
-        )
-
-        for module in self.model.modules():
-            if not isinstance(module, MoERunner):
-                continue
-            layer_id = module.layer_id
-
-            def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
-                _capturer.capture(_layer_id, topk_ids)
-
-            quant_method = module._quant_method
-            moe_kernel = getattr(quant_method, "moe_kernel", None)
-            impl = getattr(moe_kernel, "impl", None)
-            fused_experts = getattr(impl, "fused_experts", None)
-            if quant_method.is_monolithic:
-                if not (
-                    isinstance(fused_experts, FusedMoEExpertsMonolithic)
-                    and fused_experts.supports_routing_replay_capture()
-                ):
-                    raise ValueError(
-                        "--enable-return-routed-experts is not supported with "
-                        f"monolithic MoE kernel {type(fused_experts).__name__}; "
-                        "routed expert IDs would be silently all-zero."
-                    )
-                fused_experts.set_capture_fn(_capture_fn)
-            elif isinstance(module.router, BaseRouter):
-                module.router.set_capture_fn(_capture_fn)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
