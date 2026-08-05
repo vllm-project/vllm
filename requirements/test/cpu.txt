@@ -341,8 +341,9 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.22.0
+huggingface-hub==1.26.0
     # via
+    #   -r requirements/test/../common.txt
     #   accelerate
     #   datasets
     #   evaluate
