@@ -388,7 +388,10 @@ def test_pynvvideocodec_invalid_video_raises_value_error(
         ValueError,
         match=r"^Invalid or unsupported video file\.$",
     ) as exc_info:
-        PyNvVideoCodecVideoBackend.decode_frames_pynvvideocodec(b"not-a-video", None)
+        corrupted_video = (
+            Path(__file__).parent.parent / "assets" / "corrupted.mp4"
+        ).read_bytes()
+        PyNvVideoCodecVideoBackend.decode_frames_pynvvideocodec(corrupted_video, None)
 
     assert isinstance(exc_info.value.__cause__, FakePyNvVCException)
 
