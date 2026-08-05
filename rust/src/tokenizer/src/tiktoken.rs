@@ -350,6 +350,7 @@ impl LoadedTiktokenConfig {
         })?;
         let mut encoder: FxHashMap<Vec<u8>, u32> =
             FxHashMap::with_capacity_and_hasher(content.lines().count(), Default::default());
+        let mut ranks: FxHashSet<u32> = FxHashSet::default();
         for line in content.lines() {
             if line.is_empty() {
                 continue;
@@ -365,6 +366,9 @@ impl LoadedTiktokenConfig {
             let rank: u32 = rank_str
                 .parse()
                 .map_err(|error| tokenizer_error!("invalid rank in tiktoken file: {error}"))?;
+            if !ranks.insert(rank) {
+                return Err(tokenizer_error!("duplicate rank {rank} in tiktoken file"));
+            }
             encoder.insert(token_bytes, rank);
         }
 
@@ -607,6 +611,24 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let path = write_synthetic_bpe_file(dir.path());
         (explicit_backends(&path), dir)
+    }
+    #[test]
+    fn tiktoken_duplicate_ranks_return_error_without_panicking() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("duplicate-ranks.tiktoken");
+        fs::write(&path, "AA== 0\nAQ== 0\n").expect("write duplicate-rank tiktoken file");
+
+        eprintln!(
+            "[before-fix] TiktokenTokenizer::new() receives two valid tokens with duplicate rank 0"
+        );
+        let result = TiktokenTokenizer::new(&path);
+        assert!(
+            result.is_err(),
+            "duplicate ranks must be rejected without a panic"
+        );
+        let error = result.err().expect("duplicate ranks must return an error");
+        eprintln!("[after-fix] duplicate rank rejected: {error}");
+        assert!(format!("{error}").contains("duplicate rank 0"));
     }
 
     /// Verify that tiktoken decode uses lossy UTF-8 (producing `\u{FFFD}`)
