@@ -584,10 +584,16 @@ def run_dp_sharded_mrope_vision_model(
     return out_embeddings
 
 
-def make_input_norm(model_config: "ModelConfig") -> nn.BatchNorm1d:
+def make_input_norm(model_config: "ModelConfig") -> nn.Module:
     model = model_config.model
     revision = model_config.revision
     config = get_video_processor_config(model, revision=revision)
+
+    do_rescale = config.get("do_rescale", True)
+    do_normalize = config.get("do_normalize", True)
+
+    if not do_rescale and not do_normalize:
+        return nn.Identity()
 
     image_mean = config.get("image_mean", None)
     image_std = config.get("image_std", None)
@@ -595,11 +601,6 @@ def make_input_norm(model_config: "ModelConfig") -> nn.BatchNorm1d:
 
     assert image_mean is not None
     assert image_std is not None
-
-    do_rescale = config.get("do_rescale", True)
-    do_normalize = config.get("do_normalize", True)
-
-    assert do_rescale and do_normalize
 
     image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
         1.0 / rescale_factor
