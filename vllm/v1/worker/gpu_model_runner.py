@@ -3632,14 +3632,29 @@ class GPUModelRunner(
             # If a batch only has token ids, then including the embedding layer
             # in the CUDA graph will be more performant (like in the else case
             # below).
-            is_token_ids = self.is_token_ids.np[:num_scheduled_tokens]
-            token_ids_idx_np = np.nonzero(is_token_ids)[0]
-            # Some tokens ids may need to become embeds
-            if token_ids_idx_np.size > 0:
-                token_ids_idx = async_tensor_h2d(token_ids_idx_np, device=self.device)
-                token_ids = self.input_ids.gpu[token_ids_idx]
-                tokens_to_embeds = self.model.embed_input_ids(input_ids=token_ids)
-                self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
+            # NOTE: embed the FULL scheduled range rather than only the
+            # token-id subset. Layers that consult per-token batch metadata
+            # (e.g. LoRA's punica token mapping, which is built for all
+            # num_scheduled_tokens) index the embedding input by absolute
+            # batch row, so handing them a gathered subset makes those
+            # indices out of bounds. Placeholder ids at prompt_embeds
+            # positions are zeroed first so the gather cannot read
+            # out-of-range ids, then the results are written back without
+            # clobbering the precomputed prompt_embeds rows. This mirrors
+            # the multimodal branch above.
+            is_token_ids = self.is_token_ids.gpu[:num_scheduled_tokens]
+            safe_input_ids = torch.where(
+                is_token_ids,
+                self.input_ids.gpu[:num_scheduled_tokens],
+                0,
+            )
+            tokens_to_embeds = self.model.embed_input_ids(input_ids=safe_input_ids)
+            target = self.inputs_embeds.gpu[:num_scheduled_tokens]
+            self.inputs_embeds.gpu[:num_scheduled_tokens] = torch.where(
+                is_token_ids.unsqueeze(-1),
+                tokens_to_embeds,
+                target,
+            )
 
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
             model_kwargs = self._init_model_kwargs()
