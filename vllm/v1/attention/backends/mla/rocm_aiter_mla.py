@@ -832,7 +832,6 @@ class AiterMLAHelper:
             return q.repeat_interleave(
                 AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, dim=1
             )
-        )
 
         # Zero-pad if num_heads doesn't evenly divide 16.
         # Safe since MLA computes each head independently against shared KV.
