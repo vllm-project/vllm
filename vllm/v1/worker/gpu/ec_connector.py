@@ -33,9 +33,11 @@ class ActiveECConnector(ECConnector):
         encoder_cache: dict[str, torch.Tensor],
     ) -> None:
         self.encoder_cache = encoder_cache
-        self.save_new_caches = vllm_config.is_ec_producer_only
         self.ec_connector = get_ec_transfer()
         assert isinstance(self.ec_connector, ECConnectorBase)
+        # Every producer offloads freshly computed encoder outputs, including
+        # an ec_both node that also reloads them.
+        self.save_new_caches = self.ec_connector.is_producer
 
     @contextmanager
     def maybe_get_output(
