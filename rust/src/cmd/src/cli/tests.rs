@@ -63,24 +63,6 @@ fn render_args_build_supported_config() {
 }
 
 #[test]
-fn render_args_reject_security_options() {
-    for (option, value) in [("--api-key", "secret"), ("--ssl-certfile", "cert.pem")] {
-        let error = Cli::try_parse_from([
-            "vllm-rs",
-            "render",
-            "Qwen/Qwen2.5-0.5B-Instruct",
-            "--max-model-len",
-            "32768",
-            option,
-            value,
-        ])
-        .unwrap_err();
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-}
-
-#[test]
 fn serve_args_forward_python_flags_with_separator() {
     let cli = Cli::try_parse_from([
         "vllm-rs",

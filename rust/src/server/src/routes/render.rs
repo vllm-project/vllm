@@ -89,7 +89,7 @@ fn lower_render_request(
         token_ids,
         sampling_params: text_request.sampling_params,
         stream,
-        stream_options: stream.then_some(stream_options).flatten(),
+        stream_options,
         cache_salt: text_request.cache_salt,
         priority: text_request.priority,
         kv_transfer_params: None,
