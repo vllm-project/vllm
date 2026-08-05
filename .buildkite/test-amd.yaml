@@ -2663,7 +2663,7 @@ steps:
   dind: false
   agent_pool: mi300_2
   num_gpus: 2
-  working_dir: /vllm-workspace/
+  working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - vllm/config/speculative.py
   - vllm/distributed/kv_transfer/kv_connector/
