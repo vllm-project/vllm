@@ -828,7 +828,9 @@ class BaseFfnConfigParser(Parser):
 
         # Try different naming conventions.
         args.num_experts = vllm_config.model_config.get_num_experts()
-        args.num_experts_per_tok = vllm_config.model_config.get_num_experts_per_tok()
+        args.num_experts_per_tok = getattr_from_list(
+            cfg, ["num_experts_per_tok", "moe_topk"], 0
+        )
         args.moe_intermediate_size = getattr_from_list(
             cfg, ["moe_intermediate_size", "intermediate_size"], 0
         )
