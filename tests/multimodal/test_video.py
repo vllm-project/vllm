@@ -274,6 +274,45 @@ def test_pynvvideocodec_decoder_slots_are_configured_once(
         PyNvVideoCodecVideoBackend._configure_decoder_slots(3)
 
 
+def test_pynvvideocodec_borrow_error_invalidates_decoder_slot():
+    class FakeStream:
+        pass
+
+    slot = PyNvVideoCodecDecoderSlot(FakeStream())
+    slot.decoder = object()
+    slot.source_path = "unsupported-8k.mp4"
+
+    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
+    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
+    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
+    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
+    try:
+        PyNvVideoCodecVideoBackend._decoder_slots = [slot]
+        PyNvVideoCodecVideoBackend._active_decoder_slots = 1
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
+        PyNvVideoCodecVideoBackend._max_decoder_slots = 1
+
+        with (
+            pytest.raises(RuntimeError, match="decode failed"),
+            PyNvVideoCodecVideoBackend._borrow_decoder_slot() as borrowed,
+        ):
+            assert borrowed is slot
+            raise RuntimeError("decode failed")
+
+        assert slot.decoder is None
+        assert slot.source_path is None
+
+        with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as borrowed_again:
+            assert borrowed_again is slot
+            assert borrowed_again.decoder is None
+            assert borrowed_again.source_path is None
+    finally:
+        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
+        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
+        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
+
+
 @pytest.mark.parametrize("hw_decoders", [0, -1, 1.5, True, "2"])
 def test_pynvvideocodec_rejects_invalid_hw_decoders(hw_decoders: object):
     with pytest.raises(ValueError, match="hw_decoders must be a positive integer"):
