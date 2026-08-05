@@ -1393,14 +1393,7 @@ class MLACommonPrefillMetadata:
 
     @dataclass
     class ContextChunk:
-        """One workspace-sized slice of paged context for a run of prefills.
-
-        A chunk covers the contiguous prefill request range
-        ``[request_start, request_end)``. Every covered request contributes at
-        least one context row, so a chunk never contains an empty span. A
-        request is either packed whole into a single chunk or, when its context
-        alone exceeds the workspace, spread alone over several chunks.
-        """
+        """One workspace-sized slice of paged context for a run of prefills."""
 
         index: int
         request_start: int
