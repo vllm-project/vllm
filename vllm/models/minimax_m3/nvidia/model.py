@@ -562,6 +562,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
+    def _allocate_query_fp8(self, qkv: torch.Tensor) -> torch.Tensor | None:
+        if not getattr(self.impl, "use_cutlass_decode", False):
+            return None
+        return torch.empty(
+            (qkv.shape[0], self.q_size),
+            dtype=torch.float8_e4m3fn,
+            device=qkv.device,
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -596,16 +605,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
-        use_msa_decode = self.impl.should_use_msa_decode(self.layer_name)
-        query_fp8 = (
-            torch.empty(
-                (num_tokens, self.q_size),
-                dtype=torch.float8_e4m3fn,
-                device=qkv.device,
-            )
-            if use_msa_decode
-            else None
-        )
+        query_fp8 = self._allocate_query_fp8(qkv)
         # index_q matches the index-K cache dtype (e4m3 for the fp8 score path);
         # the fused kernel emits fp8 directly when this buffer is e4m3.
         index_q = qkv.new_empty(
