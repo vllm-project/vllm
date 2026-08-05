@@ -21,6 +21,7 @@ pub use event::{
     AssistantToolCall, ChatEvent,
 };
 use futures::{StreamExt, TryStreamExt as _};
+pub use llm_multimodal::MediaContentPart;
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
     HarmonyChatOutputProcessor,
@@ -33,13 +34,15 @@ pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
-    HarmonyChatRenderer, InklingChatRenderer, RenderedPrompt, RendererSelection,
+    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
+    RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, GenerationPromptMode, ReasoningEffort, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
+pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
 
 mod backend;
@@ -54,7 +57,6 @@ mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
-use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
@@ -135,17 +137,27 @@ impl ChatRequestProcessor {
         }
     }
 
-    /// Prepare one chat request without submitting it to an engine.
-    pub async fn prepare(
+    /// Prepare media for an already-tokenized request.
+    async fn prepare_media(
         &self,
-        mut request: ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
-    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
-        request.validate()?;
+        media: Vec<MediaContentPart>,
+        token_ids: &mut Vec<u32>,
+    ) -> Result<Option<MmFeatures>> {
+        if media.is_empty() {
+            return Ok(None);
+        }
+        let info = self
+            .backend
+            .multimodal_model_info()
+            .ok_or(Error::UnsupportedMultimodalRenderer)?;
+        let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+        let features = info.prepare_multimodal(media, token_ids, model_dtype).await?;
+        Ok(Some(features))
+    }
 
+    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
         let rendered = self.backend.chat_renderer().render(&request)?;
         let reasoning_parser_kwargs =
             request
@@ -156,7 +168,7 @@ impl ChatRequestProcessor {
                     chat_template_kwargs: rendered.effective_template_kwargs.clone(),
                 });
         let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
-        let text_request = TextRequest {
+        Ok(TextRequest {
             request_id: request.request_id,
             prompt,
             mm_features,
@@ -167,10 +179,28 @@ impl ChatRequestProcessor {
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
+            session_id: request.session_id,
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),
-        };
+        })
+    }
+
+    /// Prepare one chat request for tokenization without constructing an output processor.
+    pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
+        request.validate()?;
+        self.prepare_text_request(request).await
+    }
+
+    /// Prepare one chat request without submitting it to an engine.
+    pub async fn prepare(
+        &self,
+        mut request: ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
+        request.validate()?;
+        let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
+        let text_request = self.prepare_text_request(request).await?;
         Ok((text_request, output_processor))
     }
 }
@@ -244,6 +274,11 @@ impl ChatLlm {
         &self.text
     }
 
+    /// Return the chat request processor.
+    pub fn request_processor(&self) -> &ChatRequestProcessor {
+        &self.processor
+    }
+
     /// Return the model ID reported by the underlying text backend.
     pub fn model_id(&self) -> &str {
         self.text.model_id()
@@ -253,6 +288,42 @@ impl ChatLlm {
     /// calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
         self.text.engine_core_client()
+    }
+
+    /// Whether the loaded backend has a registered multimodal processor.
+    pub fn supports_multimodal(&self) -> bool {
+        self.processor.backend.multimodal_model_info().is_some()
+    }
+
+    /// Prepare media for an already-tokenized request.
+    pub async fn prepare_media(
+        &self,
+        media: Vec<MediaContentPart>,
+        token_ids: &mut Vec<u32>,
+    ) -> Result<Option<MmFeatures>> {
+        self.processor.prepare_media(media, token_ids).await
+    }
+
+    /// Effective tool-call parser name for this model, if parsing is enabled.
+    pub fn tool_call_parser_name(&self) -> Option<&str> {
+        match &self.tool_call_parser {
+            ParserSelection::Auto => {
+                ToolParserFactory::global().resolve_name_for_model(self.model_id())
+            }
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) => Some(name),
+        }
+    }
+
+    /// Effective reasoning parser name for this model, if parsing is enabled.
+    pub fn reasoning_parser_name(&self) -> Option<&str> {
+        match &self.reasoning_parser {
+            ParserSelection::Auto => {
+                ReasoningParserFactory::global().resolve_name_for_model(self.model_id())
+            }
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) => Some(name),
+        }
     }
 
     /// Render, tokenize, and submit one chat request.
@@ -273,28 +344,6 @@ impl ChatLlm {
         let structured_stream = output_processor.process(decoded_stream)?;
 
         Ok(ChatEventStream::new(request_id, structured_stream))
-    }
-
-    /// Render through the chat template and tokenize, without submitting to the engine.
-    ///
-    /// Same render → [`multimodal::finalize_rendered_prompt`] → encode pipeline as
-    /// [`Self::chat`], but stops after token IDs so `/tokenize` counts match what
-    /// generation would see. Used by `POST /tokenize` (chat form).
-    pub async fn tokenize_chat(&self, request: ChatRequest) -> Result<Vec<u32>> {
-        request.validate()?;
-
-        let rendered = self.processor.backend.chat_renderer().render(&request)?;
-        let (prompt, _mm_features) =
-            self.processor.finalize_rendered_prompt(&request, rendered).await?;
-
-        let tokenizer = self.text.tokenizer();
-        let token_ids = match prompt {
-            // Rendered string from the template (usual chat path).
-            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
-            // Already tokenized (e.g. multimodal path); pass through unchanged.
-            Prompt::TokenIds(ids) => ids,
-        };
-        Ok(token_ids)
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
@@ -327,6 +376,12 @@ mod tests {
     }
 
     #[test]
+    fn validate_parser_overrides_accepts_explicit_kimi_k3() {
+        let selection = ParserSelection::Explicit("kimi_k3".to_string());
+        validate_parser_overrides(&selection, &selection).unwrap();
+    }
+
+    #[test]
     fn validate_parser_overrides_accepts_auto_and_none() {
         validate_parser_overrides(&ParserSelection::Auto, &ParserSelection::None).unwrap();
     }
@@ -339,7 +394,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, inkling, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -350,6 +405,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, inkling, kimi, kimi_k2, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, inkling, kimi, kimi_k2, kimi_k3, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }
