@@ -550,6 +550,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
+    "SolarOpen2ForCausalLM": _HfExamplesInfo(
+        "SSON9/solar-open2-tiny-dummy",
+        use_original_num_layers=True,
+        # Initialize both a full-attention and a linear-attention layer
+        hf_overrides={"num_hidden_layers": 2},
+    ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
     ),

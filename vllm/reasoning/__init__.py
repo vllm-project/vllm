@@ -136,6 +136,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "inkling_reasoning_parser",
         "InklingParserReasoningAdapter",
     ),
+    "solar_open2": (
+        "solar_open2_reasoning_parser",
+        "SolarOpen2ReasoningParser",
+    ),
 }
 
 

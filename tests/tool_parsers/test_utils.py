@@ -4,11 +4,26 @@
 import json
 
 import pytest
+from openai.types.responses.function_tool import FunctionTool
 
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
+    find_tool_properties,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
+
+
+def test_find_tool_properties_rejects_non_mapping_properties():
+    tool = FunctionTool(
+        type="function",
+        name="malformed",
+        parameters={"type": "object", "properties": ["count"]},
+        strict=True,
+    )
+
+    assert find_tool_properties([tool], "malformed") == {}
 
 
 class TestCoerceToSchemaType:
