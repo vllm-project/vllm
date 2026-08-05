@@ -172,7 +172,10 @@ class ModelArchConfigConvertorBase:
             "moe_topk",
             "moe_top_k",
         ]
-        return getattr_iter(self.hf_text_config, names, 0) or 0
+        num_experts_per_token = getattr_iter(self.hf_text_config, names, 0)
+        if isinstance(num_experts_per_token, list):
+            return max(num_experts_per_token, default=0)
+        return num_experts_per_token or 0
 
     @final
     @classmethod
