@@ -164,12 +164,11 @@ def _cgroup_cpu_limit() -> float | None:
 
         def visit(base: str, rel_path: str, read_quota) -> None:
             nonlocal limit
-            path = rel_path
-            while path:
-                quota = read_quota(os.path.join(base, path.lstrip("/")))
+            parts = [part for part in rel_path.split("/") if part]
+            for depth in range(len(parts), -1, -1):
+                quota = read_quota(os.path.join(base, *parts[:depth]))
                 if quota is not None:
                     limit = quota if limit is None else min(limit, quota)
-                path = path.rsplit("/", 1)[0]
 
         def read_v2(cg_dir: str) -> float | None:
             try:
