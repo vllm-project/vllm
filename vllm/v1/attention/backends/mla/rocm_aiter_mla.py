@@ -291,11 +291,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         if self.num_heads == 12:
             from vllm.platforms.rocm import on_gfx950
 
-            if (
-                not on_gfx950()
-                or q_dtype != torch.bfloat16
-                or kv_dtype != dtypes.bf16
-            ):
+            if not on_gfx950() or q_dtype != torch.bfloat16 or kv_dtype != dtypes.bf16:
                 raise NotImplementedError(
                     "12-head AITER MLA decode requires gfx950 with BF16 query "
                     "and KV cache"
