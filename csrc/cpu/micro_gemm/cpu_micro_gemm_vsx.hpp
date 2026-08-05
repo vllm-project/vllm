@@ -25,8 +25,75 @@ class TileGemmVSX {
   }
 
   template <int32_t M>
+  static void gemm_micro_vsx_fallback(DEFINE_CPU_MICRO_GEMM_PARAMS) {
+      __vector float c_regs[M][4];
+      
+      if (accum_c) {
+          for (int i = 0; i < M; i++) {
+              for (int j = 0; j < 4; j++) {
+                  c_regs[i][j] = (__vector float)vec_xl(0, &c_ptr[i * ldc + j*4]);
+              }
+          }
+      } else {
+          for (int i = 0; i < M; i++) {
+              for (int j = 0; j < 4; j++) {
+                  c_regs[i][j] = (__vector float){0.0f, 0.0f, 0.0f, 0.0f};
+              }
+          }
+      }
+
+      const __vector unsigned short vzero = {0};
+      const __vector unsigned char mask_k0 = { 0,1,2,3, 8,9,10,11, 16,17,18,19, 24,25,26,27 };
+      const __vector unsigned char mask_k1 = { 4,5,6,7, 12,13,14,15, 20,21,22,23, 28,29,30,31 };
+
+      for (int32_t k_idx = 0; k_idx < k; k_idx += 2) {
+          __vector float B_k0[4];
+          __vector float B_k1[4];
+          
+          for (int j = 0; j < 4; j++) {
+              __vector unsigned short vB_short = (__vector unsigned short)vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + k_idx * 4]);
+              __vector unsigned int vB_f32_01 = (__vector unsigned int)vec_mergeh(vzero, vB_short);
+              __vector unsigned int vB_f32_23 = (__vector unsigned int)vec_mergel(vzero, vB_short);
+              
+              B_k0[j] = vec_perm((__vector float)vB_f32_01, (__vector float)vB_f32_23, mask_k0);
+              B_k1[j] = vec_perm((__vector float)vB_f32_01, (__vector float)vB_f32_23, mask_k1);
+          }
+          
+          for (int i = 0; i < M; i++) {
+              uint32_t a_val;
+              std::memcpy(&a_val, &a_ptr[i * lda + k_idx], 4);
+              uint32_t a0_u = (a_val & 0xFFFF) << 16;
+              uint32_t a1_u = a_val & 0xFFFF0000;
+              float a0_f, a1_f;
+              std::memcpy(&a0_f, &a0_u, 4);
+              std::memcpy(&a1_f, &a1_u, 4);
+              
+              __vector float vA0 = vec_splats(a0_f);
+              __vector float vA1 = vec_splats(a1_f);
+              
+              #pragma GCC unroll 4
+              for (int j = 0; j < 4; j++) {
+                  c_regs[i][j] = vec_madd(vA0, B_k0[j], c_regs[i][j]);
+                  c_regs[i][j] = vec_madd(vA1, B_k1[j], c_regs[i][j]);
+              }
+          }
+      }
+      
+      for (int i = 0; i < M; i++) {
+          for (int j = 0; j < 4; j++) {
+              vec_xst(c_regs[i][j], 0, &c_ptr[i * ldc + j*4]);
+          }
+      }
+  }
+
+  template <int32_t M>
   static void gemm_micro(DEFINE_CPU_MICRO_GEMM_PARAMS) {
     static_assert(0 < M && M <= 8);
+    
+    if constexpr (M <= 4) {
+        gemm_micro_vsx_fallback<M>(CPU_MICRO_GEMM_PARAMS);
+        return;
+    }
 
     // Calculate how many 4x4 tiles we need in M dimension
     constexpr int tiles_m = (M + 3) / 4; 
