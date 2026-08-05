@@ -74,12 +74,10 @@ class TransferJobStatus:
     # Offload keys this job covers; passed to manager.complete_*().
     keys: set[OffloadKey]
     is_store: bool
-    # Store src block IDs whose ref_cnt protects them while the request
-    # runs. Only registered in _block_id_to_pending_jobs on request_finished.
-    non_sliding_window_block_ids: list[int] | None = None
-    # Store src block IDs that may be freed before the request finishes.
-    # Registered in _block_id_to_pending_jobs at store creation time.
-    sliding_window_block_ids: list[int] | None = None
+    # Store source blocks fenced after the request finishes.
+    deferred_fence_block_ids: list[int] | None = None
+    # Store source blocks fenced when the transfer is created.
+    fenced_block_ids: list[int] | None = None
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -520,10 +518,9 @@ class OffloadingConnectorScheduler:
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
-        self._partial_tail_enabled = self.config.supports_partial_tail
         self._partial_tail_block_size = (
             self.config.kv_group_configs[0].tokens_per_block
-            if self._partial_tail_enabled
+            if self.config.supports_partial_tail
             else 0
         )
         self._cow_source_groups = frozenset(
@@ -874,7 +871,7 @@ class OffloadingConnectorScheduler:
     def _lookup(self, req_status: RequestOffloadState) -> int | None:
         complete_hit = self._lookup_complete_chunks(req_status)
         req_status.partial_tail_boundary = None
-        if complete_hit is None or not self._partial_tail_enabled:
+        if complete_hit is None or not self.config.supports_partial_tail:
             return complete_hit
 
         local_tokens = req_status.num_locally_computed_tokens
@@ -1145,7 +1142,7 @@ class OffloadingConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> dict[int, TransferJob]:
         handoffs = scheduler_output.partial_tail_offloads
-        if not self._partial_tail_enabled or not handoffs:
+        if not self.config.supports_partial_tail or not handoffs:
             return {}
 
         store_jobs: dict[int, TransferJob] = {}
@@ -1168,9 +1165,8 @@ class OffloadingConnectorScheduler:
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
             assert self._cow_source_groups.issubset(cow_blocks)
 
+            assert boundary % self._partial_tail_block_size != 0
             block_idx = boundary // self._partial_tail_block_size
-            if boundary % self._partial_tail_block_size == 0:
-                continue
             if any(
                 group.group_idx not in self._cow_source_groups
                 and block_idx >= len(req_status.group_states[group.group_idx].block_ids)
@@ -1216,7 +1212,7 @@ class OffloadingConnectorScheduler:
                 pending_count=self.config.num_workers,
                 keys=set(store_output.keys_to_store),
                 is_store=True,
-                sliding_window_block_ids=source_blocks,
+                fenced_block_ids=source_blocks,
             )
             store_jobs[job_id] = TransferJob(
                 req_id=req_id,
@@ -1329,8 +1325,8 @@ class OffloadingConnectorScheduler:
             group_sizes: list[int] = []
             block_indices: list[int] = []
             src_block_ids: list[int] = []
-            sliding_window_block_ids: list[int] = []
-            non_sliding_window_block_ids: list[int] = []
+            fenced_block_ids: list[int] = []
+            deferred_fence_block_ids: list[int] = []
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
@@ -1366,9 +1362,9 @@ class OffloadingConnectorScheduler:
                         src_block_ids.append(block_id)
                         num_group_blocks += 1
                         if is_sliding_window:
-                            sliding_window_block_ids.append(block_id)
+                            fenced_block_ids.append(block_id)
                         else:
-                            non_sliding_window_block_ids.append(block_id)
+                            deferred_fence_block_ids.append(block_id)
 
                 group_sizes.append(num_group_blocks)
                 block_indices.append(start_gpu_block_idx or 0)
@@ -1390,7 +1386,7 @@ class OffloadingConnectorScheduler:
 
             # Watch sliding window blocks as they may get evicted
             # before the request finishes
-            for bid in sliding_window_block_ids or ():
+            for bid in fenced_block_ids:
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
 
             # the non-sliding window blocks will be watched only
@@ -1400,8 +1396,8 @@ class OffloadingConnectorScheduler:
                 pending_count=self.config.num_workers,
                 keys=set(keys_to_store),
                 is_store=True,
-                non_sliding_window_block_ids=non_sliding_window_block_ids,
-                sliding_window_block_ids=sliding_window_block_ids or None,
+                deferred_fence_block_ids=deferred_fence_block_ids,
+                fenced_block_ids=fenced_block_ids or None,
             )
 
             store_jobs[job_id] = TransferJob(
@@ -1418,7 +1414,7 @@ class OffloadingConnectorScheduler:
 
             if req.is_finished():
                 # Register non-sliding-window blocks for flush detection.
-                for bid in non_sliding_window_block_ids:
+                for bid in deferred_fence_block_ids:
                     self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
                     if bid in self._current_batch_allocated_block_ids:
                         self._current_batch_jobs_to_flush.add(job_id)
@@ -1556,12 +1552,12 @@ class OffloadingConnectorScheduler:
             if self._block_id_to_pending_jobs:
                 # Sliding window blocks are tracked from store creation
                 # and must be cleaned up unconditionally.
-                self._remove_pending_job(job_id, job_status.sliding_window_block_ids)
+                self._remove_pending_job(job_id, job_status.fenced_block_ids)
                 # Non-sliding-window blocks are only tracked after
                 # request_finished, so only clean up for finished requests.
                 if req_status.req.is_finished():
                     self._remove_pending_job(
-                        job_id, job_status.non_sliding_window_block_ids
+                        job_id, job_status.deferred_fence_block_ids
                     )
 
             del self._jobs[job_id]
@@ -1616,11 +1612,11 @@ class OffloadingConnectorScheduler:
 
         # Keep req_status alive: _build_store_jobs will process finished_req_ids
         # on the next step and handle cleanup after creating store jobs.
-        # Register non_sliding_window_block_ids so future block reuse triggers
-        # a flush via _block_id_to_pending_jobs.
+        # Register deferred fences so future block reuse triggers a flush via
+        # _block_id_to_pending_jobs.
         for job_id in req_status.transfer_jobs:
             job_status = self._jobs[job_id]
-            for bid in job_status.non_sliding_window_block_ids or ():
+            for bid in job_status.deferred_fence_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
 
         return False, None

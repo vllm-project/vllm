@@ -2248,7 +2248,7 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     # Now prepare_store succeeds.
     # Without the fix, the request would try to offload the stale block_id
     # at position 0 (now reused at position 3), causing a duplicate in
-    # sliding_window_block_ids and eventually a KeyError.
+    # fenced_block_ids and eventually a KeyError.
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
@@ -3075,7 +3075,7 @@ class TestEagle:
 def test_request_finished_with_pending_stores_populates_fence(request_runner):
     """When a request finishes with in-flight store jobs, the fence index
     (_block_id_to_pending_jobs) is correctly populated with the store jobs'
-    non_sliding_window_block_ids.
+    deferred_fence_block_ids.
 
     This prevents data corruption when a subsequent request reuses the same
     GPU blocks before the store completes.
@@ -3109,7 +3109,7 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
         )
         for js in runner.connector_scheduler._jobs.values():
             if js.is_store:
-                job_block_ids.update(js.non_sliding_window_block_ids or [])
+                job_block_ids.update(js.deferred_fence_block_ids or [])
 
     # Run 1: create store job, finish request, populate fence.
     # With non-blocking drain (#45595), the job stays in-flight.
@@ -3211,7 +3211,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     request_runner,
 ):
     """With both FullAttention and SlidingWindow groups, a single store job
-    has both non_sliding_window_block_ids and sliding_window_block_ids.
+    has both deferred_fence_block_ids and fenced_block_ids.
 
     request_finished only registers non-SW blocks in the fence.
     SW blocks were already registered at store creation time.
@@ -3267,8 +3267,8 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
         )
         for js in runner.connector_scheduler._jobs.values():
             if js.is_store:
-                sw_block_ids.update(js.sliding_window_block_ids or [])
-                non_sw_block_ids.update(js.non_sliding_window_block_ids or [])
+                sw_block_ids.update(js.fenced_block_ids or [])
+                non_sw_block_ids.update(js.deferred_fence_block_ids or [])
 
     # Run 1: create store job, finish request, populate fence.
     runner.run(
