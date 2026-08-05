@@ -49,6 +49,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
+    JobResult,
     ParentManager,
     SecondaryTierManager,
     TieringOffloadingMetrics,
@@ -93,11 +94,13 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         num_blocks: int,
         mmap_region: SharedOffloadRegion,
         cache_policy: str = "lru",
+        cache_policy_module_path: str | None = None,
         enable_events: bool = False,
     ):
         super().__init__(
             num_blocks=num_blocks,
-            cache_policy=cache_policy,  # type: ignore[arg-type]
+            cache_policy=cache_policy,
+            cache_policy_module_path=cache_policy_module_path,
             enable_events=enable_events,
         )
         self._mmap_region = mmap_region
@@ -241,6 +244,39 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = True
         self._process_finished_jobs()
 
+    def _complete_promotion(
+        self, job_metadata: JobMetadata, completed_job: JobResult
+    ) -> None:
+        successful_keys = completed_job.successful_keys
+        failed_keys: Collection[OffloadKey]
+        if completed_job.success:
+            successful_keys = job_metadata.keys
+            failed_keys = ()
+        elif successful_keys:
+            failed_keys_set = set(job_metadata.keys)
+            assert failed_keys_set.issuperset(successful_keys), (
+                f"Finished promotion job_id {completed_job.job_id} "
+                "reported unknown successful keys"
+            )
+            failed_keys_set.difference_update(successful_keys)
+            failed_keys = failed_keys_set
+        else:
+            successful_keys = ()
+            failed_keys = job_metadata.keys
+
+        if successful_keys:
+            self.primary_tier.complete_write(
+                successful_keys,
+                job_metadata.req_context,
+                True,
+            )
+        if failed_keys:
+            self.primary_tier.complete_write(
+                failed_keys,
+                job_metadata.req_context,
+                False,
+            )
+
     def _process_finished_jobs(self):
         """
         Unconditionally poll all secondary tiers for completed jobs.
@@ -264,11 +300,7 @@ class TieringOffloadingManager(OffloadingManager):
                 if job_metadata.is_promotion:
                     # secondary→primary transfer (promotion) completed.
                     # Make blocks available in primary tier.
-                    self.primary_tier.complete_write(
-                        job_metadata.keys,
-                        job_metadata.req_context,
-                        completed_job.success,
-                    )
+                    self._complete_promotion(job_metadata, completed_job)
                 else:
                     # primary→secondary transfer completed.
                     # Decrement ref_cnt on primary blocks.
