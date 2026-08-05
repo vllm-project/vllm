@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -227,13 +226,30 @@ class InputProcessingContext:
         self,
         output: JSONTree,
     ) -> JSONTree:
-        def _postprocess_one(x: object):
-            if isinstance(x, torch.Tensor):  # noqa: SIM102
-                # This mimics the behavior of transformers.BatchFeature
-                if x.is_floating_point():
-                    x = x.to(dtype=self.model_config.dtype)
+        # "torch_shm" puts tensors on a torch.multiprocessing queue, which
+        # shares device tensors by CUDA IPC handle, so a device-side processor
+        # can hand `pixel_values` straight to the worker. Every other transport
+        # serializes host bytes, so the result has to be copied back first.
+        keep_on_device = (
+            self.model_config.get_multimodal_config().mm_tensor_ipc == "torch_shm"
+        )
 
-            return x
+        def _postprocess_one(x: object):
+            if not isinstance(x, torch.Tensor):
+                return x
+
+            # Bind to a Tensor-typed local: reassigning the `object`-typed
+            # parameter would discard the isinstance narrowing.
+            tensor = x
+
+            # This mimics the behavior of transformers.BatchFeature
+            if tensor.is_floating_point():
+                tensor = tensor.to(dtype=self.model_config.dtype)
+
+            if not tensor.is_cpu and not keep_on_device:
+                tensor = tensor.cpu()
+
+            return tensor
 
         return json_map_leaves(_postprocess_one, output)
 
@@ -350,6 +366,17 @@ class BaseProcessingInfo:
 
         return None
 
+    @property
+    def embeds_from_ec_connector(self) -> bool:
+        """Whether pre-computed embeddings may arrive outside the request.
+
+        True only on an EC consumer, where an encode/prefill/decode encoder
+        instance publishes them through the connector instead, so the request
+        carries only the metadata that sizes the placeholder range.
+        """
+        mm_config = self.ctx.model_config.multimodal_config
+        return mm_config is not None and mm_config.mm_embeds_from_ec_connector
+
     def get_data_parser(self) -> MultiModalDataParser:
         """
         Constructs a parser to preprocess multi-modal data items
@@ -362,6 +389,7 @@ class BaseProcessingInfo:
         """
         return MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     @cached_property
@@ -372,7 +400,6 @@ class BaseProcessingInfo:
     def skip_prompt_length_check(self) -> bool:
         return False
 
-    @abstractmethod
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """
         Return the maximum supported number of items for each modality.
