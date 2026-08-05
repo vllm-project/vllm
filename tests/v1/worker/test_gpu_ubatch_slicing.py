@@ -11,6 +11,7 @@ threaded execution of the microbatches.
 
 import threading
 from dataclasses import replace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -19,10 +20,13 @@ import torch
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.forward_context import create_forward_context
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.dp_utils import _maybe_ubatch_descriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
+    UBatchState,
     slice_input_batch,
     slice_model_inputs,
 )
@@ -275,6 +279,35 @@ def test_slice_model_inputs_handles_mrope_positions():
     assert sliced["intermediate_tensors"] is None
 
 
+def _make_execution_runner(vllm_config: VllmConfig) -> UBatchRunner:
+    """A runner for the execution tests below, which never call `prepare()`.
+
+    The attention-side dependencies are only read while building per-microbatch
+    metadata, so they are left out here.
+    """
+    return UBatchRunner(
+        vllm_config,
+        torch.device("cuda:0"),
+        model_state=cast(ModelState, None),
+        attn_groups=[],
+        kv_cache_config=cast(KVCacheConfig, None),
+        input_buffers=_make_buffers(),
+        decode_query_len=1,
+    )
+
+
+def _make_ubatch_state(
+    vllm_config: VllmConfig, ubatch_slices: list[UBatchSlice]
+) -> UBatchState:
+    return UBatchState(
+        slices=ubatch_slices,
+        forward_contexts=[
+            create_forward_context(None, vllm_config) for _ in ubatch_slices
+        ],
+        num_tokens_after_padding=sum(s.num_tokens for s in ubatch_slices),
+    )
+
+
 class _YieldingModel(torch.nn.Module):
     """Toy model that hands off to the other microbatch mid-forward."""
 
@@ -301,7 +334,7 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
         ),
     )
     device = torch.device("cuda:0")
-    runner = UBatchRunner(vllm_config, device)
+    runner = _make_execution_runner(vllm_config)
 
     num_tokens = 16
     model_inputs = {
@@ -310,15 +343,17 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
         "inputs_embeds": None,
         "intermediate_tensors": None,
     }
-    ubatch_slices = [
-        UBatchSlice(slice(0, 4), slice(0, 8)),
-        UBatchSlice(slice(4, 8), slice(8, 16)),
-    ]
-    forward_contexts = [create_forward_context(None, vllm_config) for _ in range(2)]
+    ubatch_state = _make_ubatch_state(
+        vllm_config,
+        [
+            UBatchSlice(slice(0, 4), slice(0, 8)),
+            UBatchSlice(slice(4, 8), slice(8, 16)),
+        ],
+    )
 
     trace: list[tuple[str, int]] = []
     model = _YieldingModel(trace)
-    output = runner.run(model, model_inputs, forward_contexts, ubatch_slices)
+    output = runner.run(model, model_inputs, ubatch_state)
 
     expected = model_inputs["input_ids"].float().unsqueeze(-1) * 2 + model_inputs[
         "positions"
@@ -347,7 +382,7 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
         ),
     )
     device = torch.device("cuda:0")
-    runner = UBatchRunner(vllm_config, device)
+    runner = _make_execution_runner(vllm_config)
 
     class _FailingModel(torch.nn.Module):
         def forward(self, input_ids, positions, **kwargs):
@@ -361,17 +396,19 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
         "inputs_embeds": None,
         "intermediate_tensors": None,
     }
-    ubatch_slices = [
-        UBatchSlice(slice(0, 2), slice(0, 4)),
-        UBatchSlice(slice(2, 4), slice(4, 8)),
-    ]
-    forward_contexts = [create_forward_context(None, vllm_config) for _ in range(2)]
+    ubatch_state = _make_ubatch_state(
+        vllm_config,
+        [
+            UBatchSlice(slice(0, 2), slice(0, 4)),
+            UBatchSlice(slice(2, 4), slice(4, 8)),
+        ],
+    )
 
     result: dict[str, BaseException] = {}
 
     def _call():
         try:
-            runner.run(_FailingModel(), model_inputs, forward_contexts, ubatch_slices)
+            runner.run(_FailingModel(), model_inputs, ubatch_state)
         except BaseException as e:  # noqa: BLE001
             result["error"] = e
 

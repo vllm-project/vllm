@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.ubatch_utils import get_num_ubatches
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
@@ -159,11 +160,7 @@ def init_attn_backend(
                 # Microbatches build attention metadata concurrently, and some
                 # builders keep the prepared metadata on themselves (MLA stores
                 # it on the prefill backend), so each ubatch needs its own.
-                num_metadata_builders=(
-                    vllm_config.parallel_config.num_ubatches
-                    if vllm_config.parallel_config.use_ubatching
-                    else 1
-                ),
+                num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
             builder = group.get_metadata_builder(0)
             if attn_backend_workspace is None:
