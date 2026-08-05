@@ -203,6 +203,13 @@ class GitHubClient:
     def get_pr(self, number: int) -> dict[str, Any]:
         return self._request(self._repo_path(f"/pulls/{number}"))
 
+    def list_pulls_for_commit(self, commit: str) -> list[dict[str, Any]]:
+        commit = urllib.parse.quote(commit, safe="")
+        response = self._request(self._repo_path(f"/commits/{commit}/pulls"))
+        if not isinstance(response, list):
+            raise ApiError(None, "GitHub API returned an invalid pull request list.")
+        return response
+
     def get_permission(self, actor: str) -> str:
         username = urllib.parse.quote(actor, safe="")
         try:
@@ -622,7 +629,6 @@ def notify_authorized(
         if (
             event.get("action") != "labeled"
             or event["label"]["name"] not in READY_LABELS
-            or has_trusted_approval(github, pr["number"], trusted_users)
         ):
             return
     elif "review" in event:
@@ -648,6 +654,40 @@ def notify_authorized(
             f"{CI_AUTHORIZED_COMMENT_MARKER}"
         ),
     )
+
+
+def resolve_workflow_run_pr(
+    workflow_run: Mapping[str, Any],
+    github: GitHubClient,
+) -> dict[str, Any] | None:
+    head_sha = str(workflow_run.get("head_sha", ""))
+    if not head_sha:
+        return None
+
+    seen: set[int] = set()
+
+    def find_matching_pr(
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any] | None:
+        for candidate in candidates:
+            candidate_number = candidate.get("number")
+            if not isinstance(candidate_number, int) or candidate_number in seen:
+                continue
+            seen.add(candidate_number)
+            try:
+                pr = github.get_pr(candidate_number)
+            except ApiError as error:
+                if error.status == 404:
+                    continue
+                raise
+            if pr["state"] == "open" and pr["head"]["sha"] == head_sha:
+                return pr
+        return None
+
+    associated_pr = find_matching_pr(workflow_run.get("pull_requests") or [])
+    if associated_pr is not None:
+        return associated_pr
+    return find_matching_pr(github.list_pulls_for_commit(head_sha))
 
 
 def handle_run_ci(
@@ -897,10 +937,10 @@ def main() -> None:
         )
         return
     if event_name == "workflow_run":
-        pull_requests = event["workflow_run"].get("pull_requests") or []
-        if not pull_requests:
+        pr = resolve_workflow_run_pr(event["workflow_run"], github)
+        if pr is None:
+            print("Could not resolve an open PR for the approval workflow run.")
             return
-        pr = github.get_pr(int(pull_requests[0]["number"]))
         notify_authorized(
             {
                 "action": "submitted",
