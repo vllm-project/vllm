@@ -11,7 +11,6 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from vllm.distributed.artifact_connector.buffer import RoutedExpertsArtifactBuffer
 from vllm.distributed.artifact_connector.connector import (
     ArtifactConnectorMetadata,
     ArtifactConnectorOutput,
@@ -20,6 +19,7 @@ from vllm.distributed.artifact_connector.connector import (
     ArtifactSchedulerConnector,
 )
 from vllm.distributed.artifact_connector.routed_experts import (
+    RoutedExpertsArtifactBuffer,
     get_routing_shape_and_dtype,
     materialize_routed_experts,
     publish_routed_experts,
