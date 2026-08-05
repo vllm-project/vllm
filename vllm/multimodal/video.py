@@ -854,7 +854,10 @@ class PyNvVideoCodecVideoBackendMixin:
             with os.fdopen(temp_fd, "wb") as temp_file:
                 temp_file.write(data)
 
-            gpu_source = cls._read_source_metadata(temp_path, nvc)
+            try:
+                gpu_source = cls._read_source_metadata(temp_path, nvc)
+            except nvc.PyNvVCException as exc:
+                raise ValueError("Invalid or unsupported video file.") from exc
             _check_frame_pixel_limit(gpu_source.width, gpu_source.height)
             source = cls._prepare_source(gpu_source.source)
             frame_idx = cls.compute_frames_index_to_sample(
