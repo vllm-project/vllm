@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
 )
@@ -227,7 +227,9 @@ def maybe_make_prepare_finalize(
         )
         handle = all2all_manager.get_handle(all_to_all_args)
         vllm_config = get_current_vllm_config()
-        use_cudagraph = not vllm_config.model_config.enforce_eager
+        use_cudagraph = (
+            vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        )
 
         prepare_finalize = DeepEPV2PrepareAndFinalize(
             buffer=handle,
