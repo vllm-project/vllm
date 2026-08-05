@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.distributed as dist
 
@@ -13,6 +15,9 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     CudaGraphManager,
 )
 from vllm.v1.worker.ubatch_utils import is_last_ubatch_empty
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 
 logger = init_logger(__name__)
 
@@ -163,8 +168,7 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
-    wants_ubatch: bool = False,
-    num_ubatches: int = 1,
+    ubatch_runner: UBatchRunner | None = None,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     if need_eager:
         batch_desc = BatchExecutionDescriptor(
@@ -201,6 +205,9 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
-        wants_ubatch=wants_ubatch,
-        num_ubatches=num_ubatches,
+        wants_ubatch=(
+            ubatch_runner is not None
+            and ubatch_runner.wants_ubatch(num_tokens, uniform_token_count)
+        ),
+        num_ubatches=ubatch_runner.num_ubatches if ubatch_runner is not None else 1,
     )
