@@ -155,14 +155,18 @@ def test_prm_models_with_golden_outputs(
     if not FIXTURE_REWARD_RESULT.get(model):
         pytest.skip(f"No available golden outputs for {model}.")
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    use_v2_model_runner = not current_platform.is_cpu()
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_v2_model_runner else "0")
     with vllm_runner(
         model,
         max_model_len=1024,
         dtype=dtype,
         kv_cache_memory_bytes=64 * MiB_bytes,
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        assert (
+            vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+            is use_v2_model_runner
+        )
         vllm_outputs = vllm_model.token_classify(math_step_prompts)
 
     golden_outputs = load_reward_outputs(FIXTURE_REWARD_RESULT[model])
