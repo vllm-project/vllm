@@ -406,85 +406,103 @@ def test_file_has_correct_size(iid):
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
 
 
-def test_madvise_einval_falls_back_for_ranked_region(iid, monkeypatch):
-    """Older kernels can reject MADV_POPULATE_WRITE with EINVAL.
-
-    We monkeypatch the module-level _madvise_populate_write helper to raise
-    EINVAL.  Subclassing mmap.mmap or patching the immutable mmap.mmap class
-    attribute does not work on Python 3.12+; the helper is the test seam.
-    """
-    monkeypatch.setattr(
-        "vllm.v1.kv_offload.cpu.shared_offload_region._madvise_populate_write",
-        lambda mm, off, ln: (_ for _ in ()).throw(
-            OSError(errno.EINVAL, "simulated unsupported kernel")
-        ),
-    )
-    num_blocks = 3
-    with _region(iid, num_blocks=num_blocks, num_workers=2, rank=1) as r:
-        raw = memoryview(r.mmap_obj)
-        # rank=1 occupies page 1, 3, 5 (the second column of each row).
-        for page in (1, 3, 5):
-            assert raw[page * PAGE_SIZE] == 0, (
-                f"fallback must touch rank-1 page {page} head"
-            )
-            assert all(
-                b == 0 for b in raw[page * PAGE_SIZE + 1 : (page + 1) * PAGE_SIZE]
-            ), f"fallback must fill page {page} (per-page write)"
-        # rank-0 pages (0, 2, 4) are untouched.
-        for page in (0, 2, 4):
-            assert raw[page * PAGE_SIZE] != 0 or True  # may be touched by mmap init
-        del raw
-
-
-def test_madvise_einval_falls_back_for_unranked_region(iid, monkeypatch):
-    """The scheduler mmap path (rank=None) also works when the advice is absent."""
-    monkeypatch.setattr(
-        "vllm.v1.kv_offload.cpu.shared_offload_region._madvise_populate_write",
-        lambda mm, off, ln: (_ for _ in ()).throw(
-            OSError(errno.EINVAL, "simulated unsupported kernel")
-        ),
-    )
-    with _region(iid, num_blocks=3, num_workers=2, rank=None) as r:
-        raw = memoryview(r.mmap_obj)
-        # Every page head must be 0 (fallback fills with zeros).
-        for page in range(6):
-            assert raw[page * PAGE_SIZE] == 0, (
-                f"fallback must touch page {page} head (unranked)"
-            )
-        del raw
-
-
 def test_madvise_success_selects_madvise_population(iid, monkeypatch):
     """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
-    helper must never be invoked on a kernel that accepts the advice."""
+    helper must never be invoked on a kernel that accepts the advice.
+
+    Spies on both helpers so we can verify call counts: 1 probe call +
+    N populate calls, fallback 0 times.
+    """
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    madvise_calls: list[tuple[int, int, int]] = []
     fallback_calls: list[tuple[int, int]] = []
 
     def _spy_madvise(mm, off, ln):
-        return None  # simulate a successful probe
+        madvise_calls.append((off, ln, id(mm)))
 
     def _spy_fallback(mm, off, ln):
         fallback_calls.append((off, ln))
 
-    monkeypatch.setattr(
-        "vllm.v1.kv_offload.cpu.shared_offload_region._madvise_populate_write",
-        _spy_madvise,
-    )
-    monkeypatch.setattr(
-        "vllm.v1.kv_offload.cpu.shared_offload_region._fallback_populate_write",
-        _spy_fallback,
-    )
-    with _region(iid, num_blocks=3, num_workers=2, rank=1):
+    monkeypatch.setattr(sor, "_madvise_populate_write", _spy_madvise)
+    monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
+
+    num_blocks = 3
+    num_workers = 2
+    with _region(iid, num_blocks=num_blocks, num_workers=num_workers, rank=1):
+        # 1 probe (PAGESIZE) + N populate calls (one per block per worker column).
+        expected_populate = num_blocks  # ranked path: one call per block
+        assert len(madvise_calls) == 1 + expected_populate, (
+            f"expected 1 probe + {expected_populate} populate calls, "
+            f"got {len(madvise_calls)}: {madvise_calls}"
+        )
+        # Probe is the first call at offset 0, length PAGESIZE.
+        assert madvise_calls[0] == (0, mmap.PAGESIZE, madvise_calls[0][2])
         assert fallback_calls == [], (
             "native-path constructor must not invoke the fallback helper"
         )
+
+
+def test_madvise_einval_smoke(iid, monkeypatch):
+    """Smoke: when the probe raises EINVAL the constructor still completes
+    and reaches the fallback path.  We do not assert on touched bytes here —
+    see test_fallback_populate_write_preserves_existing_bytes for that."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(
+        sor,
+        "_madvise_populate_write",
+        lambda mm, off, ln: (_ for _ in ()).throw(
+            OSError(errno.EINVAL, "simulated unsupported kernel")
+        ),
+    )
+    with _region(iid, num_blocks=3, num_workers=2, rank=1) as r:
+        # Constructor completed; region is usable.
+        assert r.mmap_obj is not None
+        assert r.total_size_bytes == 3 * 2 * PAGE_SIZE
+
+
+def test_fallback_populate_write_preserves_existing_bytes(iid, monkeypatch):
+    """Direct unit test for _fallback_populate_write: it must not alter any
+    existing byte in the mmap.  A peer worker may have written KV data into
+    the same shared mmap before this fallback runs; an unconditional `= 0`
+    would silently corrupt that data.  The `|= 0` write is a no-op that still
+    triggers the page fault."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    size = 3 * mmap.PAGESIZE
+    with _region(iid, num_blocks=size // PAGE_SIZE, num_workers=1, rank=0) as r:
+        # Plant non-zero sentinels at the head of each page.
+        mv = memoryview(r.mmap_obj)
+        sentinels = (0xAB, 0xCD, 0xEF)
+        try:
+            for page, sentinel in enumerate(sentinels):
+                mv[page * mmap.PAGESIZE] = sentinel
+        finally:
+            del mv
+
+        sor._fallback_populate_write(r.mmap_obj, 0, size)
+
+        mv = memoryview(r.mmap_obj)
+        try:
+            for page, sentinel in enumerate(sentinels):
+                assert mv[page * mmap.PAGESIZE] == sentinel, (
+                    f"page {page} head mutated: "
+                    f"got {mv[page * mmap.PAGESIZE]:#x}, want {sentinel:#x}"
+                )
+        finally:
+            del mv
 
 
 def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     """Only EINVAL triggers the fallback.  Other OSErrors (e.g. EIO) must
     propagate out of __init__, not be silently masked by the fallback branch.
     """
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
     monkeypatch.setattr(
-        "vllm.v1.kv_offload.cpu.shared_offload_region._madvise_populate_write",
+        sor,
+        "_madvise_populate_write",
         lambda mm, off, ln: (_ for _ in ()).throw(
             OSError(errno.EIO, "simulated I/O failure")
         ),

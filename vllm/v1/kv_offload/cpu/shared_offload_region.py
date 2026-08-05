@@ -39,8 +39,11 @@ def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> No
 
 
 def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
+    # Touch one byte per page via a read-modify-write so existing bytes are
+    # preserved — a peer worker may have already written KV data into this
+    # shared mmap by the time we run on a kernel without MADV_POPULATE_WRITE.
     arr = np.frombuffer(mmap_obj, dtype=np.uint8)
-    arr[offset : offset + length : mmap.PAGESIZE] = 0
+    arr[offset : offset + length : mmap.PAGESIZE] |= 0
 
 
 def _get_populate_write_fn(
