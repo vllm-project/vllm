@@ -13,8 +13,10 @@ parity of the encoder is covered by the gated pixels-in end-to-end test.
 """
 
 import os
+from collections import OrderedDict
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -24,6 +26,7 @@ from vllm.model_executor.models.minicpm_robottrack import (
     VisionProjector,
     _apply_dinov3_rotary_pos_emb,
     _count_marker_runs,
+    _encode_frames_cached,
     _grid_pool,
     _pad_history_frames,
     _rotate_half,
@@ -141,6 +144,139 @@ def test_pixel_window_pooling_token_counts():
             + 1
         )
         assert num_tokens == 221
+
+
+class _CountingTower:
+    """Fake DINOv3+SigLIP tower: deterministic per-frame grid + encode counter.
+
+    ``__call__`` returns features that depend only on each frame's fill value, so
+    identical frames yield identical features and cache reuse shows up in
+    ``frames_encoded``.
+    """
+
+    def __init__(self, grid: int, channels: int) -> None:
+        self.grid = grid
+        self.channels = channels
+        self.frames_encoded = 0
+
+    def __call__(self, dino_pixels, siglip_pixels):
+        n = dino_pixels.shape[0]
+        self.frames_encoded += n
+        scalars = dino_pixels.reshape(n, -1)[:, :1]
+        fused = scalars.view(n, 1, 1) * torch.ones(
+            n, self.grid * self.grid, self.channels
+        )
+        return fused, self.grid
+
+
+def _rolling_windows(num_frames: int, window: int):
+    for step in range(num_frames):
+        yield list(range(max(0, step - window + 1), step + 1))
+
+
+def _make_window(frame_ids):
+    # Each frame id maps to a distinct constant tensor; ids are the cache keys.
+    dino = torch.stack([torch.full((3, 8, 8), float(i)) for i in frame_ids])
+    return dino, dino.clone(), list(frame_ids)
+
+
+def test_frame_cache_encodes_each_frame_once():
+    tower = _CountingTower(grid=8, channels=4)
+    cache: OrderedDict = OrderedDict()
+    num_frames, window = 12, 4
+    per_step = []
+    for frame_ids in _rolling_windows(num_frames, window):
+        dino, siglip, keys = _make_window(frame_ids)
+        _, _, encoded = _encode_frames_cached(
+            tower, cache, 64, dino, siglip, keys, 4, 64
+        )
+        per_step.append(encoded)
+
+    # Warmup and steady state alike: exactly one new frame is encoded per step.
+    assert per_step == [1] * num_frames
+    # Each distinct frame is encoded exactly once over the whole run.
+    assert tower.frames_encoded == num_frames
+
+
+def test_frame_cache_disabled_reencodes_full_window():
+    tower = _CountingTower(grid=8, channels=4)
+    cache: OrderedDict = OrderedDict()
+    num_frames, window = 8, 4
+    per_step = []
+    for frame_ids in _rolling_windows(num_frames, window):
+        dino, siglip, keys = _make_window(frame_ids)
+        _, _, encoded = _encode_frames_cached(
+            tower,
+            cache,
+            0,
+            dino,
+            siglip,
+            keys,
+            4,
+            64,  # cache_size=0 disables reuse
+        )
+        per_step.append(encoded)
+
+    expected = [min(step + 1, window) for step in range(num_frames)]
+    assert per_step == expected
+    assert tower.frames_encoded == sum(expected)
+
+
+def test_frame_cache_evicts_oldest_beyond_capacity():
+    tower = _CountingTower(grid=8, channels=4)
+    cache: OrderedDict = OrderedDict()
+    # Capacity below the window: the oldest in-window frame is evicted and must
+    # be re-encoded when it is still referenced, so bound stays at cache_size.
+    _encode_frames_cached(tower, cache, 2, *_make_window([0, 1, 2]), 4, 64)
+    assert len(cache) == 2
+
+
+def test_frame_cache_matches_uncached_features():
+    num_frames, window = 10, 4
+    cached_tower, plain_tower = _CountingTower(8, 4), _CountingTower(8, 4)
+    cache_on, cache_off = OrderedDict(), OrderedDict()
+    for frame_ids in _rolling_windows(num_frames, window):
+        dino, siglip, keys = _make_window(frame_ids)
+        c_on, f_on, _ = _encode_frames_cached(
+            cached_tower, cache_on, 64, dino, siglip, keys, 4, 64
+        )
+        c_off, f_off, _ = _encode_frames_cached(
+            plain_tower, cache_off, 0, dino, siglip, keys, 4, 64
+        )
+        for a, b in zip(c_on, c_off):
+            assert torch.allclose(a, b)
+        assert torch.allclose(f_on, f_off)
+
+
+def test_frame_cache_stores_coarse_only():
+    tower = _CountingTower(grid=8, channels=4)
+    cache: OrderedDict = OrderedDict()
+    _, _, encoded = _encode_frames_cached(
+        tower, cache, 64, *_make_window([0, 1, 2]), 4, 64
+    )
+    assert encoded == 3
+    # Cache values are coarse pools only (coarse_tokens x channels), never
+    # (coarse, fine) tuples.
+    assert all(isinstance(v, torch.Tensor) for v in cache.values())
+    assert all(v.shape == (4, 4) for v in cache.values())
+
+
+def test_frame_cache_reencodes_repeated_current_frame():
+    tower = _CountingTower(grid=8, channels=4)
+    cache: OrderedDict = OrderedDict()
+    # Window [0, 1] encodes both frames; frame 1's coarse is cached.
+    _, _, encoded = _encode_frames_cached(
+        tower, cache, 64, *_make_window([0, 1]), 4, 64
+    )
+    assert encoded == 2
+    # Frame 1 reappears as the current frame: its coarse is a cache hit, but the
+    # fine is not cached, so the tower re-runs on that single frame.
+    _, fine, encoded = _encode_frames_cached(
+        tower, cache, 64, *_make_window([1, 1]), 4, 64
+    )
+    assert encoded == 1
+    assert tower.frames_encoded == 3
+    assert fine.shape == (64, 4)
 
 
 def test_submodule_shapes():
@@ -264,8 +400,6 @@ def test_end_to_end_finite(vllm_runner):
     ),
 )
 def test_end_to_end_pixels_in_finite(vllm_runner):
-    import numpy as np
-
     path = os.environ["MINICPM_ROBOTTRACK_PATH"]
     # A short raw-frame window; the tower pads history to 31 internally.
     frames = [np.zeros((384, 384, 3), dtype=np.uint8) for _ in range(4)]

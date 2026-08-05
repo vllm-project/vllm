@@ -35,6 +35,7 @@ class MiniCPMRobotTrackConfig(PretrainedConfig):
         dino_model: str = "facebook/dinov3-vits16-pretrain-lvd1689m",
         siglip_model: str = "google/siglip-so400m-patch14-384",
         image_size: int = 384,
+        frame_cache_size: int = 64,
         **kwargs: Any,
     ) -> None:
         self.backbone_config = self._wrap_backbone_config(backbone_config)
@@ -58,6 +59,10 @@ class MiniCPMRobotTrackConfig(PretrainedConfig):
         self.dino_model = str(dino_model)
         self.siglip_model = str(siglip_model)
         self.image_size = int(image_size)
+        # Bound of the in-tower per-frame feature cache (pixels-in path). The
+        # tower encodes each unique frame once and reuses its pooled features
+        # across the sliding window; set to 0 to disable (re-encode every step).
+        self.frame_cache_size = int(frame_cache_size)
         super().__init__(**kwargs)
 
     @staticmethod

@@ -11,7 +11,9 @@ advertises the ``"embed"`` task and returns a flat 24-dim vector per request
 (reshape to ``[8, 3]`` on the client).
 """
 
+import hashlib
 import math
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -24,6 +26,7 @@ from transformers import AutoConfig, AutoImageProcessor, BatchFeature, Pretraine
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -55,6 +58,19 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import default_pooling_type
 from .minicpm import MiniCPMModel
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+
+logger = init_logger(__name__)
+
+
+def _frame_content_key(frame: Any) -> int:
+    """Stable content hash of one raw frame, for the in-tower feature cache.
+
+    Byte-identical frames (the same physical frame re-sent as the window slides)
+    map to the same key, so the tower reuses each frame's coarse features.
+    """
+    arr = np.ascontiguousarray(np.asarray(frame))
+    digest = hashlib.blake2b(arr.tobytes(), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
 
 
 def _square_side(token_count: int) -> int:
@@ -91,6 +107,69 @@ def _pad_history_frames(history: torch.Tensor, num_frames: int) -> torch.Tensor:
         pad = history[:1].expand(num_frames - n, -1, -1)
         history = torch.cat([pad, history], dim=0)
     return history[-num_frames:]
+
+
+def _encode_frames_cached(
+    tower: Any,
+    cache: "OrderedDict[int, torch.Tensor]",
+    cache_size: int,
+    dino_pixels: torch.Tensor,
+    siglip_pixels: torch.Tensor,
+    frame_keys: Sequence[int],
+    coarse_tokens: int,
+    fine_tokens: int,
+) -> tuple[list[torch.Tensor], torch.Tensor, int]:
+    """Encode a window's frames, reusing cached per-frame coarse features.
+
+    Only the coarse pool is cached: it is the per-frame feature reused across
+    the sliding window (every frame but the current one feeds history). The
+    current frame's fine pool is consumed once, when it is the newest frame, so
+    it is always recomputed rather than stored. A coarse cache hit that is also
+    the current frame still re-runs the tower on that single frame for its fine.
+    Returns the per-frame ``coarse`` pooled tensors (window order), the current
+    frame's ``fine`` pool, and the number of frames run through the tower.
+
+    ``cache_size == 0`` disables reuse: every frame is re-encoded, matching the
+    uncached path exactly (used as an A/B parity toggle).
+    """
+    num_frames = len(frame_keys)
+    coarse_map: dict[int, torch.Tensor] = {}
+
+    miss_idx: list[int] = []
+    for i, key in enumerate(frame_keys):
+        cached = cache.get(key) if cache_size > 0 else None
+        if cached is not None:
+            coarse_map[i] = cached
+            cache.move_to_end(key)
+        else:
+            miss_idx.append(i)
+    # The current frame's fine is never cached; a coarse hit that is also the
+    # current frame must still run the tower for its fine.
+    if num_frames and num_frames - 1 not in miss_idx:
+        miss_idx.append(num_frames - 1)
+
+    if not miss_idx:
+        # Only an empty window reaches here; the current frame is always encoded.
+        raise RuntimeError("empty frame window")
+
+    index = torch.tensor(miss_idx, device=dino_pixels.device)
+    fused, grid = tower(
+        dino_pixels.index_select(0, index),
+        siglip_pixels.index_select(0, index),
+    )
+    coarse_pool = _grid_pool(fused, grid, coarse_tokens)
+    fine_pool = _grid_pool(fused, grid, fine_tokens)
+    for j, i in enumerate(miss_idx):
+        coarse_map[i] = coarse_pool[j]
+        if cache_size > 0:
+            cache[frame_keys[i]] = coarse_pool[j]
+            cache.move_to_end(frame_keys[i])
+            while len(cache) > cache_size:
+                cache.popitem(last=False)
+
+    fine = fine_pool[miss_idx.index(num_frames - 1)]
+    coarse = [coarse_map[i] for i in range(num_frames)]
+    return coarse, fine, len(miss_idx)
 
 
 def _normalize_windows(frames: Sequence[Any]) -> list[list[Any]]:
@@ -811,7 +890,12 @@ class MiniCPMRobotTrackDummyInputsBuilder(
         hf_config = self.info.get_hf_config()
         size = hf_config.image_size
         num_frames = hf_config.history_frames + 1
-        frames = [np.zeros((size, size, 3), dtype=np.uint8) for _ in range(num_frames)]
+        # Distinct per-frame fill so the content cache does not collapse the
+        # window during profiling; the tower must encode the full batch to size
+        # its peak activation memory correctly.
+        frames = [
+            np.full((size, size, 3), i % 256, dtype=np.uint8) for i in range(num_frames)
+        ]
         return {"image": {"frames": frames}}
 
 
@@ -837,20 +921,23 @@ class MiniCPMRobotTrackMultiModalProcessor(
         outputs: dict[str, object] = {"input_ids": [input_ids]}
 
         frames = mm_data.get("frames")
-        if frames:
+        if isinstance(frames, list) and frames:
             # Each mm item is one window; the framework may hand over a single
             # window or a list of windows. Normalize to per-window groups so each
             # window's frame count is recorded for the flat field slicing.
             windows = _normalize_windows(frames)
             dino_list, siglip_list, lengths = [], [], []
+            keys: list[int] = []
             for window in windows:
                 dino_pixels, siglip_pixels = self.info.prepare_pixels(window)
                 dino_list.append(dino_pixels)
                 siglip_list.append(siglip_pixels)
                 lengths.append(len(window))
+                keys.extend(_frame_content_key(frame) for frame in window)
             outputs["dino_pixels"] = torch.cat(dino_list)
             outputs["siglip_pixels"] = torch.cat(siglip_list)
             outputs["frame_lengths"] = torch.tensor(lengths, dtype=torch.long)
+            outputs["frame_keys"] = torch.tensor(keys, dtype=torch.long)
 
         return BatchFeature(outputs, tensor_type="pt")
 
@@ -879,6 +966,9 @@ class MiniCPMRobotTrackMultiModalProcessor(
                     "image", frame_lengths
                 ),
                 siglip_pixels=MultiModalFieldConfig.flat_from_sizes(
+                    "image", frame_lengths
+                ),
+                frame_keys=MultiModalFieldConfig.flat_from_sizes(
                     "image", frame_lengths
                 ),
                 frame_lengths=MultiModalFieldConfig.batched("image"),
@@ -961,6 +1051,12 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
             device=vllm_config.device_config.device,
             dtype=vllm_config.model_config.dtype,
         )
+        # Per-frame coarse-feature cache (pixels-in path): the tower encodes each
+        # unique frame once and reuses its coarse pool while it stays in the
+        # sliding window, so a rolling request re-encodes only the new frame each
+        # step. The current frame's fine pool is never cached.
+        self._frame_cache: OrderedDict[int, torch.Tensor] = OrderedDict()
+        self._frame_cache_size = int(getattr(config, "frame_cache_size", 0))
 
         self.vision_projector = VisionProjector(config.vision_feature_dim, hidden_dim)
         self.temporal_markers = TemporalMarkerEncoder(hidden_dim, config.max_time_steps)
@@ -1057,20 +1153,42 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
         return sequence.to(self.model.embed_tokens.weight.dtype)
 
     def _encode_window(
-        self, dino_pixels: torch.Tensor, siglip_pixels: torch.Tensor
+        self,
+        dino_pixels: torch.Tensor,
+        siglip_pixels: torch.Tensor,
+        frame_keys: Sequence[int],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Encode one raw-frame window into (coarse, coarse_time, fine, fine_time).
 
         The last frame is the current frame (fine pool); earlier frames are
-        history (coarse pool), padded to ``history_frames``.
+        history (coarse pool), padded to ``history_frames``. Per-frame features
+        are served from ``self._frame_cache`` so unchanged history frames are not
+        re-encoded across the sliding window.
         """
         cfg = self.config
-        fused, grid = self.vision_tower(dino_pixels, siglip_pixels)
-        device = fused.device
+        coarse_by_frame, fine, num_encoded = _encode_frames_cached(
+            self.vision_tower,
+            self._frame_cache,
+            self._frame_cache_size,
+            dino_pixels,
+            siglip_pixels,
+            list(frame_keys),
+            cfg.coarse_tokens_per_frame,
+            cfg.fine_tokens_current_frame,
+        )
+        logger.debug(
+            "RobotTrack tower: encoded %d/%d frames (cache=%d/%d)",
+            num_encoded,
+            len(frame_keys),
+            len(self._frame_cache),
+            self._frame_cache_size,
+        )
 
-        fine = _grid_pool(fused[-1:], grid, cfg.fine_tokens_current_frame)[0]
-        history_source = fused[:-1] if fused.size(0) > 1 else fused[-1:]
-        history = _grid_pool(history_source, grid, cfg.coarse_tokens_per_frame)
+        device = fine.device
+        if len(coarse_by_frame) > 1:
+            history = torch.stack(coarse_by_frame[:-1], dim=0)
+        else:
+            history = coarse_by_frame[-1].unsqueeze(0)
         history = _pad_history_frames(history, cfg.history_frames)
         coarse = history.reshape(-1, history.size(-1))
 
@@ -1087,15 +1205,18 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
         dino_pixels: object,
         siglip_pixels: object,
         frame_lengths: object,
+        frame_keys: object,
     ) -> MultiModalEmbeddings:
         dino_pixels = _as_4d(dino_pixels)
         siglip_pixels = _as_4d(siglip_pixels)
         lengths = _as_length_list(frame_lengths)
+        keys = _as_length_list(frame_keys)
         dino_split = torch.split(dino_pixels, lengths)
         siglip_split = torch.split(siglip_pixels, lengths)
+        key_split = _split_by_lengths(keys, lengths)
         return [
-            self._embed_visual_bundle(*self._encode_window(dp, sp))
-            for dp, sp in zip(dino_split, siglip_split)
+            self._embed_visual_bundle(*self._encode_window(dp, sp, wk))
+            for dp, sp, wk in zip(dino_split, siglip_split, key_split)
         ]
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
@@ -1106,6 +1227,7 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
                 dino_pixels,
                 kwargs["siglip_pixels"],
                 kwargs["frame_lengths"],
+                kwargs["frame_keys"],
             )
 
         # features-in: precomputed DINOv3+SigLIP tokens (backward compatible).
@@ -1194,3 +1316,12 @@ def _as_length_list(lengths: object) -> list[int]:
         return flat
     assert isinstance(lengths, torch.Tensor)
     return [int(x) for x in lengths.reshape(-1).tolist()]
+
+
+def _split_by_lengths(values: list[int], lengths: list[int]) -> list[list[int]]:
+    out: list[list[int]] = []
+    start = 0
+    for length in lengths:
+        out.append(values[start : start + length])
+        start += length
+    return out
