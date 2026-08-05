@@ -37,6 +37,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
+from vllm.config.model import _get_and_verify_max_len
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
@@ -1574,6 +1575,40 @@ def test_get_and_verify_max_len_with_nope_layers(
 
     assert actual_max_len == (max_model_len or expected_max_len)
     assert hf_config.rope_parameters["full_attention"] is None
+
+
+@pytest.mark.parametrize(
+    ("draft_derived_len", "target_max_len", "expected_max_len"),
+    [
+        (262144, 131072, 131072),
+        (131072, 131072, 131072),
+        (4096, 131072, 4096),
+    ],
+)
+def test_get_and_verify_max_len_bounds_draft_by_target(
+    draft_derived_len, target_max_len, expected_max_len
+):
+    """A draft model resolves to at most the target model's length.
+
+    Drafts whose checkpoint declares a longer context than the target used to
+    resolve to their own length and only get corrected afterwards, which made
+    the reported length differ from the one actually used.
+    """
+    resolved = _get_and_verify_max_len(
+        hf_config=SimpleNamespace(),
+        model_arch_config=SimpleNamespace(
+            derived_max_model_len_and_key=(
+                draft_derived_len,
+                "max_position_embeddings",
+            )
+        ),
+        tokenizer_config=None,
+        max_model_len=None,
+        disable_sliding_window=False,
+        sliding_window=None,
+        spec_target_max_model_len=target_max_len,
+    )
+    assert resolved == expected_max_len
 
 
 class MockConfig:
