@@ -43,7 +43,7 @@ def _on_gfx942() -> bool:
 @functools.lru_cache(maxsize=1)
 def _get_mla_gluon_gfx942_graph() -> Callable[..., torch.Tensor] | None:
     """Load the graph-safe gfx942 Gluon MLA entry point when available."""
-    module_name = "aiter.ops.triton.gluon.mla_gluon_gfx942"
+    module_name = "aiter.ops.triton.attention.mla"
     try:
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as import_error:
