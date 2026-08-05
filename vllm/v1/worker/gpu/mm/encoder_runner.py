@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import gc
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -50,32 +49,6 @@ class EncoderRunner:
 
     def has_cudagraph(self) -> bool:
         return self.cudagraph_manager is not None
-
-    @torch.inference_mode()
-    def profile_memory(self) -> int:
-        manager = self.cudagraph_manager
-        assert manager is not None
-        logger.info(
-            "Profiling encoder CUDA graph memory for %d graphs",
-            manager.get_num_graphs_to_capture(),
-        )
-        try:
-            gc.collect()
-            torch.accelerator.empty_cache()
-            memory_before = torch.accelerator.get_memory_info()[0]
-            self.capture()
-            memory_after = torch.accelerator.get_memory_info()[0]
-            memory_used = max(memory_before - memory_after, 0)
-        finally:
-            self.clear()
-            gc.collect()
-            torch.accelerator.empty_cache()
-
-        logger.info(
-            "Estimated encoder CUDA graph memory: %.2f GiB",
-            memory_used / (1 << 30),
-        )
-        return memory_used
 
     @torch.inference_mode()
     def capture(self) -> None:
