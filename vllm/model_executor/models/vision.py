@@ -19,7 +19,10 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.transformers_utils.processor import get_video_processor_config
+from vllm.transformers_utils.processor import (
+    get_video_processor_cls_name_from_config,
+    get_video_processor_config,
+)
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -589,15 +592,30 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
     revision = model_config.revision
     config = get_video_processor_config(model, revision=revision)
 
-    do_rescale = config.get("do_rescale", True)
-    do_normalize = config.get("do_normalize", True)
-
-    if not do_rescale and not do_normalize:
-        return nn.Identity()
+    do_rescale = config.get("do_rescale", None)
+    do_normalize = config.get("do_normalize", None)
 
     image_mean = config.get("image_mean", None)
     image_std = config.get("image_std", None)
     rescale_factor = config.get("rescale_factor", 1 / 255)
+
+    if None in [do_rescale, do_normalize, image_mean, image_std]:
+        processor = get_video_processor_cls_name_from_config(model, revision=revision)
+
+        if do_rescale is None:
+            do_rescale = getattr(processor, "do_rescale", None)
+
+        if do_normalize is None:
+            do_normalize = getattr(processor, "do_normalize", None)
+
+        if image_mean is None:
+            image_mean = getattr(processor, "image_mean", None)
+
+        if image_std is None:
+            image_std = getattr(processor, "image_std", None)
+
+    if not do_rescale and not do_normalize:
+        return nn.Identity()
 
     if not do_rescale:
         rescale_factor = 1.0
@@ -606,8 +624,7 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
         image_mean = [0.0, 0.0, 0.0]
         image_std = [1.0, 1.0, 1.0]
 
-    assert image_mean is not None
-    assert image_std is not None
+    assert None not in [do_rescale, do_normalize, image_mean, image_std]
 
     image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
         1.0 / rescale_factor
