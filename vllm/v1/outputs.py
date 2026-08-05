@@ -284,8 +284,10 @@ def make_empty_encoder_model_runner_output(
     # Give every request its own contiguous index
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
-    # No tokens generated yet ⇒ one empty list per request
-    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
+    # An encoder instance never samples, so it emits no tokens at all. The
+    # scheduler finishes these requests once their prompt is fully encoded
+    # (see `Scheduler.update_from_output`).
+    sampled_token_ids: list[list[int]] = [[] for _ in req_ids]
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]

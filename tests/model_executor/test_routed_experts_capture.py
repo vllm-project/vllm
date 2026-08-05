@@ -335,7 +335,8 @@ def test_artifact_worker_connector_owns_capture(monkeypatch):
     )
 
     config = SimpleNamespace(
-        artifact_config=SimpleNamespace(enable_return_routed_experts=True)
+        artifact_config=SimpleNamespace(enable_return_routed_experts=True),
+        kv_transfer_config=None,
     )
     model = Mock()
     connector = artifact_worker.ArtifactWorkerConnector(

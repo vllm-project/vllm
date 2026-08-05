@@ -18,6 +18,20 @@ from vllm.platforms import current_platform
 logger = logging.getLogger(__name__)
 
 
+def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
+    model_config = vllm_config.model_config
+    num_layers = model_config.get_total_num_hidden_layers()
+    num_experts = model_config.get_num_experts()
+    num_experts_per_tok = model_config.get_num_experts_per_tok()
+    if num_layers <= 0 or num_experts <= 0 or num_experts_per_tok <= 0:
+        raise ValueError(
+            "Routed-experts capture requires positive layer, expert, and "
+            "experts-per-token counts, got "
+            f"{num_layers=}, {num_experts=}, {num_experts_per_tok=}."
+        )
+    return num_layers, num_experts, num_experts_per_tok
+
+
 class RoutedExpertsCapturer:
     """Worker-side capturer for routed experts, lives on GPU.
 
@@ -39,10 +53,9 @@ class RoutedExpertsCapturer:
         max_num_batched_tokens: int,
         vllm_config: VllmConfig,
     ) -> None:
-        hf_config = vllm_config.model_config.hf_text_config
-        num_experts_per_tok = vllm_config.model_config.get_num_experts_per_token()
-        num_experts = vllm_config.model_config.get_num_experts()
-        num_layers = hf_config.num_hidden_layers
+        num_layers, num_experts, num_experts_per_tok = _get_routed_experts_shape(
+            vllm_config
+        )
         dtype = torch.uint8 if num_experts <= 256 else torch.uint16
         logger.info(
             "RoutedExpertsCapturer: allocating buffer with "
@@ -51,7 +64,7 @@ class RoutedExpertsCapturer:
             max_num_batched_tokens,
             num_layers,
             num_experts_per_tok,
-            getattr(hf_config, "model_type", "unknown"),
+            vllm_config.model_config.hf_text_config.model_type,
         )
         self.device_buffer = torch.zeros(
             (

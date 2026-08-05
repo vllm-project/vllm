@@ -1434,20 +1434,8 @@ class ModelConfig:
     def get_num_experts(self) -> int:
         return self.model_arch_config.num_experts
 
-    def get_num_experts_per_token(self) -> int:
-        value = getattr_iter(
-            self.hf_text_config,
-            (
-                "num_experts_per_tok",
-                "num_experts_per_token",
-                "top_k_experts",
-            ),
-        )
-        if value is None:
-            raise ValueError(
-                "Model config does not define the number of experts per token."
-            )
-        return value
+    def get_num_experts_per_tok(self) -> int:
+        return self.model_arch_config.num_experts_per_token
 
     def get_total_num_hidden_layers(self) -> int:
         return self.model_arch_config.total_num_hidden_layers

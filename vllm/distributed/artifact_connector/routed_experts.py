@@ -24,12 +24,12 @@ if TYPE_CHECKING:
 def get_routing_shape_and_dtype(
     vllm_config: VllmConfig,
 ) -> tuple[tuple[int, int], str]:
-    hf_config = vllm_config.model_config.hf_text_config
-    num_experts = vllm_config.model_config.get_num_experts()
+    model_config = vllm_config.model_config
+    num_experts = model_config.get_num_experts()
     return (
         (
-            hf_config.num_hidden_layers,
-            vllm_config.model_config.get_num_experts_per_token(),
+            model_config.get_total_num_hidden_layers(),
+            model_config.get_num_experts_per_tok(),
         ),
         "uint8" if num_experts <= 256 else "uint16",
     )

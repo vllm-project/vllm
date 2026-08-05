@@ -20,6 +20,7 @@ from vllm.distributed.artifact_connector.connector import (
     ArtifactSchedulerConnector,
 )
 from vllm.distributed.artifact_connector.routed_experts import (
+    get_routing_shape_and_dtype,
     materialize_routed_experts,
     publish_routed_experts,
     routed_experts_key,
@@ -141,8 +142,9 @@ def _make_vllm_config(
 ):
     model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(num_hidden_layers=3),
-        get_num_experts_per_token=lambda: 2,
+        get_num_experts_per_tok=lambda: 2,
         get_num_experts=lambda: 256,
+        get_total_num_hidden_layers=lambda: 3,
         max_model_len=4096,
     )
     return SimpleNamespace(
@@ -159,6 +161,12 @@ def _make_vllm_config(
         model_config=model_config,
         instance_id="instance",
     )
+
+
+def test_routed_experts_shape_uses_model_arch_config(tmp_path):
+    config = _make_vllm_config(tmp_path)
+
+    assert get_routing_shape_and_dtype(config) == ((3, 2), "uint8")
 
 
 def _make_connector(tmp_path, *, enable_prefix_caching: bool = True):

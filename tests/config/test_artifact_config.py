@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from vllm.config import ArtifactConfig, ModelConfig, VllmConfig
+from vllm.config import ArtifactConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
@@ -58,15 +58,6 @@ def test_artifact_config_defaults():
     assert not config.enable_return_routed_experts
     assert config.shm_dir == "/dev/shm/vllm-artifacts"
     assert config.max_shm_bytes is None
-
-
-def test_kimi_k3_experts_per_token_config_name():
-    model_config = cast(
-        ModelConfig,
-        SimpleNamespace(hf_text_config=SimpleNamespace(num_experts_per_token=16)),
-    )
-
-    assert ModelConfig.get_num_experts_per_token(model_config) == 16
 
 
 def test_legacy_routed_experts_flag_updates_artifact_config():
