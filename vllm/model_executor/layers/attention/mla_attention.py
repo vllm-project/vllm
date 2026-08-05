@@ -1431,46 +1431,29 @@ class MLACommonPrefillMetadata:
         alone exceeds the workspace, spread alone over several chunks.
         """
 
-        # Position of this chunk in `ChunkedContextMetadata.chunks`.
         index: int
-        # Prefill-local request range covered by this chunk.
         request_start: int
         request_end: int
-        # Prefill-local query-token range of the covered requests.
         token_start: int
         token_end: int
-        # Query-token end of the chunk's first request. Only meaningful when
-        # `is_continuation` is set.
         continuation_token_end: int
-        # Set when the chunk's first request already had context processed by an
-        # earlier chunk, so its partial has to be merged rather than written.
         is_continuation: bool
-        # Context rows this chunk gathers into the workspace.
         num_context_tokens: int
-        # Largest per-request context row count in this chunk.
-        max_seq_len: int
-        # Largest per-request query length in this chunk.
+        query_start_loc: torch.Tensor
         max_query_len: int
-        # `seq_starts` argument of the context gather: per-request offset into
-        # the request's context. Holds per-rank local offsets under DCP.
-        starts: torch.Tensor
-        # Per-request context rows in this chunk, kept on CPU for the kernels
-        # that take host-side sequence lengths.
-        seq_lens_cpu: torch.Tensor
-        # Cumulative `seq_lens_cpu`, shape [num_requests + 1].
         cu_seq_lens: torch.Tensor
-        # Chunk-local request index of every gathered context row.
+        starts: torch.Tensor
+        max_seq_len: int
+        seq_lens: torch.Tensor
         token_to_seq: torch.Tensor
-        # Query cumulative offsets rebased at `token_start`.
-        cu_seqlens_q: torch.Tensor
 
-        # for mla DCP: the local-gather / all-gather plan of this chunk
-        num_local_context_tokens: int = 0
+        # for mla DCP
         padded_local_seq_lens: list[int] | None = None
+        local_context_lens_allranks: list[list[int]] | None = None
         padded_local_cu_seq_lens: torch.Tensor | None = None
         padded_local_token_to_seq: torch.Tensor | None = None
+        num_local_context_tokens: int = 0
         local_starts: list[int] | None = None
-        local_context_lens_allranks: list[list[int]] | None = None
 
         @property
         def num_requests(self) -> int:
@@ -1479,11 +1462,6 @@ class MLACommonPrefillMetadata:
         def covers_all_context_tokens(
             self, chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata"
         ) -> bool:
-            """Whether this chunk alone spans every prefill token with context.
-
-            When it does, its partial is the whole context partial and no
-            accumulator is needed.
-            """
             return (
                 len(chunked_context.chunks) == 1
                 and self.token_start == 0
@@ -1492,19 +1470,11 @@ class MLACommonPrefillMetadata:
 
     @dataclass
     class ChunkedContextMetadata:
-        # Scratch buffer every chunk's context gather writes into.
-        workspace: torch.Tensor
-        # Per-request context chunks, in request order.
-        chunks: "list[MLACommonPrefillMetadata.ContextChunk]"
-        # Per-prefill total context length.
         context_lens: torch.Tensor
-        context_lens_cpu: torch.Tensor
-        # Prefill-local query tokens the context partial spans. Tokens at or
-        # past this offset take the suffix partial unchanged.
+        workspace: torch.Tensor
+        chunks: "list[MLACommonPrefillMetadata.ContextChunk]"
+        context_lens_list: list[int]
         prefill_tokens_with_context: int
-        # Query-token ranges inside `[0, prefill_tokens_with_context)` owned by
-        # prefills without context; the context partial is undefined there and
-        # has to be neutralized before the final merge.
         empty_token_ranges: list[tuple[int, int]]
 
     block_table: torch.Tensor
@@ -1693,25 +1663,7 @@ def plan_mla_context_chunks(
     max_context_chunk: int,
     padded_rows: Callable[[int], int],
 ) -> list[_ContextChunkPlan]:
-    """Pack per-request contexts into workspace-sized chunks.
-
-    Requests are visited in order and packed whole for as long as the gathered
-    rows fit `row_budget`. A request whose context alone does not fit is emitted
-    on its own, split into `max_context_chunk`-sized pieces. Prefills without
-    context are skipped, so a chunk never covers an empty context span, and
-    chunks stay in request order, so only a chunk's first request can continue
-    a request an earlier chunk started.
-
-    Args:
-        context_lens: Per-prefill context length (`seq_len - query_len`).
-        row_budget: Workspace rows a single chunk may gather.
-        max_context_chunk: Context rows one chunk of a split request covers.
-            Must be aligned so that every sub-chunk start is a legal gather
-            offset, and small enough that `padded_rows` of it fits the budget.
-        padded_rows: Workspace rows a context of the given length occupies.
-            Not the identity under DCP, where each rank gathers its own shard
-            padded up to the interleave block size.
-    """
+    """Pack per-request contexts into workspace-sized chunks."""
     assert max_context_chunk > 0
     plans: list[_ContextChunkPlan] = []
     num_requests = len(context_lens)
@@ -1951,33 +1903,33 @@ def build_mla_chunked_context_metadata(
             continuation_token_end=query_start_loc[plan.request_start + 1],
             is_continuation=plan.is_continuation,
             num_context_tokens=token_slice.stop - token_slice.start,
-            max_seq_len=max(plan.seq_lens),
+            query_start_loc=cu_seqlens_q[boundary_slice],
             max_query_len=max(query_lens),
-            starts=starts[request_slice],
-            seq_lens_cpu=seq_lens_cpu[request_slice],
             cu_seq_lens=cu_seq_lens[boundary_slice],
+            starts=starts[request_slice],
+            max_seq_len=max(plan.seq_lens),
+            seq_lens=seq_lens_cpu[request_slice],
             token_to_seq=token_to_seq[token_slice],
-            cu_seqlens_q=cu_seqlens_q[boundary_slice],
             num_local_context_tokens=local_token_slice.stop - local_token_slice.start,
         )
         if use_dcp:
             assert local_context_lens_allranks is not None
             chunk.padded_local_seq_lens = local_seq_lens_per_chunk[index]
+            chunk.local_context_lens_allranks = local_context_lens_allranks[
+                plan.request_start : plan.request_end
+            ]
             chunk.padded_local_cu_seq_lens = padded_local_cu_seq_lens[boundary_slice]
             chunk.padded_local_token_to_seq = padded_local_token_to_seq[
                 local_token_slice
             ]
             chunk.local_starts = local_starts_per_chunk[index]
-            chunk.local_context_lens_allranks = local_context_lens_allranks[
-                plan.request_start : plan.request_end
-            ]
         chunks.append(chunk)
 
     return MLACommonPrefillMetadata.ChunkedContextMetadata(
+        context_lens=context_lens_cpu.to(device, non_blocking=True),
         workspace=chunked_prefill_workspace,
         chunks=chunks,
-        context_lens=context_lens_cpu.to(device, non_blocking=True),
-        context_lens_cpu=context_lens_cpu,
+        context_lens_list=context_lens,
         prefill_tokens_with_context=prefill_tokens_with_context,
         empty_token_ranges=empty_token_ranges,
     )

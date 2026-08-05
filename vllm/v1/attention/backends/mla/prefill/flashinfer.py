@@ -180,7 +180,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             assert chunked_context is not None
             for chunk in chunked_context.chunks:
                 self._prefill_chunks[chunk.index].plan(
-                    qo_indptr=chunk.cu_seqlens_q,
+                    qo_indptr=chunk.query_start_loc,
                     kv_indptr=chunk.cu_seq_lens,
                     num_qo_heads=num_qo_heads,
                     num_kv_heads=num_kv_heads,

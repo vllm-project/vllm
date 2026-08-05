@@ -681,14 +681,14 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 chunk_topk = self._remap_topk_to_ranges(
                     topk_per_req[requests],
                     chunk.starts,
-                    chunk.seq_lens_cpu.tolist(),
+                    chunk.seq_lens.tolist(),
                 )
                 key_starts = None
             attn_out, lse = self._run_masked_mha(
                 q=q[chunk.token_start : chunk.token_end],
                 k=k,
                 v=v,
-                cu_seqlens_q=chunk.cu_seqlens_q,
+                cu_seqlens_q=chunk.query_start_loc,
                 cu_seqlens_k=chunk.cu_seq_lens,
                 max_seqlen_q=chunk.max_query_len,
                 max_seqlen_k=chunk.max_seq_len,
@@ -773,7 +773,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             output.copy_(attn_out[..., : self.v_head_dim].flatten(start_dim=-2))
             return
 
-        context_lens = chunked_context.context_lens_cpu.tolist()
+        context_lens = chunked_context.context_lens_list
         dense_mask = self._try_build_global_mask(
             topk_per_req,
             q_lens,

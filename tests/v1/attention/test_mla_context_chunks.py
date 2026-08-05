@@ -85,7 +85,7 @@ def test_chunks_gather_every_context_row_exactly_once(context_lens, workspace_si
         previous_request_start = chunk.request_start
 
         starts = chunk.starts.tolist()
-        seq_lens = chunk.seq_lens_cpu.tolist()
+        seq_lens = chunk.seq_lens.tolist()
         assert len(starts) == len(seq_lens) == chunk.num_requests
         for offset, (start, length) in enumerate(zip(starts, seq_lens)):
             assert length > 0, "a chunk must not cover an empty context span"
@@ -131,7 +131,7 @@ def test_continuation_is_confined_to_a_chunks_first_request():
         assert chunk.continuation_token_end == query_start_loc[chunk.request_start + 1]
         assert chunk.token_start == query_start_loc[chunk.request_start]
         assert chunk.token_end == query_start_loc[chunk.request_end]
-        assert chunk.cu_seqlens_q.tolist() == [
+        assert chunk.query_start_loc.tolist() == [
             offset - chunk.token_start
             for offset in query_start_loc[chunk.request_start : chunk.request_end + 1]
         ]

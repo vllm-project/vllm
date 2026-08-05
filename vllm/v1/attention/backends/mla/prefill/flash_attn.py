@@ -462,7 +462,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=chunk.cu_seqlens_q,
+            cu_seqlens_q=chunk.query_start_loc,
             cu_seqlens_k=chunk.cu_seq_lens,
             max_seqlen_q=chunk.max_query_len,
             max_seqlen_k=chunk.max_seq_len,
