@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, replace
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -8,7 +9,8 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
@@ -32,6 +34,42 @@ class RankSegment:
     @property
     def num_tokens(self) -> int:
         return self.global_batch_slice.stop - self.global_batch_slice.start
+
+
+class PCPContextPlan(NamedTuple):
+    """Cached-context attention plan for one PCP+DCP step.
+
+    The LSE combine requires identical queries on every rank, so the queries
+    are all-gathered back into global batch order and the *global* batch's rows
+    are attended against this rank's cache shard. Every index here is either
+    the global batch's own metadata or one of the two permutations the manager
+    already maintains for the hidden states.
+    """
+
+    padded_num_tokens: int  # all-gather slab size (rank-invariant)
+    restore_idx: torch.Tensor  # [num_global_tokens] int64, slab -> global order
+    local_idx: torch.Tensor  # [num_local_tokens] int64, global order -> local
+    cu_q: torch.Tensor  # [num_global_reqs + 1] int32
+    max_q: int
+    ctx_lens: torch.Tensor  # [num_global_reqs] int32, this DCP rank's shard
+    ctx_cu: torch.Tensor  # [num_global_reqs + 1] int32
+    max_ctx: int
+    block_table: torch.Tensor  # [num_global_reqs, max_num_blocks]
+
+
+class PCPPlan(NamedTuple):
+    """Per-step plan for the sharded PCP+DCP attention path.
+
+    The new tokens of the step are fully materialized on every rank by the
+    cache-write all-gather, so each rank attends its own rows against them with
+    no collective; ``ctx`` covers the cached prefix and is None when nothing was
+    cached this step (then the new-token pass alone is exact).
+    """
+
+    new_kv_idx: torch.Tensor  # [total_new_kv] int64, into the gathered slab
+    new_cu_kv: torch.Tensor  # [num_local_rows + 1] int32
+    new_max_kv: int
+    ctx: PCPContextPlan | None
 
 
 class PCPManager:
@@ -69,7 +107,39 @@ class PCPManager:
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
+        # GLOBAL batch composition (rank-invariant: every PCP rank sees the same
+        # global batch, so this is identical across ranks). Gates the
+        # cache-write all-gather and the row-plan build -- per-rank
+        # is_prefilling can differ (DualChunkSwap leaves some ranks with zero
+        # prefill chunks), which would desync NCCL collectives.
+        self._global_has_prefill: bool = False
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
+
+        # Per-step state for the sharded PCP+DCP attention path, captured at
+        # partition time and consumed by ``build_plan`` (see PCPPlan).
+        self._local_segments: list[RankSegment] = []
+        self._hidden_restore_idx_np: np.ndarray | None = None
+        self._padded_num_tokens: int = 0
+        # The cached-context pass runs on the global batch's rows, so it needs
+        # its own block tables: the ones prepare_attn() gathers describe the
+        # rank-local DualChunkSwap rows.
+        self._global_block_tables: tuple[torch.Tensor, ...] | None = (
+            tuple(
+                table.new_zeros((max_num_reqs, table.shape[1]))
+                for table in block_tables.input_block_tables
+            )
+            if block_tables is not None and max_num_reqs is not None
+            else None
+        )
+        self._global_block_table_ptrs: torch.Tensor | None = (
+            torch.tensor(
+                [t.data_ptr() for t in self._global_block_tables],
+                dtype=torch.uint64,
+                device=device,
+            )
+            if self._global_block_tables is not None
+            else None
+        )
 
         max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
         self._input_buffers = (
@@ -132,8 +202,10 @@ class PCPManager:
         if pcp_size <= 1:
             return
 
-        if not model_config.use_mla:
-            raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
+        # Non-MLA (GQA/MHA) models are supported on the FlashAttention backend,
+        # which opts in via AttentionImplBase.supports_pcp. MLA uses its own
+        # latent-attention PCP path. Per-backend capability is still enforced by
+        # check_attention_cp_compatibility in vllm/v1/worker/cp_utils.py.
         if parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError("MRV2 PCP does not support PP yet.")
         if model_config.is_encoder_decoder:
@@ -305,6 +377,8 @@ class PCPManager:
                     dtype=np.int64,
                 )
 
+        self._hidden_restore_idx_np = hidden_restore_idx
+        self._padded_num_tokens = padded_num_tokens
         self._hidden_restore_idx = async_copy_to_gpu(
             hidden_restore_idx, device=self.device
         )
@@ -330,6 +404,8 @@ class PCPManager:
         num_scheduled_tokens = global_batch.num_scheduled_tokens
         num_computed_tokens = global_batch.num_computed_tokens_np
         is_prefilling = global_batch.is_prefilling_np
+        # Rank-invariant global composition (see __init__ comment).
+        self._global_has_prefill = bool(is_prefilling.any())
 
         segments_by_rank, per_rank_num_tokens = self._build_batch_layout(
             num_scheduled_tokens,
@@ -347,6 +423,7 @@ class PCPManager:
                     rank_local_batch_slice=slice(0, 0),
                 )
             ]
+        self._local_segments = local_segments
 
         num_local_reqs = len(local_segments)
         if num_local_reqs > input_buffers.max_num_reqs:
@@ -557,6 +634,14 @@ class PCPManager:
         return block_tables, slot_mappings
 
     def prepare_slot_mappings(self) -> torch.Tensor:
+        """Slot mappings for the cache write, in the layout the write expects.
+
+        The width doubles as the protocol with the attention backend: a mapping
+        wider than the rank's own tokens means the new K/V must be all-gathered
+        across PCP before writing (prefill chunks live on different ranks). A
+        pure-decode step needs no gather -- its rows are replicated -- so it
+        gets the plain rank-local mapping.
+        """
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert self._global_batch is not None
@@ -568,6 +653,8 @@ class PCPManager:
             global_batch.num_tokens,
             out=self._global_batch_slot_mappings,
         )
+        if not self._global_has_prefill:
+            return global_batch_slot_mappings
         return self._convert_to_gathered_slot_mappings(global_batch_slot_mappings)
 
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
@@ -609,6 +696,123 @@ class PCPManager:
             return hidden_states
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
+
+    def populate_attn_metadata(self, attn_metadata: dict | None) -> None:
+        """Stamp this step's :class:`PCPPlan` onto each GQA attention metadata.
+
+        Left unset (None) when the step needs no PCP-specific attention: warmup,
+        a replicated pure-decode batch, or a non-sharded cache. MLA uses its own
+        metadata class and its own PCP path, so it is skipped.
+        """
+        if not attn_metadata:
+            return
+        plan = self.build_plan()
+        if plan is None:
+            return
+        for meta in attn_metadata.values():
+            if isinstance(meta, FlashAttentionMetadata):
+                meta.pcp_plan = plan
+
+    def build_plan(self) -> PCPPlan | None:
+        """Build the per-step plan for the sharded PCP+DCP attention path.
+
+        Returns None when the rank-local batch is already the global batch as
+        far as attention is concerned: no global batch (warmup), an unsharded
+        cache, or a pure-decode step (decode rows are replicated on every rank,
+        so the ordinary DCP path handles them).
+        """
+        gb = self._global_batch
+        restore_idx_np = self._hidden_restore_idx_np
+        if (
+            gb is None
+            or restore_idx_np is None
+            or self.dcp_world_size <= 1
+            or not self._global_has_prefill
+        ):
+            return None
+        assert self._block_tables is not None
+        assert self._hidden_restore_idx is not None
+        assert self._padded_gather_idx is not None
+
+        num_reqs = gb.num_reqs
+        query_start_loc = gb.query_start_loc_np
+        num_computed = gb.num_computed_tokens_np[:num_reqs]
+
+        # New tokens: each local row attends its request's new tokens up to the
+        # row's end, addressed into the write-gathered slab. Rows of the same
+        # request overlap, so the spans are materialized rather than sliced.
+        new_kv_parts = []
+        new_kv_lens = []
+        for seg in self._local_segments:
+            req_start = int(query_start_loc[seg.global_batch_req_idx])
+            row_end = seg.global_batch_slice.stop
+            new_kv_parts.append(restore_idx_np[req_start:row_end])
+            new_kv_lens.append(row_end - req_start)
+        new_kv_idx_np = (
+            np.concatenate(new_kv_parts) if new_kv_parts else np.empty(0, np.int64)
+        )
+        new_cu_np = np.zeros(len(new_kv_lens) + 1, dtype=np.int32)
+        np.cumsum(np.asarray(new_kv_lens, dtype=np.int32), out=new_cu_np[1:])
+
+        # Cached context: the global batch's rows against this rank's shard.
+        # Nothing cached anywhere means the new-token pass alone is exact, and
+        # the whole (collective-bearing) context pass can be skipped -- a
+        # rank-invariant decision, since the global batch is.
+        ctx_np = num_computed.astype(np.int32)
+        has_ctx = bool(ctx_np.any())
+        dcp_ctx_np = (
+            get_dcp_local_seq_lens(
+                torch.from_numpy(ctx_np),
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_interleave,
+            )
+            .numpy()
+            .astype(np.int32)
+            if has_ctx
+            else np.zeros(0, dtype=np.int32)
+        )
+        ctx_cu_np = np.zeros(len(dcp_ctx_np) + 1, dtype=np.int32)
+        np.cumsum(dcp_ctx_np, out=ctx_cu_np[1:])
+
+        new_kv_idx = async_copy_to_gpu(new_kv_idx_np, device=self.device)
+        int32_blob = async_copy_to_gpu(
+            np.concatenate((new_cu_np, dcp_ctx_np, ctx_cu_np)), device=self.device
+        )
+        num_cu = len(new_cu_np)
+        new_cu_kv = int32_blob[:num_cu]
+
+        ctx = None
+        if has_ctx:
+            ctx_lens = int32_blob[num_cu : num_cu + num_reqs]
+            ctx_cu = int32_blob[num_cu + num_reqs :]
+            block_table = self._block_tables.gather_block_tables(
+                gb.idx_mapping,
+                num_reqs,
+                out=self._global_block_tables,
+                out_ptrs=self._global_block_table_ptrs,
+            )[0]
+            rank_start = self.pcp_rank * self._padded_num_tokens
+            num_local_tokens = sum(seg.num_tokens for seg in self._local_segments)
+            ctx = PCPContextPlan(
+                padded_num_tokens=self._padded_num_tokens,
+                restore_idx=self._hidden_restore_idx,
+                local_idx=self._padded_gather_idx[
+                    rank_start : rank_start + num_local_tokens
+                ],
+                cu_q=gb.query_start_loc[: num_reqs + 1],
+                max_q=int(gb.num_scheduled_tokens.max()),
+                ctx_lens=ctx_lens,
+                ctx_cu=ctx_cu,
+                max_ctx=int(dcp_ctx_np.max()),
+                block_table=block_table,
+            )
+        return PCPPlan(
+            new_kv_idx=new_kv_idx,
+            new_cu_kv=new_cu_kv,
+            new_max_kv=max(new_kv_lens, default=0),
+            ctx=ctx,
+        )
 
     def restore_for_sampling(
         self,

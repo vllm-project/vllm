@@ -1332,7 +1332,14 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        if decode_context_parallel_size > 1 and not self.use_mla:
+        # DCP groups span the PCP axis before TP, so DCP only splits query heads
+        # when it reaches past PCP (see pcp.maybe_all_gather_q_for_dcp). When
+        # dcp == pcp the group holds replicated Q and none of these TP-head
+        # constraints apply.
+        if (
+            decode_context_parallel_size > parallel_config.prefill_context_parallel_size
+            and not self.use_mla
+        ):
             total_num_kv_heads = self.get_total_num_kv_heads()
             if tensor_parallel_size <= total_num_kv_heads:
                 raise ValueError(
