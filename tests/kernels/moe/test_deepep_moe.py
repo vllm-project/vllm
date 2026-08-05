@@ -488,9 +488,16 @@ def test_deep_ep_moe(
     world_dp_size: tuple[int, int],
     per_act_token_quant: bool,
     workspace_init,
+    monkeypatch,
 ):
     low_latency_mode = False
     use_fp8_dispatch = False
+
+    if current_platform.is_rocm():
+        # The cooperative kernel launches on this path segfault inside the ROCm
+        # HSA runtime at process exit while rocprofiler-sdk is attached, and
+        # torch attaches it implicitly. Workers are spawned, so they inherit it.
+        monkeypatch.setenv("ROCPROFILER_REGISTER_ENABLED", "0")
 
     set_random_seed(7)
     world_size, dp_size = world_dp_size
