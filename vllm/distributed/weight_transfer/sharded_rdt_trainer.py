@@ -44,8 +44,8 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
+    RdtRouter,
     arena_alloc_bytes,
-    count_consumers,
     layerwise_groups,
 )
 from vllm.logger import init_logger
@@ -120,12 +120,12 @@ class _RDTProducerServer:
     def __init__(
         self,
         *,
-        free_target: int,
         num_rdt_buffers: int,
         arena_presize_gb: float,
         nosync: bool,
         pack_check: bool,
         gather_lookahead: int,
+        served_names: list[str] | None = None,
     ) -> None:
         import gc
 
@@ -135,12 +135,17 @@ class _RDTProducerServer:
         self._cache_cond = threading.Condition()
         self._gather_error: BaseException | None = None
 
-        # [RDT-FREE-REFCOUNT] Each assigned consumer fires free_gather for every
-        # group; the group is actually freed (and reported back to the engine)
-        # only on the free_target-th call.
-        self._free_target = max(1, free_target)
+        # Names this producer publishes, so a misrouted pull fails loudly
+        # instead of blocking forever in the cache wait. None = serve anything.
+        self._served_names = set(served_names) if served_names is not None else None
+
+        # [RDT-FREE-REFCOUNT] Each consumer routed to this producer for a group
+        # fires free_gather once; the group is actually freed (and reported back
+        # to the engine) on the last of them. The target is per group — under
+        # per-layer routing a producer serves different consumer counts for
+        # different groups — and arrives with the group's publish.
+        self._free_targets: dict[tuple, int] = {}
         self._free_counts: dict[tuple, int] = {}
-        self._free_lock = threading.Lock()
 
         # [RDT-BACKPRESSURE] Published-but-not-yet-freed group keys. publish_group
         # blocks while len(...) >= gather_lookahead; free_gather (the consumer
@@ -148,7 +153,6 @@ class _RDTProducerServer:
         # drops its trainer-side refs to the shared storage.
         self._lookahead = max(1, gather_lookahead)
         self._inflight_keys: list[tuple] = []
-        self._name_to_key: dict[str, tuple] = {}
         self._freed_pending: list[tuple] = []
 
         # [RDT-RING] Per-consumer ring of packed serve arenas, rotated per pull.
@@ -166,6 +170,10 @@ class _RDTProducerServer:
         self._cache_event: dict[str, torch.cuda.Event] = {}
 
         self._pack_check = pack_check
+        # [RDT-PACK-DSTS] (consumer_id, ring idx, spec names) ->
+        # (arena data_ptr, destination views). Keyed on the arena pointer so a
+        # ring regrow invalidates rather than writing into a freed buffer.
+        self._pack_dsts: dict[tuple, tuple[int, list[torch.Tensor]]] = {}
 
         # profiling counters
         self._timing_lock = threading.Lock()
@@ -187,39 +195,107 @@ class _RDTProducerServer:
     def ping(self) -> int:
         return self._device_index
 
+    def warmup_nixl(self) -> None:
+        """Create this server's NIXL agent NOW, while the rank's GPU is quiet.
+
+        The engine calls this at spawn time, before the server-name all-gather
+        barrier — i.e. before any trainer rank can be spinning in a collective
+        (gather or barrier). Lazily creating the agent later (first
+        reserve_serve_arena, during the sender's worker-init RPC) deadlocks on
+        EFA-class fabrics: libfabric's fi_getinfo probes CUDA HMEM support with
+        a cudaMalloc/cudaFree, and cudaFree blocks behind the co-resident
+        trainer rank's persistent NCCL kernel — which cannot finish because the
+        collective is waiting on the sender rank, which is waiting on the
+        worker-init RPC, which is waiting on this server. Creating (and
+        HMEM-warming) the agent up front breaks the cycle. The warmup buffer
+        stays registered/alive so the agent and its CUDA-HMEM path stay
+        initialized.
+        """
+        from ray.experimental import register_nixl_memory
+
+        self._nixl_warmup_buf = torch.zeros(1 << 20, dtype=torch.uint8, device="cuda")
+        with self._reg_lock:
+            register_nixl_memory(self._nixl_warmup_buf)
+
     # ---------------- engine-facing (per sync) ----------------
 
     def begin_sync(self) -> None:
         """Reset per-sync free/backpressure state. The driver awaits the
         previous sync's finish (which drains every consumer's frees) before the
-        next begins, so nothing is in flight here."""
-        with self._free_lock:
-            self._free_counts.clear()
+        next begins, so nothing is in flight here.
+
+        The packed-destination cache deliberately SURVIVES: the layout repeats
+        every sync, which is what makes caching it worthwhile.
+        """
         with self._cache_cond:
             self._gather_error = None
             self._inflight_keys.clear()
-            self._name_to_key.clear()
             self._freed_pending.clear()
+            self._free_counts.clear()
+            self._free_targets.clear()
 
-    def publish_group(self, group_key: tuple, entries: dict[str, tuple]) -> list[tuple]:
+    def _release_group_locked(self, key: tuple) -> None:
+        """Drop a freed group's cache entries and release its backpressure slot.
+
+        The group key IS its name tuple, so no name -> key map is needed: a free
+        whose names do not match a published group cannot silently release a
+        different group's slot.
+
+        Caller must hold ``_cache_cond``.
+        """
+        for name in key:
+            self._cache.pop(name, None)
+            self._cache_event.pop(name, None)
+        self._free_counts.pop(key, None)
+        self._free_targets.pop(key, None)
+        if key in self._inflight_keys:
+            self._inflight_keys.remove(key)
+            self._freed_pending.append(key)
+
+    def publish_group(
+        self, group_key: tuple, entries: tuple, free_target: int
+    ) -> list[tuple]:
         """Rebuild one gather group's CUDA-IPC tensors and publish to the serve
         cache. Blocks while `gather_lookahead` groups are already in flight so
         trainer memory stays bounded (the consumer's `free_gather` drains it).
         Returns the group keys freed since the last call so the engine can drop
-        its refs to the shared storage."""
+        its refs to the shared storage.
+
+        ``entries`` is ``(storages, views)``: ``storages`` maps a storage id to
+        the ``reduce_tensor`` args of a whole-storage uint8 view (ONE CUDA-IPC
+        export per storage), ``views`` maps each served name to
+        ``(sid, dtype_name, shape, stride, storage_offset)`` — rebuilt here as
+        ``as_strided`` views. The per-name rebuild loop this replaces cost
+        ~32 us/name of pure Python plus one IPC open per name-with-new-storage
+        (and IPC opens are ~9x slower still when the exporting process uses
+        the expandable_segments allocator — see trainer_init's warning).
+
+        ``free_target`` is how many consumers are routed to this producer for
+        this group (>= 1; the engine skips publishing a group no consumer pulls
+        from it). Frees can arrive before the publish they belong to — a
+        consumer that pulls nothing of a group frees it as soon as its plan
+        starts — so a group whose frees have already all landed is released
+        here rather than waiting for a free that will never come.
+        """
         with self._cache_cond:
             while len(self._inflight_keys) >= self._lookahead:
                 if self._gather_error is not None:
                     break
                 self._cache_cond.wait()
 
-        rebuilt: dict[str, torch.Tensor] = {}
-        for name, (reduce_args, _dtype_name, _shape) in entries.items():
+        storages, views = entries
+        bases: dict[int, torch.Tensor] = {}
+        for sid, reduce_args in storages.items():
             list_args = list(reduce_args)
             # Index 6 of reduce_tensor's args is the exporter's device index;
             # rebuild on this server's device (same physical GPU as the rank).
             list_args[6] = self._device_index
-            rebuilt[name] = rebuild_cuda_tensor(*list_args)
+            bases[sid] = rebuild_cuda_tensor(*list_args)
+        rebuilt: dict[str, torch.Tensor] = {}
+        for name, (sid, dtype_name, shape, stride, storage_offset) in views.items():
+            typed = bases[sid].view(getattr(torch, dtype_name))
+            rebuilt[name] = torch.as_strided(typed, shape, stride, storage_offset)
+        del bases
 
         ev = None
         if self._serve_stream is not None:
@@ -231,8 +307,9 @@ class _RDTProducerServer:
                 for n in rebuilt:
                     self._cache_event[n] = ev
             self._inflight_keys.append(group_key)
-            for n in rebuilt:
-                self._name_to_key[n] = group_key
+            self._free_targets[group_key] = max(1, int(free_target))
+            if self._free_counts.get(group_key, 0) >= self._free_targets[group_key]:
+                self._release_group_locked(group_key)
             freed = self._freed_pending
             self._freed_pending = []
             self._cache_cond.notify_all()
@@ -260,26 +337,20 @@ class _RDTProducerServer:
     # ---------------- consumer-facing (called by name over Ray) ----------------
 
     def free_gather(self, names: list[str]) -> None:
-        """Consumer back-edge: one consumer finished pulling this group. Ref-count
-        to `free_target`; on the last, drop the cache entries, release one
-        backpressure slot, and record the freed key for the engine."""
-        key = self._name_to_key.get(names[0]) if names else None
-        with self._free_lock:
-            count = self._free_counts.get(tuple(names), 0) + 1
-            self._free_counts[tuple(names)] = count
-            do_free = count >= self._free_target
-            if do_free:
-                del self._free_counts[tuple(names)]
-        if not do_free:
-            return
+        """Consumer back-edge: one consumer finished pulling this group.
+
+        Ref-counts to the group's ``free_target``; on the last free, drops the
+        cache entries, releases one backpressure slot, and records the freed key
+        for the engine. A free that arrives before its publish is only counted —
+        ``publish_group`` completes it.
+        """
+        key = tuple(names)
         with self._cache_cond:
-            for name in names:
-                self._cache.pop(name, None)
-                self._cache_event.pop(name, None)
-                self._name_to_key.pop(name, None)
-            if key is not None and key in self._inflight_keys:
-                self._inflight_keys.remove(key)
-                self._freed_pending.append(key)
+            count = self._free_counts.get(key, 0) + 1
+            self._free_counts[key] = count
+            target = self._free_targets.get(key)
+            if target is not None and count >= target:
+                self._release_group_locked(key)
             self._cache_cond.notify_all()
 
     def reserve_serve_arena(self, consumer_id: int, nbytes: int) -> None:
@@ -301,19 +372,27 @@ class _RDTProducerServer:
                 rings[i] = t
 
     @ray.method(tensor_transport="nixl")
-    def rdt_produce_weights_batched(
-        self, specs: list, pack: bool = True, consumer_id: int = 0
-    ):
+    def rdt_produce_weights_batched(self, specs: list, consumer_id: int = 0):
         """Serve one batched slice request over NIXL.
 
         Waits until the specs' names are cached, replays each spec's op chain
         (pure views into cached tensors, guarded by ALLOWED_OPS), byte-packs the
         slices 16B-aligned into this consumer's ring slot (mirroring the
-        consumer's identical layout), and returns the one packed blob.
-        `pack=False` serves one tensor per spec (the rare unbaked path).
+        consumer's identical layout), and returns the one packed blob. Callers
+        that want a single slice pass one spec and read the blob back with that
+        slice's dtype/shape.
         """
         t_m0 = time.perf_counter()
         needed = sorted({n for n, _ in specs})
+        if self._served_names is not None:
+            unserved = [n for n in needed if n not in self._served_names]
+            if unserved:
+                # Without this the cache wait below would block forever: this
+                # producer never gathers these names, so they can never arrive.
+                raise RuntimeError(
+                    f"pull routed to the wrong producer: {unserved[:3]} "
+                    f"({len(unserved)} names) are not served here"
+                )
         t_w0 = time.perf_counter()
         with self._cache_cond:
             while not all(n in self._cache for n in needed):
@@ -339,12 +418,6 @@ class _RDTProducerServer:
             sliced.append((off, t))
             nbytes += t.numel() * t.element_size()
 
-        if not pack:
-            out = [t.contiguous().clone() for _off, t in sliced]
-            torch.accelerator.synchronize()
-            self._bump_timing(t_m0, wait_s, t_s0, len(specs), nbytes)
-            return out
-
         with self._serve_lock:
             rings = self._serve_rings.setdefault(consumer_id, [None] * self._nring)
             idx = self._serve_idx.get(consumer_id, 0)
@@ -367,11 +440,25 @@ class _RDTProducerServer:
                 if e is not None
             }.values():
                 ss.wait_event(ev)
-        with torch.cuda.stream(ss):
+        # [RDT-PACK-DSTS] The destination views are a pure function of this
+        # consumer's packed layout, which is byte-identical every sync (its plan
+        # is static), so build them ONCE per (consumer, ring slot, group) and
+        # reuse. Rebuilding them per call cost 5.2ms of the 7.5ms measured for a
+        # 384-spec 235B group — three Python ops per spec, all redundant.
+        # _foreach_copy_ then issues the copies in one dispatch (a further
+        # 0.6ms; verified byte-identical to the per-view loop).
+        dst_key = (consumer_id, idx, tuple(n for n, _ in specs))
+        cached = self._pack_dsts.get(dst_key)
+        if cached is None or cached[0] != arena.data_ptr():
+            dsts = []
             for off, t in sliced:
                 nb = t.numel() * t.element_size()
-                view = arena[off : off + nb].view(t.dtype).reshape(t.shape)
-                view.copy_(t)
+                dsts.append(arena[off : off + nb].view(t.dtype).reshape(t.shape))
+            self._pack_dsts[dst_key] = (arena.data_ptr(), dsts)
+        else:
+            dsts = cached[1]
+        with torch.cuda.stream(ss):
+            torch._foreach_copy_(dsts, [t for _off, t in sliced])
         if ss is not None:
             ss.synchronize()
 
@@ -471,6 +558,11 @@ class ShardedRDTTrainerWeightTransferEngine(
         # Group-major metadata / partition, computed at trainer_init.
         self._meta: list[ParamMeta] = []
         self._groups: list[list[str]] = []
+        # Per-group routing, resolved at trainer_init from the source's ownership.
+        self._router: RdtRouter | None = None
+        self._group_owners: list[list[int]] = []
+        self._owned_idx: list[int] = []
+        self._free_targets: dict[int, int] = {}
         # Strong refs to gathered tensors we've shared into the server, keyed by
         # group key. CUDA-IPC exports must outlive the importer, so we hold them
         # until the server reports the group freed. See send_weights.
@@ -484,6 +576,23 @@ class ShardedRDTTrainerWeightTransferEngine(
         import ray
 
         return ray.get(getattr(self._server, method).remote(*args))
+
+    def _publish_async(self, key, entries, free_target):
+        """Fire publish_group WITHOUT blocking (the gather loop overlaps the
+        publish with the next group's gather) and return a handle that
+        ``_drop_when_ready`` resolves. Ray actor handle in production; a plain
+        (non-Ray) fake server runs inline and returns its result directly."""
+        method = self._server.publish_group
+        remote = getattr(method, "remote", None)
+        if remote is not None:
+            return remote(key, entries, free_target)
+        return method(key, entries, free_target)
+
+    def _drop_when_ready(self, ref) -> None:
+        import ray
+
+        freed = ray.get(ref) if isinstance(ref, ray.ObjectRef) else ref
+        self._drop_inflight(freed)
 
     # ---------------- construction ----------------
 
@@ -506,6 +615,23 @@ class ShardedRDTTrainerWeightTransferEngine(
             init_info=init_info,
         )
 
+        # CUDA-IPC publish is the trainer engine's hot path; the VMM-based
+        # expandable_segments allocator makes IPC storage opens ~9x slower on
+        # both the export and rebuild side (measured; see publish_group).
+        # Frameworks that enable it (e.g. via PYTORCH_CUDA_ALLOC_CONF) should
+        # disable it around send_weights so the gathered tensors land in
+        # classic, IPC-fast segments. Detection below only sees the env var —
+        # runtime _set_allocator_settings changes are not introspectable.
+        import os as _os
+
+        if "expandable_segments:True" in _os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""):
+            logger.warning(
+                "Sharded-RDT trainer: PYTORCH_CUDA_ALLOC_CONF enables "
+                "expandable_segments; CUDA-IPC weight publishing will be "
+                "several times slower. Disable expandable segments around "
+                "weight sync (allocate gather buffers in classic segments)."
+            )
+
         engine._meta = list(source.metadata())
         names = [m.name for m in engine._meta]
         engine._groups = layerwise_groups(names)
@@ -518,9 +644,14 @@ class ShardedRDTTrainerWeightTransferEngine(
             )
 
         world, rank = engine._world_and_rank()
-        num_producers = world
-        free_target = count_consumers(num_producers, init_info.num_consumers, rank)
-        engine._spawn_server(free_target)
+        engine._build_router(world, rank)
+        served = [
+            n
+            for gi in engine._owned_idx
+            if engine._free_targets[gi] > 0
+            for n in engine._groups[gi]
+        ]
+        engine._spawn_server(served)
 
         # Every rank's server must exist before the sender's init RPC (the worker
         # init calls reserve_serve_arena back on ALL producer servers). The
@@ -537,6 +668,91 @@ class ShardedRDTTrainerWeightTransferEngine(
             return torch.distributed.get_world_size(), torch.distributed.get_rank()
         return 1, self._init_info.rank
 
+    def _build_router(self, world: int, rank: int) -> None:
+        """Resolve per-group ownership and this rank's publish plan.
+
+        A source may gather only part of the model — pipeline-parallel producers
+        gather within a stage rather than to all ranks — so ownership is
+        all-gathered here and shipped to the consumers in the worker init info.
+        Every rank must agree on who serves each group: a consumer pulling from
+        a producer that never gathered the group would block forever. Sources
+        without ``owned_groups`` own everything, keeping the gather-to-all
+        layout on its historical path.
+        """
+        assert self.source is not None  # guaranteed by trainer_init
+        num_groups = len(self._groups)
+        owned: list[int] | None = None
+        declared = self.source.owned_groups()
+        if declared is not None:
+            owned = sorted({int(g) for g in declared})
+            bad = [g for g in owned if not 0 <= g < num_groups]
+            if bad:
+                raise ValueError(
+                    f"WeightSource.owned_groups() out of range for "
+                    f"{num_groups} groups: {bad}"
+                )
+            if not owned:
+                raise ValueError(
+                    "WeightSource.owned_groups() is empty; a rank with nothing "
+                    "to serve cannot take part in the gather"
+                )
+
+        # One collective carries both: the ownership lists and a digest of the
+        # metadata they index into. The digest check is what makes partial
+        # ownership safe — only the sender's metadata reaches the consumers, so a
+        # rank that described just its own share would leave the rest of the
+        # model silently un-transferred instead of failing.
+        digest = self._meta_digest()
+        per_rank = self._all_gather_owned(world, (digest, owned))
+        mismatched = [r for r, (d, _o) in enumerate(per_rank) if d != digest]
+        if mismatched:
+            raise ValueError(
+                f"WeightSource.metadata() disagrees across trainer ranks "
+                f"(rank {rank} digest {digest}, differing ranks {mismatched[:4]}). "
+                "Every rank must describe the WHOLE model, even when it owns "
+                "only some groups."
+            )
+        owned_per_rank = [o for _d, o in per_rank]
+
+        group_owners: list[list[int]] | None = None
+        if any(o is not None for o in owned_per_rank):
+            group_owners = [[] for _ in range(num_groups)]
+            for r, rank_owned in enumerate(owned_per_rank):
+                for gi in range(num_groups) if rank_owned is None else rank_owned:
+                    group_owners[gi].append(r)
+
+        router = RdtRouter(
+            world, self._init_info.num_consumers, group_owners, num_groups
+        )
+        router.validate()
+        self._router = router
+        self._group_owners = group_owners or []
+        self._owned_idx = owned if owned is not None else list(range(num_groups))
+        self._free_targets = {
+            gi: router.free_target(rank, gi) for gi in self._owned_idx
+        }
+
+    def _meta_digest(self) -> str:
+        """Stable digest of this rank's metadata (name order + count)."""
+        import hashlib
+
+        h = hashlib.sha256()
+        h.update(f"{len(self._meta)}\n".encode())
+        for m in self._meta:
+            h.update(m.name.encode())
+            h.update(b"\n")
+        return h.hexdigest()[:16]
+
+    def _all_gather_owned(self, world: int, mine: tuple) -> list[tuple]:
+        """All-gather each rank's (metadata digest, owned groups)."""
+        if world <= 1 or not (
+            torch.distributed.is_available() and torch.distributed.is_initialized()
+        ):
+            return [mine]
+        gathered: list[Any] = [None] * world
+        torch.distributed.all_gather_object(gathered, mine)
+        return gathered
+
     def _all_gather_server_names(self, world: int, rank: int) -> list[str]:
         assert self._server_name is not None
         if world <= 1 or not (
@@ -547,7 +763,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         torch.distributed.all_gather_object(gathered, self._server_name)
         return [n for n in gathered if n is not None]
 
-    def _spawn_server(self, free_target: int) -> None:
+    def _spawn_server(self, served_names: list[str]) -> None:
         import ray
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
@@ -590,7 +806,11 @@ class ShardedRDTTrainerWeightTransferEngine(
             namespace=ii.trainer_actor_namespace,
             num_cpus=0,
             num_gpus=0,
-            max_concurrency=max(4, ii.num_rdt_buffers + 2),
+            # Thread budget: up to K produce calls sit BLOCKED in cache-wait
+            # per bound consumer, plus one backpressure-blocked publish_group,
+            # plus free_gather / begin/end_sync must still get a thread
+            # promptly (a queued free_gather stalls the whole credit loop).
+            max_concurrency=max(8, 2 * ii.num_rdt_buffers + 4),
             enable_tensor_transport=True,
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=node_id, soft=False
@@ -598,7 +818,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             runtime_env=runtime_env,
         )
         self._server = server_cls.remote(
-            free_target=free_target,
+            served_names=served_names,
             num_rdt_buffers=ii.num_rdt_buffers,
             arena_presize_gb=ii.arena_presize_gb,
             nosync=ii.nosync,
@@ -606,6 +826,9 @@ class ShardedRDTTrainerWeightTransferEngine(
             gather_lookahead=ii.gather_lookahead,
         )
         ray.get(self._server.ping.remote())
+        # Pre-barrier NIXL warmup: must complete before the server-name
+        # all-gather so no rank can be inside a collective yet (see warmup_nixl).
+        ray.get(self._server.warmup_nixl.remote())
 
     def _build_worker_init_info(self, server_names: list[str]):
         from vllm.distributed.weight_transfer.sharded_rdt_engine import (
@@ -624,6 +847,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             dtype_names=dtype_names,
             shapes=shapes,
             group_lens=group_lens,
+            group_owners=self._group_owners,
             num_consumers=self._init_info.num_consumers,
             num_rdt_buffers=self._init_info.num_rdt_buffers,
             layerwise_split=self._init_info.layerwise_split,
@@ -671,39 +895,100 @@ class ShardedRDTTrainerWeightTransferEngine(
         gather0 = time.perf_counter()
         assert self.source is not None  # guaranteed by trainer_init
         self._rpc("begin_sync")
-        it = iter(self.source)
+        # A source may expose the optional iter_groups() extension — (names,
+        # tensors) parallel lists per layerwise group — so the handoff is one
+        # generator resume per GROUP rather than per tensor. On a per-expert MoE
+        # model that is ~95 resumes instead of ~37k, worth ~0.9s of pure Python
+        # per sync; sources without it use the per-name iterator unchanged.
+        # The source yields only the groups this rank owns (all of them unless it
+        # declares ownership), in metadata order; the checks below hold it to
+        # that. Every owner of a group must reach it in the same order or their
+        # shared gather collective mismatches.
+        _iter_groups = getattr(self.source, "iter_groups", None)
+        git = _iter_groups() if _iter_groups is not None else None
+        it = iter(self.source) if git is None else None
+        # Publishes are fired without an inline ray.get and harvested this
+        # window deep, so the publish RPC + server-side rebuild overlap the
+        # NEXT group's gather/export instead of serializing the loop. The
+        # server's lookahead backpressure still bounds resident groups (a
+        # queued publish blocks server-side; worst case lookahead + window - 1
+        # groups are live at once).
+        _PUBLISH_WINDOW = 2
+        pending_publish: list = []
+
         try:
-            for group in self._groups:
+            for gi in self._owned_idx:
+                group = self._groups[gi]
                 key = tuple(group)
-                entries: dict[str, tuple] = {}
-                refs: dict[str, torch.Tensor] = {}
-                for expected in group:
-                    name, tensor = next(it)
-                    if name != expected:
+                if git is not None:
+                    names, tensors = next(git)
+                    if list(names) != list(group):
                         raise RuntimeError(
-                            f"WeightSource yielded {name!r} but expected "
-                            f"{expected!r}; iteration order must match metadata."
+                            f"WeightSource group yielded {len(names)} names "
+                            f"starting {names[:2]!r} but expected {len(group)} "
+                            f"starting {group[:2]!r}; iteration order must "
+                            "match metadata."
                         )
+                else:
+                    assert it is not None  # set whenever git is None
+                    names, tensors = [], []
+                    for expected in group:
+                        name, tensor = next(it)
+                        if name != expected:
+                            raise RuntimeError(
+                                f"WeightSource yielded {name!r} but expected "
+                                f"{expected!r}; iteration order must match metadata."
+                            )
+                        names.append(name)
+                        tensors.append(tensor)
+                free_target = self._free_targets.get(gi, 0)
+                if free_target <= 0:
+                    # Gathered (the group's collective spans every owner) but no
+                    # consumer pulls it from this rank. Publishing it would park
+                    # a group nobody frees, holding a backpressure slot until
+                    # end_sync waits forever.
+                    names, tensors = [], []
+                    continue
+                # Share each unique STORAGE once (one cudaIpc export instead of
+                # one per name) and describe every name as an as_strided view
+                # spec relative to its storage.
+                storages: dict[int, tuple] = {}
+                views: dict[str, tuple] = {}
+                refs: dict[str, torch.Tensor] = {}
+                for name, tensor in zip(names, tensors):
                     tensor = tensor.detach()
                     if not tensor.is_cuda:
                         tensor = tensor.cuda()
                     tensor = tensor.contiguous()
                     refs[name] = tensor  # keep the export alive
-                    _rebuild, reduce_args = reduce_tensor(tensor)
-                    entries[name] = (
-                        reduce_args,
+                    ust = tensor.untyped_storage()
+                    sid = ust.data_ptr()
+                    if sid not in storages:
+                        base = torch.empty(0, dtype=torch.uint8, device=tensor.device)
+                        base.set_(ust, 0, (ust.nbytes(),))
+                        _rebuild, reduce_args = reduce_tensor(base)
+                        storages[sid] = reduce_args
+                    views[name] = (
+                        sid,
                         str(tensor.dtype).split(".")[-1],
                         list(tensor.shape),
+                        list(tensor.stride()),
+                        tensor.storage_offset(),
                     )
                 # Hold our refs before publishing; drop them only when the
                 # server reports the group freed (IPC export must outlive import).
                 self._inflight[key] = refs
-                freed = self._rpc("publish_group", key, entries)
-                self._drop_inflight(freed)
+                pending_publish.append(
+                    self._publish_async(key, (storages, views), free_target)
+                )
+                while len(pending_publish) >= _PUBLISH_WINDOW:
+                    self._drop_when_ready(pending_publish.pop(0))
                 if update_future is not None and update_future.done():
                     # update_weights returned/failed early — surface now instead
                     # of blocking further publishes.
                     update_future.result()
+            while pending_publish:
+                self._drop_when_ready(pending_publish.pop(0))
             freed = self._rpc("end_sync")
             self._drop_inflight(freed)
         except BaseException as e:

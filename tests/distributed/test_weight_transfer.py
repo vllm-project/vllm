@@ -7,6 +7,7 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import pickle
+from dataclasses import asdict
 from unittest.mock import MagicMock
 
 import pybase64 as base64
@@ -51,7 +52,11 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
 )
-from vllm.distributed.weight_transfer.sharded_rdt_common import layerwise_groups
+from vllm.distributed.weight_transfer.sharded_rdt_common import (
+    RdtRouter,
+    assign_producer_indices,
+    layerwise_groups,
+)
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     ShardedRDTTrainerInitInfo,
     ShardedRDTTrainerWeightTransferEngine,
@@ -1762,23 +1767,34 @@ class _FakeProducerServer:
     def __init__(self, auto_free=True):
         self.order: list[str] = []
         self.published: list[tuple] = []
+        self.free_targets: list[int] = []
         self.inflight: list[tuple] = []
         self.auto_free = auto_free
+        self.free_counts: dict[tuple, int] = {}
         self._pending_freed: list[tuple] = []
 
     def begin_sync(self):
         self.order.append("begin")
 
-    def publish_group(self, key, entries):
+    def publish_group(self, key, entries, free_target):
         self.order.append("publish")
         self.published.append(key)
+        self.free_targets.append(free_target)
         self.inflight.append(key)
         freed: list[tuple] = self._pending_freed
         self._pending_freed = []
-        if self.auto_free:
+        if self.auto_free or self.free_counts.get(key, 0) >= free_target:
             self.inflight.remove(key)
             freed = freed + [key]
         return freed
+
+    def free_gather(self, names):
+        """Consumer back-edge; may arrive before the group's publish."""
+        key = tuple(names)
+        self.free_counts[key] = self.free_counts.get(key, 0) + 1
+        if key in self.inflight:
+            self.inflight.remove(key)
+            self._pending_freed.append(key)
 
     def free_one(self):
         """Manually free the oldest in-flight group (backpressure test)."""
@@ -1795,7 +1811,9 @@ class _FakeProducerServer:
         self.order.append("error")
 
 
-def _rdt_engine_with_fake_server(source, *, is_sender, client, server, monkeypatch):
+def _rdt_engine_with_fake_server(
+    source, *, is_sender, client, server, monkeypatch, fleet_owned=None
+):
     """Build a ShardedRDTTrainerWeightTransferEngine wired to an in-process fake
     server (no Ray, no CUDA IPC): bypass trainer_init's spawn, set the
     group-major metadata, and route _rpc to the fake."""
@@ -1813,6 +1831,21 @@ def _rdt_engine_with_fake_server(source, *, is_sender, client, server, monkeypat
     engine._groups = layerwise_groups(names)
     engine._server = server
     engine._rpc = lambda method, *args: getattr(server, method)(*args)
+    # What trainer_init resolves from the source's ownership + the fleet's
+    # all-gather. ``fleet_owned`` stands in for that all-gather so a partial-
+    # ownership rank can be tested without a real process group; the fleet must
+    # cover every group or the router rejects it (nothing would serve the rest).
+    if fleet_owned is None:
+        engine._build_router(1, 0)
+    else:
+        # Stands in for the (metadata digest, owned groups) all-gather; every
+        # rank reports THIS rank's digest, i.e. agreeing metadata.
+        monkeypatch.setattr(
+            engine,
+            "_all_gather_owned",
+            lambda w, mine: [(mine[0], o) for o in fleet_owned],
+        )
+        engine._build_router(len(fleet_owned), 0)
     return engine
 
 
@@ -1957,3 +1990,248 @@ def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="inference side rejected update"):
         engine.send_weights()
+
+
+class TestRdtRouter:
+    """Who serves and frees each gather group.
+
+    A wrong answer here is not a wrong number but a hang: a consumer pulling
+    from a producer that never gathered a group waits forever, and a published
+    group nobody frees stalls the producer's end_sync. So every case checks the
+    conservation law that makes the credit loop terminate — for each group, the
+    per-producer free targets sum to the consumer count.
+    """
+
+    @staticmethod
+    def _conserved(router, num_groups):
+        return all(
+            sum(router.free_target(p, g) for p in router.owners(g))
+            == router.num_consumers
+            for g in range(num_groups)
+        )
+
+    def test_identity_when_fleets_match(self):
+        r = RdtRouter(8, 8, None, num_groups=6)
+        assert [r.bound_producers(c) for c in range(8)] == [[c] for c in range(8)]
+        assert all(r.producer_for(3, g) == 3 for g in range(6))
+        assert self._conserved(r, 6)
+
+    def test_gather_to_all_keeps_the_historical_binding(self):
+        # 16 producers / 8 consumers: same producers per consumer as the
+        # pre-router block rule, but each group is pulled from ONE of them.
+        r = RdtRouter(16, 8, None, num_groups=95)
+        for c in range(8):
+            assert r.bound_producers(c) == assign_producer_indices(16, 8, c)
+        assert [r.producer_for(0, g) for g in range(4)] == [0, 1, 0, 1]
+        # No producer is left publishing groups nobody pulls from it.
+        served = {r.producer_for(c, g) for c in range(8) for g in range(95)}
+        assert served == set(range(16))
+        assert self._conserved(r, 95)
+
+    def test_fan_in_shares_one_producer(self):
+        r = RdtRouter(2, 8, None, num_groups=5)
+        assert [r.bound_producers(c) for c in range(8)] == [[c // 4] for c in range(8)]
+        assert r.free_target(0, 0) == 4 and r.free_target(1, 0) == 4
+        assert self._conserved(r, 5)
+
+    def test_pipeline_stages_route_to_the_owning_stage(self):
+        # 2 stages x 8 ranks; groups 0-2 on stage 0, 3-5 on stage 1.
+        owners = [list(range(8))] * 3 + [list(range(8, 16))] * 3
+        r = RdtRouter(16, 8, owners)
+        for c in range(8):
+            assert r.bound_producers(c) == [c, c + 8]
+            assert [r.producer_for(c, g) for g in range(6)] == [c] * 3 + [c + 8] * 3
+        assert r.owned_groups(0) == [0, 1, 2]
+        assert r.owned_groups(8) == [3, 4, 5]
+        # A rank owning a group serves exactly one consumer; non-owners serve none.
+        assert r.free_target(0, 0) == 1 and r.free_target(0, 3) == 0
+        assert self._conserved(r, 6)
+        r.validate()
+
+    def test_owner_without_a_consumer_gets_a_zero_target(self):
+        # Fewer consumers than a stage has ranks: some owners serve nothing and
+        # must not publish (the trainer skips those groups).
+        owners = [list(range(8))] * 4
+        r = RdtRouter(8, 2, owners)
+        r.validate()
+        assert self._conserved(r, 4)
+        assert any(r.free_target(p, g) == 0 for p in range(8) for g in range(4)), (
+            "expected some (producer, group) pairs to serve no consumer"
+        )
+
+    def test_validate_rejects_an_unowned_group(self):
+        with pytest.raises(ValueError, match="no owner"):
+            RdtRouter(4, 2, [[0, 1], [], [2, 3]]).validate()
+
+    def test_validate_rejects_an_out_of_range_owner(self):
+        with pytest.raises(ValueError, match="out of range"):
+            RdtRouter(2, 2, [[0, 5]]).validate()
+
+
+class _OwnedSource(_ListSource):
+    """A source that gathers only some groups, like a pipeline-parallel rank."""
+
+    def __init__(self, pairs, owned_group_idx):
+        super().__init__(pairs)
+        self._owned = list(owned_group_idx)
+        groups = layerwise_groups([n for n, _ in pairs])
+        self._owned_names = [n for gi in self._owned for n in groups[gi]]
+
+    def owned_groups(self):
+        return list(self._owned)
+
+    def __iter__(self):
+        by_name = dict(self._pairs)
+        return iter([(n, by_name[n]) for n in self._owned_names])
+
+
+def test_sharded_rdt_publishes_only_owned_groups(monkeypatch):
+    server = _FakeProducerServer(auto_free=True)
+    engine = _rdt_engine_with_fake_server(
+        _OwnedSource(_rdt_source_two_layers()._pairs, [1, 2]),
+        is_sender=False,
+        client=RecordingClient(),
+        server=server,
+        monkeypatch=monkeypatch,
+        fleet_owned=[[1, 2], [0, 3]],  # this rank holds the layers, rank 1 the rest
+    )
+    engine.send_weights()
+
+    assert server.published == [("model.layers.0.w",), ("model.layers.1.w",)]
+    assert server.order == ["begin", "publish", "publish", "end"]
+    assert engine._inflight == {}
+    assert engine._group_owners == [[1], [0], [0], [1]]
+
+
+def test_sharded_rdt_owned_group_order_mismatch_raises(monkeypatch):
+    class _MisorderedOwned(_OwnedSource):
+        def __iter__(self):
+            return iter(list(super().__iter__())[::-1])
+
+    server = _FakeProducerServer(auto_free=True)
+    engine = _rdt_engine_with_fake_server(
+        _MisorderedOwned(_rdt_source_two_layers()._pairs, [1, 2]),
+        is_sender=False,
+        client=RecordingClient(),
+        server=server,
+        monkeypatch=monkeypatch,
+        fleet_owned=[[1, 2], [0, 3]],
+    )
+    with pytest.raises(RuntimeError, match="iteration order must match"):
+        engine.send_weights()
+    assert "error" in server.order
+
+
+def test_sharded_rdt_skips_publishing_a_group_no_consumer_pulls(monkeypatch):
+    """A group gathered but routed to nobody must not be published: it would
+    hold a backpressure slot that no free ever releases."""
+    server = _FakeProducerServer(auto_free=True)
+    source = _rdt_source_two_layers()
+    engine = _rdt_engine_with_fake_server(
+        source,
+        is_sender=False,
+        client=RecordingClient(),
+        server=server,
+        monkeypatch=monkeypatch,
+    )
+    engine._free_targets[1] = 0  # group 1 serves no consumer from this rank
+    engine.send_weights()
+
+    assert ("model.layers.0.w",) not in server.published
+    assert len(server.published) == 3
+    assert server.order.count("publish") == 3
+
+
+def test_sharded_rdt_publish_carries_the_group_free_target(monkeypatch):
+    server = _FakeProducerServer(auto_free=True)
+    engine = _rdt_engine_with_fake_server(
+        _rdt_source_two_layers(),
+        is_sender=False,
+        client=RecordingClient(),
+        server=server,
+        monkeypatch=monkeypatch,
+    )
+    engine.send_weights()
+    assert server.free_targets == [1, 1, 1, 1]
+
+
+def test_sharded_rdt_worker_init_info_carries_group_owners(monkeypatch):
+    import json
+
+    server = _FakeProducerServer(auto_free=True)
+    engine = _rdt_engine_with_fake_server(
+        _OwnedSource(_rdt_source_two_layers()._pairs, [0, 1]),
+        is_sender=True,
+        client=RecordingClient(),
+        server=server,
+        monkeypatch=monkeypatch,
+        fleet_owned=[[0, 1], [2, 3]],
+    )
+    worker_init = engine._build_worker_init_info(["srv_rk0", "srv_rk1"])
+    assert worker_init.group_owners == [[0], [0], [1], [1]]
+    assert len(worker_init.group_owners) == len(worker_init.group_lens)
+    # The payload crosses the control plane as JSON.
+    assert json.loads(json.dumps(asdict(worker_init)))["group_owners"] == [
+        [0],
+        [0],
+        [1],
+        [1],
+    ]
+
+
+def test_weight_source_owns_every_group_by_default():
+    """The contract's default: a source that says nothing owns the whole model."""
+    src = _rdt_source_two_layers()
+    assert src.owned_groups() is None
+    assert ModuleSource(torch.nn.Linear(2, 2)).owned_groups() is None
+
+
+def test_sharded_rdt_rejects_out_of_range_owned_group(monkeypatch):
+    class _BadOwned(_OwnedSource):
+        def owned_groups(self):
+            return [0, 99]
+
+    with pytest.raises(ValueError, match="out of range"):
+        _rdt_engine_with_fake_server(
+            _BadOwned(_rdt_source_two_layers()._pairs, [0]),
+            is_sender=False,
+            client=RecordingClient(),
+            server=_FakeProducerServer(),
+            monkeypatch=monkeypatch,
+        )
+
+
+def test_sharded_rdt_rejects_empty_owned_groups(monkeypatch):
+    class _OwnsNothing(_ListSource):
+        def owned_groups(self):
+            return []
+
+    with pytest.raises(ValueError, match="empty"):
+        _rdt_engine_with_fake_server(
+            _OwnsNothing(_rdt_source_two_layers()._pairs),
+            is_sender=False,
+            client=RecordingClient(),
+            server=_FakeProducerServer(),
+            monkeypatch=monkeypatch,
+        )
+
+
+def test_sharded_rdt_rejects_metadata_disagreement_across_ranks(monkeypatch):
+    """Only the sender's metadata reaches the consumers, so a rank describing
+    just its own share must fail loudly rather than silently drop the rest."""
+    engine = _rdt_engine_with_fake_server(
+        _OwnedSource(_rdt_source_two_layers()._pairs, [1, 2]),
+        is_sender=False,
+        client=RecordingClient(),
+        server=_FakeProducerServer(auto_free=True),
+        monkeypatch=monkeypatch,
+        fleet_owned=[[1, 2], [0, 3]],  # a covering fleet, so construction succeeds
+    )
+    # Now rank 1 reports a DIFFERENT metadata digest for the same model.
+    monkeypatch.setattr(
+        engine,
+        "_all_gather_owned",
+        lambda w, mine: [mine, ("deadbeefdeadbeef", [0, 3])],
+    )
+    with pytest.raises(ValueError, match="disagrees across trainer ranks"):
+        engine._build_router(2, 0)

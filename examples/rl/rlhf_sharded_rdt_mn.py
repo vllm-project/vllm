@@ -7,12 +7,12 @@ The canonical M:N example.
 Fleet sizes and model come from env (see below), so the SAME file runs both
 M:N regimes end to end:
   - more trainers than inference (P>C, e.g. 8->4): each consumer binds a
-    contiguous block of producers and SPLITS every chunk-pull evenly across
-    them (load balance);
+    contiguous block of producers and rotates between them BY GATHER GROUP
+    (load balance; one producer serves each whole pull);
   - more inference than trainers (C>P, e.g. 4->8): several consumers share one
     producer, which keeps a per-consumer serve ring and ref-counts frees.
-The 1:1 case reduces to the pre-M:N behavior. See assign_producer_indices in
-sharded_rdt_common.py for the block rule.
+The 1:1 case reduces to the pre-M:N behavior. See RdtRouter in
+sharded_rdt_common.py for the routing rule.
 
 Architecture:
   - Each FSDP trainer rank builds a ``ShardedRDTTrainerWeightTransferEngine``

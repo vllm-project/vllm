@@ -66,10 +66,10 @@ class WeightSource(ABC):
       case it should cache.
     * iteration — yields fully-materialized `(name, tensor)` pairs, one at a
       time. Materializing is typically a collective (FSDP `full_tensor()`, a
-      Megatron export), so every trainer rank must iterate the same source in the
-      same order in lockstep, or ranks deadlock. Under pipeline parallelism a
-      rank may not own a parameter at all — iterating still drives the collective
-      and the yielded tensor is only meaningful on the sender.
+      Megatron export), so the ranks that share a parameter must iterate it in
+      the same order in lockstep, or they deadlock.
+    * `owned_groups()` — which gather groups this rank holds, for producers that
+      are split so each rank holds only part of the model. Defaults to all.
 
     `iter(source)` must yield a *fresh* pass each round. Backends with custom
     producer logic (Megatron export, RDT plans, MoE re-fusing) subclass this.
@@ -82,6 +82,33 @@ class WeightSource(ABC):
     @abstractmethod
     def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
         raise NotImplementedError
+
+    def owned_groups(self) -> list[int] | None:
+        """Indices of the gather groups this rank holds, or None for all of them.
+
+        Groups partition `metadata()`'s name order into the pre block, one group
+        per decoder layer, then the post block (`layerwise_groups`), so index *g*
+        means the same group on every rank and on every consumer. Override when
+        producers are split so each holds only part of the model — pipeline
+        parallelism, where a layer's gather spans only the ranks that hold it.
+        The default owns everything, which is the gather-to-all layout.
+
+        Two requirements come with overriding it:
+
+        * `metadata()` must still describe the WHOLE model on every rank. The
+          group partition, the iteration checks and the consumers' pull plans are
+          all built from one rank's metadata, so a rank that reported only its own
+          share would leave the rest of the model silently un-transferred. The
+          sharded-RDT engine cross-checks this across ranks at init.
+        * iteration must yield ONLY the owned groups, in metadata order. A rank
+          that does not hold a group must not iterate it: the group's gather is a
+          collective among its owners alone, so a non-owner joining in has
+          nothing to contribute and nothing to receive.
+
+        Returns:
+            Sorted group indices, or None to own every group.
+        """
+        return None
 
 
 class ModuleSource(WeightSource):
