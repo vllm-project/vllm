@@ -55,8 +55,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
     # Hook points for model-specific optimizations. A CUDA graph records the
-    # branch Python took while capturing, so state toggled here must match at
-    # capture and replay time -- hence the decode pair also fires in `capture`.
+    # branch Python took while capturing, so every pair fires in `capture` as
+    # well as in `propose`, around the matching region. Keeping both paths
+    # symmetric means a hook can toggle state that selects a code path without
+    # having to reason about which phase gets captured first.
     def on_prefill_begin(self, num_reqs: int) -> None: ...
 
     def on_prefill_end(self, num_reqs: int) -> None: ...
@@ -115,6 +117,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+        self.on_prefill_begin(self.max_num_reqs)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
             self.model_state,
@@ -124,6 +127,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
+        self.on_prefill_end(self.max_num_reqs)
 
         if self.num_speculative_steps == 1:
             return
