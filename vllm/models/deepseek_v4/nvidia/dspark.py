@@ -125,6 +125,16 @@ def _apply_rope_gptj_last(
     return out
 
 
+# DSpark draft layers run their MoE on the non-sequence-parallel convention
+# regardless of how the target model is parallelized. Both the layer that builds
+# the MoE and the loader that decides whether to pad block-quantized
+# shared-expert weights must agree on this, so they read the same constant: the
+# two used to derive it independently and disagreed whenever
+# use_sequence_parallel_moe was set, which slices the padded weights on the
+# wrong block boundary across TP ranks.
+_DSPARK_USE_SEQUENCE_PARALLEL = False
+
+
 class DeepSeekV4DSparkLayer(nn.Module):
     def __init__(
         self,
@@ -156,7 +166,11 @@ class DeepSeekV4DSparkLayer(nn.Module):
             topk_indices_buffer=None,
             aux_stream_list=None,
         )
-        self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{runtime_prefix}.ffn")
+        self.ffn = DeepseekV4MoE(
+            vllm_config,
+            prefix=f"{runtime_prefix}.ffn",
+            use_sequence_parallel=_DSPARK_USE_SEQUENCE_PARALLEL,
+        )
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
 
@@ -702,7 +716,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.quant_config = get_draft_quant_config(vllm_config)
         self.pad_shared_expert = (
             getattr(self.quant_config, "weight_block_size", None) is not None
-            and not vllm_config.parallel_config.use_sequence_parallel_moe
+            and not _DSPARK_USE_SEQUENCE_PARALLEL
         )
         self.dspark_aux_hidden_size = hidden_size * len(self.target_layer_ids)
 
