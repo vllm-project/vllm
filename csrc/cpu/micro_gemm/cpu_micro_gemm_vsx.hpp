@@ -6,14 +6,6 @@
 namespace cpu_micro_gemm {
 namespace {
 
-// Float32 to BF16 (RNE) for packing weights
-static inline uint16_t f32_to_bf16_rne(float f) {
-    uint32_t u; std::memcpy(&u, &f, 4);
-    if ((u & 0x7fffffff) > 0x7f800000) return (uint16_t)((u >> 16) | 0x0040);
-    uint32_t lsb = (u >> 16) & 1;
-    u += 0x7FFF + lsb;
-    return (uint16_t)(u >> 16);
-}
 
 // 8-16-16 pattern, 2 regs for A, 4 regs for B, 8 regs for C, [8, K] @ [K, 16]
 template <typename scalar_t>
@@ -49,16 +41,16 @@ class TileGemmVSX {
 
     // Load initial accumulators if accum_c is true
     if (accum_c) {
-        typedef float v4sf __attribute__((vector_size(16)));
         for (int i = 0; i < tiles_m; i++) {
             for (int j = 0; j < tiles_n; j++) {
-                v4sf tmp[4];
+                __vector float tmp[4];
+                #pragma GCC unroll 4
                 for(int r=0; r<4; r++) {
                     int r_idx = i*4 + r;
                     if (r_idx < M) {
-                        tmp[r] = (v4sf)vec_xl(0, &c_ptr[r_idx * ldc + j*4]);
+                        tmp[r] = (__vector float)vec_xl(0, &c_ptr[r_idx * ldc + j*4]);
                     } else {
-                        tmp[r] = (v4sf){0.0f, 0.0f, 0.0f, 0.0f};
+                        tmp[r] = (__vector float){0.0f, 0.0f, 0.0f, 0.0f};
                     }
                 }
                 __builtin_mma_build_acc(&acc[i][j], 
@@ -89,16 +81,21 @@ class TileGemmVSX {
             if constexpr (M >= 3) v2 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[2 * lda + k_idx]); else v2 = vzero;
             __vector unsigned short v3;
             if constexpr (M >= 4) v3 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[3 * lda + k_idx]); else v3 = vzero;
+            __vector unsigned int w0 = (__vector unsigned int)v0;
+            __vector unsigned int w1 = (__vector unsigned int)v1;
+            __vector unsigned int w2 = (__vector unsigned int)v2;
+            __vector unsigned int w3 = (__vector unsigned int)v3;
             
-            __vector unsigned short vh01 = vec_mergeh(v0, v1);
-            __vector unsigned short vh23 = vec_mergeh(v2, v3);
-            vA_0[0] = vec_mergeh((__vector unsigned int)vh01, (__vector unsigned int)vh23);
-            vA_2[0] = vec_mergel((__vector unsigned int)vh01, (__vector unsigned int)vh23);
+            __vector unsigned int w01_h = vec_mergeh(w0, w1);
+            __vector unsigned int w23_h = vec_mergeh(w2, w3);
+            __vector unsigned int w01_l = vec_mergel(w0, w1);
+            __vector unsigned int w23_l = vec_mergel(w2, w3);
             
-            __vector unsigned short vl01 = vec_mergel(v0, v1);
-            __vector unsigned short vl23 = vec_mergel(v2, v3);
-            vA_4[0] = vec_mergeh((__vector unsigned int)vl01, (__vector unsigned int)vl23);
-            vA_6[0] = vec_mergel((__vector unsigned int)vl01, (__vector unsigned int)vl23);
+            typedef __vector unsigned long long v_ull_t;
+            vA_0[0] = (__vector unsigned int)vec_mergeh((v_ull_t)w01_h, (v_ull_t)w23_h);
+            vA_2[0] = (__vector unsigned int)vec_mergel((v_ull_t)w01_h, (v_ull_t)w23_h);
+            vA_4[0] = (__vector unsigned int)vec_mergeh((v_ull_t)w01_l, (v_ull_t)w23_l);
+            vA_6[0] = (__vector unsigned int)vec_mergel((v_ull_t)w01_l, (v_ull_t)w23_l);
         }
         
         if constexpr (M >= 5) {
@@ -111,36 +108,74 @@ class TileGemmVSX {
             __vector unsigned short v7;
             if constexpr (M >= 8) v7 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&a_ptr[7 * lda + k_idx]); else v7 = vzero;
             
-            __vector unsigned short vh45 = vec_mergeh(v4, v5);
-            __vector unsigned short vh67 = vec_mergeh(v6, v7);
-            vA_0[1] = vec_mergeh((__vector unsigned int)vh45, (__vector unsigned int)vh67);
-            vA_2[1] = vec_mergel((__vector unsigned int)vh45, (__vector unsigned int)vh67);
+            __vector unsigned int w4 = (__vector unsigned int)v4;
+            __vector unsigned int w5 = (__vector unsigned int)v5;
+            __vector unsigned int w6 = (__vector unsigned int)v6;
+            __vector unsigned int w7 = (__vector unsigned int)v7;
             
-            __vector unsigned short vl45 = vec_mergel(v4, v5);
-            __vector unsigned short vl67 = vec_mergel(v6, v7);
-            vA_4[1] = vec_mergeh((__vector unsigned int)vl45, (__vector unsigned int)vl67);
-            vA_6[1] = vec_mergel((__vector unsigned int)vl45, (__vector unsigned int)vl67);
+            __vector unsigned int w45_h = vec_mergeh(w4, w5);
+            __vector unsigned int w67_h = vec_mergeh(w6, w7);
+            __vector unsigned int w45_l = vec_mergel(w4, w5);
+            __vector unsigned int w67_l = vec_mergel(w6, w7);
+            
+            typedef __vector unsigned long long v_ull_t;
+            vA_0[1] = (__vector unsigned int)vec_mergeh((v_ull_t)w45_h, (v_ull_t)w67_h);
+            vA_2[1] = (__vector unsigned int)vec_mergel((v_ull_t)w45_h, (v_ull_t)w67_h);
+            vA_4[1] = (__vector unsigned int)vec_mergeh((v_ull_t)w45_l, (v_ull_t)w67_l);
+            vA_6[1] = (__vector unsigned int)vec_mergel((v_ull_t)w45_l, (v_ull_t)w67_l);
         }
         
         // Load B and GER for k_idx + 0
         __vector unsigned char vB_vec_0[tiles_n];
+        #pragma GCC unroll 4
         for (int j = 0; j < tiles_n; j++) vB_vec_0[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 0) * 4]);
-        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_0[i], vB_vec_0[j]);
+        
+        #pragma GCC unroll 2
+        for (int i = 0; i < tiles_m; i++) {
+            #pragma GCC unroll 4
+            for (int j = 0; j < tiles_n; j++) {
+                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_0[i], vB_vec_0[j]);
+            }
+        }
         
         // Load B and GER for k_idx + 2
         __vector unsigned char vB_vec_2[tiles_n];
+        #pragma GCC unroll 4
         for (int j = 0; j < tiles_n; j++) vB_vec_2[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 2) * 4]);
-        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_2[i], vB_vec_2[j]);
+        
+        #pragma GCC unroll 2
+        for (int i = 0; i < tiles_m; i++) {
+            #pragma GCC unroll 4
+            for (int j = 0; j < tiles_n; j++) {
+                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_2[i], vB_vec_2[j]);
+            }
+        }
         
         // Load B and GER for k_idx + 4
         __vector unsigned char vB_vec_4[tiles_n];
+        #pragma GCC unroll 4
         for (int j = 0; j < tiles_n; j++) vB_vec_4[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 4) * 4]);
-        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_4[i], vB_vec_4[j]);
+        
+        #pragma GCC unroll 2
+        for (int i = 0; i < tiles_m; i++) {
+            #pragma GCC unroll 4
+            for (int j = 0; j < tiles_n; j++) {
+                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_4[i], vB_vec_4[j]);
+            }
+        }
         
         // Load B and GER for k_idx + 6
         __vector unsigned char vB_vec_6[tiles_n];
+        #pragma GCC unroll 4
         for (int j = 0; j < tiles_n; j++) vB_vec_6[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 6) * 4]);
-        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_6[i], vB_vec_6[j]);
+        
+        #pragma GCC unroll 2
+        for (int i = 0; i < tiles_m; i++) {
+            #pragma GCC unroll 4
+            for (int j = 0; j < tiles_n; j++) {
+                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_6[i], vB_vec_6[j]);
+            }
+        }
     }
     
     // Remainder loop processing 2 columns at a time
@@ -226,11 +261,11 @@ class TileGemmVSX {
     }
 
     // Disassemble and store
-    typedef float v4sf __attribute__((vector_size(16)));
     for (int i = 0; i < tiles_m; i++) {
         for (int j = 0; j < tiles_n; j++) {
-            v4sf tmp[4];
+            __vector float tmp[4];
             __builtin_mma_disassemble_acc(tmp, &acc[i][j]);
+            #pragma GCC unroll 4
             for(int r=0; r<4; r++) {
                 int r_idx = i*4 + r;
                 if (r_idx < M) {
@@ -271,7 +306,35 @@ class MicroGemm<cpu_utils::ISA::VSX, scalar_t> {
     uint16_t* pw = reinterpret_cast<uint16_t*>(packed_weight);
 
     for (int32_t o_idx = 0; o_idx < output_size; o_idx += 4) {
-      for (int32_t i_idx = 0; i_idx < input_size; i_idx += 2) {
+      int32_t i_idx = 0;
+      for (; i_idx <= input_size - 8; i_idx += 8) {
+          __vector unsigned short row0 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&w[(o_idx+0)*input_size + i_idx]);
+          __vector unsigned short row1 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&w[(o_idx+1)*input_size + i_idx]);
+          __vector unsigned short row2 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&w[(o_idx+2)*input_size + i_idx]);
+          __vector unsigned short row3 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&w[(o_idx+3)*input_size + i_idx]);
+          
+          __vector unsigned int w0 = (__vector unsigned int)row0;
+          __vector unsigned int w1 = (__vector unsigned int)row1;
+          __vector unsigned int w2 = (__vector unsigned int)row2;
+          __vector unsigned int w3 = (__vector unsigned int)row3;
+          
+          __vector unsigned int w01_h = vec_mergeh(w0, w1);
+          __vector unsigned int w23_h = vec_mergeh(w2, w3);
+          __vector unsigned int w01_l = vec_mergel(w0, w1);
+          __vector unsigned int w23_l = vec_mergel(w2, w3);
+          
+          typedef __vector unsigned long long v_ull_t;
+          __vector unsigned short out0 = (__vector unsigned short)vec_mergeh((v_ull_t)w01_h, (v_ull_t)w23_h);
+          __vector unsigned short out1 = (__vector unsigned short)vec_mergel((v_ull_t)w01_h, (v_ull_t)w23_h);
+          __vector unsigned short out2 = (__vector unsigned short)vec_mergeh((v_ull_t)w01_l, (v_ull_t)w23_l);
+          __vector unsigned short out3 = (__vector unsigned short)vec_mergel((v_ull_t)w01_l, (v_ull_t)w23_l);
+          
+          vec_xst(out0, 0, pw); pw += 8;
+          vec_xst(out1, 0, pw); pw += 8;
+          vec_xst(out2, 0, pw); pw += 8;
+          vec_xst(out3, 0, pw); pw += 8;
+      }
+      for (; i_idx < input_size; i_idx += 2) {
         *pw++ = w[(o_idx+0)*input_size + i_idx];
         *pw++ = w[(o_idx+0)*input_size + i_idx+1];
         
