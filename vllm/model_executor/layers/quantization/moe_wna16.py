@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -43,6 +43,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from transformers import PretrainedConfig
+
+    from vllm.model_executor.models.utils import WeightsMapper
+
 
 class MoeWNA16Config(QuantizationConfig):
     """Config class for MOE WNA16 (W8A16/W4A16) quantization."""
@@ -65,6 +70,7 @@ class MoeWNA16Config(QuantizationConfig):
         self.lm_head_quantized = lm_head_quantized
         self.linear_quant_method = linear_quant_method
         self.full_config = full_config
+        self._linear_quant_config: QuantizationConfig | None = None
         # Avoid circular import
         from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
@@ -168,6 +174,43 @@ class MoeWNA16Config(QuantizationConfig):
 
         return gptq_compatible or awq_compatible
 
+    @property
+    def linear_quant_config(self) -> QuantizationConfig:
+        """The delegate config that handles non-MoE linear layers.
+
+        Built once and cached: this config is the one vLLM resolves, so the
+        loader-side enrichment hooks (`maybe_update_config`, `apply_vllm_mapper`)
+        are invoked on `self` and must reach the same delegate instance that
+        `get_quant_method` later consults.
+        """
+        if self._linear_quant_config is None:
+            # Avoid circular import
+            from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+            from vllm.model_executor.layers.quantization.auto_gptq import (
+                AutoGPTQConfig,
+            )
+
+            if self.linear_quant_method == "gptq":
+                self._linear_quant_config = AutoGPTQConfig.from_config(self.full_config)
+            elif self.linear_quant_method in ("awq", "awq_marlin"):
+                self._linear_quant_config = AutoAWQConfig.from_config(self.full_config)
+            else:
+                raise ValueError("moe_wna16 only support gptq and awq.")
+        return self._linear_quant_config
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        self.linear_quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: "PretrainedConfig | None" = None,
+        revision: str | None = None,
+    ):
+        self.linear_quant_config.maybe_update_config(
+            model_name, hf_config=hf_config, revision=revision
+        )
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -176,22 +219,16 @@ class MoeWNA16Config(QuantizationConfig):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
-            # Avoid circular import
-            from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
-            from vllm.model_executor.layers.quantization.auto_gptq import (
-                AutoGPTQConfig,
-            )
-
-            if self.linear_quant_method == "gptq":
-                return AutoGPTQConfig.from_config(self.full_config).get_quant_method(
-                    layer, prefix
-                )
-            elif self.linear_quant_method in ("awq", "awq_marlin"):
-                return AutoAWQConfig.from_config(self.full_config).get_quant_method(
-                    layer, prefix
-                )
-            else:
-                raise ValueError("moe_wna16 only support gptq and awq.")
+            linear_quant_config = self.linear_quant_config
+            # from_config() builds the delegate from the raw HF dict, which has
+            # no packed_modules_mapping -- that is attached to this config
+            # afterwards by the model loader, and rebound rather than mutated,
+            # so it has to be forwarded here rather than at build time. Without
+            # it the delegate cannot tell that gate_up_proj/qkv_proj are fused,
+            # so it registers no qweight on those layers and their checkpoint
+            # tensors fail to load.
+            linear_quant_config.packed_modules_mapping = self.packed_modules_mapping
+            return linear_quant_config.get_quant_method(layer, prefix)
         elif isinstance(layer, RoutedExperts):
             return MoeWNA16Method(self, layer.moe_config)
         return None

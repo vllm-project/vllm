@@ -87,6 +87,25 @@ def test_map_wna16_backend_supports_triton():
             False,
             "MoeWNA16 checkpoint layout",
         ),
+        (
+            # The XPU repack helper contracts on the AutoGPTQ int32 K-first
+            # layout, so it must not be offered a MoeWNA16 uint8 N-first
+            # checkpoint -- on XPU it is the only `auto` candidate, so a
+            # missing rejection here silently shapes the weights wrong.
+            WNA16MoEBackend.XPU,
+            MoeWNA16Config(
+                linear_quant_method="gptq",
+                weight_bits=4,
+                group_size=128,
+                has_zp=False,
+                lm_head_quantized=False,
+                modules_to_not_convert=None,
+                full_config={},
+            ),
+            False,
+            False,
+            "MoeWNA16 checkpoint layout",
+        ),
     ],
 )
 def test_wna16_oracle_rejects_incompatible_quant_structures(
@@ -107,6 +126,84 @@ def test_wna16_oracle_rejects_incompatible_quant_structures(
 
     assert reason is not None
     assert expected in reason
+
+
+def test_wna16_oracle_keeps_triton_available_for_moe_wna16():
+    """Triton is the backend that reads the MoeWNA16 layout; keep it eligible.
+
+    `--moe-backend triton` is the only way to run a MoeWNA16 checkpoint on XPU
+    now that the XPU backend rejects that layout, so a broader rejection would
+    leave the checkpoint with no backend at all.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    reason = _backend_incompatibility_reason(
+        backend=WNA16MoEBackend.TRITON,
+        moe_config=make_dummy_moe_config(),
+        quant_config=MoeWNA16Config(
+            linear_quant_method="gptq",
+            weight_bits=4,
+            group_size=128,
+            has_zp=False,
+            lm_head_quantized=False,
+            modules_to_not_convert=None,
+            full_config={},
+        ),
+        may_have_zp=False,
+        may_have_bias=False,
+        allow_tile_padding=True,
+    )
+
+    assert reason is None
+
+
+def test_auto_dispatch_falls_back_to_triton_when_xpu_rejects_moe_wna16(monkeypatch):
+    """`--moe-backend auto` must not dead-end for a MoeWNA16 checkpoint on XPU.
+
+    XPU's native kernel is the only `auto` candidate and it rejects MoeWNA16's
+    layout outright (see the guard in `_backend_incompatibility_reason`), so
+    without a fallback candidate this leaves the user with a bare
+    `NotImplementedError` for a checkpoint that TRITON can serve correctly --
+    confirmed by `test_wna16_oracle_keeps_triton_available_for_moe_wna16` above.
+    There is no tradeoff in falling back: TRITON is the only backend this
+    layout can ever run on, so `auto` choosing it is not a silent
+    performance surprise, it is the only working choice.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.oracle import int_wna16
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        INT4_DTYPE,
+        QuantKey,
+        kInt4StaticGroupScale,
+    )
+
+    monkeypatch.setattr(int_wna16.current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(int_wna16.current_platform, "is_cpu", lambda: False)
+
+    # A real weight_key, matching how MoeWNA16Method builds it for num_bits=4 --
+    # the kernel-level is_supported_config() check (below the oracle-level
+    # rejection this test targets) rejects a None weight_key outright, which
+    # would make this test pass for the wrong reason if it were skipped instead.
+    weight_key = QuantKey(INT4_DTYPE, kInt4StaticGroupScale)
+
+    backend, _experts_cls = int_wna16.select_wna16_moe_backend(
+        config=make_dummy_moe_config(
+            num_experts=8, hidden_dim=4096, intermediate_size=1024
+        ),
+        weight_key=weight_key,
+        quant_config=MoeWNA16Config(
+            linear_quant_method="gptq",
+            weight_bits=4,
+            group_size=128,
+            has_zp=False,
+            lm_head_quantized=False,
+            modules_to_not_convert=None,
+            full_config={},
+        ),
+        may_have_zp=False,
+        may_have_bias=False,
+    )
+    assert backend == int_wna16.WNA16MoEBackend.TRITON
 
 
 def test_compressed_tensors_weights_are_transposed_for_triton():
@@ -313,3 +410,66 @@ def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
     assert not hasattr(layer, "w2_weight_packed")
     assert layer.w13_weight.dtype is torch.int32
     assert layer.w2_weight.dtype is torch.int32
+
+
+def test_moe_wna16_propagates_packed_modules_mapping_to_linear_delegate():
+    """A fused linear layer must reach the delegate as quantized, not unquantized.
+
+    `MoeWNA16Config.get_quant_method` rebuilds the linear delegate with
+    `AutoGPTQConfig.from_config(self.full_config)`, which sees only the raw HF
+    quantization dict. `packed_modules_mapping` is attached to the parent config
+    later by the model loader, so unless it is forwarded the delegate cannot tell
+    that `gate_up_proj` is a fusion of `gate_proj` and `up_proj`. It then matches
+    nothing in `modules_in_block_to_quantize` and hands back
+    `UnquantizedLinearMethod` -- and the checkpoint's `qweight` has nowhere to go.
+    """
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQLinearMethod
+
+    full_config = {
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+        "quant_method": "gptq",
+        # As emitted by AutoGPTQ: shard names, never the fused name.
+        "modules_in_block_to_quantize": [["mlp.gate_proj", "mlp.up_proj"]],
+    }
+    config = MoeWNA16Config(
+        linear_quant_method="gptq",
+        weight_bits=4,
+        group_size=128,
+        has_zp=False,
+        lm_head_quantized=False,
+        modules_to_not_convert=None,
+        full_config=full_config,
+    )
+    config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    assert "gate_up_proj" not in str(full_config["modules_in_block_to_quantize"]), (
+        "premise: the checkpoint must list shard names, not the fused name"
+    )
+
+    layer = ColumnParallelLinear.__new__(ColumnParallelLinear)
+    method = config.get_quant_method(layer, "model.layers.0.mlp.gate_up_proj")
+
+    assert isinstance(method, AutoGPTQLinearMethod), (
+        f"fused layer resolved to {type(method).__name__}; the delegate did not "
+        "receive packed_modules_mapping, so its shards matched nothing"
+    )
+
+
+def test_xpu_platform_supports_moe_wna16():
+    """Regression guard: XPU must keep `moe_wna16` in its quantization allowlist.
+
+    Nothing else in this test file imports `vllm.platforms.xpu` (that module
+    registers ops from the compiled `vllm_xpu_kernels` package, so it only
+    imports cleanly on a real Intel XPU stack) -- skip everywhere else instead
+    of failing collection on CUDA/CPU CI.
+    """
+    try:
+        from vllm.platforms.xpu import XPUPlatform
+    except ImportError:
+        pytest.skip("vllm_xpu_kernels not importable outside an XPU stack")
+
+    assert "moe_wna16" in XPUPlatform.supported_quantization

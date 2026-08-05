@@ -112,7 +112,11 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     if current_platform.is_cpu():
         return [WNA16MoEBackend.CPU]
     if current_platform.is_xpu():
-        return [WNA16MoEBackend.XPU]
+        # TRITON is the fallback for layouts XPU's native kernel rejects (e.g.
+        # MoeWNA16's uint4 N-first weights, see the XPU guard above) -- without
+        # it, `--moe-backend auto` dead-ends in a bare NotImplementedError for
+        # any checkpoint the native kernel can't take, even though TRITON can.
+        return [WNA16MoEBackend.XPU, WNA16MoEBackend.TRITON]
 
     return [
         WNA16MoEBackend.FLASHINFER_TRTLLM,
@@ -151,6 +155,17 @@ def _backend_incompatibility_reason(
             and quant_config.actorder == "group"
         ):
             return "group activation ordering is not supported"
+
+    if backend == WNA16MoEBackend.XPU and isinstance(quant_config, MoeWNA16Config):
+        # `_process_weights_xpu` contracts on the AutoGPTQ int32 K-first layout
+        # and unconditionally transposes dims 1/2; MoeWNA16 registers uint8
+        # N-first weights instead, so the transpose would shape the tensor wrong
+        # handed to the kernel. The XPU int4 kernel also has no zero-point
+        # input, which asymmetric checkpoints require.
+        return (
+            "the MoeWNA16 checkpoint layout is not supported "
+            "(use --moe-backend triton for MoeWNA16 on XPU)"
+        )
 
     # Marlin only supports certain problem/group sizes.
     allow_marlin = not isinstance(quant_config, MoeWNA16Config)
@@ -238,6 +253,17 @@ def select_wna16_moe_backend(
             "deployment configuration."
         )
 
+    def _make_log_unsupported_all(reason: str | None) -> str:
+        # Surface the last backend's rejection reason (e.g. an explicit hint
+        # to pass a different --moe-backend) instead of a bare generic
+        # message; without this the caller only sees it at debug level.
+        if reason:
+            return (
+                "No WNA16 MoE backend supports the deployment configuration "
+                f"since {reason}."
+            )
+        return "No WNA16 MoE backend supports the deployment configuration."
+
     def _return_or_raise(
         backend: WNA16MoEBackend,
         config: FusedMoEConfig,
@@ -299,9 +325,7 @@ def select_wna16_moe_backend(
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
-    raise NotImplementedError(
-        "No WNA16 MoE backend supports the deployment configuration."
-    )
+    raise NotImplementedError(_make_log_unsupported_all(reason))
 
 
 def make_wna16_moe_quant_config(
