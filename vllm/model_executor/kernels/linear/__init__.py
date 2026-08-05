@@ -167,6 +167,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.helion import (
+    HelionFP8BlockScaledMMLinearKernel,
     HelionFP8ScaledMMLinearKernel,
     HelionINT8ScaledMMLinearKernel,
 )
@@ -268,6 +269,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "helion": {
         HelionFP8ScaledMMLinearKernel,
         HelionINT8ScaledMMLinearKernel,
+        HelionFP8BlockScaledMMLinearKernel,
     },
     "deep_gemm": {
         DeepGemmFp8BlockScaledMMKernel,
@@ -368,6 +370,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum.CUDA: [
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
+        HelionFP8BlockScaledMMLinearKernel,
         CutlassFp8BlockScaledMMKernel,
         MarlinFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
