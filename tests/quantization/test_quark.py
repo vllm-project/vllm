@@ -918,4 +918,4 @@ def test_quark_int4_canonicalizes_pack_for_kernel_layout(pack_method, symmetric)
         canonical_weight, scales, canonical_zero, group_size
     )
 
-    torch.testing.assert_close(actual, expected)
+    assert torch.equal(actual, expected)
