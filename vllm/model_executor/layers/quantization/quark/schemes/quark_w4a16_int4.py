@@ -167,7 +167,7 @@ class QuarkW4A16Int4(QuarkScheme):
             mp_linear_kernel_config,
             w_q_param_name="weight",
             w_s_param_name="weight_scale",
-            w_zp_param_name="weight_zero_point",
+            w_zp_param_name="weight_zero_point" if not self.is_symmetric else None,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -177,19 +177,22 @@ class QuarkW4A16Int4(QuarkScheme):
             is_symmetric=self.is_symmetric,
             pack_factor=self.pack_factor,
         )
-        layer.weight_zero_point.data = canonicalize_quark_packed_int4(
-            layer.weight_zero_point.data,
-            pack_reorder=self.pack_reorder,
-            is_symmetric=self.is_symmetric,
-            pack_factor=self.pack_factor,
-        )
+        if not self.is_symmetric:
+            layer.weight_zero_point.data = canonicalize_quark_packed_int4(
+                layer.weight_zero_point.data,
+                pack_reorder=self.pack_reorder,
+                is_symmetric=self.is_symmetric,
+                pack_factor=self.pack_factor,
+            )
         output_size = layer.output_size_per_partition
         packed_output_size = layer.packed_output_size_per_partition * self.pack_factor
         if output_size < packed_output_size:
             layer.weight_scale.data[:, output_size:].zero_()
 
         _convert_awq_to_standard_format(
-            layer, "weight", "weight_zero_point", self.quant_type.size_bits
+            layer, "weight",
+            "weight_zero_point" if not self.is_symmetric else None,
+            self.quant_type.size_bits,
         )
         assert self.kernel is not None
         self.kernel.process_weights_after_loading(layer)
