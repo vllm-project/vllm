@@ -480,15 +480,26 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # DSpark draft: the block is non-causal (every query attends to the
         # trailing window of context PLUS all query tokens, including future ones),
-        # so its per-token index list is wider than `window_size`. The kernel pads
-        # the q-head count to B_TOPK (64/128), which requires the index width to be
-        # a multiple of 128.
+        # so its per-token index list is wider than `window_size`.
+        #
+        # SM120: the FlashInfer sparse-MLA decode kernel only dispatches for
+        # topk in {128, 512, 1024} (_DECODE_DSV4_DISPATCH in
+        # flashinfer/mla/_sparse_mla_sm120.py). The natural width
+        # cdiv(window + spec, 128) * 128 (= 256 for window 128) is not
+        # instantiated, so the call falls through to the paged/prefill kernel,
+        # which asserts num_tokens > 64 and crashes every small DSpark decode
+        # batch. Round the width up to the nearest dispatchable topk; the
+        # extra slots are masked via swa_topk_lens (correct, small extra
+        # compute).
         self.is_dspark = spec_config is not None and spec_config.use_dspark()
-        self.noncausal_index_width = (
-            cdiv(self.window_size + self.num_speculative_tokens, 128) * 128
-            if self.is_dspark
-            else 0
-        )
+        if self.is_dspark:
+            _needed = self.window_size + self.num_speculative_tokens
+            _supported_topk = (128, 512, 1024)
+            self.noncausal_index_width = next(
+                (t for t in _supported_topk if t >= _needed), 2048
+            )
+        else:
+            self.noncausal_index_width = 0
         self.decode_swa_indices_noncausal: torch.Tensor | None = None
         self._max_tokens = max_tokens
 
