@@ -324,6 +324,10 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         qkv = qkv.permute(1, 0, 2, 3).contiguous().unsqueeze(1)
         return qkv.unbind(0)
 
+    def _project_qkvgfab(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Projection seam for platform-specific subclasses."""
+        return self.in_proj_qkvgfab(hidden_states)[0]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -331,7 +335,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         output: torch.Tensor,
     ) -> None:
         num_tokens = hidden_states.size(0)
-        projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+        projected_qkvgfab = self._project_qkvgfab(hidden_states)
         if self.use_full_rank_gate:
             split_sizes = [
                 3 * self.local_projection_size,
