@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 
 from typing_extensions import override
 
@@ -31,7 +31,7 @@ class ARCCachePolicy(CachePolicy):
            - If in B1 ghost list: Increase target_t1_size.
            - If in B2 ghost list: Decrease target_t1_size.
 
-        3. Block eviction (evict_until) - Adaptive Replacement:
+        3. Block eviction (evict) - Adaptive Replacement:
            Determines eviction source based on adaptive target:
            - If T1 size >= target_t1_size: Evict from T1, add to B1.
            - Otherwise: Evict from T2, add to B2.
@@ -101,20 +101,20 @@ class ARCCachePolicy(CachePolicy):
                 self.b2.move_to_end(key)
 
     @override
-    def evict(
-        self, n: int, protected: set[OffloadKey]
-    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
-        if n == 0:
-            return []
-        return self.evict_until(lambda c: len(c) >= n, protected)
-
-    @override
     def clear(self) -> None:
         self.t1.clear()
         self.t2.clear()
         self.b1.clear()
         self.b2.clear()
         self.target_t1_size = 0.0
+
+    @override
+    def evict(
+        self, n: int, protected: set[OffloadKey]
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+        if n == 0:
+            return []
+        return self.evict_until(lambda c: len(c) >= n, protected)
 
     @override
     def evict_until(
@@ -132,53 +132,60 @@ class ARCCachePolicy(CachePolicy):
         Protected keys and entries with non-zero ``ref_cnt`` are never
         selected.
         """
-        candidates: list[tuple[OffloadKey, BlockStatus, bool]] = []
-        already_selected: set[OffloadKey] = set()
-        virtual_t1_size: int = len(self.t1)
+        # Collect candidates atomically: simulate T1 size changes as we
+        # select, but do not modify actual data structures until the
+        # predicate is satisfied.
+        candidates: list[
+            tuple[OffloadKey, BlockStatus, bool]
+        ] = []  # (key, block, from_t1)
+        virtual_t1_size = len(self.t1)
+        # Keep the scans monotonic: restarting from the LRU end after every
+        # selection makes a batch eviction quadratic in the number of blocks.
+        t1_iter = iter(self.t1.items())
+        t2_iter = iter(self.t2.items())
+
+        def next_candidate(
+            entries: Iterator[tuple[OffloadKey, BlockStatus]],
+        ) -> tuple[OffloadKey, BlockStatus] | None:
+            for key, block in entries:
+                if block.ref_cnt == 0 and key not in protected:
+                    return key, block
+            return None
 
         while True:
             candidate: tuple[OffloadKey, BlockStatus, bool] | None = None
 
             if virtual_t1_size >= int(self.target_t1_size):
-                for key, block in self.t1.items():
-                    if (
-                        block.ref_cnt == 0
-                        and key not in protected
-                        and key not in already_selected
-                    ):
-                        candidate = (key, block, True)
-                        virtual_t1_size -= 1
-                        break
+                entry = next_candidate(t1_iter)
+                if entry is not None:
+                    candidate = (*entry, True)
+                    virtual_t1_size -= 1
 
             if candidate is None:
-                for key, block in self.t2.items():
-                    if (
-                        block.ref_cnt == 0
-                        and key not in protected
-                        and key not in already_selected
-                    ):
-                        candidate = (key, block, False)
-                        break
-
-            if candidate is None:
-                return None
+                entry = next_candidate(t2_iter)
+                if entry is None:
+                    return None
+                candidate = (*entry, False)
 
             candidates.append(candidate)
-            already_selected.add(candidate[0])
 
-            if can_fit([(k, b) for k, b, _ in candidates]):
-                result: list[tuple[OffloadKey, BlockStatus]] = []
-                for key, block, from_t1 in candidates:
-                    if from_t1:
-                        del self.t1[key]
-                        self.b1[key] = None
-                    else:
-                        del self.t2[key]
-                        self.b2[key] = None
-                    result.append((key, block))
+            if not can_fit([(k, b) for k, b, _ in candidates]):
+                continue
 
-                for ghost in (self.b1, self.b2):
-                    for _ in range(len(ghost) - self.cache_capacity):
-                        ghost.popitem(last=False)
+            # Apply all evictions now that the collected prefix suffices.
+            result: list[tuple[OffloadKey, BlockStatus]] = []
+            for key, block, from_t1 in candidates:
+                if from_t1:
+                    del self.t1[key]
+                    self.b1[key] = None
+                else:
+                    del self.t2[key]
+                    self.b2[key] = None
+                result.append((key, block))
 
-                return result
+            # Trim ghost lists to cache_capacity.
+            for ghost in (self.b1, self.b2):
+                for _ in range(len(ghost) - self.cache_capacity):
+                    ghost.popitem(last=False)
+
+            return result

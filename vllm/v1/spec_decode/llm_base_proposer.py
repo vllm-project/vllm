@@ -24,7 +24,10 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models import (
+    supports_multimodal,
+    supports_multimodal_embeddings,
+)
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
@@ -1434,18 +1437,16 @@ class SpecDecodeBaseProposer:
             if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
         }
 
-        if self.supports_mm_inputs:
-            # Even if the target model is multimodal, we can also use
-            # text-only draft models
-            try:
-                dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
-                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
-            except (NotImplementedError, AttributeError, TypeError):
-                logger.warning(
-                    "Draft model does not support multimodal inputs, "
-                    "falling back to text-only mode"
-                )
-                self.supports_mm_inputs = False
+        # Even if the target model is multimodal, we can also use
+        # text-only draft models
+        if self.supports_mm_inputs and not supports_multimodal_embeddings(self.model):
+            logger.warning_once(
+                "Draft model %s does not support external multimodal embeddings. "
+                "Embeddings from the target model will not be passed to the "
+                "drafter; using text-only draft inputs instead.",
+                type(self.model).__name__,
+            )
+            self.supports_mm_inputs = False
 
         if supports_multimodal(target_model):
             # handle multimodality

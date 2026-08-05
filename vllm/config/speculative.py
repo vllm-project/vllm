@@ -320,6 +320,9 @@ class SpeculativeConfig:
     """Use fused DSpark output-projection activation quantization."""
     dspark_fused_shared_experts_quant: bool = True
     """Use fused DSpark shared-expert activation quantization."""
+    dspark_draft_topk: int | None = Field(default=None, ge=1)
+    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
+    top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
     def compute_hash(self) -> str:
         """
@@ -1103,6 +1106,10 @@ class SpeculativeConfig:
                         "Inkling MTP currently supports exactly one speculative token"
                     )
 
+                if self.dspark_draft_topk is not None and self.method != "dspark":
+                    raise ValueError("dspark_draft_topk is only supported by DSpark")
+
+                dspark_draft_topk = None
                 if self.method == "dspark":
                     # Upstream removed its own nst-vs-block assertion in #50869
                     # ("invalid assertion added erroneously"), and it was right
@@ -1154,6 +1161,32 @@ class SpeculativeConfig:
                                 dspark_block_size,
                             )
 
+                    hf_config = self.draft_model_config.hf_config
+                    dspark_draft_topk = self.dspark_draft_topk
+                    if dspark_draft_topk is None:
+                        dspark_draft_topk = getattr(
+                            hf_config, "dspark_draft_topk", None
+                        )
+                    if dspark_draft_topk is not None:
+                        draft_vocab_size = (
+                            getattr(hf_config, "draft_vocab_size", None)
+                            or hf_config.vocab_size
+                        )
+                        if not 1 <= dspark_draft_topk <= draft_vocab_size:
+                            raise ValueError(
+                                "dspark_draft_topk must be between 1 and the "
+                                f"draft vocabulary size ({draft_vocab_size})"
+                            )
+                        if (
+                            "Qwen3DSparkModel"
+                            not in self.draft_model_config.architectures
+                        ):
+                            raise ValueError(
+                                "dspark_draft_topk is only supported by "
+                                "Qwen3DSparkModel"
+                            )
+                        hf_config.dspark_draft_topk = dspark_draft_topk
+
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(
                         self.target_parallel_config,
@@ -1161,7 +1194,6 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config,
                     )
                 )
-
                 self.draft_model_config.max_model_len = (
                     SpeculativeConfig._maybe_override_draft_max_model_len(
                         self.max_model_len,
