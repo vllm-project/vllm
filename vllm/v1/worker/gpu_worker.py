@@ -665,13 +665,9 @@ class Worker(WorkerBase):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
         if self.vllm_config.artifact_config.enabled:
-            assert self.use_v2_model_runner
-            from vllm.v1.worker.gpu.model_runner import (
-                GPUModelRunner as GPUModelRunnerV2,
+            self.model_runner.init_artifact_connector(  # type: ignore[attr-defined]
+                kv_cache_config
             )
-
-            assert isinstance(self.model_runner, GPUModelRunnerV2)
-            self.model_runner.init_artifact_connector(kv_cache_config)
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch

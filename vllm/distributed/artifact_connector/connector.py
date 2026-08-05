@@ -227,7 +227,7 @@ class ArtifactSchedulerConnector:
 
     def request_finished(self, request: Request) -> None:
         request_id = request.request_id
-        state = self._states[request_id]
+        state = self._states.pop(request_id)
         if self._reuse_kv_hashes:
             if state.num_hashes > len(request.block_hashes):
                 raise RuntimeError("KV block-hash history shrank")
@@ -235,7 +235,6 @@ class ArtifactSchedulerConnector:
         self._finished_requests[(request_id, state.epoch)] = PackedBlockHashes(
             bytes(state.packed_hashes), state.hash_size or 1
         )
-        self._states.pop(request_id, None)
         self._resume_emit_cursors.pop(request_id, None)
 
     @staticmethod

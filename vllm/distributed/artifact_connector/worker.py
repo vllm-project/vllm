@@ -388,7 +388,6 @@ class ArtifactWorkerConnector:
         buffer = self._buffer
         assert buffer is not None
         blocks = state.pending_blocks
-        state.pending_blocks = []
         keyed_end = len(state.block_hashes) * block_size
         ready = [(start, rows) for start, rows in blocks if start < keyed_end]
         pending = [(start, rows) for start, rows in blocks if start >= keyed_end]
@@ -399,8 +398,7 @@ class ArtifactWorkerConnector:
                 # Completed tail slots and model-runner output buffers are
                 # reusable after this call, so retain only unkeyed blocks.
                 pending.append((start, buffer.retain_block(rows)))
-        if pending:
-            state.pending_blocks = pending
+        state.pending_blocks = pending
         return pending, ready
 
     @staticmethod
@@ -499,6 +497,7 @@ class ArtifactWorkerConnector:
         block_hashes: Sequence[bytes] | None,
         block_size: int,
     ) -> None:
+        assert self._store is not None and self._buffer is not None
         if block_hashes is not None:
             state.block_hashes = list(block_hashes)
             state.artifact_keys = [
@@ -506,7 +505,6 @@ class ArtifactWorkerConnector:
                 for block_hash in block_hashes
             ]
             pending, ready = self._take_available_blocks(state, [], block_size)
-            assert self._store is not None and self._buffer is not None
             publish_routed_experts(
                 self._store,
                 batches=[(state.artifact_keys, ready)],
@@ -516,9 +514,7 @@ class ArtifactWorkerConnector:
                 self._buffer.release_block(rows)
         else:
             for _, rows in state.pending_blocks:
-                assert self._buffer is not None
                 self._buffer.release_block(rows)
-        assert self._buffer is not None
         self._buffer.discard(key)
         del self._requests[key]
 
