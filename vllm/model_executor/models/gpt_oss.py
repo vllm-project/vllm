@@ -3,7 +3,6 @@
 from collections.abc import Iterable
 
 import torch
-import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
@@ -152,9 +151,7 @@ class MLPBlock(torch.nn.Module):
         self.layer_idx = layer_idx
         self.num_experts = config.num_local_experts
         self.experts_per_token = config.num_experts_per_tok
-        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.router = torch.nn.Linear(config.hidden_size, config.num_local_experts)
-        assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
@@ -168,6 +165,10 @@ class MLPBlock(torch.nn.Module):
             has_bias=True,
             activation="swigluoai",
             is_sequence_parallel=self.is_sequence_parallel,
+            # DP replicas must own the same model weights. FusedMoE normally
+            # folds DP into its internal TP size when EP is disabled, which
+            # would incorrectly shard the experts across DP replicas.
+            dp_size=None if parallel_config.enable_expert_parallel else 1,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -291,8 +292,8 @@ class GptOssModel(nn.Module):
 
     def _load_weights_mxfp4(
         self,
-        ep_rank_end: int,
-        ep_rank_start: int,
+        expert_offset: int,
+        expert_length: int,
         heads_per_rank: int,
         head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -328,7 +329,7 @@ class GptOssModel(nn.Module):
             if ".w13_weight_scale" in name:
                 # Handle MLP gate and up projection weights scale
                 if use_ep:
-                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
 
@@ -346,7 +347,7 @@ class GptOssModel(nn.Module):
             elif ".w2_weight_scale" in name:
                 # Handle MLP down projection weights
                 if use_ep:
-                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     narrow_weight = weight[
                         ..., tp_rank_start // mxfp4_block : tp_rank_end // mxfp4_block
@@ -374,7 +375,7 @@ class GptOssModel(nn.Module):
                 # Extract gate and up projection parts
                 # since the weight is shuffled, we can slice directly
                 if use_ep:
-                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
 
@@ -397,7 +398,7 @@ class GptOssModel(nn.Module):
                     num_experts, -1, intermediate_size // 2
                 ).contiguous()
                 if use_ep:
-                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     narrow_weight = weight[..., tp_rank_start // 2 : tp_rank_end // 2]
 
@@ -416,7 +417,7 @@ class GptOssModel(nn.Module):
                 # Handle MLP gate and up projection biases
                 # Extract gate and up projection bias parts
                 if use_ep:
-                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
 
@@ -436,7 +437,7 @@ class GptOssModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if use_ep:
-                    weight = weight[ep_rank_start:ep_rank_end, ...]
+                    weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     # (only load on rank 0 to avoid duplication)
                     if tp_rank != 0:
@@ -476,8 +477,8 @@ class GptOssModel(nn.Module):
 
     def _load_weights_other(
         self,
-        ep_rank_start: int,
-        ep_rank_end: int,
+        expert_offset: int,
+        expert_length: int,
         heads_per_rank: int,
         head_start: int,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -506,7 +507,7 @@ class GptOssModel(nn.Module):
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
                 if use_ep:
-                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     narrow_weight = weight[:, :, 2 * tp_rank_start : 2 * tp_rank_end]
 
@@ -519,7 +520,7 @@ class GptOssModel(nn.Module):
             elif ".w2_weight" in name:
                 # Handle MLP down projection weights
                 if use_ep:
-                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     narrow_weight = weight[:, tp_rank_start:tp_rank_end, :]
                 narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
@@ -532,7 +533,7 @@ class GptOssModel(nn.Module):
                 # Handle MLP gate and up projection biases
                 # Extract gate and up projection bias parts
                 if use_ep:
-                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                    narrow_weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
 
@@ -543,7 +544,7 @@ class GptOssModel(nn.Module):
             elif ".w2_bias" in name:
                 # Handle MLP down projection bias
                 if use_ep:
-                    weight = weight[ep_rank_start:ep_rank_end, ...]
+                    weight = weight.narrow(0, expert_offset, expert_length)
                 else:
                     # (only load on rank 0 to avoid duplication)
                     if tp_rank != 0:
@@ -598,9 +599,10 @@ class GptOssModel(nn.Module):
         ep_size = get_ep_group().world_size
         ep_rank = get_ep_group().rank
         num_experts = self.config.num_local_experts
-        experts_per_rank = num_experts // ep_size
-        ep_rank_start = ep_rank * experts_per_rank
-        ep_rank_end = (ep_rank + 1) * experts_per_rank
+        base_experts = num_experts // ep_size
+        extra_experts = num_experts % ep_size
+        expert_length = base_experts + int(ep_rank < extra_experts)
+        expert_offset = ep_rank * base_experts + min(ep_rank, extra_experts)
 
         quant_method = (
             self.config.quantization_config["quant_method"]
@@ -609,21 +611,21 @@ class GptOssModel(nn.Module):
         )
         if quant_method == "mxfp4":
             return self._load_weights_mxfp4(
-                ep_rank_end,
-                ep_rank_start,
-                heads_per_rank,
-                head_start,
-                weights,
-                stacked_params_mapping,
+                expert_offset=expert_offset,
+                expert_length=expert_length,
+                heads_per_rank=heads_per_rank,
+                head_start=head_start,
+                weights=weights,
+                stacked_params_mapping=stacked_params_mapping,
             )
         else:
             return self._load_weights_other(
-                ep_rank_end,
-                ep_rank_start,
-                heads_per_rank,
-                head_start,
-                weights,
-                stacked_params_mapping,
+                expert_offset=expert_offset,
+                expert_length=expert_length,
+                heads_per_rank=heads_per_rank,
+                head_start=head_start,
+                weights=weights,
+                stacked_params_mapping=stacked_params_mapping,
             )
 
 
