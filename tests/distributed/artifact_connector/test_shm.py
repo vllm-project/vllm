@@ -17,6 +17,7 @@ from vllm.distributed.artifact_connector.connector import (
     ArtifactRequestMetadata,
     ArtifactRequestOutput,
     ArtifactSchedulerConnector,
+    PackedBlockHashes,
 )
 from vllm.distributed.artifact_connector.routed_experts import (
     RoutedExpertsArtifactBuffer,
@@ -26,15 +27,13 @@ from vllm.distributed.artifact_connector.routed_experts import (
     routed_experts_key,
 )
 from vllm.distributed.artifact_connector.shm import (
-    LocalSharedMemoryArtifactStore,
-)
-from vllm.distributed.artifact_connector.store import (
     ArtifactCapacityError,
     ArtifactCorruptionError,
     ArtifactNotFoundError,
     ArtifactObject,
     ArtifactStoreError,
     BackgroundArtifactStore,
+    LocalSharedMemoryArtifactStore,
 )
 from vllm.distributed.artifact_connector.worker import (
     ArtifactWorkerConnector,
@@ -349,6 +348,31 @@ def test_worker_defers_full_block_until_kv_hash_arrives(tmp_path):
         ),
         logical[:4],
     )
+    worker.close()
+
+
+def test_worker_publishes_full_block_before_restarted_epoch(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    block_hash = b"a" * 32
+    logical = np.arange(5 * 3 * 2, dtype=np.uint8).reshape(5, 3, 2)
+    first = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 0, 4, 0, False, [])],
+        {},
+    )
+    output = _process_output(worker, first, logical[:4], ["request"], np.array([0]))
+    assert not output.requests
+
+    restarted = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 4, 1, 0, True, [block_hash], epoch=1)],
+        {("request", 0): PackedBlockHashes(block_hash, len(block_hash))},
+    )
+    output = _process_output(worker, restarted, logical[4:], ["request"], np.array([0]))
+
+    np.testing.assert_array_equal(output.requests["request"].rows, logical)
     worker.close()
 
 
@@ -990,7 +1014,7 @@ def test_scheduler_connector_restarts_preempted_request_epoch(tmp_path):
         preempted,
         {request.request_id: request},
     )
-    assert cleanup.finished_requests == {(request.request_id, 0): None}
+    assert list(cleanup.finished_requests[(request.request_id, 0)]) == [b"a" * 32]
 
     resumed = connector.build_connector_meta(
         _step_output([request.request_id], [0], [4]),
@@ -1005,12 +1029,60 @@ def test_scheduler_skips_invalid_inflight_epoch(tmp_path):
     connector = _make_connector(tmp_path)
     request = _scheduler_request("request", [b"a" * 32], num_tokens=5)
     connector.request_started(request)
-    connector.request_restarted(request.request_id)
+    connector.request_restarted(request)
     request.num_computed_tokens = 4
 
     output = ArtifactConnectorOutput({}, {(request.request_id, 0)})
 
     assert connector.take_output(request, True, output) is None
+
+
+def test_scheduler_consumes_ordered_stale_artifact_outputs(tmp_path):
+    connector = _make_connector(tmp_path)
+    request = _scheduler_request("request", [], num_tokens=1)
+    connector.request_started(request)
+    first_rows = np.arange(2 * 3 * 2, dtype=np.uint8).reshape(2, 3, 2)
+    second_rows = first_rows + 20
+    first = ArtifactConnectorOutput({"request": ArtifactRequestOutput(0, first_rows)})
+    second = ArtifactConnectorOutput({"request": ArtifactRequestOutput(1, second_rows)})
+
+    np.testing.assert_array_equal(
+        connector.take_output(request, True, first, is_stale=True), first_rows
+    )
+    np.testing.assert_array_equal(
+        connector.take_output(request, True, second, is_stale=True), second_rows[1:]
+    )
+
+
+def test_scheduler_rejects_stale_artifact_token_gap(tmp_path):
+    connector = _make_connector(tmp_path)
+    request = _scheduler_request("request", [], num_tokens=1)
+    connector.request_started(request)
+    output = ArtifactConnectorOutput(
+        {"request": ArtifactRequestOutput(1, np.zeros((1, 3, 2), dtype=np.uint8))}
+    )
+
+    with pytest.raises(RuntimeError, match="token gap"):
+        connector.take_output(request, True, output, is_stale=True)
+
+
+def test_scheduler_restart_truncates_invalid_hash_suffix(tmp_path):
+    connector = _make_connector(tmp_path)
+    hashes = [b"a" * 32, b"b" * 32]
+    request = _scheduler_request("request", hashes, num_tokens=8)
+    connector.request_started(request)
+    connector.build_connector_meta(
+        _step_output([request.request_id], [0], [8]),
+        {request.request_id: request},
+    )
+
+    connector.request_restarted(request, num_valid_tokens=_BLOCK_SIZE)
+    cleanup = connector.build_connector_meta(
+        _step_output([], [], []),
+        {request.request_id: request},
+    )
+
+    assert list(cleanup.finished_requests[(request.request_id, 0)]) == hashes[:1]
 
 
 def test_scheduler_connector_sends_only_new_block_hashes(tmp_path):
@@ -1055,7 +1127,7 @@ def test_scheduler_connector_sends_kv_block_ids_once_per_epoch(tmp_path):
     )
     assert not second.requests[0].kv_block_ids
 
-    connector.request_restarted(request.request_id)
+    connector.request_restarted(request)
     assert connector.needs_kv_block_ids(request.request_id)
 
 

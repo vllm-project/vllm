@@ -1704,7 +1704,11 @@ class Scheduler(SchedulerInterface):
             )
             if self.artifact_connector is not None and self.recompute_kv_load_failures:
                 for request_id in failed_kv_load_req_ids:
-                    self.artifact_connector.request_restarted(request_id)
+                    failed_request = self.requests[request_id]
+                    self.artifact_connector.request_restarted(
+                        failed_request,
+                        num_valid_tokens=failed_request.num_computed_tokens,
+                    )
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1842,6 +1846,7 @@ class Scheduler(SchedulerInterface):
                     request,
                     should_emit_output,
                     model_runner_output.artifact_connector_output,
+                    is_stale=output_is_stale,
                 )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()

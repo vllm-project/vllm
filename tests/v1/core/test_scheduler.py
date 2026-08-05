@@ -1145,6 +1145,33 @@ def test_preemption_re_records_prefix_cache_query():
     assert stats.preempted_requests == 1
 
 
+def test_preemption_marks_artifact_output_as_stale():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    scheduler.artifact_connector = Mock()
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.artifact_connector.take_output.assert_called_once()
+    assert scheduler.artifact_connector.take_output.call_args.kwargs == {
+        "is_stale": True
+    }
+
+
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():
     """With prefix caching off there is no local lookup, so admitting a request
     records no phantom miss."""

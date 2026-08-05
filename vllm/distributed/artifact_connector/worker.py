@@ -27,8 +27,10 @@ from vllm.distributed.artifact_connector.routed_experts import (
     publish_routed_experts,
     routed_experts_key,
 )
-from vllm.distributed.artifact_connector.shm import LocalSharedMemoryArtifactStore
-from vllm.distributed.artifact_connector.store import BackgroundArtifactStore
+from vllm.distributed.artifact_connector.shm import (
+    BackgroundArtifactStore,
+    LocalSharedMemoryArtifactStore,
+)
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,

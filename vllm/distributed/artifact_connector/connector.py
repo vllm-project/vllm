@@ -132,7 +132,7 @@ class ArtifactSchedulerConnector:
         if kv_block_ids is None:
             kv_block_ids = {}
         for request_id in scheduler_output.preempted_req_ids or ():
-            self.request_restarted(request_id)
+            self.request_restarted(requests[request_id])
         token_starts = {
             request.req_id: request.num_computed_tokens
             for request in scheduler_output.scheduled_new_reqs
@@ -197,19 +197,13 @@ class ArtifactSchedulerConnector:
         request: Request,
         emit_output: bool,
         output: ArtifactConnectorOutput | None,
+        *,
+        is_stale: bool = False,
     ) -> np.ndarray | None:
         if not emit_output:
             return None
-        token_end = min(
-            request.num_tokens - 1,
-            request.num_computed_tokens - request.num_in_flight_tokens,
-        )
-        if token_end <= 0:
-            return None
         request_id = request.request_id
         state = self._states[request_id]
-        if token_end <= state.emit_cursor:
-            return None
         if output is not None and any(
             request_id == invalid_request_id
             for invalid_request_id, _ in output.invalid_requests
@@ -218,10 +212,30 @@ class ArtifactSchedulerConnector:
         if output is None or request_id not in output.requests:
             raise RuntimeError(f"artifact worker output is missing {request_id}")
         request_output = output.requests[request_id]
+        if is_stale:
+            output_end = request_output.token_start + len(request_output.rows)
+            local_start = state.emit_cursor - request_output.token_start
+            if local_start < 0:
+                raise RuntimeError("stale artifact worker output has a token gap")
+            if output_end <= state.emit_cursor:
+                return None
+            state.emit_cursor = max(state.emit_cursor, output_end)
+            return request_output.rows[local_start:]
+        token_end = min(
+            request.num_tokens - 1,
+            request.num_computed_tokens - request.num_in_flight_tokens,
+        )
+        if token_end <= 0 or token_end <= state.emit_cursor:
+            return None
         local_start = state.emit_cursor - request_output.token_start
         local_end = token_end - request_output.token_start
         if local_start < 0 or local_end > len(request_output.rows):
-            raise RuntimeError("artifact worker output has an invalid token range")
+            raise RuntimeError(
+                "artifact worker output has an invalid token range: "
+                f"request={request_id}, emit_cursor={state.emit_cursor}, "
+                f"token_end={token_end}, output_start={request_output.token_start}, "
+                f"output_end={request_output.token_start + len(request_output.rows)}"
+            )
         state.emit_cursor = token_end
         return request_output.rows[local_start:local_end]
 
@@ -257,12 +271,41 @@ class ArtifactSchedulerConnector:
             self._finished_requests[(request_id, state.epoch)] = None
         self._resume_emit_cursors.pop(request_id, None)
 
-    def request_restarted(self, request_id: str) -> None:
+    def request_restarted(
+        self,
+        request: Request,
+        *,
+        num_valid_tokens: int | None = None,
+    ) -> None:
         """Start a fresh worker epoch while preserving delivered output."""
+        request_id = request.request_id
         state = self._states.get(request_id)
         if state is None:
             return
-        self._finished_requests[(request_id, state.epoch)] = None
+        if num_valid_tokens is None:
+            num_valid_blocks = (
+                len(request.block_hashes) if self._reuse_kv_hashes else state.num_hashes
+            )
+        else:
+            num_valid_blocks = num_valid_tokens // self._block_size
+        if num_valid_blocks < state.num_hashes:
+            del state.packed_hashes[num_valid_blocks * state.hash_size :]
+            state.num_hashes = num_valid_blocks
+        elif num_valid_blocks > state.num_hashes:
+            new_hashes: Sequence[bytes]
+            if self._reuse_kv_hashes:
+                new_hashes = request.block_hashes[state.num_hashes : num_valid_blocks]
+                if len(new_hashes) != num_valid_blocks - state.num_hashes:
+                    raise RuntimeError("KV block-hash history is incomplete")
+            else:
+                new_hashes = [
+                    hashlib.sha256(f"{request_id}:{i}".encode()).digest()
+                    for i in range(state.num_hashes, num_valid_blocks)
+                ]
+            self._pack_block_hashes(state, new_hashes)
+        self._finished_requests[(request_id, state.epoch)] = PackedBlockHashes(
+            bytes(state.packed_hashes), state.hash_size or 1
+        )
         state.epoch += 1
         state.sent_kv_block_ids = False
         state.packed_hashes.clear()
