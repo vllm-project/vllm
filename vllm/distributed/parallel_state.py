@@ -2182,7 +2182,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
             torch.accelerator.empty_host_cache()
         except AttributeError:
             logger.warning(
-                "torch.accelerator.empty_host_cache() only available in Pytorch >=2.10"
+                "torch.accelerator.empty_host_cache() only available in Pytorch >=2.9"
             )
 
     logger.debug_once("[shutdown] Distributed: cleanup complete")
