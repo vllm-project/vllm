@@ -146,7 +146,6 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # matching head dims.
         self._pad_v = False
 
-
         # Distributed / context-parallel bookkeeping expected by the parent.
         self.dcp_world_size = 1
         self.cp_kv_cache_interleave_size = 1
@@ -218,6 +217,4 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k_pe_sq = k_pe_sq[valid_mask]
         target_dtype = flat.dtype
         flat[slots, :kv_lora_rank] = kv_c_normed.to(target_dtype)
-        flat[slots, kv_lora_rank:] = k_pe_sq.view(-1, pe_dim).to(
-            target_dtype
-        )
+        flat[slots, kv_lora_rank:] = k_pe_sq.view(-1, pe_dim).to(target_dtype)

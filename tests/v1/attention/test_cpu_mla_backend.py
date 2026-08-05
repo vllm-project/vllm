@@ -32,9 +32,7 @@ def test_kv_cache_cpu_write() -> None:
 
     kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype)
     k_pe = torch.randn(num_tokens, pe_dim, dtype=dtype)
-    kv_cache = torch.zeros(
-        num_blocks, block_size, kv_lora_rank + pe_dim, dtype=dtype
-    )
+    kv_cache = torch.zeros(num_blocks, block_size, kv_lora_rank + pe_dim, dtype=dtype)
     slot_mapping = torch.arange(num_tokens, dtype=torch.long)
     # Mark the last slot as padding to make sure we honour negative slots.
     slot_mapping[-1] = -1
