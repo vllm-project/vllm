@@ -1729,6 +1729,13 @@ def add_cli_args(parser: FlexibleArgumentParser):
         help="Append the benchmark result to the existing json file.",
     )
     parser.add_argument(
+        "--report-cached-tokens",
+        action="store_true",
+        help="Expect the server to report cached prompt tokens in "
+        "usage.prompt_tokens_details and warn if it does not. For vLLM "
+        "servers, this requires --enable-prompt-tokens-details.",
+    )
+    parser.add_argument(
         "--metadata",
         metavar="KEY=VALUE",
         nargs="*",
@@ -2214,6 +2221,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         self_timed=args.self_timed,
         probe_request_rate=args.probe_request_rate,
     )
+
+    report_cached_tokens = getattr(args, "report_cached_tokens", False)
+    if report_cached_tokens and "total_cached_tokens" not in benchmark_result:
+        warnings.warn(
+            "--report-cached-tokens was set but the server did not report "
+            "cached token counts (usage.prompt_tokens_details.cached_tokens). "
+            "If benchmarking a vLLM server, start it with "
+            "--enable-prompt-tokens-details.",
+            stacklevel=2,
+        )
 
     # Save config and results to json
     result_json: dict[str, Any] = {}

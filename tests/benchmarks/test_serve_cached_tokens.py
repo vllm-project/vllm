@@ -10,6 +10,7 @@ must be omitted entirely.
 import argparse
 import asyncio
 import json
+import warnings
 from pathlib import Path
 
 import aiohttp
@@ -122,9 +123,13 @@ async def test_request_func_cached_tokens_none_without_details():
 
 
 def _serve_args(
-    dataset_path: str, base_url: str, result_dir: str
+    dataset_path: str,
+    base_url: str,
+    result_dir: str,
+    report_cached_tokens: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
+        report_cached_tokens=report_cached_tokens,
         # dataset
         dataset_name="custom",
         dataset_path=dataset_path,
@@ -195,30 +200,65 @@ def _serve_args(
     )
 
 
+def _write_prompts(tmp_path: Path) -> Path:
+    dataset_path = tmp_path / "prompts.jsonl"
+    dataset_path.write_text(
+        "\n".join(json.dumps({"prompt": f"hello {i}"}) for i in range(3)) + "\n"
+    )
+    return dataset_path
+
+
 @pytest.mark.benchmark
 @pytest.mark.asyncio
 async def test_total_cached_tokens_saved_in_result_json(tmp_path: Path) -> None:
     """End to end: cached tokens reported per request must be summed and
-    written to the result JSON as total_cached_tokens."""
+    written to the result JSON as total_cached_tokens, without warning when
+    --report-cached-tokens is set and the data is present."""
     usage = {
         "prompt_tokens": 4,
         "completion_tokens": 2,
         "prompt_tokens_details": {"cached_tokens": 3},
     }
     runner, port = await _fake_completions_server(usage)
-
-    dataset_path = tmp_path / "prompts.jsonl"
-    dataset_path.write_text(
-        "\n".join(json.dumps({"prompt": f"hello {i}"}) for i in range(3)) + "\n"
+    dataset_path = _write_prompts(tmp_path)
+    args = _serve_args(
+        str(dataset_path),
+        f"http://127.0.0.1:{port}",
+        str(tmp_path),
+        report_cached_tokens=True,
     )
-    args = _serve_args(str(dataset_path), f"http://127.0.0.1:{port}", str(tmp_path))
 
     try:
-        result = await asyncio.wait_for(serve_module.main_async(args), timeout=30)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = await asyncio.wait_for(serve_module.main_async(args), timeout=30)
     finally:
         await runner.cleanup()
 
     assert result["total_cached_tokens"] == 9
+    assert not [w for w in caught if "prompt-tokens-details" in str(w.message)]
 
     saved = json.loads((tmp_path / "cached_result.json").read_text())
     assert saved["total_cached_tokens"] == 9
+
+
+@pytest.mark.benchmark
+@pytest.mark.asyncio
+async def test_report_cached_tokens_warns_when_server_does_not_report(
+    tmp_path: Path,
+) -> None:
+    usage = {"prompt_tokens": 4, "completion_tokens": 2}
+    runner, port = await _fake_completions_server(usage)
+    dataset_path = _write_prompts(tmp_path)
+    args = _serve_args(
+        str(dataset_path),
+        f"http://127.0.0.1:{port}",
+        str(tmp_path),
+        report_cached_tokens=True,
+    )
+
+    try:
+        with pytest.warns(UserWarning, match="enable-prompt-tokens-details"):
+            await asyncio.wait_for(serve_module.main_async(args), timeout=30)
+    finally:
+        await runner.cleanup()

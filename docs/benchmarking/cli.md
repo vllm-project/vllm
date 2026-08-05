@@ -115,6 +115,8 @@ P99 ITL (ms):                            8.39
     Start the server with `--enable-prompt-tokens-details` to additionally
     report `Total cached tokens:` (prompt tokens served from the prefix cache)
     in the summary and a `total_cached_tokens` field in the saved result JSON.
+    Pass `--report-cached-tokens` to `vllm bench serve` to get a warning when
+    the server does not report this data.
 
 #### Understanding the Latency Metrics
 
