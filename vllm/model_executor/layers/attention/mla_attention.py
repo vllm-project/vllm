@@ -2484,28 +2484,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             k[..., k_nope.shape[-1] :] = k_pe
         return k
 
-    def _up_project_context_kv(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        q_data_type: torch.dtype | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Up-project gathered latent context rows into MHA K/V."""
-        use_fp8_prefill = q_data_type == current_platform.fp8_dtype()
-        input_dtype = _get_kv_b_proj_input_dtype(self.kv_b_proj, use_fp8_prefill)
-        if input_dtype is not None:
-            kv_c_normed = kv_c_normed.to(input_dtype)
-
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-        )
-        # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
-        if use_fp8_prefill:
-            kv_nope = kv_nope.to(q_data_type)
-            k_pe = k_pe.to(q_data_type)
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        return self._concat_k_nope_k_pe(k_nope, k_pe), v
-
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -2520,6 +2498,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert chunked_context is not None
 
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(
+            self.kv_b_proj, use_fp8_prefill
+        )
         workspace = chunked_context.workspace
 
         if use_fp8_prefill:
@@ -2564,11 +2545,20 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     seq_starts=chunk.starts,
                 )
 
-            k, v = self._up_project_context_kv(
-                workspace[:toks][..., : self.kv_lora_rank],
-                workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1),
-                prefill_metadata.q_data_type,
+            kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
+            if kv_b_proj_input_dtype is not None:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
+
+            k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+            # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
+            if use_fp8_prefill:
+                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
+                k_pe = k_pe.to(prefill_metadata.q_data_type)
+            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
                 prefill_metadata.prefill_backend.run_prefill_context_chunk(
@@ -2607,6 +2597,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context is not None
 
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(
+            self.kv_b_proj, use_fp8_prefill
+        )
         output = None
         output_lse = None
         workspace = chunked_context.workspace
@@ -2687,9 +2681,17 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 max_seq_len=chunk.max_seq_len,
                 toks=toks,
             )
-            k, v = self._up_project_context_kv(
-                kv_c_normed, k_pe, prefill_metadata.q_data_type
+            if kv_b_proj_input_dtype is not None:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
+
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+            if use_fp8_prefill:
+                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
+                k_pe = k_pe.to(prefill_metadata.q_data_type)
+            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
                 prefill_metadata.prefill_backend.run_prefill_context_chunk(
