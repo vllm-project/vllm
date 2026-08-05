@@ -64,6 +64,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
     RoutedExpertsTensors,
+    make_empty_encoder_model_runner_output,
 )
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
@@ -87,6 +88,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
@@ -154,6 +156,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.device = device
         self.dtype = self.model_config.dtype
+        self.is_encoder_only = vllm_config.is_encoder_only
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
             # Quantized KV cache.
@@ -212,6 +215,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
+        self.ec_connector = get_ec_connector(vllm_config, self.encoder_cache)
 
         # Speculative decoding.
         self.speculator = None
@@ -455,6 +459,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return torch.cuda.current_stream(self.device)
 
     def get_kv_cache_spec(self):
+        if self.is_encoder_only:
+            return {}
         return get_kv_cache_spec(self.vllm_config)
 
     def initialize_kv_cache(
@@ -590,6 +596,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if self.is_encoder_only:
+            empty = torch.empty(0, device=self.device)
+            return empty, empty
         if skip_attn and not is_profile:
             raise ValueError(
                 "skip_attn must only be True for initial memory profiling."
@@ -743,6 +752,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.encoder_runner.profile_encoder_cache(
                     dummy_mm_inputs, mm_budget
                 )
+
+        if self.is_encoder_only:
+            torch.accelerator.synchronize()
+            self.reset_encoder_cache()
+            gc.collect()
+            return
 
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True, is_profile=True
@@ -1221,6 +1236,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def capture_model(self) -> int:
+        if self.is_encoder_only:
+            return 0
+
         assert self.cudagraph_manager is not None
         if not self.cudagraph_manager.needs_capture():
             logger.warning(
@@ -1799,6 +1817,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         input_ids = input_batch.input_ids
         inputs_embeds = None
+        ec_connector_output = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
@@ -1818,11 +1837,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         lora_state=self.lora_state,
                         scheduled_encoder_inputs=scheduled_encoder_inputs,
                     )
-                inputs_embeds = self.model_state.get_mm_embeddings(
-                    scheduled_encoder_inputs, input_batch, self.req_states
-                )
+                with self.ec_connector.maybe_get_output(
+                    scheduler_output
+                ) as ec_connector_output:
+                    inputs_embeds = self.model_state.get_mm_embeddings(
+                        scheduled_encoder_inputs, input_batch, self.req_states
+                    )
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
+
+        if self.is_encoder_only:
+            output = make_empty_encoder_model_runner_output(scheduler_output)
+            output.ec_connector_output = ec_connector_output
+            return output
 
         model_inputs = {
             "input_ids": input_ids,

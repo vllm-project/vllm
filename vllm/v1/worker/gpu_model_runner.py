@@ -231,7 +231,7 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import is_residual_scattered_for_sp, raise_if_nan_logits
 from vllm.v1.worker.workspace import (
     PersistentWorkspaceLease,
     current_workspace_manager,
@@ -5728,6 +5728,8 @@ class GPUModelRunner(
                     if num_nans_for_index is not None and req_index < logits.shape[0]
                     else 0
                 )
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(num_nans_in_logits)
             return num_nans_in_logits
         except IndexError:
             return {}

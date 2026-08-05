@@ -63,7 +63,7 @@ from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -903,6 +903,10 @@ class Worker(WorkerBase):
         # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
+
+        # Startup is done; steady-state serving gets no benefit from torch
+        # intra-op parallelism.
+        set_torch_threads_for_runtime()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
