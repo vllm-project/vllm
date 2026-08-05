@@ -20,6 +20,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
@@ -1094,6 +1095,40 @@ class MooncakeStoreWorker:
             else None
         )
 
+        # Custom memory pool for KV cache allocation (NVLink / BAREX).
+        # When set, KV cache is allocated from a Mooncake-managed pool
+        # instead of the default CUDA or CuMem allocator.
+        self._mem_pool: torch.cuda.MemPool | None = None
+        pool_type = str(extra_config.get("custom_mem_pool", "")).upper()
+        if pool_type:
+            if model_config.enable_cumem_allocator:
+                raise ValueError(
+                    "custom_mem_pool is incompatible with "
+                    "enable_cumem_allocator; both use "
+                    "torch.cuda.MemPool but with different allocators."
+                )
+            if model_config.enable_sleep_mode:
+                raise ValueError(
+                    "custom_mem_pool is incompatible with "
+                    "enable_sleep_mode; sleep/wake relies on "
+                    "CuMemAllocator which cannot see the custom pool."
+                )
+            if pool_type == "NVLINK":
+                from mooncake.allocator import NVLinkAllocator
+
+                allocator = NVLinkAllocator.get_allocator(self.device)
+            elif pool_type == "BAREX":
+                from mooncake.allocator import BarexAllocator
+
+                allocator = BarexAllocator.get_allocator(self.device)
+            else:
+                raise ValueError(
+                    f"Unsupported custom_mem_pool={pool_type!r}, "
+                    "expected 'NVLINK' or 'BAREX'"
+                )
+            self._mem_pool = torch.cuda.MemPool(allocator.allocator())
+            logger.info("Using Mooncake custom memory pool: %s", pool_type)
+
         # Start lookup server on rank 0 for scheduler-side prefix queries
         self.lookup_server: LookupKeyServer | None = None
         if vllm_config.parallel_config.rank == 0:
@@ -1153,6 +1188,13 @@ class MooncakeStoreWorker:
             for g_idx, g in enumerate(self._kv_cache_groups)
         ]
         self._init_lookup_key_prefixes()
+
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a context manager for the custom MemPool, or None if
+        no custom pool is configured."""
+        if self._mem_pool is None:
+            return None
+        return torch.cuda.use_mem_pool(self._mem_pool)
 
     def _init_lookup_key_prefixes(self) -> None:
         """Prepare per-group key prefixes across parallel rank namespaces."""

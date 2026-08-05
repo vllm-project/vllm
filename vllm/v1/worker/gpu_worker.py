@@ -247,23 +247,6 @@ class Worker(WorkerBase):
             self.model_runner.post_kv_cache_wake_up()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
-        # Mooncake custom memory pool (NVLink / BAREX) only applies to KV
-        # cache allocation, not weights.
-        if tag == "kv_cache":
-            pool_type = (envs.VLLM_MOONCAKE_CUSTOM_MEM_POOL or "").upper()
-            if pool_type == "NVLINK":
-                from mooncake.allocator import NVLinkAllocator
-
-                allocator = NVLinkAllocator.get_allocator(self.device)
-                mem_pool = torch.cuda.MemPool(allocator.allocator())
-                return torch.cuda.use_mem_pool(mem_pool)
-            elif pool_type == "BAREX":
-                from mooncake.allocator import BarexAllocator
-
-                allocator = BarexAllocator.get_allocator(self.device)
-                mem_pool = torch.cuda.MemPool(allocator.allocator())
-                return torch.cuda.use_mem_pool(mem_pool)
-
         if (
             current_platform.is_cuda_alike()
             and not self.vllm_config.model_config.enable_cumem_allocator
@@ -733,7 +716,18 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        with self._maybe_get_memory_pool_context(tag="kv_cache"):
+        # If the connector provides a custom memory pool (e.g. Mooncake
+        # NVLink/BAREX), use it for KV cache allocation; otherwise fall
+        # back to the standard CuMem pool.
+        connector = get_kv_transfer_group()
+        cm = (
+            connector.get_mem_pool_context()
+            if hasattr(connector, "get_mem_pool_context")
+            else None
+        )
+        if cm is None:
+            cm = self._maybe_get_memory_pool_context(tag="kv_cache")
+        with cm:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
