@@ -260,7 +260,6 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, is_a_8bit, nk_factors)
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
 
-@pytest.mark.marlin_ldmatrix_s4
 @pytest.mark.skipif(
     not is_quant_method_supported("gptq_marlin"),
     reason="Marlin is not supported on this GPU type.",
@@ -299,7 +298,6 @@ def test_gptq_marlin_repack_ldmatrix_s4_all_nibbles():
         torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.marlin_ldmatrix_s4
 @pytest.mark.skipif(
     not is_quant_method_supported("gptq_marlin"),
     reason="Marlin is not supported on this GPU type.",
@@ -447,15 +445,7 @@ def marlin_generate_valid_test_cases():
                 continue
             args = sub_case + (size_m, size_n, size_k) + case[4:]
             if is_invalid(*args):
-                if (
-                    sub_case[0] == scalar_types.int8
-                    and sub_case[1] == scalar_types.uint4b8
-                ):
-                    cases.append(
-                        pytest.param(*args, marks=pytest.mark.marlin_ldmatrix_s4)
-                    )
-                else:
-                    cases.append(args)
+                cases.append(args)
     return cases
 
 

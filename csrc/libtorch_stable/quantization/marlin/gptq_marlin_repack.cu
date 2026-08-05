@@ -27,22 +27,22 @@ bool supports_ldmatrix_s4(int device_index) {
     return true;
   }
   #endif
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM100_FAMILY_ENABLED)
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM100_ENABLED)
   if (major == 10 && (minor == 0 || minor == 3)) {
     return true;
   }
   #endif
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM107_FAMILY_ENABLED)
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM107_ENABLED)
   if (major == 10 && minor == 7) {
     return true;
   }
   #endif
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM110_FAMILY_ENABLED)
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM110_ENABLED)
   if (major == 11 && minor == 0) {
     return true;
   }
   #endif
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM120_FAMILY_ENABLED)
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM120_ENABLED)
   if (major == 12 && (minor == 0 || minor == 1)) {
     return true;
   }
