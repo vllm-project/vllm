@@ -594,9 +594,9 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
 
     image_mean = config.get("image_mean", None)
     image_std = config.get("image_std", None)
-    rescale_factor = config.get("rescale_factor", 1 / 255)
+    rescale_factor = config.get("rescale_factor", None)
 
-    if None in [do_rescale, do_normalize, image_mean, image_std]:
+    if None in [do_rescale, do_normalize, image_mean, image_std, rescale_factor]:
         image_processor = get_processor(model, revision=revision).image_processor
 
         if do_rescale is None:
@@ -611,6 +611,9 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
         if image_std is None:
             image_std = getattr(image_processor, "image_std", None)
 
+        if rescale_factor is None:
+            rescale_factor = getattr(image_processor, "rescale_factor", None)
+
     if not do_rescale:
         rescale_factor = 1.0
 
@@ -618,7 +621,7 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
         image_mean = [0.0, 0.0, 0.0]
         image_std = [1.0, 1.0, 1.0]
 
-    assert None not in [do_rescale, do_normalize, image_mean, image_std]
+    assert None not in [do_rescale, do_normalize, image_mean, image_std, rescale_factor]
 
     if not do_rescale and not do_normalize:
         return nn.Identity()
