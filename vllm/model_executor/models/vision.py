@@ -599,15 +599,15 @@ def make_input_norm(model_config: "ModelConfig") -> nn.Module:
     image_std = config.get("image_std", None)
     rescale_factor = config.get("rescale_factor", 1 / 255)
 
-    assert image_mean is not None
-    assert image_std is not None
-
     if not do_rescale:
         rescale_factor = 1.0
 
     if not do_normalize:
         image_mean = [0.0, 0.0, 0.0]
         image_std = [1.0, 1.0, 1.0]
+
+    assert image_mean is not None
+    assert image_std is not None
 
     image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
         1.0 / rescale_factor
