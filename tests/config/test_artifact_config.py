@@ -147,6 +147,11 @@ def test_artifact_connector_requires_explicit_capacity_with_kv_connector():
         )
 
 
+def test_artifact_connector_rejects_multi_connector():
+    with pytest.raises(ValueError, match="does not support MultiConnector"):
+        VllmConfig._verify_artifact_compatibility(_config(connector="MultiConnector"))
+
+
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
 def test_artifact_connector_rejects_pd_disaggregation(role):
     with pytest.raises(ValueError, match="kv_role=kv_both"):

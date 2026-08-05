@@ -981,6 +981,11 @@ class VllmConfig:
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is None or not kv_transfer_config.is_kv_transfer_instance:
             return
+        if kv_transfer_config.kv_connector == "MultiConnector":
+            raise ValueError(
+                "--enable-return-routed-experts does not support MultiConnector "
+                "or P/D disaggregation."
+            )
         if kv_transfer_config.kv_role != "kv_both":
             raise ValueError(
                 "--enable-return-routed-experts with KV transfer requires "
