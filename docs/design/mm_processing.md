@@ -77,13 +77,13 @@ Traditionally, the CPU would divide pixel values by 255, then subtract the mean 
   - Effective std  = `image_std  * (1/rescale_factor)`
 - **At runtime**: The layer takes raw uint8 pixel values (0–255) and does the full normalised mapping in a single GPU kernel—no CPU involvement.
 
-#### Keeping Data in UINT8 All the Way
+#### Optimized Data Path for Fused Normalisation
 
-To get the most out of this GPU‑side fused normalisation, we keep image data as `uint8` throughout the whole path—from the entry point, through the engine core, right up to GPU memory. We don’t convert to the model’s `bf16` dtype early.
+Performing fused normalisation directly on the device allows us to keep the entire transfer path—from **Entrypoint** through **Engine Core** to **GPU memory**—in **`uint8`**. This halves PCIe bandwidth and reduces CPU memory footprint.
 
-`Entrypoint → Engine Core → GPU memory` – every transfer carries `uint8` data.  
+Only after data reaches GPU memory do we cast to `fp32` for `BatchNorm1d` (to ensure numerical accuracy), then cast to `bf16` for subsequent layers—all within the GPU, avoiding any host‑side conversions.
 
-The actual cast to `bf16` is **deferred** until just before the fused normalisation layer, and that cast also happens on the GPU. This cuts PCIe bandwidth usage in half and lowers CPU memory footprint.
+Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → GPU Memory (uint8)`** → GPU‑local `fp32` BN → `bf16` output.
 
 #### Toggle: `mm_device_do_normalize`
 
