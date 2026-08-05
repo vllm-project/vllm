@@ -227,21 +227,28 @@ class StructuredOutputManager:
             return
 
         output_prefix = tuple(output_token_ids)
-        if any(
-            len(output_prefix) >= len(marker) and output_prefix[: len(marker)] == marker
-            for marker in marker_sequences
-        ):
+        marker_token_state = getattr(reasoner, "reasoning_marker_token_state", None)
+        if marker_token_state is not None:
+            marker_complete, next_marker_token_ids = marker_token_state(output_prefix)
+            next_marker_token_ids = set(next_marker_token_ids)
+        else:
+            marker_complete = any(
+                len(output_prefix) >= len(marker)
+                and output_prefix[: len(marker)] == marker
+                for marker in marker_sequences
+            )
+            next_marker_token_ids = {
+                marker[len(output_prefix)]
+                for marker in marker_sequences
+                if len(output_prefix) < len(marker)
+                and output_prefix == marker[: len(output_prefix)]
+            }
+
+        if marker_complete:
             # A complete marker means generated reasoning has started (or a
             # leading closer is being discarded). Leave reasoning unconstrained.
             self._grammar_bitmask[index].fill_(self._full_mask)
             return
-
-        next_marker_token_ids = {
-            marker[len(output_prefix)]
-            for marker in marker_sequences
-            if len(output_prefix) < len(marker)
-            and output_prefix == marker[: len(output_prefix)]
-        }
 
         row = self._grammar_bitmask[index]
         grammar_advanced = 0
