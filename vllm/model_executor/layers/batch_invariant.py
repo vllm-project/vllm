@@ -1083,30 +1083,6 @@ def rms_norm_batch_invariant(
     return output.reshape(original_shape)
 
 
-def _linear_backward_xpu(input, grad_output, weight, output_mask):
-    """XPU implementation of aten::linear_backward."""
-    grad_input = grad_weight = grad_bias = None
-    go_2d = grad_output.reshape(-1, grad_output.shape[-1])
-    if output_mask[0]:
-        grad_input = torch.mm(go_2d, weight).reshape(input.shape)
-    if output_mask[1]:
-        grad_weight = torch.mm(go_2d.t(), input.reshape(-1, input.shape[-1]))
-    if output_mask[2]:
-        grad_bias = go_2d.sum(0)
-    return grad_input, grad_weight, grad_bias
-
-
-def _matmul_backward_xpu(grad, self, other, mask):
-    """XPU implementation of aten::matmul_backward."""
-    grad_self = (
-        matmul_batch_invariant(grad, other.transpose(-1, -2)) if mask[0] else None
-    )
-    grad_other = (
-        matmul_batch_invariant(self.transpose(-1, -2), grad) if mask[1] else None
-    )
-    return grad_self, grad_other
-
-
 def linear_batch_invariant(input, weight, bias=None):
     output = matmul_batch_invariant(input, weight.t())
 
@@ -1161,8 +1137,6 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
-        _batch_invariant_LIB.impl("aten::linear_backward", _linear_backward_xpu, key)
-        _batch_invariant_LIB.impl("aten::matmul_backward", _matmul_backward_xpu, key)
 
         _fp16_block_size_n = 128
 
