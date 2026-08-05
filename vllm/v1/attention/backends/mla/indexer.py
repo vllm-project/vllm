@@ -389,6 +389,12 @@ class BuildPrefillChunkMetadataKernel(
             max(1, int(ratio))
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
+        # GLM5Next's kpool indexer sets COMPRESS_RATIO = index_kpool on the
+        # indexer spec, which is not in compress_ratios. Include it so the
+        # warmup covers the runtime key instead of JIT-ing on first prefill.
+        index_kpool = getattr(hf_config, "index_kpool", None)
+        if index_kpool and index_kpool > 1 and index_kpool not in compress_ratios:
+            compress_ratios = compress_ratios + (index_kpool,)
         return self._trace_dispatch(self.dispatch)(
             query_slice_start=WarmupIntRange(0, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
