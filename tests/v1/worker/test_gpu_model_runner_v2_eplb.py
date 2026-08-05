@@ -55,7 +55,7 @@ class FakeEplbState:
 def _make_runner(**overrides: Any) -> Any:
     runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.device = torch.device("cpu")
-    runner.hisparse_runtime = None
+    runner.hisparse_store = None
     runner.model_config = SimpleNamespace(model="test-model")
     runner.load_config = SimpleNamespace(load_format="hf")
     runner.parallel_config = SimpleNamespace(

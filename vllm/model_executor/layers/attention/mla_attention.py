@@ -2321,13 +2321,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
         block_table = prefill_metadata.block_table
         if kv_c_and_k_pe_cache.device.type == "cpu":
-            coordinator = getattr(self, "hisparse_coordinator", None)
-            assert coordinator is not None, (
+            layer_store = getattr(self, "hisparse_layer", None)
+            assert layer_store is not None, (
                 "CPU-resident MLA context requires a host-cache staging backend"
             )
             seq_lens = getattr(attn_metadata, "seq_lens", None)
             assert seq_lens is not None
-            kv_c_and_k_pe_cache, block_table = coordinator.stage_prefill_cache(
+            kv_c_and_k_pe_cache, block_table = layer_store.offload.stage_prefill_cache(
                 kv_c_and_k_pe_cache,
                 block_table,
                 seq_lens[attn_metadata.num_decodes :],

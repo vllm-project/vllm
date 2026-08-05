@@ -171,32 +171,22 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                if self.hisparse_coordinator is not None:
-                    coordinator = self.hisparse_coordinator
-                    if coordinator.fully_resident_batch:
-                        kv_cache, global_indices, topk_lens = cast(
-                            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-                            coordinator.resolve_resident(
-                                attn_metadata.req_id_per_token[:num_decode_tokens],
-                                self.topk_indices_buffer[:num_decode_tokens],
-                                return_valid_counts=True,
+                if self.hisparse_layer is not None:
+                    layer_store = self.hisparse_layer
+                    assert attn_metadata.batch_to_request_state is not None
+                    kv_cache, global_indices, topk_lens = cast(
+                        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+                        layer_store.resolve_topk(
+                            attn_metadata.req_id_per_token[:num_decode_tokens],
+                            block_table=attn_metadata.block_table[:num_decodes],
+                            topk_indices=self.topk_indices_buffer[:num_decode_tokens],
+                            request_state_indices=(
+                                attn_metadata.batch_to_request_state
                             ),
-                        )
-                    else:
-                        kv_cache, global_indices, topk_lens = cast(
-                            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-                            coordinator.swap_in(
-                                req_id_per_token=attn_metadata.req_id_per_token[
-                                    :num_decode_tokens
-                                ],
-                                block_table=attn_metadata.block_table[:num_decodes],
-                                topk_indices=self.topk_indices_buffer[
-                                    :num_decode_tokens
-                                ],
-                                block_size=block_size,
-                                return_valid_counts=True,
-                            ),
-                        )
+                            block_size=block_size,
+                            return_valid_counts=True,
+                        ),
+                    )
                     topk_indices = global_indices.view(num_decode_tokens, 1, -1)
                 else:
                     global_indices, topk_lens = compute_global_topk_indices_and_lens(
@@ -338,11 +328,13 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     chunk_start:chunk_end
                 ]
                 cache = compressed_k_cache
-                if self.hisparse_coordinator is not None:
-                    cache, block_table = self.hisparse_coordinator.stage_prefill_cache(
-                        compressed_k_cache,
-                        block_table,
-                        seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                if self.hisparse_layer is not None:
+                    cache, block_table = (
+                        self.hisparse_layer.offload.stage_prefill_cache(
+                            compressed_k_cache,
+                            block_table,
+                            seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                        )
                     )
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],

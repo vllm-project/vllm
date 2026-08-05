@@ -33,18 +33,18 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-from vllm.v1.attention.backends.mla.hisparse import (
-    FP8_DS_MLA_ROW_BYTES,
-    HiSparseCoordinator,
-    HiSparsePrefillStagingPlan,
-    build_hisparse_prefill_staging_plan,
-    create_hisparse_coordinator,
-)
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.kv_offload.sparse.hisparse_layer import (
+    FP8_DS_MLA_ROW_BYTES,
+    HiSparseLayer,
+    HiSparsePrefillStagingPlan,
+    build_hisparse_prefill_staging_plan,
+    create_hisparse_layer,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -538,7 +538,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             else topk_indices_buffer
         )
 
-        self.hisparse_coordinator: HiSparseCoordinator | None = None
+        self.hisparse_layer: HiSparseLayer | None = None
         vllm_config = get_current_vllm_config()
         if vllm_config.attention_config.hisparse_config is not None:
             if kv_cache_dtype == "fp8_ds_mla":
@@ -554,15 +554,19 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 if indexer is not None
                 else vllm_config.model_config.hf_config.index_topk
             )
-            self.hisparse_coordinator = create_hisparse_coordinator(
+            self.hisparse_layer = create_hisparse_layer(
                 vllm_config,
                 model_top_k,
+                index_group_scope=(
+                    self.topk_indices_buffer
+                    if self.topk_indices_buffer is not None
+                    else vllm_config
+                ),
+                is_index_group_leader=indexer is not None,
                 row_width=row_width,
                 kv_dtype=kv_dtype,
             )
-            assert self.hisparse_coordinator is not None
-            self.hisparse_coordinator.join_indexer_group(indexer is not None)
-        self._hisparse_decode_batch = False
+            assert self.hisparse_layer is not None
         self._hisparse_dummy_batch = False
 
         self._use_flashinfer_concat_mla_k = (
@@ -581,21 +585,18 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             kv_cache_dtype=kv_cache_dtype,
         )
 
+    @property
+    def _hisparse_decode_batch(self) -> bool:
+        return self.hisparse_layer is not None and self.hisparse_layer.decode_batch
+
     def prepare_hisparse_for_batch(self, attn_metadata: Any | None) -> None:
         self._hisparse_dummy_batch = attn_metadata is None
-        if attn_metadata is None:
-            self._hisparse_decode_batch = False
-            return
-        if self.hisparse_coordinator is not None:
-            indices = getattr(attn_metadata, "batch_to_request_state", None)
-            if indices is None:
-                raise ValueError("HiSparse requires V2 request-state indices.")
-            self.hisparse_coordinator.set_request_state_indices(indices)
-        self._hisparse_decode_batch = (
-            self.hisparse_coordinator is not None
-            and attn_metadata.max_query_len == 1
-            and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
-        )
+        if self.hisparse_layer is not None:
+            self.hisparse_layer.decode_batch = (
+                attn_metadata is not None
+                and attn_metadata.max_query_len == 1
+                and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
+            )
 
     def _hisparse_swap_in(
         self,
@@ -604,32 +605,21 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         num_decode_tokens: int | None = None,
         return_valid_counts: bool = False,
     ):
-        assert self.hisparse_coordinator is not None
+        assert self.hisparse_layer is not None
         pure_decode = num_decode_tokens is None
         n = topk_indices.shape[0] if pure_decode else num_decode_tokens
         assert n is not None
         assert pure_decode or n == attn_metadata.num_decodes, (
             "HiSparse requires one token per mixed-batch decode request."
         )
-        if self.hisparse_coordinator.fully_resident_batch:
-            return self.hisparse_coordinator.resolve_resident(
-                attn_metadata.req_id_per_token[:n],
-                topk_indices[:n],
-                return_valid_counts=return_valid_counts,
-            )
-        if self.hisparse_coordinator.leader is not None:
-            return self.hisparse_coordinator.apply_plan(
-                block_size=attn_metadata.block_size,
-                num_tokens=n,
-                return_valid_counts=return_valid_counts,
-            )
-        return self.hisparse_coordinator.swap_in(
-            req_id_per_token=attn_metadata.req_id_per_token[:n],
+        assert attn_metadata.batch_to_request_state is not None
+        return self.hisparse_layer.resolve_topk(
+            attn_metadata.req_id_per_token[:n],
             block_table=attn_metadata.block_table,
             topk_indices=topk_indices[:n],
+            request_state_indices=attn_metadata.batch_to_request_state,
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
-            produce_plan=bool(self.hisparse_coordinator.group_shared),
         )
 
     def _hisparse_decode_cache(
@@ -640,7 +630,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         *,
         return_valid_counts: bool = False,
     ):
-        if self.hisparse_coordinator is None:
+        if self.hisparse_layer is None:
             return None
         if attn_metadata.num_decode_tokens == 0:
             kv_cache, block_table, req_ids = self._hisparse_stage_prefill_rows(
@@ -676,11 +666,11 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
     def _hisparse_stage_prefill_rows(
         self, kv_cache: torch.Tensor, attn_metadata: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        assert self.hisparse_coordinator is not None
+        assert self.hisparse_layer is not None
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
         assert attn_metadata.seq_lens is not None
-        staged_cache, staged_bt = self.hisparse_coordinator.stage_prefill_cache(
+        staged_cache, staged_bt = self.hisparse_layer.offload.stage_prefill_cache(
             kv_cache,
             attn_metadata.block_table[num_decodes:],
             attn_metadata.seq_lens[num_decodes:],
@@ -699,8 +689,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
     ) -> None:
-        coordinator = self.hisparse_coordinator
-        if coordinator is None:
+        layer_store = self.hisparse_layer
+        if layer_store is None:
             return super().do_kv_cache_update(
                 kv_c_normed,
                 k_pe,
@@ -711,22 +701,14 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             )
         if self._hisparse_dummy_batch:
             return
-        if self._hisparse_decode_batch:
-            coordinator.write_newest_rows(
-                kv_c_normed,
-                k_pe,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-            )
-        else:
-            coordinator.write_rows_to_host(
-                kv_c_normed,
-                k_pe,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-            )
+        layer_store.write_rows(
+            kv_c_normed,
+            k_pe,
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+            mirror_to_host=not layer_store.decode_batch,
+        )
 
     @staticmethod
     def _slice_topk_per_req(
@@ -956,14 +938,14 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
     ) -> None:
         prefill = attn_metadata.prefill  # type: ignore[attr-defined]
         if (
-            self.hisparse_coordinator is not None
+            self.hisparse_layer is not None
             and kv_c_and_k_pe_cache.device.type == "cpu"
             and prefill is not None
             and prefill.chunked_context is not None
         ):
             assert isinstance(prefill, SparseMLAPrefillMetadata)
             assert prefill.hisparse_staging_plan is not None
-            kv_c_and_k_pe_cache = self.hisparse_coordinator.gather_prefill_cache(
+            kv_c_and_k_pe_cache = self.hisparse_layer.offload.gather_prefill_cache(
                 kv_c_and_k_pe_cache, prefill.hisparse_staging_plan
             )
         prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]

@@ -936,10 +936,6 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     """Track reclaimable resident pages for otherwise host-backed KV."""
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.host_valid_pages: defaultdict[str, set[int]] = defaultdict(set)
-
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -972,7 +968,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             self.block_size,
         )
         req_blocks.extend([self._null_block] * num_host_pages)
-        self.host_valid_pages[request_id].update(range(num_host_pages))
         self.num_cached_block[request_id] = 0
 
     def allocate_new_blocks(
@@ -1004,10 +999,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         block = blocks[block_idx]
         return None if block.is_null else block
 
-    def mark_host_valid(self, request_id: str, block_idx: int) -> None:
-        if request_id in self.req_to_blocks:
-            self.host_valid_pages[request_id].add(block_idx)
-
     def is_fully_resident(self, request_id: str) -> bool:
         blocks = self.req_to_blocks.get(request_id)
         return (
@@ -1033,10 +1024,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         blocks[block_idx] = self._null_block
         self.block_pool.free_blocks([block])
         return block
-
-    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
-        self.host_valid_pages.pop(request_id, None)
-        return super().pop_blocks_for_free(request_id)
 
 
 class RSWAManager(FullAttentionManager):

@@ -55,6 +55,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, MambaSpec
+from vllm.v1.kv_offload.sparse.hisparse_store import HiSparseOffloadStore
 from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.block_table import get_block_table_width
@@ -80,7 +81,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
-from vllm.v1.worker.gpu.hisparse import HiSparseRuntime
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -280,7 +280,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
         # HiSparse state if configured.
-        self.hisparse_runtime: HiSparseRuntime | None = None
+        self.hisparse_store: HiSparseOffloadStore | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -553,7 +553,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict, self.hisparse_runtime = init_kv_cache(
+        kv_caches_dict, self.hisparse_store = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
@@ -792,8 +792,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return 0
 
     def _set_hisparse_capture_variant(self, variant: int) -> None:
-        assert self.hisparse_runtime is not None
-        self.hisparse_runtime.set_fully_resident_batch(
+        assert self.hisparse_store is not None
+        self.hisparse_store.set_fully_resident_batch(
             variant == _HISPARSE_RESIDENT_GRAPH_VARIANT
         )
 
@@ -815,8 +815,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            if self.hisparse_runtime is not None:
-                self.hisparse_runtime.set_fully_resident_batch(True)
+            if self.hisparse_store is not None:
+                self.hisparse_store.set_fully_resident_batch(True)
             try:
                 self.cudagraph_manager.capture(
                     self.model,
@@ -832,14 +832,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     decode_post_forward_hook=None,
                     graph_variant_capture_hook=(
                         self._set_hisparse_capture_variant
-                        if self.hisparse_runtime is not None
+                        if self.hisparse_store is not None
                         else None
                     ),
                 )
             finally:
-                if self.hisparse_runtime is not None:
-                    self.hisparse_runtime.set_fully_resident_batch(False)
-                    self.hisparse_runtime.reset_hot_state()
+                if self.hisparse_store is not None:
+                    self.hisparse_store.set_fully_resident_batch(False)
+                    self.hisparse_store.reset_hot_state()
             if self.speculator is not None:
                 self.speculator.capture()
 
@@ -956,18 +956,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
-        table_updates = scheduler_output.hisparse_block_table_updates or {}
-        for req_id, block_ids in table_updates.items():
-            req_index = self.req_states.req_id_to_index.get(req_id)
-            if req_index is not None:
-                self.block_tables.append_block_ids(req_index, block_ids, overwrite=True)
+        offload_command = scheduler_output.sparse_kv_offload
+        table_updates = (
+            offload_command.block_table_updates if offload_command is not None else None
+        )
+        if table_updates is not None:
+            for req_id, block_ids in table_updates.items():
+                req_index = self.req_states.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    self.block_tables.append_block_ids(
+                        req_index, block_ids, overwrite=True
+                    )
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
-            if req_new_block_ids is not None and req_id not in table_updates:
+            if req_new_block_ids is not None and (
+                table_updates is None or req_id not in table_updates
+            ):
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
@@ -1295,21 +1303,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
-            if self.hisparse_runtime is not None:
-                self.hisparse_runtime.pre_step(scheduler_output)
+            if self.hisparse_store is not None:
+                command = scheduler_output.sparse_kv_offload
+                assert command is not None
+                self.hisparse_store.prepare_step(command, scheduler_output)
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
-                spill_ids = (
-                    self.hisparse_runtime.take_spill_completions()
-                    if self.hisparse_runtime is not None
+                offload_output = (
+                    self.hisparse_store.take_completed_transfer_ids()
+                    if self.hisparse_store is not None
                     else None
                 )
-                if spill_ids:
+                if offload_output is not None:
                     return ModelRunnerOutput.with_worker_output_only(
                         empty_output.kv_connector_output,
                         None,
-                        spill_ids,
+                        offload_output,
                     )
                 return empty_output
 
@@ -1344,8 +1354,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_active_loras=num_active_loras,
             graph_variant=(
                 _HISPARSE_HYBRID_GRAPH_VARIANT
-                if self.hisparse_runtime is not None
-                and not self.hisparse_runtime.coordinators[0].fully_resident_batch
+                if self.hisparse_store is not None
+                and not self.hisparse_store.fully_resident_batch
                 else _HISPARSE_RESIDENT_GRAPH_VARIANT
             ),
         )
@@ -1395,9 +1405,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
-
-        if self.hisparse_runtime is not None:
-            self.hisparse_runtime.set_request_state_indices(input_batch.idx_mapping)
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -1517,8 +1524,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
 
-        if not dummy_run and self.hisparse_runtime is not None:
-            self.hisparse_runtime.post_forward()
+        if not dummy_run and self.hisparse_store is not None:
+            self.hisparse_store.finish_forward()
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
@@ -1581,11 +1588,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # in the immediate next step (rather than in pp_size steps).
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
 
-            kv_connector_output, hisparse_stats, spill_ids = self._finish_step(
+            kv_connector_output, hisparse_stats, offload_output = self._finish_step(
                 finished_req_ids
             )
             return ModelRunnerOutput.with_worker_output_only(
-                kv_connector_output, hisparse_stats, spill_ids
+                kv_connector_output, hisparse_stats, offload_output
             )
 
         # Last rank: sample tokens
@@ -1694,12 +1701,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.draft_tokens[input_batch.idx_mapping],
             )
 
-        kv_connector_output, hisparse_stats, spill_ids = self._finish_step(
+        kv_connector_output, hisparse_stats, offload_output = self._finish_step(
             finished_req_ids
         )
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.hisparse_stats = hisparse_stats
-        model_runner_output.hisparse_spill_completions = spill_ids
+        model_runner_output.sparse_kv_completions = offload_output
 
         return async_output
 
@@ -1718,14 +1725,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         self.execute_model_state = None
 
-        kv_connector_output, hisparse_stats, spill_ids = self._finish_step(
+        kv_connector_output, hisparse_stats, offload_output = self._finish_step(
             finished_req_ids
         )
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
             return ModelRunnerOutput.with_worker_output_only(
-                kv_connector_output, hisparse_stats, spill_ids
+                kv_connector_output, hisparse_stats, offload_output
             )
 
         assert self.pooling_runner is not None
@@ -1739,7 +1746,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
             hisparse_stats=hisparse_stats,
-            hisparse_spill_completions=spill_ids,
+            sparse_kv_completions=offload_output,
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
@@ -1762,28 +1769,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _finish_step(
         self, finished_req_ids: set[str]
-    ) -> tuple[KVConnectorOutput | None, HiSparseStats | None, list[int] | None]:
+    ) -> tuple[
+        KVConnectorOutput | None,
+        HiSparseStats | None,
+        list[int] | None,
+    ]:
         hisparse_stats = (
-            self.hisparse_runtime.post_step()
-            if self.hisparse_runtime is not None
+            self.hisparse_store.finish_step()
+            if self.hisparse_store is not None
             else None
         )
-        spill_ids = (
-            self.hisparse_runtime.take_spill_completions()
-            if self.hisparse_runtime is not None
+        offload_output = (
+            self.hisparse_store.take_completed_transfer_ids()
+            if self.hisparse_store is not None
             else None
         )
         return (
             self.kv_connector.post_forward(finished_req_ids),
             hisparse_stats,
-            spill_ids,
+            offload_output,
         )
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
-        if self.hisparse_runtime is not None:
-            self.hisparse_runtime.shutdown()
+        if self.hisparse_store is not None:
+            self.hisparse_store.shutdown()
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()

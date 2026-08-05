@@ -165,7 +165,7 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pools = self.coordinator.block_pools
         self.block_pool = self.coordinator.block_pool
-        self.hisparse = self.coordinator.hisparse
+        self.hisparse_residency = self.coordinator.hisparse_residency
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
@@ -557,7 +557,7 @@ class KVCacheManager:
             ):
                 shortage = required + watermark + reserved - pool.get_num_free_blocks()
                 if shortage > 0:
-                    self.hisparse.reclaim_resident_blocks(pool_id, shortage)
+                    self.hisparse_residency.reclaim_resident_blocks(pool_id, shortage)
             lacks_capacity = any(
                 required + watermark > pool.get_num_free_blocks() - reserved
                 for required, watermark, reserved, pool in zip(
@@ -608,17 +608,6 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
-
-    def take_hisparse_block_table_updates(
-        self,
-    ) -> dict[str, tuple[list[int], ...]] | None:
-        request_ids = self.hisparse.take_block_table_update_requests()
-        if not request_ids:
-            return None
-        return {
-            request_id: self.get_blocks(request_id).get_block_ids()
-            for request_id in request_ids
-        }
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

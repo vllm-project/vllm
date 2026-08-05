@@ -39,7 +39,6 @@ if not current_platform.is_cuda():
     )
 
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mla import hisparse
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseTRTLLMBackend,
 )
@@ -50,14 +49,6 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseMetadataBuilder,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.backends.mla.hisparse import (
-    HiSparseCoordinator,
-    HiSparsePrefillStagingPlan,
-    ResolvedHiSparseConfig,
-    _has_hisparse_ops,
-    build_hisparse_prefill_staging_plan,
-    hisparse_prefill_staging_remap,
-)
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.backends.utils import (
@@ -65,6 +56,16 @@ from vllm.v1.attention.backends.utils import (
     split_prefill_chunks,
 )
 from vllm.v1.attention.ops import flashmla
+from vllm.v1.kv_offload.sparse import hisparse_layer as hisparse
+from vllm.v1.kv_offload.sparse.hisparse_layer import (
+    HiSparseLayer,
+    HiSparseOffloadLayer,
+    HiSparsePrefillStagingPlan,
+    ResolvedHiSparseConfig,
+    _has_hisparse_ops,
+    build_hisparse_prefill_staging_plan,
+    hisparse_prefill_staging_remap,
+)
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -916,7 +917,7 @@ def test_hisparse_mha_uses_shared_staging_plan(monkeypatch):
 
     impls = [object.__new__(FlashMLASparseImpl) for _ in range(2)]
     for impl in impls:
-        impl.hisparse_coordinator = Coordinator()
+        impl.hisparse_layer = Coordinator()
 
     prefill = SparseMLAPrefillMetadata(
         block_table=staged_block_table,
@@ -1370,7 +1371,7 @@ requires_hisparse_ops = pytest.mark.skipif(
 
 
 def fallback_swap_in(
-    coordinator: HiSparseCoordinator,
+    coordinator: HiSparseOffloadLayer,
     global_indices: torch.Tensor,
     hot_indices: torch.Tensor,
 ) -> None:
@@ -1430,21 +1431,22 @@ def fallback_swap_in(
         lru_cpu, dtype=torch.int16, device=coordinator.device
     )
     if miss_src:
+        assert coordinator.hot is not None
         src_cpu = torch.tensor(miss_src, dtype=torch.long)
         dst = torch.tensor(miss_dst, dtype=torch.long, device=coordinator.device)
         rows = coordinator._host_cache[src_cpu].to(coordinator.device)
-        coordinator.hot_cache.view(-1, coordinator.row_width).index_copy_(0, dst, rows)
+        coordinator.hot.cache.view(-1, coordinator.row_width).index_copy_(0, dst, rows)
 
 
-def _make_hisparse_coordinator(
+def _make_hisparse_offload_layer(
     *,
     top_k: int = 4,
     device_buffer_size: int = 5,
     max_num_reqs: int = 2,
     row_width: int = 8,
     block_size: int = 64,
-) -> HiSparseCoordinator:
-    coordinator = HiSparseCoordinator(
+) -> HiSparseOffloadLayer:
+    coordinator = HiSparseOffloadLayer(
         config=ResolvedHiSparseConfig(
             top_k=top_k,
             device_buffer_size=device_buffer_size,
@@ -1464,58 +1466,65 @@ def _make_hisparse_coordinator(
         dtype=torch.float32,
         device=DEVICE_TYPE,
     ).view(torch.int8)
+    block_table = torch.arange(
+        max_num_reqs * blocks_per_request,
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    ).view(max_num_reqs, blocks_per_request)
     coordinator.bind_hot_cache(
         raw,
         byte_offset=0,
         block_stride=block_size * row_width * torch.float32.itemsize,
         num_blocks=num_blocks,
         block_size=block_size,
+        block_table=block_table,
     )
-    block_table = torch.arange(
-        max_num_reqs * blocks_per_request,
-        dtype=torch.int32,
-        device=DEVICE_TYPE,
-    ).view(max_num_reqs, blocks_per_request)
-    coordinator.bind_hot_block_table(block_table)
     return coordinator
 
 
-def _hisparse_hot_slot(coordinator: HiSparseCoordinator, row: int, logical: int) -> int:
-    assert coordinator.hot_cache is not None
+def _make_hisparse_layer(
+    *,
+    top_k: int = 4,
+    device_buffer_size: int = 5,
+    max_num_reqs: int = 2,
+    row_width: int = 8,
+    block_size: int = 64,
+) -> HiSparseLayer:
+    offload = _make_hisparse_offload_layer(
+        top_k=top_k,
+        device_buffer_size=device_buffer_size,
+        max_num_reqs=max_num_reqs,
+        row_width=row_width,
+        block_size=block_size,
+    )
+    return HiSparseLayer(offload)
+
+
+def _hisparse_hot_slot(
+    coordinator: HiSparseOffloadLayer, row: int, logical: int
+) -> int:
+    assert coordinator.hot is not None
     assert coordinator.hot_block_table is not None
-    block_size = coordinator.hot_cache.shape[1]
+    block_size = coordinator.hot.cache.shape[1]
     block = coordinator.hot_block_table[row, logical // block_size]
     return int(block.item()) * block_size + logical % block_size
-
-
-@requires_hisparse_ops
-def test_hisparse_request_state_mapping_storage_is_stable():
-    coordinator = _make_hisparse_coordinator(max_num_reqs=4)
-    mapping = torch.tensor([3, 1], dtype=torch.int32, device=DEVICE_TYPE)
-    original_ptr = coordinator.request_state_indices.data_ptr()
-
-    coordinator.set_request_state_indices(mapping, force=True)
-    torch.accelerator.synchronize()
-
-    assert coordinator.request_state_indices.data_ptr() == original_ptr
-    assert coordinator.request_state_indices[:2].tolist() == [3, 1]
 
 
 def test_hisparse_resident_rows_bypass_hot_lru():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8
-    coordinator = _make_hisparse_coordinator(
+    coordinator = _make_hisparse_layer(
         top_k=4,
         device_buffer_size=5,
         max_num_reqs=1,
         row_width=row_width,
         block_size=block_size,
     )
-    assert coordinator.hot_cache is not None
-    raw = coordinator.hot_cache.view(torch.int8)
+    assert coordinator.offload.hot is not None
+    raw = coordinator.offload.hot.cache.view(torch.int8)
     resident_table = torch.tensor([[1]], dtype=torch.int32, device=device)
     resident_slots = torch.tensor([block_size], dtype=torch.int64, device=device)
-    coordinator.bind_resident_cache(
+    coordinator.bind_cache(
         raw,
         byte_offset=0,
         block_stride=block_size * row_width * torch.float32.itemsize,
@@ -1523,36 +1532,43 @@ def test_hisparse_resident_rows_bypass_hot_lru():
         block_size=block_size,
         block_table=resident_table,
         slot_mapping=resident_slots,
-        group_id=1,
     )
 
     host = torch.randn(1, block_size, row_width).pin_memory()
-    coordinator.bind_source_cache(host)
-    coordinator.hot_cache[1].copy_(host[0])
+    coordinator.offload.bind_source_cache(host)
+    coordinator.offload.hot.cache[1].copy_(host[0])
     source_table = torch.tensor([[0]], dtype=torch.int32, device=device)
     request_ids = torch.zeros(1, dtype=torch.int32, device=device)
     topk = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32, device=device)
-    lru_before = coordinator.lru_slots.clone()
+    assert coordinator.offload.lru_slots is not None
+    lru_before = coordinator.offload.lru_slots.clone()
 
-    resident_cache, resident_indices = coordinator.resolve_resident(
-        request_ids,
-        topk,
-        return_valid_counts=False,
-    )
-    assert resident_cache.data_ptr() == coordinator.attention_hot_cache.data_ptr()
-    assert resident_indices.tolist() == [[block_size + 1, 66, 67, 68]]
-
-    cache, indices = coordinator.swap_in(
+    coordinator.fully_resident = True
+    resident_cache, resident_indices = coordinator.resolve_topk(
         req_id_per_token=request_ids,
         block_table=source_table,
         topk_indices=topk,
+        request_state_indices=request_ids,
+        block_size=block_size,
+        return_valid_counts=False,
+    )
+    assert coordinator.view is not None
+    assert resident_cache.data_ptr() == coordinator.view.attention_cache.data_ptr()
+    assert resident_indices.tolist() == [[block_size + 1, 66, 67, 68]]
+    coordinator.fully_resident = False
+
+    cache, indices = coordinator.resolve_topk(
+        req_id_per_token=request_ids,
+        block_table=source_table,
+        topk_indices=topk,
+        request_state_indices=request_ids,
         block_size=block_size,
     )
     torch.accelerator.synchronize()
 
     expected_indices = topk + block_size
     torch.testing.assert_close(indices, expected_indices)
-    torch.testing.assert_close(coordinator.lru_slots, lru_before)
+    torch.testing.assert_close(coordinator.offload.lru_slots, lru_before)
     torch.testing.assert_close(
         cache.view(-1, row_width)[indices.to(torch.long)],
         host.view(-1, row_width)[topk.cpu().to(torch.long)].to(device),
@@ -1576,8 +1592,8 @@ def test_hisparse_kernel_matches_fallback():
     ).pin_memory()
     flat_pool = kv_pool.reshape(-1, row_width)
 
-    def make() -> HiSparseCoordinator:
-        c = _make_hisparse_coordinator(
+    def make() -> HiSparseOffloadLayer:
+        c = _make_hisparse_offload_layer(
             top_k=top_k,
             device_buffer_size=buf,
             max_num_reqs=num_reqs,
@@ -1635,7 +1651,7 @@ def test_hisparse_kernel_matches_fallback():
         torch.testing.assert_close(
             kernel_c.lru_slots, fallback_c.lru_slots, rtol=0, atol=0
         )
-        torch.testing.assert_close(kernel_c.hot_cache, fallback_c.hot_cache)
+        torch.testing.assert_close(kernel_c.hot.cache, fallback_c.hot.cache)
 
         # Data correctness: every valid hot index holds the right KV row.
         flat_hot = hot_k.reshape(-1, row_width)
@@ -1670,8 +1686,8 @@ def test_hisparse_apply_plan_matches_independent():
         (num_blocks, block_size, row_width), dtype=torch.float32
     ).pin_memory()
 
-    def make() -> HiSparseCoordinator:
-        c = _make_hisparse_coordinator(
+    def make() -> HiSparseOffloadLayer:
+        c = _make_hisparse_offload_layer(
             top_k=top_k,
             device_buffer_size=buf,
             max_num_reqs=num_reqs,
@@ -1686,7 +1702,7 @@ def test_hisparse_apply_plan_matches_independent():
     )
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
-    hisparse._STATE.group_plans.clear()
+    hisparse._get_group_plan.cache_clear()
     producer, shared, indep = make(), make(), make()
     shared.join_group(producer)
     for _ in range(8):
@@ -1710,7 +1726,7 @@ def test_hisparse_apply_plan_matches_independent():
         torch.accelerator.synchronize()
         torch.testing.assert_close(idx_shared, idx_full, rtol=0, atol=0)
         torch.testing.assert_close(idx_indep, idx_full, rtol=0, atol=0)
-        torch.testing.assert_close(shared.hot_cache, indep.hot_cache)
+        torch.testing.assert_close(shared.hot.cache, indep.hot.cache)
 
 
 @requires_hisparse_ops
@@ -1721,41 +1737,41 @@ def test_hisparse_prefill_writes_resident_and_host_rows():
     row_width = 8
     kv_pool = torch.zeros(8, block_size, row_width, dtype=torch.float32).pin_memory()
     flat_pool = kv_pool.reshape(-1, row_width)
-    coordinator = _make_hisparse_coordinator(
+    coordinator = _make_hisparse_layer(
         max_num_reqs=1,
         row_width=row_width,
         block_size=block_size,
     )
-    assert coordinator.hot_cache is not None
+    assert coordinator.offload.hot is not None
     resident_slots = torch.tensor([4, 5, -1], dtype=torch.int64, device=device)
-    coordinator.bind_resident_cache(
-        coordinator.hot_cache.view(torch.int8),
+    coordinator.bind_cache(
+        coordinator.offload.hot.cache.view(torch.int8),
         byte_offset=0,
         block_stride=block_size * row_width * torch.float32.itemsize,
-        num_blocks=coordinator.hot_cache.shape[0],
+        num_blocks=coordinator.offload.hot.cache.shape[0],
         block_size=block_size,
         block_table=torch.tensor([[1]], dtype=torch.int32, device=device),
         slot_mapping=resident_slots,
-        group_id=1,
     )
 
     slots = torch.tensor([3, 7, -1], dtype=torch.int64, device=device)
     kv_c = torch.randn(8, row_width - 2, device=device)
     k_pe = torch.randn(8, 1, 2, device=device)
-    coordinator.bind_source_cache(kv_pool)
+    coordinator.offload.bind_source_cache(kv_pool)
 
-    coordinator.write_rows_to_host(
+    coordinator.write_rows(
         kv_c,
         k_pe,
         slots,
         "auto",
         torch.tensor(1.0, device=device),
+        mirror_to_host=True,
     )
     torch.accelerator.synchronize()
 
     expected = torch.cat([kv_c[:2], k_pe[:2, 0]], dim=-1).cpu()
     torch.testing.assert_close(
-        coordinator.hot_cache.view(-1, row_width)[resident_slots[:2]],
+        coordinator.view.cache.view(-1, row_width)[resident_slots[:2]],
         expected.to(device),
     )
     torch.testing.assert_close(flat_pool[torch.tensor([3, 7])], expected)
@@ -1766,7 +1782,7 @@ def test_hisparse_prefill_writes_resident_and_host_rows():
 def test_hisparse_remaps_strided_hma_rows_for_attention():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 4, 8
-    coordinator = _make_hisparse_coordinator(
+    coordinator = _make_hisparse_offload_layer(
         max_num_reqs=1,
         block_size=block_size,
         row_width=row_width,
@@ -1798,9 +1814,9 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         block_size=block_size,
     )
 
-    assert coordinator.attention_hot_cache is not None
-    assert coordinator.attention_hot_cache.is_contiguous()
-    physical_indices = coordinator._hot_indices[0]
+    assert coordinator.hot.attention_cache is not None
+    assert coordinator.hot.attention_cache.is_contiguous()
+    physical_indices = coordinator._plan.hot_indices[0]
     expected = (
         physical_indices // block_size * (stride_elements // row_width)
         + physical_indices % block_size
@@ -2094,21 +2110,20 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     )
     flat_pool = kv_pool.reshape(-1, row_width)
 
-    coordinator = _make_hisparse_coordinator(block_size=block_size)
-    assert coordinator.hot_cache is not None
-    coordinator.eager_host_mirror = True
+    coordinator = _make_hisparse_layer(block_size=block_size)
+    assert coordinator.offload.hot is not None
+    coordinator.offload.eager_host_mirror = True
 
     block_table = torch.tensor([[2, 0, 4]], dtype=torch.int32, device=device)
     resident_slots = torch.tensor([4, -1], dtype=torch.int64, device=device)
-    coordinator.bind_resident_cache(
-        coordinator.hot_cache.view(torch.int8),
+    coordinator.bind_cache(
+        coordinator.offload.hot.cache.view(torch.int8),
         byte_offset=0,
         block_stride=block_size * row_width * torch.float32.itemsize,
-        num_blocks=coordinator.hot_cache.shape[0],
+        num_blocks=coordinator.offload.hot.cache.shape[0],
         block_size=block_size,
         block_table=torch.tensor([[0, 0, 1]], dtype=torch.int32, device=device),
         slot_mapping=resident_slots,
-        group_id=1,
     )
     req_ids = torch.tensor([0], dtype=torch.int32, device=device)
     newest_global = 4 * block_size
@@ -2117,32 +2132,32 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     slot_mapping = torch.tensor(
         [newest_global, padded_global], dtype=torch.int64, device=device
     )
-    coordinator.set_request_state_indices(
-        torch.tensor([0, -1], dtype=torch.int32, device=device)
-    )
+    request_state_indices = torch.tensor([0, -1], dtype=torch.int32, device=device)
 
     kv_c = torch.randn(3, row_width - 2, device=device)
     k_pe = torch.randn(3, 1, 2, device=device)
-    coordinator.bind_source_cache(kv_pool)
-    coordinator.write_newest_rows(
+    coordinator.offload.bind_source_cache(kv_pool)
+    coordinator.write_rows(
         kv_c,
         k_pe,
         slot_mapping,
         "auto",
         torch.tensor(1.0, device=device),
+        mirror_to_host=False,
     )
     torch.accelerator.synchronize()
     expected_row = torch.cat([kv_c[0], k_pe[0, 0]]).cpu()
     torch.testing.assert_close(flat_pool[newest_global], expected_row)
     torch.testing.assert_close(flat_pool[padded_global], padded_row)
-    flat_hot = coordinator.hot_cache.view(-1, row_width)
+    flat_hot = coordinator.offload.hot.cache.view(-1, row_width)
     torch.testing.assert_close(flat_hot[resident_slots[0]].cpu(), expected_row)
 
     topk = torch.tensor([[0, -1, -1, -1]], dtype=torch.int32, device=device)
-    _, hot_indices = coordinator.swap_in(
+    _, hot_indices = coordinator.resolve_topk(
         req_id_per_token=req_ids,
         block_table=block_table,
         topk_indices=topk,
+        request_state_indices=request_state_indices,
         block_size=block_size,
     )
     torch.accelerator.synchronize()
@@ -2150,11 +2165,12 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     stale_row = flat_hot[stale_hot_slot].clone()
 
     flat_pool[8] += 1000
-    coordinator.invalidate_slots(torch.tensor([8], device=device))
-    _, hot_indices = coordinator.swap_in(
+    coordinator.offload.invalidate_slots(torch.tensor([8], device=device))
+    _, hot_indices = coordinator.resolve_topk(
         req_id_per_token=req_ids,
         block_table=block_table,
         topk_indices=topk,
+        request_state_indices=request_state_indices,
         block_size=block_size,
     )
     torch.accelerator.synchronize()
@@ -2230,7 +2246,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     )
     model_config.get_head_size = MethodType(lambda self: head_size, model_config)
     model_config.get_sliding_window = MethodType(lambda self: None, model_config)
-    # create_hisparse_coordinator sizes hot buffers per layer.
+    # create_hisparse_layer sizes hot buffers per layer.
     model_config.get_num_layers = MethodType(
         lambda self, parallel_config: 1, model_config
     )
@@ -2345,29 +2361,27 @@ def test_hisparse_mixed_batch_bf16_row_split(
             kv_b_proj=None,
             indexer=mock_indexer,
         )
-    assert impl.hisparse_coordinator is not None
-    coordinator = impl.hisparse_coordinator
-    blocks_per_request = cdiv(coordinator.region_stride, block_size)
-    num_hot_blocks = coordinator.max_num_reqs * blocks_per_request
+    assert impl.hisparse_layer is not None
+    coordinator = impl.hisparse_layer
+    blocks_per_request = cdiv(coordinator.offload.region_stride, block_size)
+    num_hot_blocks = coordinator.offload.max_num_reqs * blocks_per_request
     hot_cache = torch.zeros(
         num_hot_blocks * block_size * head_size,
         dtype=dtype,
         device=device,
     ).view(torch.int8)
-    coordinator.bind_hot_cache(
+    coordinator.offload.bind_hot_cache(
         hot_cache,
         byte_offset=0,
         block_stride=block_size * head_size * dtype.itemsize,
         num_blocks=num_hot_blocks,
         block_size=block_size,
-    )
-    coordinator.bind_hot_block_table(
-        torch.arange(num_hot_blocks, dtype=torch.int32, device=device).view(
-            coordinator.max_num_reqs, blocks_per_request
-        )
+        block_table=torch.arange(num_hot_blocks, dtype=torch.int32, device=device).view(
+            coordinator.offload.max_num_reqs, blocks_per_request
+        ),
     )
     impl.prepare_hisparse_for_batch(metadata)
-    assert not impl._hisparse_decode_batch
+    assert not coordinator.decode_batch
 
     # Device-resident reference: the whole batch converted against the full
     # block table and run as one kernel call over the GPU cache.
@@ -2383,17 +2397,17 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
     # Host-resident pool with identical contents.
     kv_pool = kv_cache.cpu().pin_memory()
-    coordinator.bind_source_cache(kv_pool)
+    coordinator.offload.bind_source_cache(kv_pool)
 
     staging_calls = []
-    original_stage = coordinator.stage_prefill_cache
+    original_stage = coordinator.offload.stage_prefill_cache
 
     def spy_stage(self, kv, block_table, seq_lens):
         staged, staged_bt = original_stage(kv, block_table, seq_lens)
         staging_calls.append((block_table.clone(), seq_lens.clone(), staged.shape))
         return staged, staged_bt
 
-    coordinator.stage_prefill_cache = MethodType(spy_stage, coordinator)
+    coordinator.offload.stage_prefill_cache = MethodType(spy_stage, coordinator.offload)
 
     backend_output = impl._forward_bf16_kv(q, kv_pool, sparse_indices, metadata)
     torch.accelerator.synchronize()
@@ -2478,7 +2492,9 @@ def test_hisparse_dense_mha_chunked_context_stages_host_cache(monkeypatch):
         stage_calls.append((cache, table, lengths))
         return staged_cache, staged_block_table
 
-    impl.hisparse_coordinator = SimpleNamespace(stage_prefill_cache=stage_host_cache)
+    impl.hisparse_layer = SimpleNamespace(
+        offload=SimpleNamespace(stage_prefill_cache=stage_host_cache)
+    )
 
     gathered = {}
 
@@ -2526,7 +2542,7 @@ def test_hisparse_dense_mha_chunked_context_stages_host_cache(monkeypatch):
 def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
     """Dense MHA may consume every prefill token in a mixed batch."""
     impl = object.__new__(FlashMLASparseImpl)
-    impl._hisparse_decode_batch = False
+    impl.hisparse_layer = SimpleNamespace(decode_batch=False)
 
     q = torch.empty(2, 1, 8)
     source_cache = torch.empty(4, 2, 8)

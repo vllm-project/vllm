@@ -21,10 +21,6 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.mla.hisparse import (
-    allocate_pinned_host_pool,
-    check_hisparse_host_memory,
-)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
@@ -35,7 +31,14 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.worker.gpu.hisparse import HiSparseRuntime, init_hisparse_runtime
+from vllm.v1.kv_offload.sparse.hisparse_layer import (
+    allocate_pinned_host_pool,
+    check_hisparse_host_memory,
+)
+from vllm.v1.kv_offload.sparse.hisparse_store import (
+    HiSparseOffloadStore,
+    init_hisparse_store,
+)
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
@@ -491,7 +494,7 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
     block_tables: "BlockTables",
-) -> tuple[dict[str, Any], "HiSparseRuntime | None"]:
+) -> tuple[dict[str, Any], "HiSparseOffloadStore | None"]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     kv_cache_raw_tensors = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device
@@ -505,9 +508,9 @@ def init_kv_cache(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_config=kv_cache_config,
     )
-    hisparse_runtime = None
+    hisparse_store = None
     if vllm_config.attention_config.hisparse_config is not None:
-        hisparse_runtime = init_hisparse_runtime(
+        hisparse_store = init_hisparse_store(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,
             raw_tensors=kv_cache_raw_tensors,
@@ -533,7 +536,7 @@ def init_kv_cache(
     runner_kv_caches.extend(
         cache for name, cache in kv_caches.items() if name not in forward_context
     )
-    return kv_caches, hisparse_runtime
+    return kv_caches, hisparse_store
 
 
 def build_slot_mappings_by_layer(

@@ -1093,7 +1093,7 @@ def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
         scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
     )
     monkeypatch.setattr(
-        scheduler.kv_cache_manager.hisparse,
+        scheduler.kv_cache_manager.hisparse_residency,
         "has_pending_reclamation",
         Mock(return_value=True),
     )

@@ -54,10 +54,6 @@ from vllm.utils.multi_stream_utils import (
     maybe_execute_in_parallel,
 )
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
-from vllm.v1.attention.backends.mla.hisparse import (
-    HiSparseCoordinator,
-    create_hisparse_coordinator,
-)
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,
     get_max_prefill_buffer_size,
@@ -67,6 +63,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     get_kv_quant_mode,
+)
+from vllm.v1.kv_offload.sparse.hisparse_layer import (
+    HiSparseLayer,
+    create_hisparse_layer,
 )
 
 logger = init_logger(__name__)
@@ -336,7 +336,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if prefix:
             compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])
-        self.hisparse_coordinator: HiSparseCoordinator | None = None
+        self.hisparse_layer: HiSparseLayer | None = None
         if (
             vllm_config.attention_config.hisparse_config is not None
             and self.compress_ratio == 4
@@ -350,16 +350,21 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 raise ValueError(
                     "DeepSeek V4 HiSparse requires the fp8_ds_mla cache layout."
                 )
-            self.hisparse_coordinator = create_hisparse_coordinator(
+            self.hisparse_layer = create_hisparse_layer(
                 vllm_config,
                 config.index_topk,
+                index_group_scope=(
+                    self.topk_indices_buffer
+                    if self.topk_indices_buffer is not None
+                    else vllm_config
+                ),
+                is_index_group_leader=True,
                 row_width=584,
                 kv_dtype=torch.uint8,
                 storage_block_size=cache_config.block_size // self.compress_ratio,
                 row_value_bytes=576,
             )
-            assert self.hisparse_coordinator is not None
-            self.hisparse_coordinator.join_indexer_group(True)
+            assert self.hisparse_layer is not None
 
         # Create the compressor for layers with compress_ratio > 1; after the
         # attention setup above so its KV-cache prefix (self.prefix) is set.
@@ -377,13 +382,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
     def prepare_hisparse_for_batch(self, attn_metadata: Any | None) -> None:
-        if self.hisparse_coordinator is None or attn_metadata is None:
+        if self.hisparse_layer is None or attn_metadata is None:
             return
-        indices = getattr(attn_metadata, "batch_to_request_state", None)
-        if indices is None:
-            raise ValueError("HiSparse requires V2 request-state indices.")
-        self.hisparse_coordinator.set_request_state_indices(indices)
-        self.hisparse_coordinator.decode_batch = (
+        self.hisparse_layer.decode_batch = (
             attn_metadata.max_query_len == 1
             and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
         )
@@ -513,7 +514,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        if self.hisparse_coordinator is not None:
+        if self.hisparse_layer is not None:
             layer_metadata = (
                 attn_metadata.get(self.prefix)
                 if isinstance(attn_metadata, dict)

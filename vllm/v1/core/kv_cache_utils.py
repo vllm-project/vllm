@@ -19,10 +19,6 @@ from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backends.mla.hisparse import (
-    HISPARSE_KERNEL_BLOCK_SIZE,
-    ResolvedHiSparseConfig,
-)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -42,6 +38,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_offload.sparse.hisparse_layer import (
+    HISPARSE_KERNEL_BLOCK_SIZE,
+    ResolvedHiSparseConfig,
+)
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -59,6 +59,19 @@ BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 # It's a union of `bytes` and `int` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.
 ExternalBlockHash: TypeAlias = bytes | int
+
+
+def get_unique_kv_cache_group_id(
+    kv_cache_config: KVCacheConfig, role: KVCacheGroupRole
+) -> int:
+    group_ids = [
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if group.role is role
+    ]
+    if len(group_ids) != 1:
+        raise ValueError(f"Expected one {role.value} cache group, found {group_ids}.")
+    return group_ids[0]
 
 
 def make_block_hash_with_group_id(
@@ -1380,6 +1393,16 @@ def _is_hisparse_host_layer(layer_name: str) -> bool:
     return ".indexer" not in layer_name
 
 
+def get_hisparse_layer_prefix(name: str) -> str:
+    if ".self_attn." in name:
+        return name.partition(".self_attn.")[0]
+    prefix, separator, suffix = name.rpartition(".layers.")
+    layer_index = suffix.partition(".")[0]
+    if separator and layer_index.isdigit():
+        return f"{prefix}{separator}{layer_index}"
+    return name
+
+
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 HISPARSE_INDEXER_SOURCE_SUFFIX = ".hisparse_source"
@@ -1478,19 +1501,10 @@ def _get_hisparse_hma_config(
         )
     hot_blocks_per_request = cdiv(config.device_buffer_size, storage_block_size)
 
-    def layer_prefix(name: str) -> str:
-        if ".self_attn." in name:
-            return name.partition(".self_attn.")[0]
-        prefix, separator, suffix = name.rpartition(".layers.")
-        layer_index = suffix.partition(".")[0]
-        if separator and layer_index.isdigit():
-            return f"{prefix}{separator}{layer_index}"
-        return name
-
-    indexer_prefixes = {layer_prefix(name) for name in indexer_specs}
+    indexer_prefixes = {get_hisparse_layer_prefix(name) for name in indexer_specs}
     hot_units: list[list[tuple[str, KVCacheSpec]]] = []
     for layer_name, layer_spec in host_specs.items():
-        if layer_prefix(layer_name) in indexer_prefixes or not hot_units:
+        if get_hisparse_layer_prefix(layer_name) in indexer_prefixes or not hot_units:
             hot_units.append([])
         hot_units[-1].append(
             (

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""HiSparse worker-side store for host/hot state and data movement."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
@@ -8,25 +10,29 @@ import numpy as np
 import torch
 
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mla.hisparse import (
-    HiSparseCoordinator,
-    invalidate_blocks,
-    register_indexer_source,
-    release_pinned_state,
-)
 from vllm.v1.core.kv_cache_utils import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_INDEXER_SOURCE_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
+    get_unique_kv_cache_group_id,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
-    HiSparseSpill,
     KVCacheConfig,
     KVCacheGroupRole,
     UniformTypeKVCacheSpecs,
+)
+from vllm.v1.kv_offload.sparse.base import (
+    SparseKVOffloadCommand,
+    SparseKVPageTransfer,
+)
+from vllm.v1.kv_offload.sparse.hisparse_layer import (
+    HiSparseLayer,
+    register_host_write_event,
+    register_indexer_source,
+    release_pinned_state,
 )
 from vllm.v1.metrics.stats import HiSparseStats
 
@@ -48,23 +54,33 @@ def _expand_source_block_ids(
     return (logical_ids[:, None] * blocks_per_kv_block + offsets).reshape(-1)[:count]
 
 
-class HiSparseRuntime:
+def _get_hisparse_layer(
+    forward_context: dict[str, Any], layer_name: str
+) -> HiSparseLayer:
+    layer = forward_context[layer_name]
+    hisparse_layer = getattr(layer, "hisparse_layer", None)
+    if hisparse_layer is None:
+        hisparse_layer = layer.impl.hisparse_layer
+    assert hisparse_layer is not None
+    return hisparse_layer
+
+
+class HiSparseOffloadStore:
+    """Own HiSparse host/hot state and execute its worker-side transfers."""
+
     def __init__(
         self,
         cache_pairs: list[tuple[torch.Tensor, torch.Tensor]],
-        coordinators: list[HiSparseCoordinator],
+        layers: list[HiSparseLayer],
         hot_backing: torch.Tensor,
         max_num_reqs: int,
         max_model_len: int,
         max_concurrent_batches: int,
-        block_size: int,
         blocks_per_kv_block: int,
         device: torch.device,
     ) -> None:
         self.cache_pairs = cache_pairs
-        self.block_size = block_size
         kernel_block_size = cache_pairs[0][0].shape[1]
-        assert block_size % kernel_block_size == 0
         self.kernel_block_size = kernel_block_size
         self.blocks_per_kv_block = blocks_per_kv_block
         capacity = max_num_reqs * cdiv(max_model_len, kernel_block_size)
@@ -72,10 +88,13 @@ class HiSparseRuntime:
         self.dst_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
         self.src_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
         self.dst_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
-        self.coordinators = coordinators
+        self.layers = layers
+        self.lru_layers = [layer for layer in layers if layer.offload.leader is None]
         self.hot_backing = hot_backing
-        self._post_forward_spills: list[HiSparseSpill] = []
-        self._enqueued_spill_ids: list[int] = []
+        self._block_staging: torch.Tensor | None = None
+        self._block_staging_event: torch.Event | None = None
+        self._post_forward_transfers: list[SparseKVPageTransfer] = []
+        self._completed_transfer_ids: list[int] = []
         self._metrics_calls = 0
         self._metrics_last = HiSparseStats()
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
@@ -86,55 +105,36 @@ class HiSparseRuntime:
         max_model_len: int,
         max_concurrent_batches: int,
     ) -> None:
-        entries = [coordinator.backup_caches() for coordinator in self.coordinators]
+        entries = [layer.offload.backup_caches() for layer in self.layers]
         hot_caches, host_caches = zip(*entries)
-        first_hot = hot_caches[0]
-        first_host = host_caches[0]
 
         def host_layout(cache: torch.Tensor) -> tuple[int, int, int]:
-            if cache.ndim == 2:
-                row_bytes = cache.shape[1] * cache.element_size()
-                return cache.shape[0], 1, row_bytes
-            if cache.ndim == 3:
-                return (
-                    cache.shape[0] * cache.shape[1],
-                    cache.shape[1],
-                    cache.stride(0) * cache.element_size(),
+            if cache.ndim not in (2, 3):
+                raise RuntimeError("HiSparse host caches must be 2D or 3D.")
+            block_size = cache.shape[1] if cache.ndim == 3 else 1
+            rows = cache.numel() // cache.shape[-1]
+            return rows, block_size, cache.stride(0) * cache.element_size()
+
+        layouts = []
+        for item, hot_cache, host_cache in zip(self.layers, hot_caches, host_caches):
+            row_bytes = hot_cache.shape[-1] * hot_cache.element_size()
+            layouts.append(
+                (
+                    row_bytes,
+                    hot_cache.shape[1],
+                    hot_cache.stride(0) * hot_cache.element_size(),
+                    hot_cache.shape[0] * hot_cache.shape[1],
+                    *host_layout(host_cache),
+                    item.offload.row_value_bytes or 0,
                 )
-            raise RuntimeError("HiSparse host caches must be 2D or 3D.")
-
-        row_bytes = first_hot.shape[-1] * first_hot.element_size()
-        src_block_size = first_hot.shape[1]
-        src_block_stride = first_hot.stride(0) * first_hot.element_size()
-        src_rows = first_hot.shape[0] * src_block_size
-        host_rows, host_block_size, host_block_stride = host_layout(first_host)
-        row_value_bytes = self.coordinators[0].row_value_bytes or 0
-        backing_ptr = self.hot_backing.data_ptr()
-
-        for coordinator, hot_cache, host_cache in zip(
-            self.coordinators, hot_caches, host_caches
-        ):
-            cache_host_rows, cache_host_block_size, cache_host_stride = host_layout(
-                host_cache
             )
-            if hot_cache.untyped_storage().data_ptr() != (
-                self.hot_backing.untyped_storage().data_ptr()
-            ):
-                raise RuntimeError("HiSparse hot caches must share one GPU backing.")
-            if (
-                hot_cache.shape[-1] * hot_cache.element_size() != row_bytes
-                or hot_cache.shape[1] != src_block_size
-                or hot_cache.stride(0) * hot_cache.element_size() != src_block_stride
-                or hot_cache.shape[0] * src_block_size != src_rows
-                or cache_host_rows != host_rows
-                or cache_host_block_size != host_block_size
-                or cache_host_stride != host_block_stride
-                or host_cache.shape[-1] * host_cache.element_size() != row_bytes
-                or (coordinator.row_value_bytes or 0) != row_value_bytes
-            ):
-                raise RuntimeError(
-                    "HiSparse all-layer backup requires a uniform cache layout."
-                )
+        if any(layout != layouts[0] for layout in layouts[1:]):
+            raise RuntimeError(
+                "HiSparse all-layer backup requires a uniform cache layout."
+            )
+        src_block_size, src_block_stride, src_rows = layouts[0][1:4]
+        row_value_bytes = layouts[0][-1]
+        backing_ptr = self.hot_backing.data_ptr()
 
         self.backup_layer_offsets = torch.tensor(
             [cache.data_ptr() - backing_ptr for cache in hot_caches],
@@ -146,20 +146,19 @@ class HiSparseRuntime:
             dtype=torch.uint64,
             device=device,
         )
-        self.backup_host_anchor = first_host
+        self.backup_host_anchor = host_caches[0]
         self.backup_src_block_stride = src_block_stride
         self.backup_src_block_size = src_block_size
         self.backup_src_rows = src_rows
         self.backup_row_value_bytes = row_value_bytes
         self.host_write_event = torch.Event()
-        for coordinator in self.coordinators:
-            coordinator._host_write_event = self.host_write_event
+        register_host_write_event(device, self.host_write_event)
         self.spill_row_capacity = max_model_len
         spill_staging_count = max_concurrent_batches + 1
         self.spill_src_cpu = torch.empty(
             (
                 spill_staging_count,
-                len(self.coordinators),
+                len(self.layers),
                 self.spill_row_capacity,
             ),
             dtype=torch.int64,
@@ -171,7 +170,7 @@ class HiSparseRuntime:
             pin_memory=True,
         )
         self.spill_src_gpu = torch.empty(
-            (len(self.coordinators), self.spill_row_capacity),
+            (len(self.layers), self.spill_row_capacity),
             dtype=torch.int64,
             device=device,
         )
@@ -186,11 +185,22 @@ class HiSparseRuntime:
         self._spill_staging_index = 0
         self._spill_staging_events = [torch.Event() for _ in range(spill_staging_count)]
 
-    def pre_step(self, scheduler_output: SchedulerOutput) -> None:
-        self.set_fully_resident_batch(scheduler_output.hisparse_fully_resident)
-        spills = scheduler_output.hisparse_spills or []
-        self._post_forward_spills = [spill for spill in spills if spill.after_forward]
-        self._enqueue_spills([spill for spill in spills if not spill.after_forward])
+    def prepare_step(
+        self,
+        command: SparseKVOffloadCommand,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        self.set_fully_resident_batch(command.fully_resident)
+        transfers = command.page_transfers
+        if transfers:
+            self._post_forward_transfers = [
+                transfer for transfer in transfers if transfer.after_forward
+            ]
+            self._enqueue_transfers(
+                [transfer for transfer in transfers if not transfer.after_forward]
+            )
+        else:
+            self._post_forward_transfers.clear()
         block_ids = [
             block_id
             for request in scheduler_output.scheduled_new_reqs
@@ -200,24 +210,48 @@ class HiSparseRuntime:
             if new_block_ids is not None:
                 block_ids.extend(new_block_ids[0])
 
-        invalidate_blocks(block_ids, self.kernel_block_size)
+        self.invalidate_blocks(block_ids)
         self.restore_prefix(scheduler_output)
 
-    def set_fully_resident_batch(self, fully_resident: bool) -> None:
-        for coordinator in self.coordinators:
-            coordinator.fully_resident_batch = fully_resident
+    def invalidate_blocks(self, block_ids: list[int]) -> None:
+        """Invalidate recycled host slots in only the layers owned by this store."""
+        if not block_ids:
+            return
+        device = self.layers[0].offload.device
+        num_blocks = len(block_ids)
+        if self._block_staging is None or self._block_staging.shape[0] < num_blocks:
+            size = 1 << max(10, (num_blocks - 1).bit_length())
+            self._block_staging = torch.empty(size, dtype=torch.long, pin_memory=True)
+            self._block_staging_event = None
+        if self._block_staging_event is not None:
+            self._block_staging_event.synchronize()
+        staging = self._block_staging[:num_blocks]
+        staging.copy_(torch.from_numpy(np.asarray(block_ids, dtype=np.int64)))
+        blocks = staging.to(device, non_blocking=True)
+        if self._block_staging_event is None:
+            self._block_staging_event = torch.Event()
+        self._block_staging_event.record(torch.accelerator.current_stream(device))
+        offsets = torch.arange(self.kernel_block_size, dtype=torch.long, device=device)
+        slots = (blocks[:, None] * self.kernel_block_size + offsets[None, :]).flatten()
+        for layer in self.lru_layers:
+            layer.offload.invalidate_slots(slots)
 
-    def set_request_state_indices(self, indices: torch.Tensor) -> None:
-        self.coordinators[0].set_request_state_indices(indices, force=True)
+    def set_fully_resident_batch(self, fully_resident: bool) -> None:
+        for layer in self.layers:
+            layer.fully_resident = fully_resident
+
+    @property
+    def fully_resident_batch(self) -> bool:
+        return self.layers[0].fully_resident
 
     def reset_hot_state(self) -> None:
-        for coordinator in self.coordinators:
-            coordinator.reset_hot_state()
+        for layer in self.lru_layers:
+            layer.offload.reset_hot_state()
 
-    def _enqueue_spills(self, spills: list[HiSparseSpill]) -> None:
-        if not spills:
+    def _enqueue_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
+        if not transfers:
             return
-        num_rows = len(spills) * self.kernel_block_size
+        num_rows = len(transfers) * self.kernel_block_size
         if num_rows > self.spill_row_capacity:
             raise RuntimeError(
                 "HiSparse spill exceeded its preallocated row capacity "
@@ -234,15 +268,17 @@ class HiSparseRuntime:
         src = src_staging.numpy()
         dst = dst_staging.numpy()
         offsets = np.arange(self.kernel_block_size, dtype=np.int64)
-        for spill_idx, spill in enumerate(spills):
-            start = spill_idx * self.kernel_block_size
+        for transfer_idx, transfer in enumerate(transfers):
+            start = transfer_idx * self.kernel_block_size
             end = start + self.kernel_block_size
-            resident_blocks = dict(spill.resident_block_ids)
-            for layer_idx, coordinator in enumerate(self.coordinators):
-                block_id = resident_blocks[coordinator.resident_group_id]
+            for layer_idx, layer in enumerate(self.layers):
+                block_id = transfer.source_block_ids[
+                    layer.offload.resident_source_index
+                ]
                 src[layer_idx, start:end] = block_id * self.kernel_block_size + offsets
             host_page = (
-                spill.host_block_id * self.blocks_per_kv_block + spill.host_page_offset
+                transfer.destination_block_id * self.blocks_per_kv_block
+                + transfer.destination_page_offset
             )
             dst[start:end] = host_page * self.kernel_block_size + offsets
         self.spill_src_gpu[:, :num_rows].copy_(
@@ -267,25 +303,27 @@ class HiSparseRuntime:
         self.host_write_event.record(
             torch.accelerator.current_stream(self.hot_backing.device)
         )
-        self._enqueued_spill_ids.extend(spill.spill_id for spill in spills)
+        self._completed_transfer_ids.extend(
+            transfer.transfer_id for transfer in transfers
+        )
 
-    def post_forward(self) -> None:
+    def finish_forward(self) -> None:
         current_stream = torch.accelerator.current_stream(self.hot_backing.device)
-        self._enqueue_spills(self._post_forward_spills)
-        self._post_forward_spills = []
+        self._enqueue_transfers(self._post_forward_transfers)
+        self._post_forward_transfers.clear()
         self.host_write_event.record(current_stream)
 
-    def post_step(self) -> HiSparseStats | None:
+    def finish_step(self) -> HiSparseStats | None:
         self._metrics_calls += 1
         if self._metrics_calls % _METRICS_INTERVAL != 0:
             return None
 
         current = HiSparseStats()
-        for coordinator in self.coordinators:
-            hits, misses = coordinator._swap_stats.cpu().tolist()
+        for layer in self.lru_layers:
+            hits, misses = layer.offload._swap_stats.cpu().tolist()
             current.cache_hits += hits
             current.cache_misses += misses
-            current.host_to_device_bytes += misses * coordinator.stats_row_bytes
+            current.host_to_device_bytes += misses * layer.offload.stats_row_bytes
 
         delta = HiSparseStats(
             cache_hits=current.cache_hits - self._metrics_last.cache_hits,
@@ -299,15 +337,13 @@ class HiSparseRuntime:
             return None
         return delta
 
-    def take_spill_completions(self) -> list[int] | None:
-        if not self._enqueued_spill_ids:
-            return None
-        spill_ids = self._enqueued_spill_ids
-        self._enqueued_spill_ids = []
-        return spill_ids
+    def take_completed_transfer_ids(self) -> list[int] | None:
+        completed = self._completed_transfer_ids
+        self._completed_transfer_ids = []
+        return completed or None
 
     def shutdown(self) -> None:
-        release_pinned_state()
+        release_pinned_state([layer.offload for layer in self.layers])
 
     def restore_prefix(self, scheduler_output: SchedulerOutput) -> None:
         src = self.src_cpu.numpy()
@@ -362,7 +398,7 @@ class HiSparseRuntime:
             )
 
 
-def init_hisparse_runtime(
+def init_hisparse_store(
     *,
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
@@ -373,156 +409,131 @@ def init_hisparse_runtime(
     max_model_len: int,
     max_concurrent_batches: int,
     device: torch.device,
-) -> HiSparseRuntime | None:
-    def get_coordinator(layer_name: str) -> HiSparseCoordinator:
-        layer = forward_context[layer_name]
-        coordinator = getattr(layer, "hisparse_coordinator", None)
-        if coordinator is None:
-            coordinator = layer.impl.hisparse_coordinator
-        assert coordinator is not None
-        return coordinator
-
+) -> HiSparseOffloadStore:
     tensor_configs = {
         name: tensor_config
         for tensor_config in kv_cache_config.kv_cache_tensors
         for name in tensor_config.shared_by
     }
-    group_ids = {
-        name: group_id
-        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        for name in group.layer_names
-    }
-    source_group_ids = [
-        group_id
-        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if group.role is KVCacheGroupRole.HISPARSE_SOURCE
-    ]
-    indexer_group_ids = [
-        group_id
-        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if group.role is KVCacheGroupRole.HISPARSE_INDEXER
-    ]
-    if len(source_group_ids) != 1 or len(indexer_group_ids) != 1:
-        raise ValueError(
-            "HiSparse requires exactly one source and one indexer cache group; "
-            f"found source={source_group_ids}, indexer={indexer_group_ids}."
-        )
-    source_group_id = source_group_ids[0]
-    indexer_group_id = indexer_group_ids[0]
+    groups = kv_cache_config.kv_cache_groups
+    source_group_id = get_unique_kv_cache_group_id(
+        kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
+    )
+    indexer_group_id = get_unique_kv_cache_group_id(
+        kv_cache_config, KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    source_group = groups[source_group_id]
+    indexer_group = groups[indexer_group_id]
+    source_specs = cast(UniformTypeKVCacheSpecs, source_group.kv_cache_spec)
+    indexer_specs = cast(UniformTypeKVCacheSpecs, indexer_group.kv_cache_spec)
     num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
-    hot_backing: torch.Tensor | None = None
-    coordinators: list[HiSparseCoordinator] = []
-    seen_coordinators: set[int] = set()
-    for cache_name, raw_tensor in raw_tensors.items():
-        group_id = group_ids[cache_name]
-        group_spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+
+    cache_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for layer_name in indexer_group.layer_names:
+        cache_name = f"{layer_name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"
         tensor_config = tensor_configs[cache_name]
-        if cache_name.endswith(HISPARSE_INDEXER_SOURCE_SUFFIX):
-            layer_name = cache_name[: -len(HISPARSE_INDEXER_SOURCE_SUFFIX)]
-            source_group_spec = cast(UniformTypeKVCacheSpecs, group_spec)
-            source_spec = source_group_spec.kv_cache_specs[cache_name]
-            assert isinstance(source_spec, AttentionSpec)
-            indexer_spec = cast(
-                UniformTypeKVCacheSpecs,
-                kv_cache_config.kv_cache_groups[indexer_group_id].kv_cache_spec,
-            )
-            gpu_indexer_spec = indexer_spec.kv_cache_specs[layer_name]
-            kernel_block_size = getattr(
-                gpu_indexer_spec, "storage_block_size", gpu_indexer_spec.block_size
-            )
-            source_storage_block_size = getattr(
-                source_spec, "storage_block_size", source_spec.block_size
-            )
-            assert source_storage_block_size % kernel_block_size == 0
-            blocks_per_kv_block = source_storage_block_size // kernel_block_size
-            source_cache = torch.as_strided(
-                raw_tensor.view(source_spec.dtype),
-                size=(
-                    num_blocks_by_pool[tensor_config.block_pool_id]
-                    * blocks_per_kv_block,
-                    kernel_block_size,
-                    source_spec.head_size,
-                ),
-                stride=(
-                    source_spec.page_size_bytes // source_spec.dtype.itemsize,
-                    source_spec.head_size,
-                    1,
-                ),
-            )
-            register_indexer_source(
-                layer_name,
-                source_cache,
-                block_tables.slot_mappings[source_group_id],
-            )
-            kv_caches[cache_name] = source_cache
+        source_spec = source_specs.kv_cache_specs[cache_name]
+        gpu_indexer_spec = indexer_specs.kv_cache_specs[layer_name]
+        assert isinstance(source_spec, AttentionSpec)
+        kernel_block_size = getattr(
+            gpu_indexer_spec, "storage_block_size", gpu_indexer_spec.block_size
+        )
+        source_block_size = getattr(
+            source_spec, "storage_block_size", source_spec.block_size
+        )
+        assert source_block_size % kernel_block_size == 0
+        blocks_per_kv_block = source_block_size // kernel_block_size
+        source_cache = torch.as_strided(
+            raw_tensors[cache_name].view(source_spec.dtype),
+            size=(
+                num_blocks_by_pool[tensor_config.block_pool_id] * blocks_per_kv_block,
+                kernel_block_size,
+                source_spec.head_size,
+            ),
+            stride=(
+                source_spec.page_size_bytes // source_spec.dtype.itemsize,
+                source_spec.head_size,
+                1,
+            ),
+        )
+        register_indexer_source(
+            layer_name,
+            source_cache,
+            block_tables.slot_mappings[source_group_id],
+        )
+        kv_caches[cache_name] = source_cache
+        cache_pairs.append((source_cache, kv_caches[layer_name]))
+
+    resident_source_index = 0
+    for group_id, group in enumerate(groups):
+        if not isinstance(group.kv_cache_spec, HiSparseResidentSpec):
             continue
-        if cache_name.endswith(HISPARSE_RESIDENT_SUFFIX):
+        for cache_name in group.layer_names:
+            assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
-            resident_spec = group_spec
-            assert isinstance(resident_spec, HiSparseResidentSpec)
-            coordinator = get_coordinator(layer_name)
-            coordinator.bind_resident_cache(
+            tensor_config = tensor_configs[cache_name]
+            layer = _get_hisparse_layer(forward_context, layer_name)
+            layer.bind_cache(
+                raw_tensors[cache_name],
+                byte_offset=tensor_config.offset,
+                block_stride=tensor_config.block_stride,
+                num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
+                block_size=group.kv_cache_spec.block_size,
+                block_table=block_tables.input_block_tables[group_id],
+                slot_mapping=block_tables.slot_mappings[group_id],
+            )
+            layer.offload.resident_source_index = resident_source_index
+        resident_source_index += 1
+
+    hot_backing: torch.Tensor | None = None
+    layers: list[HiSparseLayer] = []
+    for group_id, group in enumerate(groups):
+        if not isinstance(group.kv_cache_spec, HiSparseHotSpec):
+            continue
+        for cache_name in group.layer_names:
+            assert cache_name.endswith(HISPARSE_HOT_SUFFIX)
+            raw_tensor = raw_tensors[cache_name]
+            if hot_backing is None:
+                hot_backing = raw_tensor
+            elif hot_backing.untyped_storage().data_ptr() != (
+                raw_tensor.untyped_storage().data_ptr()
+            ):
+                raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
+            layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
+            layer = _get_hisparse_layer(forward_context, layer_name)
+            tensor_config = tensor_configs[cache_name]
+            layer.offload.bind_hot_cache(
                 raw_tensor,
                 byte_offset=tensor_config.offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
-                block_size=resident_spec.block_size,
+                block_size=group.kv_cache_spec.block_size,
                 block_table=block_tables.input_block_tables[group_id],
-                slot_mapping=block_tables.slot_mappings[group_id],
-                group_id=group_id,
             )
-            continue
-        if not cache_name.endswith(HISPARSE_HOT_SUFFIX):
-            continue
-        if hot_backing is None:
-            hot_backing = raw_tensor
-        elif hot_backing.untyped_storage().data_ptr() != (
-            raw_tensor.untyped_storage().data_ptr()
-        ):
-            raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
-        layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
-        coordinator = get_coordinator(layer_name)
-        hot_spec = group_spec
-        assert isinstance(hot_spec, HiSparseHotSpec)
-        coordinator.bind_hot_cache(
-            raw_tensor,
-            byte_offset=tensor_config.offset,
-            block_stride=tensor_config.block_stride,
-            num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
-            block_size=hot_spec.block_size,
-        )
-        coordinator.bind_hot_block_table(block_tables.input_block_tables[group_id])
-        if id(coordinator) not in seen_coordinators:
-            coordinator.bind_source_cache(kv_caches[layer_name])
-            coordinators.append(coordinator)
-            seen_coordinators.add(id(coordinator))
+            resident = layer.view
+            hot = layer.offload.hot
+            assert resident is not None and hot is not None
+            if (
+                resident.cache.untyped_storage().data_ptr()
+                != hot.cache.untyped_storage().data_ptr()
+                or resident.cache.stride() != hot.cache.stride()
+            ):
+                raise RuntimeError("HiSparse resident and hot layouts must match.")
+            layer.offload.bind_source_cache(kv_caches[layer_name])
+            layers.append(layer)
 
-    indexer_group = kv_cache_config.kv_cache_groups[indexer_group_id]
-    cache_pairs = [
-        (
-            kv_caches[f"{layer_name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"],
-            kv_caches[layer_name],
-        )
-        for layer_name in indexer_group.layer_names
-    ]
-
-    block_size = kv_cache_config.kv_cache_groups[
-        source_group_id
-    ].kv_cache_spec.block_size
-    indexer_block_size = kv_cache_config.kv_cache_groups[
-        indexer_group_id
-    ].kv_cache_spec.block_size
+    block_size = source_group.kv_cache_spec.block_size
+    indexer_block_size = indexer_group.kv_cache_spec.block_size
     assert block_size % indexer_block_size == 0
-    if not coordinators or hot_backing is None:
-        raise RuntimeError("HiSparse runtime found no hot-cache coordinators.")
-    return HiSparseRuntime(
+    if not layers or hot_backing is None:
+        raise RuntimeError("HiSparse runtime found no hot-cache layers.")
+    return HiSparseOffloadStore(
         cache_pairs,
-        coordinators,
+        layers,
         hot_backing,
         max_num_reqs,
         max_model_len,
         max_concurrent_batches,
-        block_size,
         block_size // indexer_block_size,
         device,
     )

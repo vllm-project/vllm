@@ -589,7 +589,8 @@ class Scheduler(SchedulerInterface):
                     # allocatable after the worker acknowledges the spill.
                     # Yield this scheduling iteration instead of preempting a
                     # request whose resident pages are already being reclaimed.
-                    if self.kv_cache_manager.hisparse.has_pending_reclamation():
+                    residency = self.kv_cache_manager.hisparse_residency
+                    if residency.has_pending_reclamation():
                         break
 
                     # The request cannot be scheduled.
@@ -1230,12 +1231,8 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
-            hisparse_block_table_updates=(
-                self.kv_cache_manager.take_hisparse_block_table_updates()
-            ),
-            hisparse_spills=self.kv_cache_manager.hisparse.take_spills(),
-            hisparse_fully_resident=(
-                self.kv_cache_manager.hisparse.are_requests_fully_resident(
+            sparse_kv_offload=(
+                self.kv_cache_manager.hisparse_residency.build_offload_command(
                     list(num_scheduled_tokens)
                 )
             ),
@@ -1696,9 +1693,8 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         hisparse_stats = model_runner_output.hisparse_stats
-        self.kv_cache_manager.hisparse.complete_spills(
-            model_runner_output.hisparse_spill_completions
-        )
+        completed_transfers = model_runner_output.sparse_kv_completions
+        self.kv_cache_manager.hisparse_residency.complete_spills(completed_transfers)
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is

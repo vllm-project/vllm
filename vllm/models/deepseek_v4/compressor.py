@@ -29,15 +29,15 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.hisparse import (
-    compress_hisparse_slot_mapping,
-    get_indexer_source,
-)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+)
+from vllm.v1.kv_offload.sparse.hisparse_layer import (
+    compress_hisparse_slot_mapping,
+    get_indexer_source,
 )
 
 if TYPE_CHECKING:
@@ -411,13 +411,13 @@ class DeepseekCompressor(nn.Module):
         source_k_cache_metadata = k_cache_metadata
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
-        hisparse_coordinator = getattr(k_cache_layer, "hisparse_coordinator", None)
-        if hisparse_coordinator is not None:
-            assert hisparse_coordinator.hot_cache is not None
-            kv_cache = hisparse_coordinator.hot_cache
+        hisparse_layer = getattr(k_cache_layer, "hisparse_layer", None)
+        if hisparse_layer is not None:
+            assert hisparse_layer.view is not None
+            kv_cache = hisparse_layer.view.cache
             num_kv_slots = source_k_cache_metadata.slot_mapping.numel()
             k_cache_metadata = SimpleNamespace(
-                slot_mapping=hisparse_coordinator.get_compressed_resident_slot_mapping(
+                slot_mapping=hisparse_layer.get_compressed_slot_mapping(
                     positions[:num_kv_slots], self.compress_ratio
                 )
             )
@@ -493,8 +493,8 @@ class DeepseekCompressor(nn.Module):
             **extra_kwargs,
         )
 
-        if hisparse_coordinator is not None and not hisparse_coordinator.decode_batch:
-            hisparse_coordinator.backup_compressed_rows(
+        if hisparse_layer is not None and not hisparse_layer.decode_batch:
+            hisparse_layer.offload.backup_rows(
                 kv_cache,
                 k_cache_metadata.slot_mapping,
                 source_k_cache_metadata.slot_mapping,

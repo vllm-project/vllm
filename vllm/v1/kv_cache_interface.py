@@ -25,19 +25,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
-class HiSparseSpill:
-    """One kernel-page transfer from resident HMA storage to the host pool."""
-
-    spill_id: int
-    request_id: str
-    page_index: int
-    host_block_id: int
-    host_page_offset: int
-    resident_block_ids: tuple[tuple[int, int], ...]
-    after_forward: bool
-
-
 # ---------------------------------------------------------------------------
 # KV cache quantization mode
 # ---------------------------------------------------------------------------

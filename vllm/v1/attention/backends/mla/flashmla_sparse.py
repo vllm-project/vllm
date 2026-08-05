@@ -683,7 +683,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         decode_cache = kv_c_and_k_pe_cache
         decode_topk: torch.Tensor | None = None
-        use_hisparse = self.hisparse_coordinator is not None
+        use_hisparse = self.hisparse_layer is not None
         if use_hisparse and num_decode_tokens > 0:
             decode_cache, decode_topk = self._hisparse_swap_in(
                 topk_indices,
@@ -775,9 +775,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 chunk_workspace = self.prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
                 if host_resident:
                     assert chunk.seq_lens is not None
-                    assert self.hisparse_coordinator is not None
+                    assert self.hisparse_layer is not None
                     gather_cache, gather_bt = (
-                        self.hisparse_coordinator.stage_prefill_cache(
+                        self.hisparse_layer.offload.stage_prefill_cache(
                             kv_c_and_k_pe_cache,
                             chunk.block_table,
                             chunk.seq_lens,

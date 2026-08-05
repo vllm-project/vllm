@@ -8,10 +8,10 @@ import pytest
 
 from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.mla.hisparse import ResolvedHiSparseConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.kv_cache_interface import KVCacheSpecKind
+from vllm.v1.kv_offload.sparse.hisparse_layer import ResolvedHiSparseConfig
 
 
 @pytest.mark.parametrize(
@@ -79,7 +79,6 @@ def test_hisparse_config_resolves_model_constraints():
     resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
     assert resolved is not None
     assert resolved.device_buffer_size == 256
-    assert resolved.num_hot_blocks(64) == 4
 
     vllm_config.attention_config.hisparse_config = HiSparseConfig(
         host_pool_gib=1.0, device_buffer_size=128

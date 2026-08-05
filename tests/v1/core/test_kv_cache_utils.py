@@ -147,6 +147,7 @@ def test_hisparse_hma_splits_scheduler_blocks_into_kernel_blocks(block_size):
     assert len(resident_groups) == len(hot_groups)
     assert all(group.kv_cache_spec.block_size == 64 for group in resident_groups)
     assert all(group.kv_cache_spec.block_size == 64 for group in hot_groups)
+    assert all(group.kv_cache_spec.blocks_per_request == 4 for group in hot_groups)
 
 
 def test_hisparse_hma_rejects_mixed_hot_page_sizes():
