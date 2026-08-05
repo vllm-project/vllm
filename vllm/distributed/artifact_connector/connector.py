@@ -84,12 +84,14 @@ class ArtifactRequestOutput:
 @dataclass
 class ArtifactConnectorOutput:
     requests: dict[str, ArtifactRequestOutput]
+    invalid_requests: set[tuple[str, int]] = field(default_factory=set)
 
 
 @dataclass
 class _RequestState:
     emit_cursor: int
     epoch: int = 0
+    sent_kv_block_ids: bool = False
     packed_hashes: bytearray = field(default_factory=bytearray)
     num_hashes: int = 0
     hash_size: int = 0
@@ -157,6 +159,10 @@ class ArtifactSchedulerConnector:
                 ]
             block_hash_start = state.num_hashes
             block_hashes = self._pack_block_hashes(state, new_hashes)
+            request_kv_block_ids = kv_block_ids.get(request_id, ())
+            state.sent_kv_block_ids = state.sent_kv_block_ids or bool(
+                request_kv_block_ids
+            )
             metadata.append(
                 ArtifactRequestMetadata(
                     request_id=request_id,
@@ -170,7 +176,7 @@ class ArtifactSchedulerConnector:
                     block_hashes=block_hashes,
                     block_hash_start=block_hash_start,
                     epoch=state.epoch,
-                    kv_block_ids=kv_block_ids.get(request_id, ()),
+                    kv_block_ids=request_kv_block_ids,
                 )
             )
         finished_requests = self._finished_requests
@@ -181,6 +187,10 @@ class ArtifactSchedulerConnector:
             metadata,
             finished_requests,
         )
+
+    def needs_kv_block_ids(self, request_id: str) -> bool:
+        state = self._states.get(request_id)
+        return state is not None and not state.sent_kv_block_ids
 
     def take_output(
         self,
@@ -199,6 +209,11 @@ class ArtifactSchedulerConnector:
         request_id = request.request_id
         state = self._states[request_id]
         if token_end <= state.emit_cursor:
+            return None
+        if output is not None and any(
+            request_id == invalid_request_id
+            for invalid_request_id, _ in output.invalid_requests
+        ):
             return None
         if output is None or request_id not in output.requests:
             raise RuntimeError(f"artifact worker output is missing {request_id}")
@@ -250,6 +265,7 @@ class ArtifactSchedulerConnector:
             return
         self._finished_requests[(request_id, state.epoch)] = None
         state.epoch += 1
+        state.sent_kv_block_ids = False
         state.packed_hashes.clear()
         state.num_hashes = 0
         state.hash_size = 0

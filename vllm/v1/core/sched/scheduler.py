@@ -1237,6 +1237,7 @@ class Scheduler(SchedulerInterface):
                 {
                     request_id: self.kv_cache_manager.get_block_ids(request_id)[0]
                     for request_id in scheduler_output.num_scheduled_tokens
+                    if self.artifact_connector.needs_kv_block_ids(request_id)
                 }
                 if self.connector is not None
                 else {}
@@ -2412,10 +2413,12 @@ class Scheduler(SchedulerInterface):
         # Artifact keys follow the lifetime of every KV cache that can satisfy
         # a prefix hit. Reset remote/offloaded KV together with artifacts so a
         # surviving remote hit cannot refer to a newly reset artifact store.
-        reset_connector = reset_connector or (
-            self.artifact_connector is not None and self.connector is not None
+        reset_remote = reset_connector or (
+            reset_successful
+            and self.artifact_connector is not None
+            and self.connector is not None
         )
-        if reset_successful and reset_connector:
+        if reset_remote:
             reset_successful = self.reset_connector_cache() and reset_successful
 
         if reset_successful and self.artifact_connector is not None:
@@ -2436,7 +2439,7 @@ class Scheduler(SchedulerInterface):
             )
             return True
 
-        if self.connector.reset_cache() is False:
+        if self.connector.reset_cache() is not True:
             return False
 
         if self.log_stats:

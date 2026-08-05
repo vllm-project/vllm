@@ -37,6 +37,13 @@ class ArtifactReader(Protocol):
 
     def get(self, keys: list[str]) -> list[bytes]: ...
 
+    def get_concatenated(
+        self,
+        keys: list[str],
+        *,
+        object_size: int,
+    ) -> bytes: ...
+
     def close(self) -> None: ...
 
 
@@ -100,7 +107,7 @@ class BackgroundArtifactStore:
                 raise RuntimeError("artifact store is closed")
             self._raise_if_failed()
             if objects:
-                self._queue.put(list(objects))
+                self._queue.put(objects)
                 self._raise_if_failed()
 
     def get(self, keys: list[str]) -> list[bytes]:
@@ -109,6 +116,16 @@ class BackgroundArtifactStore:
         self._queue.join()
         self._raise_if_failed()
         return self._store.get(keys)
+
+    def get_concatenated(
+        self,
+        keys: list[str],
+        *,
+        object_size: int,
+    ) -> bytes:
+        self._queue.join()
+        self._raise_if_failed()
+        return self._store.get_concatenated(keys, object_size=object_size)
 
     def close(self) -> None:
         with self._state_lock:

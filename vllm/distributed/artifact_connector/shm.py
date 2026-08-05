@@ -20,6 +20,7 @@ import regex as re
 
 from vllm.distributed.artifact_connector.store import (
     ArtifactCapacityError,
+    ArtifactCorruptionError,
     ArtifactNotFoundError,
     ArtifactObject,
     ArtifactStoreError,
@@ -329,16 +330,7 @@ class LocalSharedMemoryArtifactStore:
     def get(self, keys: list[str]) -> list[bytes]:
         assert self._arena is not None
         with self._lock:
-            object_ids = [self._object_id(key) for key in keys]
-            try:
-                entries = [self._lru[object_id] for object_id in object_ids]
-            except KeyError as error:
-                raise ArtifactNotFoundError(
-                    "artifact object does not exist; the object may have been "
-                    f"evicted from SHM (used={self._used_bytes}, "
-                    f"limit={self.max_bytes}). Increase "
-                    "artifact_config.max_shm_bytes when a KV cache hit requires it."
-                ) from error
+            object_ids, entries = self._lookup(keys)
             payloads = [
                 self._arena[entry.offset : entry.offset + entry.size]
                 for entry in entries
@@ -346,6 +338,42 @@ class LocalSharedMemoryArtifactStore:
             for object_id in object_ids:
                 self._lru.move_to_end(object_id)
             return payloads
+
+    def get_concatenated(
+        self,
+        keys: list[str],
+        *,
+        object_size: int,
+    ) -> bytes:
+        assert self._arena is not None
+        with self._lock:
+            object_ids, entries = self._lookup(keys)
+            if any(entry.size != object_size for entry in entries):
+                raise ArtifactCorruptionError("artifact object has an invalid size")
+            arena = memoryview(self._arena)
+            try:
+                payload = b"".join(
+                    arena[entry.offset : entry.offset + object_size]
+                    for entry in entries
+                )
+            finally:
+                arena.release()
+            for object_id in object_ids:
+                self._lru.move_to_end(object_id)
+            return payload
+
+    def _lookup(self, keys: list[str]) -> tuple[list[str], list[_Entry]]:
+        object_ids = [self._object_id(key) for key in keys]
+        try:
+            entries = [self._lru[object_id] for object_id in object_ids]
+        except KeyError as error:
+            raise ArtifactNotFoundError(
+                "artifact object does not exist; the object may have been "
+                f"evicted from SHM (used={self._used_bytes}, "
+                f"limit={self.max_bytes}). Increase "
+                "artifact_config.max_shm_bytes when a KV cache hit requires it."
+            ) from error
+        return object_ids, entries
 
     def close(self) -> None:
         arena = self._arena

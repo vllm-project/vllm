@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from vllm.distributed.artifact_connector.store import (
-    ArtifactCorruptionError,
     ArtifactObject,
     ArtifactReader,
     ArtifactStore,
@@ -54,46 +53,39 @@ def materialize_routed_experts(
 ) -> np.ndarray:
     if not artifact_keys:
         raise ValueError("routed-experts artifact key list must not be empty")
-    payloads = store.get(artifact_keys)
-    if len(payloads) != len(artifact_keys):
-        raise ArtifactCorruptionError(
-            "artifact backend returned the wrong object count"
-        )
     object_size = rows_per_object * math.prod(shape_per_token) * dtype.itemsize
-    if any(len(payload) != object_size for payload in payloads):
-        raise ArtifactCorruptionError("artifact object has an invalid size")
-    payload = payloads[0] if len(payloads) == 1 else b"".join(payloads)
+    payload = store.get_concatenated(
+        artifact_keys,
+        object_size=object_size,
+    )
     return np.frombuffer(payload, dtype=dtype).reshape((-1, *shape_per_token))
 
 
 def publish_routed_experts(
     store: ArtifactStore,
     *,
-    artifact_namespace: str,
-    batches: list[tuple[Sequence[bytes], list[tuple[int, np.ndarray]]]],
+    batches: list[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
     block_size: int,
 ) -> None:
     """Publish immutable full R3 blocks."""
     objects = []
-    for block_hashes, blocks in batches:
-        if any(start < 0 or start % block_size for start, _ in blocks):
-            raise ValueError("artifact block start is not hash-block aligned")
+    for artifact_keys, blocks in batches:
         for block_start, array in blocks:
+            if block_start < 0 or block_start % block_size:
+                raise ValueError("artifact block start is not hash-block aligned")
             block_index = block_start // block_size
-            if block_index >= len(block_hashes):
+            if block_index >= len(artifact_keys):
                 raise ValueError(
-                    "artifact block has no corresponding KV cache hash: "
+                    "artifact block has no corresponding key: "
                     f"start={block_start}, index={block_index}, "
-                    f"hashes={len(block_hashes)}, block_size={block_size}"
+                    f"keys={len(artifact_keys)}, block_size={block_size}"
                 )
             if len(array) != block_size:
                 raise ValueError("artifact block length does not match hash block size")
             objects.append(
                 ArtifactObject(
-                    key=routed_experts_key(
-                        block_hashes[block_index], artifact_namespace
-                    ),
-                    payload=np.ascontiguousarray(array).tobytes(order="C"),
+                    key=artifact_keys[block_index],
+                    payload=array.tobytes(order="C"),
                 )
             )
     store.put(objects)

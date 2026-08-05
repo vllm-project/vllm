@@ -35,7 +35,10 @@ from vllm.distributed.artifact_connector.store import (
     ArtifactStoreError,
     BackgroundArtifactStore,
 )
-from vllm.distributed.artifact_connector.worker import ArtifactWorkerConnector
+from vllm.distributed.artifact_connector.worker import (
+    ArtifactWorkerConnector,
+    _WorkerRequestState,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
@@ -175,16 +178,10 @@ def _make_worker(tmp_path, max_num_seqs: int) -> ArtifactWorkerConnector:
     worker._buffer = RoutedExpertsArtifactBuffer(
         _DTYPE, _SHAPE, _BLOCK_SIZE, max_num_seqs, max_num_seqs * _BLOCK_SIZE
     )
-    worker._pending_blocks = {}
-    worker._capture_cursors = {}
-    worker._emit_cursors = {}
-    worker._block_hashes = {}
+    worker._requests = {}
     worker._generation = -1
     worker._shape_per_token = _SHAPE
     worker._dtype = _DTYPE
-    worker._pending_requests = {}
-    worker._finished_requests = {}
-    worker._invalid_requests = set()
     worker._lock = threading.Lock()
     return worker
 
@@ -194,12 +191,12 @@ def _process_output(worker, metadata, rows, request_ids, num_rejected):
     return worker.process_output(metadata, rows, request_ids, num_rejected)
 
 
-def test_materialize_rejects_invalid_object_size():
+def test_materialize_rejects_invalid_object_size(tmp_path):
     array = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
     payload = array.tobytes()
 
-    store = Mock()
-    store.get.return_value = [payload[:-1]]
+    store = _make_store(tmp_path)
+    store.put([ArtifactObject("key", payload[:-1])])
     with pytest.raises(ArtifactCorruptionError, match="size"):
         materialize_routed_experts(
             store,
@@ -208,6 +205,7 @@ def test_materialize_rejects_invalid_object_size():
             dtype=_DTYPE,
             rows_per_object=_BLOCK_SIZE,
         )
+    store.close()
 
 
 def test_logical_buffer_handles_overlap_and_release():
@@ -243,15 +241,14 @@ def test_publish_routed_experts_publishes_full_blocks(tmp_path):
     buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 8)
     logical = np.arange(8 * 3 * 2, dtype=np.uint8).reshape(8, 3, 2)
     hashes = [b"a" * 32, b"b" * 32]
+    keys = [routed_experts_key(block_hash, "0") for block_hash in hashes]
     blocks = buffer.capture("request", 0, logical)
     publish_routed_experts(
         store,
-        artifact_namespace="0",
-        batches=[(hashes, blocks)],
+        batches=[(keys, blocks)],
         block_size=_BLOCK_SIZE,
     )
 
-    keys = [routed_experts_key(block_hash, "0") for block_hash in hashes]
     np.testing.assert_array_equal(
         materialize_routed_experts(
             store,
@@ -334,7 +331,7 @@ def test_worker_defers_full_block_until_kv_hash_arrives(tmp_path):
 
     assert output is not None
     np.testing.assert_array_equal(output.requests["request"].rows, logical[:4])
-    assert worker._pending_blocks[("request", 0)][0][0] == 0
+    assert worker._requests[("request", 0)].pending_blocks[0][0] == 0
 
     block_hash = b"a" * 32
     second = ArtifactConnectorMetadata(
@@ -347,7 +344,7 @@ def test_worker_defers_full_block_until_kv_hash_arrives(tmp_path):
 
     assert output is not None
     np.testing.assert_array_equal(output.requests["request"].rows, logical[4:])
-    assert ("request", 0) not in worker._pending_blocks
+    assert not worker._requests[("request", 0)].pending_blocks
     assert worker._store is not None
     np.testing.assert_array_equal(
         materialize_routed_experts(
@@ -444,20 +441,97 @@ def test_worker_emits_mid_block_chunked_prefill(tmp_path):
     worker.close()
 
 
-def test_worker_output_does_not_alias_model_runner_buffer(tmp_path):
-    worker = _make_worker(tmp_path, 1)
-    logical = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
-    metadata = ArtifactConnectorMetadata(
+def test_worker_invalidates_prefix_sharing_inflight_request(tmp_path):
+    worker = _make_worker(tmp_path, 2)
+    rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
+    first = ArtifactConnectorMetadata(
         0,
         _BLOCK_SIZE,
-        [ArtifactRequestMetadata("request", 0, 4, 0, True, [b"a" * 32])],
+        [
+            ArtifactRequestMetadata(
+                "first", 0, 4, 0, True, [b"a" * 32], kv_block_ids=[7]
+            )
+        ],
+        {},
+    )
+    shared = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [
+            ArtifactRequestMetadata(
+                "shared", 0, 4, 0, True, [b"a" * 32], kv_block_ids=[7]
+            )
+        ],
+        {},
+    )
+    worker.begin_step(first)
+    worker.begin_step(shared)
+
+    failed = worker.process_output(
+        first, rows, ["first"], np.array([0]), invalid_block_ids={7}
+    )
+    later = worker.process_output(shared, rows, ["shared"], np.array([0]))
+
+    assert failed.invalid_requests == {("first", 0)}
+    assert later.invalid_requests == {("shared", 0)}
+    assert not later.requests
+    worker.close()
+
+
+def test_worker_emits_published_block_and_mid_block_tail(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    logical = np.arange(7 * 3 * 2, dtype=np.uint8).reshape(7, 3, 2)
+
+    first = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 0, 6, 0, False, [b"a" * 32])],
+        {},
+    )
+    output = _process_output(worker, first, logical[:6], ["request"], np.array([0]))
+    assert not output.requests
+
+    second = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 6, 1, 0, True, [b"a" * 32])],
+        {},
+    )
+    output = _process_output(worker, second, logical[6:], ["request"], np.array([0]))
+
+    np.testing.assert_array_equal(output.requests["request"].rows, logical)
+    worker.close()
+
+
+def test_worker_output_does_not_alias_released_tail_buffer(tmp_path):
+    worker = _make_worker(tmp_path, 1)
+    logical = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
+    first = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 0, 2, 0, False, [b"a" * 32])],
+        {},
+    )
+    _process_output(worker, first, logical[:2], ["request"], np.array([0]))
+    second = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("request", 2, 2, 0, True, [b"a" * 32])],
         {},
     )
 
-    output = _process_output(worker, metadata, logical, ["request"], np.array([0]))
+    output = _process_output(worker, second, logical[2:], ["request"], np.array([0]))
     emitted = output.requests["request"].rows
     expected = logical.copy()
-    logical.fill(0)
+
+    replacement = np.full_like(logical, 99)
+    reuse = ArtifactConnectorMetadata(
+        0,
+        _BLOCK_SIZE,
+        [ArtifactRequestMetadata("reuse", 0, 4, 0, False, [b"b" * 32])],
+        {},
+    )
+    _process_output(worker, reuse, replacement, ["reuse"], np.array([0]))
 
     np.testing.assert_array_equal(emitted, expected)
     worker.close()
@@ -494,6 +568,7 @@ def test_worker_does_not_publish_artifact_for_failed_kv_load(tmp_path):
     )
 
     assert not output.requests
+    assert output.invalid_requests == {("request", 0)}
 
     # A later async frame from the same request epoch is invalid too, even if
     # the KV connector reported the failed load only on the first frame.
@@ -508,6 +583,29 @@ def test_worker_does_not_publish_artifact_for_failed_kv_load(tmp_path):
     with pytest.raises(ArtifactNotFoundError):
         worker._store.get([routed_experts_key(block_hash, "0")])
     worker.close()
+
+
+def test_worker_unions_invalid_blocks_across_tp(monkeypatch):
+    worker = object.__new__(ArtifactWorkerConnector)
+    worker._sync_invalid_blocks = True
+    cpu_group = object()
+    tp_group = SimpleNamespace(world_size=2, cpu_group=cpu_group)
+    monkeypatch.setattr(
+        "vllm.distributed.artifact_connector.worker.get_tp_group",
+        lambda: tp_group,
+    )
+
+    def all_gather_object(gathered, local, *, group):
+        assert local == {7}
+        assert group is cpu_group
+        gathered[:] = [{7}, {9}]
+
+    monkeypatch.setattr(
+        "vllm.distributed.artifact_connector.worker.torch.distributed.all_gather_object",
+        all_gather_object,
+    )
+
+    assert worker.sync_invalid_block_ids({7}) == {7, 9}
 
 
 def test_worker_excludes_rejected_speculative_rows(tmp_path):
@@ -532,7 +630,7 @@ def test_worker_retains_tail_until_inflight_output_finishes(tmp_path):
     assert worker._buffer is not None
     rows = np.zeros((2, *_SHAPE), dtype=_DTYPE)
     worker._buffer.capture(("request", 0), 0, rows)
-    worker._pending_requests[("request", 0)] = 1
+    worker._requests[("request", 0)] = _WorkerRequestState(pending_outputs=1)
 
     cleanup = ArtifactConnectorMetadata(0, _BLOCK_SIZE, [], {("request", 0): []})
     worker.begin_step(cleanup)
@@ -559,7 +657,7 @@ def test_worker_discards_inflight_output_from_old_generation(tmp_path):
         {},
     )
     worker.begin_step(old)
-    worker._pending_requests[("old", 0)] = 1
+    worker._requests[("old", 0)].pending_outputs = 1
 
     new = ArtifactConnectorMetadata(
         1,
@@ -579,8 +677,8 @@ def test_worker_discards_inflight_output_from_old_generation(tmp_path):
 
     assert not output.requests
     assert worker._generation == 1
-    assert worker._block_hashes == {("new", 0): [b"b" * 32]}
-    assert not worker._pending_requests
+    assert worker._requests[("new", 0)].block_hashes == [b"b" * 32]
+    assert not worker._requests[("new", 0)].pending_outputs
     worker.close()
 
 
@@ -607,30 +705,33 @@ def test_worker_merges_block_hash_deltas(tmp_path):
         )
     )
 
-    assert worker._block_hashes[("request", 0)] == [b"a" * 32, b"b" * 32]
+    assert worker._requests[("request", 0)].block_hashes == [
+        b"a" * 32,
+        b"b" * 32,
+    ]
     worker.close()
 
 
 def test_worker_discards_finished_block_without_kv_hash(tmp_path):
     worker = _make_worker(tmp_path, 1)
     worker._generation = 0
-    worker._pending_blocks[("request", 0)] = [
-        (0, np.zeros((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE))
-    ]
+    worker._requests[("request", 0)] = _WorkerRequestState(
+        pending_blocks=[(0, np.zeros((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE))]
+    )
 
     worker.begin_step(
         ArtifactConnectorMetadata(0, _BLOCK_SIZE, [], {("request", 0): []})
     )
-    assert ("request", 0) not in worker._pending_blocks
+    assert ("request", 0) not in worker._requests
     worker.close()
 
 
 def test_worker_discards_uncommitted_blocks_for_aborted_request(tmp_path):
     worker = _make_worker(tmp_path, 1)
     worker._generation = 0
-    worker._pending_blocks[("request", 0)] = [
-        (0, np.zeros((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE))
-    ]
+    worker._requests[("request", 0)] = _WorkerRequestState(
+        pending_blocks=[(0, np.zeros((_BLOCK_SIZE, *_SHAPE), dtype=_DTYPE))]
+    )
     assert worker._buffer is not None
     worker._buffer.capture(("request", 0), _BLOCK_SIZE, np.zeros((1, *_SHAPE)))
 
@@ -638,7 +739,7 @@ def test_worker_discards_uncommitted_blocks_for_aborted_request(tmp_path):
         ArtifactConnectorMetadata(0, _BLOCK_SIZE, [], {("request", 0): None})
     )
 
-    assert ("request", 0) not in worker._pending_blocks
+    assert ("request", 0) not in worker._requests
     with pytest.raises(RuntimeError, match="missing request"):
         worker._buffer.read(("request", 0), _BLOCK_SIZE, _BLOCK_SIZE + 1)
     worker.close()
@@ -648,7 +749,7 @@ def test_worker_commits_pending_block_with_finished_request_hash(tmp_path):
     worker = _make_worker(tmp_path, 1)
     worker._generation = 0
     logical = np.arange(_BLOCK_SIZE * 3 * 2, dtype=np.uint8).reshape(_BLOCK_SIZE, 3, 2)
-    worker._pending_requests[("request", 0)] = 1
+    worker._requests[("request", 0)] = _WorkerRequestState(pending_outputs=1)
 
     block_hash = b"a" * 32
     worker.begin_step(
@@ -907,6 +1008,18 @@ def test_scheduler_connector_restarts_preempted_request_epoch(tmp_path):
     assert list(resumed.requests[0].block_hashes) == [b"a" * 32]
 
 
+def test_scheduler_skips_invalid_inflight_epoch(tmp_path):
+    connector = _make_connector(tmp_path)
+    request = _scheduler_request("request", [b"a" * 32], num_tokens=5)
+    connector.request_started(request)
+    connector.request_restarted(request.request_id)
+    request.num_computed_tokens = 4
+
+    output = ArtifactConnectorOutput({}, {(request.request_id, 0)})
+
+    assert connector.take_output(request, True, output) is None
+
+
 def test_scheduler_connector_sends_only_new_block_hashes(tmp_path):
     connector = _make_connector(tmp_path)
     request = _scheduler_request("request", [b"a" * 32], num_tokens=8)
@@ -925,6 +1038,32 @@ def test_scheduler_connector_sends_only_new_block_hashes(tmp_path):
     assert first.requests[0].block_hash_start == 0
     assert list(second.requests[0].block_hashes) == [b"b" * 32]
     assert second.requests[0].block_hash_start == 1
+
+
+def test_scheduler_connector_sends_kv_block_ids_once_per_epoch(tmp_path):
+    connector = _make_connector(tmp_path)
+    request = _scheduler_request("request", [b"a" * 32], num_tokens=8)
+    connector.request_started(request)
+    scheduler_output = _step_output([request.request_id], [0], [4])
+
+    assert connector.needs_kv_block_ids(request.request_id)
+    first = connector.build_connector_meta(
+        scheduler_output,
+        {request.request_id: request},
+        {request.request_id: [3, 4]},
+    )
+    assert list(first.requests[0].kv_block_ids) == [3, 4]
+    assert not connector.needs_kv_block_ids(request.request_id)
+
+    second = connector.build_connector_meta(
+        scheduler_output,
+        {request.request_id: request},
+        {},
+    )
+    assert not second.requests[0].kv_block_ids
+
+    connector.request_restarted(request.request_id)
+    assert connector.needs_kv_block_ids(request.request_id)
 
 
 def test_scheduler_connector_uses_fixed_size_synthetic_hashes(tmp_path):
@@ -1015,3 +1154,31 @@ def test_scheduler_preserves_artifacts_if_remote_kv_reset_fails():
 
     assert not scheduler.reset_prefix_cache()
     scheduler.artifact_connector.reset.assert_not_called()
+
+
+def test_scheduler_fails_closed_if_connector_reset_is_unsupported():
+    scheduler = object.__new__(Scheduler)
+    scheduler.running = []
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.reset_prefix_cache.return_value = True
+    scheduler.artifact_connector = Mock()
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = None
+    scheduler.log_stats = False
+
+    assert not scheduler.reset_prefix_cache()
+    scheduler.artifact_connector.reset.assert_not_called()
+
+
+def test_scheduler_explicitly_resets_connector_after_local_reset_failure():
+    scheduler = object.__new__(Scheduler)
+    scheduler.running = []
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.reset_prefix_cache.return_value = False
+    scheduler.artifact_connector = None
+    scheduler.connector = Mock()
+    scheduler.connector.reset_cache.return_value = True
+    scheduler.log_stats = False
+
+    assert not scheduler.reset_prefix_cache(reset_connector=True)
+    scheduler.connector.reset_cache.assert_called_once_with()
