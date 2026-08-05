@@ -85,6 +85,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             " float16 quantization are currently supported."
         )
         self.device = moe_config.device
+        # Constants the SM90 humming branch would otherwise rebuild on every
+        # forward; see apply(). Filled lazily there because g1/g2_alphas are
+        # only populated once weights are loaded.
+        self._humming_g1_scaled: torch.Tensor | None = None
+        self._humming_g2_scaled: torch.Tensor | None = None
+        self._humming_one: torch.Tensor | None = None
         self.num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.ep_size = moe_config.moe_parallel_config.ep_size
@@ -343,13 +349,27 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # num_valid_local rows in local-expert order.
             num_local = self.num_experts  # == moe_config.num_local_experts
             start_expert = self.ep_rank * num_local
+            # The epilogue compensation is a constant, so fold it into the
+            # residuals once instead of re-scaling the gathered values on every
+            # forward. g1/g2_alphas are shared with the nvfp4 paths above and
+            # must not be scaled in place.
+            if self._humming_g1_scaled is None or self._humming_g2_scaled is None:
+                self._humming_g1_scaled = (
+                    self.g1_alphas * HUMMING_EPILOGUE_COMPENSATION
+                ).contiguous()
+                self._humming_g2_scaled = (
+                    self.g2_alphas * HUMMING_EPILOGUE_COMPENSATION
+                ).contiguous()
+            g1_scaled = self._humming_g1_scaled
+            g2_scaled = self._humming_g2_scaled
             sel = topk_ids.to(torch.long).reshape(-1)
             local_id = sel - start_expert
             is_local = (local_id >= 0) & (local_id < num_local)
-            # Clamp OOB ids to 0 for a safe gather; masked out below.
-            gather_id = torch.where(is_local, local_id, torch.zeros_like(local_id))
-            fc1_route = self.g1_alphas[gather_id] * HUMMING_EPILOGUE_COMPENSATION
-            fc2_route = self.g2_alphas[gather_id] * HUMMING_EPILOGUE_COMPENSATION
+            # Send OOB ids to 0 for a safe gather; masked out below. Scalar
+            # `other` avoids materialising a zeros tensor each call.
+            gather_id = torch.where(is_local, local_id, 0)
+            fc1_route = g1_scaled[gather_id]
+            fc2_route = g2_scaled[gather_id]
 
             # Sort key = local expert id, with non-local tokens pushed to the
             # tail (sentinel num_local). Stable argsort keeps output size fixed
@@ -358,16 +378,18 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # ordered by local expert id. At ep_size=1 this reduces to the
             # global expert-contiguous order (validated in
             # scripts/humming_offline_check.py).
-            sort_key = torch.where(
-                is_local, local_id, torch.full_like(local_id, num_local)
-            )
+            sort_key = torch.where(is_local, local_id, num_local)
             # Both GEMMs' per-token residual scales live in the same expert-
             # permuted token space (kernel reads fc1 via [permuted_row], fc2 via
             # [token], both in that space), so fc1 and fc2 share one perm.
             perm = torch.argsort(sort_key, stable=True)
             fc1_residual_token = fc1_route.reshape(-1)[perm].contiguous()
             fc2_residual_token = fc2_route.reshape(-1)[perm].contiguous()
-            fc2_act_global = torch.ones((), device=self.device, dtype=torch.float32)
+            if self._humming_one is None:
+                self._humming_one = torch.ones(
+                    (), device=self.device, dtype=torch.float32
+                )
+            fc2_act_global = self._humming_one
             # Positional contract with the humming kernel: it indexes these five
             # slots by position, so the order below is load-bearing and a
             # reordering fails silently with wrong values rather than raising.
