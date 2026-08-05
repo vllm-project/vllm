@@ -525,22 +525,27 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     fixed_fp32x8_t r =
         RVVI(__riscv_vfsub_vv_f32, LMUL_256)(x_scaled, n_float, VEC_ELEM_NUM);
 
+    // Horner via vfmadd (vd = vd * vs1 + vs2): one instruction per step
+    // instead of vfmul + vfadd.  The coefficient splats are loop-invariant
+    // and hoist out of caller loops.
+    const fixed_fp32x8_t c1 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(0.009618129107628f, VEC_ELEM_NUM);
+    const fixed_fp32x8_t c2 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(0.055504108664821f, VEC_ELEM_NUM);
+    const fixed_fp32x8_t c3 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(0.240226506959101f, VEC_ELEM_NUM);
+    const fixed_fp32x8_t c4 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(0.693147180559945f, VEC_ELEM_NUM);
+    const fixed_fp32x8_t c5 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(1.0f, VEC_ELEM_NUM);
+
     fixed_fp32x8_t poly =
         RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(0.001333355810164f, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, r, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(poly, 0.009618129107628f,
-                                                VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, r, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(poly, 0.055504108664821f,
-                                                VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, r, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(poly, 0.240226506959101f,
-                                                VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, r, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(poly, 0.693147180559945f,
-                                                VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, r, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(poly, 1.0f, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, r, c1, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, r, c2, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, r, c3, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, r, c4, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, r, c5, VEC_ELEM_NUM);
 
     fixed_i32x8_t biased_exp =
         RVVI(__riscv_vadd_vx_i32, LMUL_256)(n_int, 127, VEC_ELEM_NUM);
@@ -576,25 +581,28 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     fixed_fp32x8_t abs_x =
         RVVI(__riscv_vfabs_v_f32, LMUL_256)(reg, VEC_ELEM_NUM);
 
-    fixed_fp32x8_t t = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(
-        RVVI(__riscv_vfmul_vf_f32, LMUL_256)(abs_x, p, VEC_ELEM_NUM), 1.0f,
-        VEC_ELEM_NUM);
+    const fixed_fp32x8_t one =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(1.0f, VEC_ELEM_NUM);
+    // 1 + p * abs_x  via vfmadd.vf (vd = vd * f + vs2)
+    fixed_fp32x8_t t =
+        RVVI(__riscv_vfmadd_vf_f32, LMUL_256)(abs_x, p, one, VEC_ELEM_NUM);
     t = RVVI(__riscv_vfrdiv_vf_f32, LMUL_256)(t, 1.0f, VEC_ELEM_NUM);
+
+    const fixed_fp32x8_t a4v =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(a4, VEC_ELEM_NUM);
+    const fixed_fp32x8_t a3v =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(a3, VEC_ELEM_NUM);
+    const fixed_fp32x8_t a2v =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(a2, VEC_ELEM_NUM);
+    const fixed_fp32x8_t a1v =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(a1, VEC_ELEM_NUM);
 
     fixed_fp32x8_t poly =
         RVVI(__riscv_vfmv_v_f_f32, LMUL_256)(a5, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, t, VEC_ELEM_NUM), a4,
-        VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, t, VEC_ELEM_NUM), a3,
-        VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, t, VEC_ELEM_NUM), a2,
-        VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_256)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, t, VEC_ELEM_NUM), a1,
-        VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, t, a4v, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, t, a3v, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, t, a2v, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_256)(poly, t, a1v, VEC_ELEM_NUM);
     poly = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, t, VEC_ELEM_NUM);
 
     fixed_fp32x8_t exp_val = FP32Vec8(RVVI(__riscv_vfneg_v_f32, LMUL_256)(
@@ -603,9 +611,9 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
                                           VEC_ELEM_NUM))
                                  .exp()
                                  .reg;
-    fixed_fp32x8_t res = RVVI(__riscv_vfrsub_vf_f32, LMUL_256)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_256)(poly, exp_val, VEC_ELEM_NUM), 1.0f,
-        VEC_ELEM_NUM);
+    // 1 - poly * exp_val  via vfnmsac.vv (vd = vd - vs1 * vs2)
+    fixed_fp32x8_t res = RVVI(__riscv_vfnmsac_vv_f32, LMUL_256)(
+        one, poly, exp_val, VEC_ELEM_NUM);
 
     rvv_mask_f32x8_t mask = RVVIB(__riscv_vmflt_vf_f32, LMUL_256, BOOL_256)(
         reg, 0.0f, VEC_ELEM_NUM);
@@ -793,23 +801,27 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     fixed_fp32x16_t r =
         RVVI(__riscv_vfsub_vv_f32, LMUL_512)(x_scaled, n_float, VEC_ELEM_NUM);
 
+    // Horner via vfmadd (vd = vd * vs1 + vs2): one instruction per step
+    // instead of vfmul + vfadd.  The coefficient splats are loop-invariant
+    // and hoist out of caller loops.
+    const fixed_fp32x16_t c1 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(0.009618129107628f, VEC_ELEM_NUM);
+    const fixed_fp32x16_t c2 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(0.055504108664821f, VEC_ELEM_NUM);
+    const fixed_fp32x16_t c3 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(0.240226506959101f, VEC_ELEM_NUM);
+    const fixed_fp32x16_t c4 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(0.693147180559945f, VEC_ELEM_NUM);
+    const fixed_fp32x16_t c5 =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(1.0f, VEC_ELEM_NUM);
+
     fixed_fp32x16_t poly =
         RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(0.001333355810164f, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, r, VEC_ELEM_NUM),
-        0.009618129107628f, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, r, VEC_ELEM_NUM),
-        0.055504108664821f, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, r, VEC_ELEM_NUM),
-        0.240226506959101f, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, r, VEC_ELEM_NUM),
-        0.693147180559945f, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, r, VEC_ELEM_NUM), 1.0f,
-        VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, r, c1, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, r, c2, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, r, c3, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, r, c4, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, r, c5, VEC_ELEM_NUM);
 
     fixed_i32x16_t biased_exp = RVVI(__riscv_vmax_vx_i32, LMUL_512)(
         RVVI(__riscv_vadd_vx_i32, LMUL_512)(n_int, 127, VEC_ELEM_NUM), 0,
@@ -840,26 +852,28 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                 a3 = 1.421413741f, a4 = -1.453152027f, a5 = 1.061405429f;
     fixed_fp32x16_t abs_x =
         RVVI(__riscv_vfabs_v_f32, LMUL_512)(reg, VEC_ELEM_NUM);
-    fixed_fp32x16_t t = RVVI(__riscv_vfrdiv_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-            RVVI(__riscv_vfmul_vf_f32, LMUL_512)(abs_x, p, VEC_ELEM_NUM), 1.0f,
-            VEC_ELEM_NUM),
-        1.0f, VEC_ELEM_NUM);
+    const fixed_fp32x16_t one =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(1.0f, VEC_ELEM_NUM);
+    // 1 + p * abs_x  via vfmadd.vf (vd = vd * f + vs2)
+    fixed_fp32x16_t t =
+        RVVI(__riscv_vfmadd_vf_f32, LMUL_512)(abs_x, p, one, VEC_ELEM_NUM);
+    t = RVVI(__riscv_vfrdiv_vf_f32, LMUL_512)(t, 1.0f, VEC_ELEM_NUM);
+
+    const fixed_fp32x16_t a4v =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(a4, VEC_ELEM_NUM);
+    const fixed_fp32x16_t a3v =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(a3, VEC_ELEM_NUM);
+    const fixed_fp32x16_t a2v =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(a2, VEC_ELEM_NUM);
+    const fixed_fp32x16_t a1v =
+        RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(a1, VEC_ELEM_NUM);
 
     fixed_fp32x16_t poly =
         RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(a5, VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, t, VEC_ELEM_NUM), a4,
-        VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, t, VEC_ELEM_NUM), a3,
-        VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, t, VEC_ELEM_NUM), a2,
-        VEC_ELEM_NUM);
-    poly = RVVI(__riscv_vfadd_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, t, VEC_ELEM_NUM), a1,
-        VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, t, a4v, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, t, a3v, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, t, a2v, VEC_ELEM_NUM);
+    poly = RVVI(__riscv_vfmadd_vv_f32, LMUL_512)(poly, t, a1v, VEC_ELEM_NUM);
     poly = RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, t, VEC_ELEM_NUM);
 
     fixed_fp32x16_t exp_val =
@@ -869,9 +883,9 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                       VEC_ELEM_NUM))
             .exp()
             .reg;
-    fixed_fp32x16_t res = RVVI(__riscv_vfrsub_vf_f32, LMUL_512)(
-        RVVI(__riscv_vfmul_vv_f32, LMUL_512)(poly, exp_val, VEC_ELEM_NUM), 1.0f,
-        VEC_ELEM_NUM);
+    // 1 - poly * exp_val  via vfnmsac.vv (vd = vd - vs1 * vs2)
+    fixed_fp32x16_t res = RVVI(__riscv_vfnmsac_vv_f32, LMUL_512)(
+        one, poly, exp_val, VEC_ELEM_NUM);
 
     rvv_mask_f32x16_t mask = RVVIB(__riscv_vmflt_vf_f32, LMUL_512, BOOL_512)(
         reg, 0.0f, VEC_ELEM_NUM);
