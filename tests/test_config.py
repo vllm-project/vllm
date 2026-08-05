@@ -2740,6 +2740,42 @@ def test_get_and_verify_max_len_yarn_is_already_scaled(
     assert actual_max_len == expected_max_len
 
 
+@pytest.mark.parametrize(
+    ("draft_derived_len", "target_max_len", "expected_max_len"),
+    [
+        (262144, 131072, 131072),
+        (131072, 131072, 131072),
+        (4096, 131072, 4096),
+    ],
+)
+def test_get_and_verify_max_len_bounds_draft_by_target(
+    draft_derived_len, target_max_len, expected_max_len
+):
+    """A draft model resolves to at most the target model's length.
+
+    Drafts whose checkpoint declares a longer context than the target used to
+    resolve to their own length and only get corrected afterwards, which made
+    the reported length differ from the one actually used.
+    """
+    from vllm.config.model import _get_and_verify_max_len
+
+    resolved = _get_and_verify_max_len(
+        hf_config=SimpleNamespace(),
+        model_arch_config=SimpleNamespace(
+            derived_max_model_len_and_key=(
+                draft_derived_len,
+                "max_position_embeddings",
+            )
+        ),
+        tokenizer_config=None,
+        max_model_len=None,
+        disable_sliding_window=False,
+        sliding_window=None,
+        spec_target_max_model_len=target_max_len,
+    )
+    assert resolved == expected_max_len
+
+
 class MockConfig:
     """Simple mock object for testing maybe_pull_model_tokenizer_for_runai."""
 
