@@ -263,6 +263,11 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    # num_blocks/external tokens vary with the backend's KV cache block size
+    # (16 on CUDA, 64 on XPU), so derive the expected event from the observed one.
+    alloc_event = storage1_scheduler_events[4]
+    assert alloc_event.startswith("update_state_after_alloc num_blocks=[")
+    assert alloc_event.endswith(" 0")
     # First event is bind_gpu_block_pool from initialization, then
     # set_xfer_handshake_metadata_pp_aware, then on_new_request when the request is
     # enqueued, then get_num_new_matched_tokens and update_state_after_alloc from
@@ -272,7 +277,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        alloc_event,
         "build_connector_meta",
     ]
     # First three events are from initialization (register_kv_caches,
@@ -292,7 +297,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        alloc_event,
         "build_connector_meta",
     ]
     assert events["storage2-WORKER"][:8] == [
@@ -324,16 +329,20 @@ def test_multi_example_connector_consistency():
     storage2_scheduler_events = _events_from_request(
         _ignore_event_collection(events["storage2-SCHEDULER"])
     )
+    alloc_event = storage1_scheduler_events[2]
+    alloc_prefix = alloc_event.rsplit(" ", 1)[0]
+    assert alloc_prefix.startswith("update_state_after_alloc num_blocks=[")
+    assert not alloc_event.endswith(" 0")
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 96",
+        alloc_event,
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"{alloc_prefix} 0",
         "build_connector_meta",
     ]
 
@@ -358,16 +367,20 @@ def test_multi_example_connector_consistency():
     storage2_scheduler_events = _events_from_request(
         _ignore_event_collection(events["storage2-SCHEDULER"])
     )
+    alloc_event = storage2_scheduler_events[2]
+    alloc_prefix = alloc_event.rsplit(" ", 1)[0]
+    assert alloc_prefix.startswith("update_state_after_alloc num_blocks=[")
+    assert not alloc_event.endswith(" 0")
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 0",
+        f"{alloc_prefix} 0",
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[7] 96",
+        alloc_event,
         "build_connector_meta",
     ]
 
