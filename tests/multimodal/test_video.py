@@ -313,6 +313,72 @@ def test_pynvvideocodec_borrow_error_invalidates_decoder_slot():
         PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
 
 
+def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
+    events: list[tuple[str, str]] = []
+
+    class FakeStream:
+        cuda_stream = "cuda-stream"
+
+    class FakeDecoder:
+        poisoned = False
+
+        def reconfigure_decoder(self, file_path: str):
+            self.poisoned = True
+            events.append(("reconfigure", file_path))
+            raise RuntimeError("reconfigure failed")
+
+    old_decoder = FakeDecoder()
+    slot = PyNvVideoCodecDecoderSlot(FakeStream())
+    slot.decoder = old_decoder
+    slot.source_path = "valid.mp4"
+
+    class FakeNvc:
+        class OutputColorType:
+            RGB = "rgb"
+
+        @staticmethod
+        def SimpleDecoder(file_path: str, **kwargs):
+            events.append(("construct", file_path))
+            assert slot.decoder is None
+            assert slot.source_path is None
+            raise RuntimeError("construct failed")
+
+    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
+    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
+    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
+    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
+    try:
+        PyNvVideoCodecVideoBackend._decoder_slots = [slot]
+        PyNvVideoCodecVideoBackend._active_decoder_slots = 1
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
+        PyNvVideoCodecVideoBackend._max_decoder_slots = 1
+
+        with (
+            pytest.raises(RuntimeError, match="construct failed"),
+            PyNvVideoCodecVideoBackend._borrow_decoder_slot() as borrowed,
+        ):
+            assert borrowed is slot
+            borrowed.get_decoder(
+                "unsupported-8k.mp4",
+                FakeNvc,
+                device_index=0,
+            )
+
+        assert events == [
+            ("reconfigure", "unsupported-8k.mp4"),
+            ("construct", "unsupported-8k.mp4"),
+        ]
+        assert old_decoder.poisoned
+        assert slot.decoder is None
+        assert slot.source_path is None
+        assert PyNvVideoCodecVideoBackend._decoder_slots == [slot]
+    finally:
+        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
+        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
+        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
+
+
 @pytest.mark.parametrize("hw_decoders", [0, -1, 1.5, True, "2"])
 def test_pynvvideocodec_rejects_invalid_hw_decoders(hw_decoders: object):
     with pytest.raises(ValueError, match="hw_decoders must be a positive integer"):
