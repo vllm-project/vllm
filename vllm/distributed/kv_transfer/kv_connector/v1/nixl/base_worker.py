@@ -1093,7 +1093,7 @@ class NixlBaseConnectorWorker:
 
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
-        seen_base_addresses = []
+        seen_base_addresses: list[int] = []
 
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
@@ -1139,11 +1139,19 @@ class NixlBaseConnectorWorker:
             curr_tensor_size_bytes = num_blocks * physical_page_size
 
             base_addr = cache.data_ptr()
+            is_mla_region = isinstance(
+                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            )
             if base_addr in seen_base_addresses:
                 # NOTE (NickLucche) HMA employs memory pooling to share tensors
                 # across groups. This results in skipping all tensors but the ones
                 # pointed to by group0. Also, generally we will have more blocks
                 # per tensor but fewer regions.
+                # A shared tensor may back both SSM and attention layers (e.g.
+                # KDA+MLA in KimiLinear); the region's FA view is MLA whichever
+                # layer registered it first.
+                idx = seen_base_addresses.index(base_addr)
+                self._region_is_mla[idx] |= is_mla_region
                 logger.debug("Skipping %s because it's already seen", layer_name)
                 continue
             logger.debug(
@@ -1157,9 +1165,6 @@ class NixlBaseConnectorWorker:
                 )
             else:
                 self.block_len_per_layer.append(physical_page_size)
-            is_mla_region = isinstance(
-                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-            )
             self._region_is_mla.append(is_mla_region)
 
             if not is_mla_region:
@@ -1801,7 +1806,22 @@ class NixlBaseConnectorWorker:
         # the per-rank KV head ratio rather than the raw tp_ratio, because GQA
         # replication caps per-rank heads at 1 when tp > total_kv_heads
         # (issue #45330). Mamba uses the ssm_sizes counterpart, so skip here.
-        if not self._has_mamba:
+        if self._has_mamba and self.use_mla:
+            # Hybrid MLA+SSM (e.g. KimiLinear's KDA+MLA): regions are
+            # kernel-granularity views of the mamba-unified page. The MLA
+            # per-token page is TP-independent, so the block lengths must
+            # match up to the kernel block size ratio even under
+            # heterogeneous TP (remote kernel blocks may be smaller).
+            # SSM geometry is validated via ssm_sizes/conv offsets instead.
+            assert self.block_len_per_layer == [
+                block_len * block_size_ratio for block_len in nixl_agent_meta.block_lens
+            ], (
+                "Hybrid MLA kernel-granularity block lengths must match "
+                f"between P and D (block_size_ratio={block_size_ratio}): "
+                f"local={self.block_len_per_layer}, "
+                f"remote={nixl_agent_meta.block_lens}."
+            )
+        elif not self._has_mamba:
             assert len(self.block_len_per_layer) == len(nixl_agent_meta.block_lens), (
                 "Number of KV layers must match between prefill and decode"
             )
@@ -2419,16 +2439,25 @@ class NixlBaseConnectorWorker:
             for i, remote_group in enumerate(remote_block_ids):
                 num_local_blocks = len(local_block_ids[i])
                 num_remote_blocks = len(remote_group)
-                if (
-                    _is_ssm_spec(self._group_spec_types[i])
-                    and num_local_blocks < num_remote_blocks
-                ):
-                    # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
-                    # prior to the last one are placeholders (null blocks). Mind that
-                    # this doesn't really impact transfer, as we only still care about
-                    # the last "block", the full in-place state.
-                    assert num_local_blocks == 1, "SSM can only have one local block"
-                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                if _is_ssm_spec(self._group_spec_types[i]):
+                    if num_local_blocks == num_remote_blocks:
+                        continue
+                    # Only state-bearing slots reach here, single-state modes
+                    # just one (see get_exchange_clipped_blocks), so differing
+                    # counts mean position-indexed "all"-mode lists. A longer
+                    # remote list carries earlier positions the local side
+                    # already has (prefix hit) -> read its tail; a longer local
+                    # list holds the position D recomputes itself, which gets
+                    # no remote state.
+                    assert num_local_blocks - num_remote_blocks <= 1, (
+                        f"Group {i}: unpairable SSM state slots, "
+                        f"local={num_local_blocks} remote={num_remote_blocks}"
+                    )
+                    num_blocks = min(num_local_blocks, num_remote_blocks)
+                    if num_local_blocks < num_remote_blocks:
+                        remote_block_ids[i] = remote_group[-num_blocks:]
+                    else:
+                        local_block_ids[i] = local_block_ids[i][:num_blocks]
                 elif (
                     self._physical_blocks_per_logical_kv_block
                     == remote_physical_per_logical

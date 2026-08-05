@@ -7,6 +7,7 @@ import json
 import os
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
 import torch
 from aiter.fused_moe import moe_sorting as aiter_moe_sorting
 from aiter.ops.flydsl.kernels.moe_gemm_2stage import (
@@ -41,6 +42,12 @@ _FLYDSL_MOE_DEFAULT_CONFIG = {
     4096: {"tile_m": 32, "tile_n": 64, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
     8192: {"tile_m": 64, "tile_n": 64, "tile_k": 64, "tile_n2": 256, "tile_k2": 64},
 }
+
+
+def _as_flydsl_ptr(tensor: torch.Tensor | None):
+    """Adapt a torch tensor to the pointer ABI expected by AITER FlyDSL."""
+    data_ptr = None if tensor is None else tensor.data_ptr()
+    return flyc.from_c_void_p(fx.Uint8, data_ptr)
 
 
 def moe_sorting(
@@ -219,6 +226,22 @@ def fused_flydsl_moe_impl(
     )
 
     compiled_exe1 = _FLYDSL_MOE_GEMM1_CACHE.get(key1)
+    args1 = (
+        _as_flydsl_ptr(out_stage1),
+        _as_flydsl_ptr(hidden_states),
+        _as_flydsl_ptr(w1),
+        _as_flydsl_ptr(scale_x_1d),
+        _as_flydsl_ptr(w1_scale),
+        _as_flydsl_ptr(sorted_token_ids),
+        _as_flydsl_ptr(sorted_expert_ids),
+        _as_flydsl_ptr(sorted_weights_1d),
+        _as_flydsl_ptr(num_valid_ids),
+        tokens,
+        inter_dim,
+        model_dim,
+        int(blocks),
+        stream,
+    )
     if compiled_exe1 is None:
         exe1 = compile_moe_gemm1(
             model_dim=model_dim,
@@ -235,41 +258,10 @@ def fused_flydsl_moe_impl(
             use_cshuffle_epilog=False,
             scale_is_bf16=scale_is_bf16,
         )
-        compiled_exe1 = flyc.compile(
-            exe1,
-            out_stage1,
-            hidden_states,
-            w1,
-            scale_x_1d,
-            w1_scale,
-            sorted_token_ids,
-            sorted_expert_ids,
-            sorted_weights_1d,
-            num_valid_ids,
-            tokens,
-            inter_dim,
-            model_dim,
-            int(blocks),
-            stream,
-        )
+        compiled_exe1 = flyc.compile(exe1, *args1)
         _FLYDSL_MOE_GEMM1_CACHE[key1] = compiled_exe1
-
-    compiled_exe1(
-        out_stage1,
-        hidden_states,
-        w1,
-        scale_x_1d,
-        w1_scale,
-        sorted_token_ids,
-        sorted_expert_ids,
-        sorted_weights_1d,
-        num_valid_ids,
-        tokens,
-        inter_dim,
-        model_dim,
-        int(blocks),
-        stream,
-    )
+    else:
+        compiled_exe1(*args1)
 
     a2_1d = out_stage1.view(-1).contiguous()
     a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
@@ -291,6 +283,23 @@ def fused_flydsl_moe_impl(
     )
 
     compiled_exe2 = _FLYDSL_MOE_GEMM2_CACHE.get(key2)
+    args2 = (
+        _as_flydsl_ptr(out_stage2),
+        _as_flydsl_ptr(a2_1d),
+        _as_flydsl_ptr(w2),
+        _as_flydsl_ptr(a2_scale_1d),
+        _as_flydsl_ptr(w2_scale),
+        _as_flydsl_ptr(sorted_token_ids),
+        _as_flydsl_ptr(sorted_expert_ids),
+        _as_flydsl_ptr(sorted_weights_1d),
+        _as_flydsl_ptr(num_valid_ids),
+        tokens,
+        model_dim,
+        inter_dim,
+        int(blocks),
+        stream,
+    )
+    out_stage2.zero_()
     if compiled_exe2 is None:
         exe2 = compile_moe_gemm2(
             model_dim=model_dim,
@@ -306,42 +315,10 @@ def fused_flydsl_moe_impl(
             doweight_stage2=bool(doweight_stage2),
             scale_is_bf16=scale_is_bf16,
         )
-        compiled_exe2 = flyc.compile(
-            exe2,
-            out_stage2,
-            a2_1d,
-            w2,
-            a2_scale_1d,
-            w2_scale,
-            sorted_token_ids,
-            sorted_expert_ids,
-            sorted_weights_1d,
-            num_valid_ids,
-            tokens,
-            model_dim,
-            inter_dim,
-            int(blocks),
-            stream,
-        )
+        compiled_exe2 = flyc.compile(exe2, *args2)
         _FLYDSL_MOE_GEMM2_CACHE[key2] = compiled_exe2
-
-    out_stage2.zero_()
-    compiled_exe2(
-        out_stage2,
-        a2_1d,
-        w2,
-        a2_scale_1d,
-        w2_scale,
-        sorted_token_ids,
-        sorted_expert_ids,
-        sorted_weights_1d,
-        num_valid_ids,
-        tokens,
-        model_dim,
-        inter_dim,
-        int(blocks),
-        stream,
-    )
+    else:
+        compiled_exe2(*args2)
     return out_stage2
 
 
