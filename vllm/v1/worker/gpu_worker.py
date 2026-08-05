@@ -178,6 +178,10 @@ class Worker(WorkerBase):
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
 
+        # Custom MemPool for Mooncake KV cache allocation (NVLink/BAREX).
+        # Kept alive on the Worker so the pool outlives the context manager.
+        self._mooncake_mem_pool: torch.cuda.MemPool | None = None
+
     def _get_sleep_mode_backend(self) -> "SleepModeBackend":
         if self._sleep_mode_backend is None:
             from vllm.device_allocator.sleep_mode_backend import (
@@ -254,6 +258,32 @@ class Worker(WorkerBase):
         checkpoint_restore_distributed_state()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+        # Mooncake custom memory pool (NVLink / BAREX) only applies to KV
+        # cache allocation, not weights.
+        if tag == "kv_cache" and self.vllm_config.kv_transfer_config:
+            pool_type = str(
+                self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "custom_mem_pool", ""
+                )
+            ).upper()
+            if pool_type in ("NVLINK", "BAREX"):
+                if self._mooncake_mem_pool is None:
+                    if pool_type == "NVLINK":
+                        from mooncake.allocator import NVLinkAllocator
+
+                        allocator = NVLinkAllocator.get_allocator(self.device)
+                    else:
+                        from mooncake.allocator import BarexAllocator
+
+                        allocator = BarexAllocator.get_allocator(self.device)
+                    self._mooncake_mem_pool = torch.cuda.MemPool(allocator.allocator())
+                return torch.cuda.use_mem_pool(self._mooncake_mem_pool)
+            elif pool_type:
+                raise ValueError(
+                    f"Unsupported custom_mem_pool={pool_type!r}, "
+                    "expected 'NVLINK' or 'BAREX'"
+                )
+
         if (
             current_platform.is_cuda_alike()
             and not self.vllm_config.model_config.enable_cumem_allocator
