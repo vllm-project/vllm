@@ -561,6 +561,29 @@ def split_decodes_prefills_and_extends(
     )
 
 
+def sparse_short_extend_tiering(common_attn_metadata) -> bool:
+    """Shared `treat_short_extends_as_decodes` for the DSv4 sparse builders.
+
+    The indexer, the sparse-SWA builder and the C128A builder all slice the SAME
+    ``topk_indices_buffer`` at ``num_decode_tokens``. If they disagree about
+    whether a short extend is a decode, one writes at one boundary and another
+    reads at a different one, so tokens receive each other's top-k indices. The
+    indices stay individually valid (each is a real slot in the owning request's
+    block table), which is why byte-level sentinels and per-slot validity checks
+    do not see it -- the corruption is a misattribution across tokens.
+
+    The disagreement only appears when a batch mixes prefill and decode rows,
+    which is why it requires concurrency to reproduce.
+
+    All three call sites must use this one function so they cannot drift apart.
+    """
+    is_prefilling = common_attn_metadata.is_prefilling
+    has_prefilling_rows = is_prefilling is not None and bool(
+        torch.any(is_prefilling).item()
+    )
+    return not has_prefilling_rows
+
+
 def split_decodes_and_prefills(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,

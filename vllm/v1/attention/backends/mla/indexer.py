@@ -33,6 +33,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
+    sparse_short_extend_tiering,
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
@@ -806,7 +807,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 require_uniform=not self.use_flattening,
-                treat_short_extends_as_decodes=not has_prefilling_rows
+                treat_short_extends_as_decodes=sparse_short_extend_tiering(
+                    common_attn_metadata
+                )
                 and not self.use_pcp,
             )
         )

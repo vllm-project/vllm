@@ -21,7 +21,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    sparse_short_extend_tiering,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # Pad C128A topk width to this alignment. 128 covers both h_q=64 (B_TOPK=64) and
@@ -255,6 +258,9 @@ class DeepseekV4FlashMLAMetadataBuilder(
             split_decodes_and_prefills(
                 cm,
                 decode_threshold=self.reorder_batch_threshold or 1,
+                # Must match SWA and the indexer -- see
+                # sparse_short_extend_tiering().
+                treat_short_extends_as_decodes=sparse_short_extend_tiering(cm),
             )
         )
 
