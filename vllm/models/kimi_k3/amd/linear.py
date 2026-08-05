@@ -28,7 +28,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    KimiGatedDeltaNetAttention,
+    KimiGatedDeltaNetAttention as KimiLinearGatedDeltaNetAttention,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -61,6 +61,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -477,11 +478,22 @@ class KimiDecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         if config.is_kda_layer(layer_idx):
-            self.self_attn = KimiGatedDeltaNetAttention(
-                config,
-                vllm_config,
-                prefix=f"{prefix}.self_attn",
-            )
+            # Kimi-K3 sets use_full_rank_gate and uses the ROCm-specific K3 KDA
+            # layer; Kimi-Linear keeps the shared low-rank-gate implementation.
+            kda_config = config.linear_attn_config
+            assert kda_config is not None
+            if kda_config.get("use_full_rank_gate", False):
+                self.self_attn = KimiK3DeltaAttention(
+                    config,
+                    vllm_config,
+                    prefix=f"{prefix}.self_attn",
+                )
+            else:
+                self.self_attn = KimiLinearGatedDeltaNetAttention(
+                    config,
+                    vllm_config,
+                    prefix=f"{prefix}.self_attn",
+                )
         else:
             qk_nope_head_dim = config.qk_nope_head_dim
             qk_rope_head_dim = config.qk_rope_head_dim
