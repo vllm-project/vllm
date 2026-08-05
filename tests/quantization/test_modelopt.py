@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
+    ModelOptFp8LinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
@@ -112,6 +113,28 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
         method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
     assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_modelopt_fp8_updates_weight_dims_after_transpose():
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight", torch.nn.Parameter(torch.empty(3, 2), requires_grad=False)
+    )
+    layer.register_parameter(
+        "weight_scale", torch.nn.Parameter(torch.ones(1), requires_grad=False)
+    )
+    layer.register_parameter(
+        "input_scale", torch.nn.Parameter(torch.ones(1), requires_grad=False)
+    )
+
+    method = ModelOptFp8LinearMethod.__new__(ModelOptFp8LinearMethod)
+    method.fp8_linear = Mock()
+    method.process_weights_after_loading(layer)
+
+    assert layer.weight.shape == (2, 3)
+    assert layer.weight.input_dim == 0
+    assert layer.weight.output_dim == 1
+    method.fp8_linear.process_weights_after_loading.assert_called_once_with(layer)
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
