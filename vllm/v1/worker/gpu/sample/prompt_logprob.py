@@ -33,6 +33,33 @@ class PromptLogprobsWorker:
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
 
+    def _needs_prompt_logprobs_mask(
+        self,
+        input_batch: InputBatch,
+        prompt_lens: np.ndarray,
+    ) -> np.ndarray:
+        idx_mapping_np = input_batch.idx_mapping_np
+        needs_prompt_logprobs = self.uses_prompt_logprobs[idx_mapping_np]
+        if not np.any(needs_prompt_logprobs):
+            return needs_prompt_logprobs
+        batch_prompt_lens = prompt_lens[idx_mapping_np]
+        computed_prefill = input_batch.num_computed_prefill_tokens_np
+        includes_prompt = computed_prefill < batch_prompt_lens
+        # If the request resumed after preemption, its prompt logprobs were
+        # computed before preemption.
+        resumed_after_prompt = batch_prompt_lens < input_batch.prefill_len_np
+        return needs_prompt_logprobs & includes_prompt & ~resumed_after_prompt
+
+    def needs_prompt_hidden_states(
+        self,
+        input_batch: InputBatch,
+        prompt_lens: np.ndarray,
+    ) -> bool:
+        """Whether this step needs dense, globally ordered prompt rows."""
+        if not self.in_progress_prompt_logprobs:
+            return False
+        return bool(np.any(self._needs_prompt_logprobs_mask(input_batch, prompt_lens)))
+
     def compute_prompt_logprobs(
         self,
         logits_fn: Callable[[torch.Tensor], torch.Tensor],
@@ -45,22 +72,18 @@ class PromptLogprobsWorker:
         # [max_num_reqs]
         prompt_lens: np.ndarray,
     ) -> dict[str, LogprobsTensors]:
+        if not self.in_progress_prompt_logprobs:
+            return {}
         idx_mapping_np = input_batch.idx_mapping_np
-        needs_prompt_logprobs = self.uses_prompt_logprobs[idx_mapping_np]
+        needs_prompt_logprobs = self._needs_prompt_logprobs_mask(
+            input_batch, prompt_lens
+        )
         if not np.any(needs_prompt_logprobs):
-            # Common case: No request asks for prompt logprobs.
             return {}
 
         num_prompt_logprobs = self.num_prompt_logprobs[idx_mapping_np]
         prompt_lens = prompt_lens[idx_mapping_np]
         computed_prefill = input_batch.num_computed_prefill_tokens_np
-        includes_prompt = computed_prefill < prompt_lens
-        # NOTE(woosuk): If the request was resumed after preemption, its prompt
-        # logprobs must have been computed before preemption. Skip.
-        resumed_after_prompt = prompt_lens < input_batch.prefill_len_np
-        needs_prompt_logprobs &= includes_prompt & ~resumed_after_prompt
-        if not np.any(needs_prompt_logprobs):
-            return {}
 
         # get the maximum number in this batch
         requested_num_prompt_logprobs = num_prompt_logprobs[needs_prompt_logprobs]

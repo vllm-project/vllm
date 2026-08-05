@@ -16,6 +16,31 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### Compact final-row exchange
+
+Prefill context parallelism partitions the model rows across ranks, but sampling
+usually consumes only the final row of each scheduled request. PCP therefore
+exchanges those sampled rows instead of reconstructing every scheduled token.
+Pure decode rows are already replicated in global request order and require no
+exchange.
+
+On systems with CUDA symmetric-memory multicast, the sampled rows are
+multicast into rank-major staging memory and locally reordered. Other systems
+use the existing PCP collective on the same compact buffer. Backend selection
+is automatic and does not require a feature flag.
+
+Prompt-logprob requests are the exception: they consume dense prompt rows and
+therefore retain the full hidden-state collective for steps that need them.
+
+The CUDA multicast backend allocates persistent staging before vLLM profiles
+memory for the KV cache. Its storage per GPU is approximately:
+
+```text
+(pcp_size + 3) * max_num_seqs * hidden_size * hidden_state_element_size
+```
+
+The exact footprint is excluded when the KV cache is sized.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

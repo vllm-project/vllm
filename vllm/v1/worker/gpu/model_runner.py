@@ -230,6 +230,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
+        self._pcp_hidden_state_restorer = pcp.maybe_create_pcp_hidden_state_restorer(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+        )
         self.pcp_manager: pcp.PCPManager | None = None
 
         # Pooling models.
@@ -516,7 +521,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.supports_mm_inputs,
             self.req_states,
             self.block_tables,
+            self._pcp_hidden_state_restorer,
         )
+        self._pcp_hidden_state_restorer = None
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
@@ -1181,8 +1188,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
+        sample_hidden_states: torch.Tensor | None = None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
-        sample_hidden_states = hidden_states[input_batch.logits_indices]
+        if sample_hidden_states is None:
+            sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
@@ -1539,13 +1548,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
-        # Last rank: sample tokens
-        hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
-            self.pcp_manager, hidden_states, input_batch
+        # Last rank: restore only the final rows consumed by sampling. Dense
+        # prompt rows are restored only when prompt-logprob work needs them.
+        assert self.prompt_logprobs_worker is not None
+        needs_prompt_hidden_states = False
+        if self.pcp_manager is not None:
+            sampling_input_batch = pcp.maybe_get_pcp_global_batch(
+                self.pcp_manager, input_batch
+            )
+            needs_prompt_hidden_states = (
+                self.prompt_logprobs_worker.needs_prompt_hidden_states(
+                    sampling_input_batch,
+                    self.req_states.prompt_len.np,
+                )
+            )
+        hidden_states, sample_hidden_states, input_batch = (
+            pcp.maybe_restore_pcp_for_sampling(
+                self.pcp_manager,
+                hidden_states,
+                input_batch,
+                needs_prompt_hidden_states=needs_prompt_hidden_states,
+            )
         )
 
         sampler_output, num_sampled, num_rejected = self.sample(
-            hidden_states, input_batch, grammar_output
+            hidden_states,
+            input_batch,
+            grammar_output,
+            sample_hidden_states,
         )
 
         if self.pp_handler is not None:
@@ -1557,7 +1587,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
             )
 
-        assert self.prompt_logprobs_worker is not None
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
             self.model.compute_logits,
             hidden_states,
@@ -1707,6 +1736,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.pcp_manager is not None:
+            self.pcp_manager.close()
+            self.pcp_manager = None
+        elif self._pcp_hidden_state_restorer is not None:
+            self._pcp_hidden_state_restorer.close()
+            self._pcp_hidden_state_restorer = None
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
