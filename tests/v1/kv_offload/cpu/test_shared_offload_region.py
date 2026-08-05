@@ -385,6 +385,33 @@ def test_creator_flag_set_on_first_open(iid):
         assert r._creator is True
 
 
+def test_insufficient_space_raises_clear_error(iid, monkeypatch):
+    """An oversized region must fail fast with an explanatory error.
+
+    Without an up-front capacity check the shortfall only surfaces later as an
+    opaque ``OSError: [Errno 14] Bad address`` from madvise(MADV_POPULATE_WRITE).
+    """
+    import os as _os
+
+    real_fstatvfs = _os.fstatvfs
+
+    class _TinyStat:
+        # Report only one free page so any real region exceeds it.
+        f_bavail = 1
+        f_frsize = PAGE_SIZE
+
+    monkeypatch.setattr(_os, "fstatvfs", lambda fd: _TinyStat())
+
+    with pytest.raises(RuntimeError, match="Not enough space"):
+        _make_region(iid, num_blocks=4)
+
+    # Restore before checking the filesystem so cleanup assertions are accurate.
+    monkeypatch.setattr(_os, "fstatvfs", real_fstatvfs)
+    # The partially created file must be removed so other workers do not block.
+    expected_path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    assert not os.path.exists(expected_path)
+
+
 def test_joiner_flag_not_set(iid):
     """A second worker opening the same file must have _creator == False."""
     with _multi_region(iid, num_workers=2) as (r0, r1):
