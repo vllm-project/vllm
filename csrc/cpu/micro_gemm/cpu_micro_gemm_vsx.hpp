@@ -127,55 +127,23 @@ class TileGemmVSX {
         
         // Load B and GER for k_idx + 0
         __vector unsigned char vB_vec_0[tiles_n];
-        #pragma GCC unroll 4
         for (int j = 0; j < tiles_n; j++) vB_vec_0[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 0) * 4]);
-        
-        #pragma GCC unroll 2
-        for (int i = 0; i < tiles_m; i++) {
-            #pragma GCC unroll 4
-            for (int j = 0; j < tiles_n; j++) {
-                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_0[i], vB_vec_0[j]);
-            }
-        }
+        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_0[i], vB_vec_0[j]);
         
         // Load B and GER for k_idx + 2
         __vector unsigned char vB_vec_2[tiles_n];
-        #pragma GCC unroll 4
         for (int j = 0; j < tiles_n; j++) vB_vec_2[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 2) * 4]);
-        
-        #pragma GCC unroll 2
-        for (int i = 0; i < tiles_m; i++) {
-            #pragma GCC unroll 4
-            for (int j = 0; j < tiles_n; j++) {
-                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_2[i], vB_vec_2[j]);
-            }
-        }
+        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_2[i], vB_vec_2[j]);
         
         // Load B and GER for k_idx + 4
         __vector unsigned char vB_vec_4[tiles_n];
-        #pragma GCC unroll 4
         for (int j = 0; j < tiles_n; j++) vB_vec_4[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 4) * 4]);
-        
-        #pragma GCC unroll 2
-        for (int i = 0; i < tiles_m; i++) {
-            #pragma GCC unroll 4
-            for (int j = 0; j < tiles_n; j++) {
-                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_4[i], vB_vec_4[j]);
-            }
-        }
+        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_4[i], vB_vec_4[j]);
         
         // Load B and GER for k_idx + 6
         __vector unsigned char vB_vec_6[tiles_n];
-        #pragma GCC unroll 4
         for (int j = 0; j < tiles_n; j++) vB_vec_6[j] = vec_xl(0, (const unsigned char*)&b_ptr[j * k * 4 + (k_idx + 6) * 4]);
-        
-        #pragma GCC unroll 2
-        for (int i = 0; i < tiles_m; i++) {
-            #pragma GCC unroll 4
-            for (int j = 0; j < tiles_n; j++) {
-                __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_6[i], vB_vec_6[j]);
-            }
-        }
+        for (int i = 0; i < tiles_m; i++) for (int j = 0; j < tiles_n; j++) __builtin_mma_xvbf16ger2pp(&acc[i][j], (__vector unsigned char)vA_6[i], vB_vec_6[j]);
     }
     
     // Remainder loop processing 2 columns at a time
