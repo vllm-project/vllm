@@ -18,7 +18,12 @@ class DummyStatLogger(StatLoggerBase):
         self.engine_initialized = False
 
     def record(
-        self, scheduler_stats, iteration_stats, mm_cache_stats=None, engine_idx=0
+        self,
+        scheduler_stats,
+        iteration_stats,
+        mm_cache_stats=None,
+        engine_notifications=None,
+        engine_idx=0,
     ):
         self.recorded.append(
             (scheduler_stats, iteration_stats, mm_cache_stats, engine_idx)

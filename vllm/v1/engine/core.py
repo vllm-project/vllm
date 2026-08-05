@@ -85,6 +85,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
+from vllm.v1.notifications import EngineNotification
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
@@ -236,6 +237,12 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+
+        # Notifications waiting on the in-process frontend (EngineCoreProc
+        # overrides _publish_notifications to broadcast instead). Additive in
+        # emission order, like scheduler_stats: nothing dropped. Producers
+        # throttle themselves, so this stays bounded while idle.
+        self._pending_notifications: list[EngineNotification] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -606,6 +613,7 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
+        self._collect_step_notifications(model_output, engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -708,6 +716,7 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
+        self._collect_step_notifications(model_output, engine_core_outputs)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -733,6 +742,37 @@ class EngineCore:
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
         return engine_core_outputs, model_executed
+
+    def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
+        """Queue notifications for the frontend.
+
+        Additive (like scheduler_stats): nothing gets dropped. The in-process
+        engine buffers until the next step's outputs; EngineCoreProc overrides
+        this to broadcast to every frontend right away.
+        """
+        self._pending_notifications.extend(notifications)
+
+    def _flush_notifications(
+        self, engine_core_outputs: dict[int, EngineCoreOutputs]
+    ) -> None:
+        """Attach pending notifications to the in-process frontend's outputs."""
+        if not self._pending_notifications:
+            return
+        if (eco := next(iter(engine_core_outputs.values()), None)) is None:
+            engine_core_outputs[0] = eco = EngineCoreOutputs()
+        eco.engine_notifications = self._pending_notifications
+        self._pending_notifications = []
+
+    def _collect_step_notifications(
+        self,
+        model_output: ModelRunnerOutput,
+        engine_core_outputs: dict[int, EngineCoreOutputs],
+    ) -> None:
+        if model_output.worker_notifications:
+            self._publish_notifications(model_output.worker_notifications)
+        if scheduler_notifications := self.scheduler.take_notifications():
+            self._publish_notifications(scheduler_notifications)
+        self._flush_notifications(engine_core_outputs)
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
@@ -925,16 +965,43 @@ class EngineCore:
         self.model_executor.execute_dummy_batch()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_executor.add_lora(lora_request)
+        added = self.model_executor.add_lora(lora_request)
+        self._publish_lora_load_event()
+        return added
 
     def remove_lora(self, lora_id: int) -> bool:
-        return self.model_executor.remove_lora(lora_id)
+        removed = self.model_executor.remove_lora(lora_id)
+        self._publish_lora_load_event()
+        return removed
 
     def list_loras(self) -> set[int]:
         return self.model_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        return self.model_executor.pin_lora(lora_id)
+        pinned = self.model_executor.pin_lora(lora_id)
+        self._publish_lora_load_event()
+        return pinned
+
+    def _publish_lora_load_event(self) -> None:
+        """Emit a load event for dynamic adapter changes.
+
+        Without this, an idle engine (e.g. a replica with statically
+        configured adapters and no traffic yet) would not report its loaded
+        adapters until its first step, which defeats cold routing.
+        """
+        try:
+            deltas = self.model_executor.collective_rpc("take_lora_load_event")
+        except Exception:
+            # Metrics must never fail the adapter operation itself (the
+            # executor mutation has already happened). Workers without the
+            # snapshot method (e.g. out-of-tree platforms) land here.
+            logger.warning_once(
+                "Could not collect a LoRA load event; loaded-adapter "
+                "metrics will not reflect this adapter change."
+            )
+            return
+        if deltas and deltas[0] is not None:
+            self._publish_notifications([deltas[0]])
 
     def save_sharded_state(
         self,
@@ -1821,6 +1888,19 @@ class EngineCoreProc(EngineCore):
         if more_flag:
             socket.send_multipart(buffers[1:], copy=False)
         return tracker
+
+    def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
+        """Broadcast notifications to every connected frontend.
+
+        One-shot deltas must reach all clients: attaching to a single
+        client's step outputs (as scheduler_stats does) would leave every
+        other frontend permanently stale, and an idle engine has no step
+        outputs at all.
+        """
+        for client_index in range(len(self.addresses.outputs)):
+            self.output_queue.put_nowait(
+                (client_index, EngineCoreOutputs(engine_notifications=notifications))
+            )
 
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
