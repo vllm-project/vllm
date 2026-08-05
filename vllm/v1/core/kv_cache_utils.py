@@ -1745,19 +1745,10 @@ def _annotate_eagle_groups_deepseek_v4(
 
 
 def _largest_divisor_at_most(value: int, limit: int) -> int:
-    if limit >= value:
-        return value
-
-    largest = 1
-    for divisor in range(1, math.isqrt(value) + 1):
-        if value % divisor != 0:
-            continue
-        if divisor <= limit:
-            largest = max(largest, divisor)
-        paired_divisor = value // divisor
-        if paired_divisor <= limit:
-            largest = max(largest, paired_divisor)
-    return largest
+    for candidate in range(min(value, limit), 0, -1):
+        if value % candidate == 0:
+            return candidate
+    return 1
 
 
 def get_kv_cache_groups(
@@ -1830,6 +1821,15 @@ def get_kv_cache_groups(
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
             max_block_size = max(common_page // per_token, 1)
             new_bs = _largest_divisor_at_most(group_block_size, max_block_size)
+            wasted_bytes = common_page - new_bs * per_token
+            logger.info(
+                "Using block size %d for hidden-state cache layer %s; "
+                "page alignment wastes %d bytes (%.2f%%) per block",
+                new_bs,
+                name,
+                wasted_bytes,
+                wasted_bytes / common_page * 100,
+            )
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
