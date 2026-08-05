@@ -43,8 +43,11 @@ from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
-from vllm.distributed.weight_transfer.sharded_rdt_common import layerwise_groups
+from vllm.distributed.weight_transfer.base import (
+    ParamMeta,
+    WeightSource,
+    layerwise_groups,
+)
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     ShardedRDTTrainerInitInfo,
 )

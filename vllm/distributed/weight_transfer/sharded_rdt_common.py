@@ -4,12 +4,15 @@
 engines.
 
 Both sides must agree on the M:N producer/consumer binding and per-group
-routing (``RdtRouter``), the arena byte sizing, the greedy byte-balanced split,
-the gather-group partition, and the op-chain allowlist. Keeping them here —
-imported by both
+routing (``RdtRouter``), the arena byte sizing, the greedy byte-balanced
+split, and the op-chain allowlist. Keeping them here — imported by both
 ``sharded_rdt_engine`` (consumer) and ``sharded_rdt_trainer`` (producer) —
 makes that agreement a single source of truth rather than two copies that can
 silently drift.
+
+The gather-group partition itself lives on ``base.layerwise_groups``: it
+defines what a group index means for ``WeightSource``, not just for this
+transport.
 """
 
 # Op chains the consumer's baked plan may request the producer to replay on a
@@ -183,32 +186,3 @@ def greedy_run_starts(weights: list[int], n: int) -> list[int]:
             cur = 0
         cur += w
     return starts
-
-
-def layerwise_groups(names: list[str]) -> list[list[str]]:
-    """Partition flat parameter names into pre / per-decoder-layer / post gather
-    groups (keys on ``model.layers.<N>.``). The group is the unit of gathering,
-    freeing, AND the packed pull's chunk budget — without it a whole model
-    becomes one chunk and the receive/serve arenas balloon to the full
-    per-worker share."""
-    pre: list[str] = []
-    layers: dict[int, list[str]] = {}
-    post: list[str] = []
-    seen = False
-    for n in names:
-        if n.startswith("model.layers."):
-            seen = True
-            idx = int(n[len("model.layers.") :].split(".", 1)[0])
-            layers.setdefault(idx, []).append(n)
-        elif not seen:
-            pre.append(n)
-        else:
-            post.append(n)
-    groups: list[list[str]] = []
-    if pre:
-        groups.append(pre)
-    for i in sorted(layers):
-        groups.append(layers[i])
-    if post:
-        groups.append(post)
-    return groups

@@ -15,12 +15,12 @@ silently shipping different bytes.
 import pytest
 import torch
 
+from vllm.distributed.weight_transfer.base import layerwise_groups
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
     RdtRouter,
     arena_alloc_bytes,
     greedy_run_starts,
-    layerwise_groups,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     _SUPPORTED_OPS,
