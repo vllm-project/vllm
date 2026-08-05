@@ -34,7 +34,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
-    prepare_communication_buffer_for_model,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -353,11 +352,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             format_gib(m.consumed_memory),
             time_after_load - time_before_load,
         )
-
-        if not load_dummy_weights:
-            prepare_communication_buffer_for_model(self.model)
-            if self.speculator is not None:
-                prepare_communication_buffer_for_model(self.speculator.model)
 
         # Initialize the components that require the model.
         self.model_state = init_model_state(
