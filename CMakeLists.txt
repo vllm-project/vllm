@@ -395,6 +395,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
+  if(Torch_VERSION VERSION_GREATER_EQUAL "2.13" AND
+     Torch_VERSION VERSION_LESS "2.14")
+    list(GET TORCH_INCLUDE_DIRS 0 TORCH_INCLUDE_DIR)
+    file(READ
+      "${TORCH_INCLUDE_DIR}/torch/csrc/stable/stableivalue_conversions.h"
+      TORCH_STABLE_STRING_CONTENTS)
+    if(TORCH_STABLE_STRING_CONTENTS MATCHES
+       "auto strptr = new std::string")
+      execute_process(
+        COMMAND patch --batch --forward -p1
+          "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
+        WORKING_DIRECTORY "${TORCH_INCLUDE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+  endif()
+
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
     "csrc/libtorch_stable/cuda_view.cu"
