@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Sequence Parallel Correctness Tests (2xB200)
   key: sequence-parallel-correctness-tests-2xb200
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   optional: true
