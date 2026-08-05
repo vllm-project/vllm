@@ -133,7 +133,7 @@ def test_get_diff_sampling_param_includes_penalties():
         },
     )
 
-    diff = ModelConfig.get_diff_sampling_param(fake)
+    diff = ModelConfig.get_diff_sampling_param(fake)  # type: ignore[arg-type]
 
     assert diff["presence_penalty"] == 1.5
     assert diff["frequency_penalty"] == 0.5
@@ -161,7 +161,7 @@ def test_generation_config_penalties_survive_diff_sampling_filter():
         },
     )
 
-    diff = ModelConfig.get_diff_sampling_param(fake)
+    diff = ModelConfig.get_diff_sampling_param(fake)  # type: ignore[arg-type]
 
     assert diff["presence_penalty"] == 1.1
     assert diff["frequency_penalty"] == 0.7
