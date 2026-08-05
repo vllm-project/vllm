@@ -142,7 +142,14 @@ def test_prefill_concat_ignores_negative_slots_for_cache(cache_format: str) -> N
         if cache_format == "bf16"
         else fused_mla_key_concat_ds_mla_insert
     )
-    output = op(inputs["k_nope"], inputs["k_pe"], inputs["kv_c"], mixed_cache, slots)
+    output = op(
+        inputs["q"],
+        inputs["k_nope"],
+        inputs["k_pe"],
+        inputs["kv_c"],
+        mixed_cache,
+        slots,
+    )
 
     torch.testing.assert_close(
         output, _full_key(inputs["k_nope"], inputs["k_pe"]), rtol=0, atol=0
@@ -223,6 +230,7 @@ def test_ds_mla_cache_insert_bit_compatible_with_reference() -> None:
     kv_c = torch.randn(num_tokens, KV_LORA_RANK, device="cuda", dtype=dt)
     k_pe = torch.randn(num_tokens, 1, ROPE_HEAD_DIM, device="cuda", dtype=dt)
     k_nope = torch.randn(num_tokens, NUM_HEADS, NOPE_HEAD_DIM, device="cuda", dtype=dt)
+    q = torch.randn(num_tokens, NUM_HEADS, QK_HEAD_DIM, device="cuda", dtype=dt)
     slots = torch.randperm(num_blocks * BLOCK_SIZE, device="cuda")[:num_tokens].long()
     slots[torch.rand(num_tokens, device="cuda") < 0.3] = -1
     ref = torch.full(
@@ -234,5 +242,5 @@ def test_ds_mla_cache_insert_bit_compatible_with_reference() -> None:
     got = ref.clone()
     scale = torch.ones(1, device="cuda", dtype=torch.float32)
     ops.concat_and_cache_mla(kv_c, k_pe.squeeze(1), ref, slots, "fp8_ds_mla", scale)
-    fused_mla_key_concat_ds_mla_insert(k_nope, k_pe, kv_c, got, slots)
+    fused_mla_key_concat_ds_mla_insert(q, k_nope, k_pe, kv_c, got, slots)
     assert torch.equal(ref, got)
