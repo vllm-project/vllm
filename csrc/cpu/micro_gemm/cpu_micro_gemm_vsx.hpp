@@ -323,22 +323,6 @@ class MicroGemm<cpu_utils::ISA::VSX, scalar_t> {
   static void pack_weight(const scalar_t* __restrict__ weight,
                           scalar_t* __restrict__ packed_weight,
                           const int32_t output_size, const int32_t input_size) {
-    TORCH_CHECK(output_size % 16 == 0);
-    TORCH_CHECK(input_size % 2 == 0);
-    
-    const uint16_t* w = reinterpret_cast<const uint16_t*>(weight);
-    uint16_t* pw = reinterpret_cast<uint16_t*>(packed_weight);
-
-    for (int32_t o_idx = 0; o_idx < output_size; o_idx += 4) {
-      int32_t i_idx = 0;
-      for (; i_idx <= input_size - 8; i_idx += 8) {
-          __vector unsigned short row0 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&w[(o_idx+0)*input_size + i_idx]);
-          __vector unsigned short row1 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&w[(o_idx+1)*input_size + i_idx]);
-          __vector unsigned short row2 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&w[(o_idx+2)*input_size + i_idx]);
-          __vector unsigned short row3 = (__vector unsigned short)vec_xl(0, (const unsigned char*)&w[(o_idx+3)*input_size + i_idx]);
-          
-          __vector unsigned int w0 = (__vector unsigned int)row0;
-          __vector unsigned int w1 = (__vector unsigned int)row1;
       TORCH_CHECK_EQ(output_size % NSize, 0);
       TORCH_CHECK_EQ(input_size % 2, 0);
 
