@@ -542,10 +542,13 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
         # ("tiiuae/falcon-mamba-7b", 16, 1),
-        ("state-spaces/mamba-1.4b-hf", 16, 1)
+        ("state-spaces/mamba-1.4b-hf", 16, 1),
     ],
 )
-def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
+@pytest.mark.parametrize("mamba_cache_mode", ["align", "all"])
+def test_mamba_cpu_offload_boundary(
+    model: str, block_size: int, tp_size: int, mamba_cache_mode: str
+):
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
@@ -562,7 +565,7 @@ def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
         kv_transfer_config=kv_transfer_config,
         language_model_only=True,
         enable_prefix_caching=True,
-        mamba_cache_mode="align",
+        mamba_cache_mode=mamba_cache_mode,
         disable_hybrid_kv_cache_manager=False,
     )
 
@@ -599,12 +602,10 @@ def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
             )
 
     try:
-        # Mamba has only a single state. The CPU cache stores are triggered
-        # at offload block boundaries. When the prompt is exactly at the boundary,
-        # The CPU offload should not load the cached block.
-        # This is because we'd use that state to recompute the last token. This
-        # does not work for mamba as there is only one KV value and that is for
-        # for the token at the boundary.
+        # A cached Mamba entry is a point state. CPU cache stores are triggered
+        # at offload block boundaries. When the prompt is exactly at a boundary,
+        # CPU offload must not load that boundary's cached state because it already
+        # includes the last token that must be recomputed.
         # This is fine for other attention types as we have all the necessary
         # token KV values in the hit blocks.
         prompt = TokensPrompt(prompt_token_ids=initial_ids)
