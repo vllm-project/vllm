@@ -7,7 +7,7 @@ import mmap
 import os
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -204,6 +204,7 @@ class SparseMLAOffloadManager:
     _mmap: mmap.mmap | None
     _host_views: dict[str, torch.Tensor]
     _local_buffers: dict[str, torch.Tensor]
+    _row_request_ids: list[str | None]
     _indexer_inventory: dict[str, torch.Tensor]
     _layer_views: dict[str, SparseMLALayerView]
     _device_slab: torch.Tensor | None
@@ -327,6 +328,103 @@ class SparseMLAOffloadManager:
         if not self._is_host_writer:
             raise PermissionError("only TP-local rank 0 may write shared Main KV")
         return self._host_views[layer_name]
+
+    def _prepare_decode_batch(
+        self,
+        req_ids: Sequence[str],
+        reset_req_ids: Sequence[str],
+        idx_mapping: torch.Tensor,
+        block_tables: tuple[torch.Tensor, ...],
+        num_blocks: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        num_reqs_padded: int,
+    ) -> None:
+        self._require_open()
+        request_block_ids = self._local_buffers["request_block_ids"]
+        request_num_blocks = self._local_buffers["request_num_blocks"]
+        request_num_tokens = self._local_buffers["request_num_tokens"]
+        request_generation = self._local_buffers["request_generation"]
+        request_active = self._local_buffers["request_active"]
+        max_num_reqs, request_block_width = request_block_ids.shape
+        num_reqs = len(req_ids)
+        device = request_block_ids.device
+
+        if (
+            not isinstance(reset_req_ids, Sequence)
+            or isinstance(reset_req_ids, (str, bytes))
+            or len(block_tables) != 1
+            or not 0 <= num_reqs <= num_reqs_padded <= max_num_reqs
+        ):
+            raise ValueError("invalid sparse MLA decode batch boundary")
+        block_table = block_tables[0]
+        if (
+            idx_mapping.device != device
+            or idx_mapping.dtype != torch.int32
+            or idx_mapping.ndim != 1
+            or idx_mapping.shape != (num_reqs,)
+            or block_table.device != device
+            or block_table.dtype != torch.int32
+            or block_table.ndim != 2
+            or block_table.shape[0] != num_reqs_padded
+            or block_table.shape[1] < request_block_width
+            or num_blocks.device != device
+            or num_blocks.dtype != torch.int32
+            or num_blocks.ndim != 2
+            or num_blocks.shape != (1, max_num_reqs)
+            or num_computed_tokens.device != device
+            or num_computed_tokens.dtype != torch.int32
+            or num_computed_tokens.ndim != 1
+            or num_computed_tokens.shape != (max_num_reqs,)
+        ):
+            raise ValueError("invalid sparse MLA decode batch tensors")
+
+        reset_ids = frozenset(reset_req_ids)
+        for row in range(max_num_reqs):
+            previous_req_id = self._row_request_ids[row]
+            if row < num_reqs:
+                req_id = req_ids[row]
+                invalidate = previous_req_id != req_id or req_id in reset_ids
+                self._row_request_ids[row] = req_id
+            else:
+                invalidate = True
+                self._row_request_ids[row] = None
+            if row >= num_reqs and previous_req_id is None:
+                increment_generation = False
+            else:
+                increment_generation = invalidate
+            if increment_generation:
+                request_generation[row].add_(1)
+            if invalidate:
+                for name in (
+                    "resident_logical_ids",
+                    "resident_generation",
+                    "newest_logical_ids",
+                    "newest_generation",
+                ):
+                    self._local_buffers[name][:, row].fill_(-1)
+                self._local_buffers["resident_last_access"][:, row].zero_()
+
+        request_block_ids.fill_(-1)
+        request_num_blocks.zero_()
+        request_num_tokens.zero_()
+        request_active.zero_()
+        if num_reqs:
+            request_block_ids[:num_reqs].copy_(
+                block_table[:num_reqs, :request_block_width]
+            )
+            torch.index_select(
+                num_blocks[0],
+                0,
+                idx_mapping,
+                out=request_num_blocks[:num_reqs],
+            )
+            torch.index_select(
+                num_computed_tokens,
+                0,
+                idx_mapping,
+                out=request_num_tokens[:num_reqs],
+            )
+            request_active[:num_reqs].fill_(True)
 
     def close(self) -> None:
         if self._closed:
@@ -533,6 +631,7 @@ class SparseMLAOffloadManager:
             )
         self._device_slab = slab
         self._local_buffers = local_buffers
+        self._row_request_ids = [None] * local_buffers["request_active"].shape[0]
         for name in (
             "resident_logical_ids",
             "resident_generation",
