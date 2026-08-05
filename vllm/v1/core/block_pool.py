@@ -77,8 +77,15 @@ class BlockHashToBlockMap:
         ] = {}
 
     @staticmethod
-    def _is_tenant_allowed(node: TreeNode, tenant_id: str) -> bool:
-        return tenant_id in node.allowed_tenants or _GLOBAL_SENTINEL in node.allowed_tenants
+    def _is_tenant_allowed(node: TreeNode, tenant_id: str | None) -> bool:
+        """Determines if a tenant is allowed to access a cached block."""
+        if _GLOBAL_SENTINEL in node.allowed_tenants:
+            return True
+
+        if tenant_id is not None and tenant_id in node.allowed_tenants:
+            return True
+
+        return False
 
     def get_one_block(
         self,
@@ -88,23 +95,14 @@ class BlockHashToBlockMap:
         """
         Gets any block with the given block hash key.
         """
-        if tenant_id is not None:
-            nodes = self.hash_to_nodes_map.get(key)
-            if nodes is None:
-                return None
-            for block_id in sorted(nodes):
-                node = nodes[block_id]
-                if self._is_tenant_allowed(node, tenant_id):
-                    return node.block
+        nodes = self.hash_to_nodes_map.get(key)
+        if not nodes:
             return None
 
-        blocks = self._cache.get(key)
-        if blocks is not None:
-            if isinstance(blocks, KVCacheBlock):
-                return blocks
-            if isinstance(blocks, dict):
-                return next(iter(blocks.values()))
-            self._unexpected_blocks_type(blocks)
+        for block_id, node in nodes.items():
+            if self._is_tenant_allowed(node, tenant_id):
+                return node.block
+
         return None
 
     def insert(
@@ -254,6 +252,8 @@ class BlockPool:
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
+        # Map block hash -> distinct tenants that have accessed it.
+        self.block_tenant_tracker: dict[BlockHashWithGroupId, set[str]] = {}
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -366,7 +366,10 @@ class BlockPool:
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, kv_cache_group_id
             )
-            blk.block_hash = block_hash_with_group_id
+            try:
+                blk.block_hash = block_hash_with_group_id
+            except AttributeError:
+                blk._block_hash = block_hash_with_group_id
             tenant_id = getattr(request, "tenant_id", None)
             allowed_tenants = (
                 {tenant_id}
@@ -378,7 +381,11 @@ class BlockPool:
                 blk,
                 allowed_tenants=allowed_tenants,
             )
-            self.try_promote_cached_hash_to_global(block_hash, kv_cache_group_id, threshold=5)
+            self.try_promote_cached_hash_to_global(
+                block_hash_with_group_id,
+                tenant_id=tenant_id,
+                threshold=5,
+            )
 
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
@@ -432,28 +439,28 @@ class BlockPool:
             )
 
     def try_promote_cached_hash_to_global(
-            self,
-            block_hash: BlockHash,
-            kv_cache_group_id: int,
-            threshold: int = 5,
-        ) -> None: # Changed return type to None
-            """Promote duplicate hash entries and free the redundant GPU memory."""
-            node_hash = make_block_hash_with_group_id(block_hash, kv_cache_group_id)
-            
-            # Get the IDs of the duplicate blocks
-            redundant_block_ids = self.cached_block_hash_to_block.try_promote_to_global(
-                node_hash, threshold=threshold
-            )
-            
-            if not redundant_block_ids:
-                return
-                
-            # Fetch the actual KVCacheBlock objects using the IDs
-            blocks_to_free = [self.blocks[b_id] for b_id in redundant_block_ids]
-            
-            # Free them back into the queue so the GPU reclaims the VRAM!
-            self.free_blocks(blocks_to_free)
-            logger.info(f"[HybridCache] Promoted {node_hash} to GLOBAL. Freed {len(blocks_to_free)} redundant blocks.")
+        self,
+        block_hash: BlockHashWithGroupId,
+        tenant_id: str | None,
+        threshold: int = 5,
+    ) -> None:
+        """Promotes a block to GLOBAL once threshold K distinct tenants access it."""
+        if not isinstance(tenant_id, str) or not tenant_id:
+            return
+
+        if block_hash not in self.block_tenant_tracker:
+            self.block_tenant_tracker[block_hash] = set()
+
+        self.block_tenant_tracker[block_hash].add(tenant_id)
+
+        if len(self.block_tenant_tracker[block_hash]) < threshold:
+            return
+
+        nodes = self.cached_block_hash_to_block.hash_to_nodes_map.get(block_hash)
+        if nodes:
+            for node in nodes.values():
+                node.allowed_tenants.add(_GLOBAL_SENTINEL)
+                node.allowed_tenants.add(_GLOBAL_SENTINEL)
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
