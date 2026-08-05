@@ -7,7 +7,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.engine.serving import GenerationError, OpenAIServing
+from vllm.entrypoints.openai.engine.serving import (
+    GenerationError,
+    OpenAIServing,
+    RequestTimeoutError,
+)
 
 
 @pytest.mark.asyncio
@@ -31,6 +35,15 @@ async def test_raise_if_error_raises_generation_error():
 
     assert str(exc_info.value) == "Internal server error"
     assert exc_info.value.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+
+    with pytest.raises(RequestTimeoutError) as exc_info:
+        serving._raise_if_error("timeout", "test-request-id")
+    response = serving._convert_generation_error_to_response(exc_info.value)
+    assert response.error.type == "RequestTimeoutError"
+    assert response.error.code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert response.error.message == (
+        "Request timed out while waiting for scheduling resources."
+    )
 
     # test that other finish_reasons don't raise
     serving._raise_if_error("stop", "test-request-id")  # should not raise

@@ -36,7 +36,6 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
-from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config.utils import replace
@@ -82,6 +81,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     OutputTokensDetails,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseErrorEvent,
     ResponseInProgressEvent,
     ResponseInputOutputMessage,
     ResponsesRequest,
@@ -705,13 +705,15 @@ class OpenAIServingResponses(OpenAIServing):
                 input_messages = context.messages[: context.num_init_messages]
                 output_messages = context.messages[context.num_init_messages :]
             num_tool_output_tokens = context.num_tool_output_tokens
+            self._raise_if_error(
+                context.finish_reason,
+                request.request_id,
+            )
             if len(output) > 0:
                 if context.finish_reason == "length":
                     status = "incomplete"
                 elif context.finish_reason == "abort":
                     status = "cancelled"
-                else:
-                    self._raise_if_error(context.finish_reason, request.request_id)
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
@@ -725,8 +727,11 @@ class OpenAIServingResponses(OpenAIServing):
             # assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
 
-            # Check finish reason from the parser
-            if context.parser.finish_reason == "length":
+            self._raise_if_error(
+                context.finish_reason,
+                request.request_id,
+            )
+            if context.finish_reason == "length":
                 status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
@@ -737,7 +742,10 @@ class OpenAIServingResponses(OpenAIServing):
             final_output = final_res.outputs[0]
 
             # finish_reason='error' indicates retryable internal error
-            self._raise_if_error(final_output.finish_reason, request.request_id)
+            self._raise_if_error(
+                final_output.finish_reason,
+                request.request_id,
+            )
 
             # Check if generation was stopped due to max_tokens
             if final_output.finish_reason == "length":
@@ -1475,7 +1483,7 @@ class OpenAIServingResponses(OpenAIServing):
                             previous_token_ids=[],
                             current_token_ids=cur_token_ids,
                             delta_token_ids=cur_token_ids,
-                            request=request,
+                            request=request,  # type: ignore[arg-type]
                         )
                         tool_prev_text = cur_text
                         tool_prev_token_ids = cur_token_ids
@@ -1489,7 +1497,7 @@ class OpenAIServingResponses(OpenAIServing):
                             previous_token_ids=tool_prev_token_ids,
                             current_token_ids=cur_token_ids,
                             delta_token_ids=list(output.token_ids),
-                            request=request,
+                            request=request,  # type: ignore[arg-type]
                         )
                         tool_prev_text = cur_text
                         tool_prev_token_ids = cur_token_ids
@@ -1963,9 +1971,14 @@ class OpenAIServingResponses(OpenAIServing):
                 ):
                     yield event_data
             except GenerationError as e:
-                error_json = self._convert_generation_error_to_streaming_response(e)
                 yield _increment_sequence_number_and_return(
-                    TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                    ResponseErrorEvent(
+                        type="error",
+                        code=e.error_type,
+                        message=str(e),
+                        param=None,
+                        sequence_number=-1,
+                    )
                 )
                 return
 

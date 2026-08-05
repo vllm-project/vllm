@@ -89,6 +89,7 @@ class Request:
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
+        self.waiting_since: float | None = None
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: int | str | None = None
 
@@ -320,6 +321,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
+    FINISHED_TIMEOUT = enum.auto()
 
     def __str__(self) -> str:
         return self.name
@@ -343,5 +345,6 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
+    RequestStatus.FINISHED_TIMEOUT: FinishReason.TIMEOUT,
     RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
 }

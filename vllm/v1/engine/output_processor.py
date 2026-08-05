@@ -673,7 +673,7 @@ class OutputProcessor:
                     self._update_stats_from_finished(
                         req_state, finish_reason, iteration_stats
                     )
-                    if self.tracing_enabled:
+                    if self.tracing_enabled and finish_reason != FinishReason.TIMEOUT:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
         return OutputProcessorOutput(
@@ -769,6 +769,8 @@ class OutputProcessor:
     ):
         if iteration_stats is None:
             return
+        if engine_core_output.finish_reason == FinishReason.TIMEOUT:
+            return
 
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
@@ -793,6 +795,9 @@ class OutputProcessor:
 
         assert finish_reason is not None
         assert req_state.stats is not None
+        if finish_reason == FinishReason.TIMEOUT:
+            self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
+            return
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
             num_prompt_tokens=req_state.prompt_len,

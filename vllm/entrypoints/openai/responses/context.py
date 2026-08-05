@@ -281,6 +281,7 @@ class ParsableContext(ConversationContext):
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
         self.num_reasoning_tokens = 0
+        self.finish_reason: str | None = None
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
 
@@ -310,6 +311,7 @@ class ParsableContext(ConversationContext):
         self._accumulated_token_ids: list[int] = []
 
     def append_output(self, output: RequestOutput) -> None:
+        self.finish_reason = output.outputs[0].finish_reason
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
@@ -851,6 +853,8 @@ class StreamingHarmonyContext(HarmonyContext):
         return self._messages
 
     def append_output(self, output: RequestOutput) -> None:
+        completion_output = output.outputs[0]
+        self.finish_reason = completion_output.finish_reason
         # append_output is called for each output token in streaming case,
         # so we only want to add the prompt tokens once for each message.
         self.last_content_delta = None
@@ -862,9 +866,11 @@ class StreamingHarmonyContext(HarmonyContext):
         # beginning of a new message
         self.first_tok_of_message = output.finished
         last_delta_text = ""
-        for tok in output.outputs[0].token_ids:
+        last_tok = None
+        for tok in completion_output.token_ids:
             self.parser.process(tok)
             last_delta_text += self.parser.last_content_delta or ""
+            last_tok = tok
         if last_delta_text:
             self.last_content_delta = last_delta_text
         self._update_decode_token_usage(output)
@@ -875,7 +881,8 @@ class StreamingHarmonyContext(HarmonyContext):
             self.current_turn_metrics.reset()
         # Check if the current token is part of reasoning content
         self._update_num_reasoning_tokens()
-        self.last_tok = tok
+        if last_tok is not None:
+            self.last_tok = last_tok
         if len(self._messages) - self.num_init_messages < len(self.parser.messages):
             self._messages.extend(
                 self.parser.messages[len(self._messages) - self.num_init_messages :]

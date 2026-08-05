@@ -951,6 +951,8 @@ class OpenAIServingChat(OpenAIServing):
                     if finish_reason_sent[i]:
                         continue
 
+                    self._raise_if_error(output.finish_reason, request_id)
+
                     if request.logprobs and request.top_logprobs is not None:
                         assert output.logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_chat_logprobs(
@@ -1425,10 +1427,6 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the model is finished generating
                     else:
-                        # check for error finish reason and abort streaming
-                        # finish_reason='error' indicates a retryable error
-                        self._raise_if_error(output.finish_reason, request_id)
-
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing

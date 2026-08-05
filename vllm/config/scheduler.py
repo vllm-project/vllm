@@ -112,6 +112,10 @@ class SchedulerConfig:
     - "priority" means requests are handled based on given priority (lower
     value means earlier handling) and time of arrival deciding any ties)."""
 
+    waiting_timeout_seconds: float = Field(default=0.0, ge=0.0)
+    """Maximum continuous time a generation request may remain in the waiting
+    queue. A value of 0 disables the timeout."""
+
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
     partially schedule a multimodal item. Only used in V1

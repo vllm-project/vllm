@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any
@@ -153,9 +154,23 @@ async def test_chat_error_non_stream():
     assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+@pytest.mark.parametrize(
+    ("finish_reason", "before_first_token", "expected_error"),
+    [
+        (
+            "error",
+            False,
+            ("InternalServerError", HTTPStatus.INTERNAL_SERVER_ERROR),
+        ),
+        (
+            "timeout",
+            True,
+            ("RequestTimeoutError", HTTPStatus.SERVICE_UNAVAILABLE),
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_chat_error_stream():
-    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
+async def test_chat_error_stream(finish_reason, before_first_token, expected_error):
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -189,11 +204,11 @@ async def test_chat_error_stream():
 
     completion_output_2 = CompletionOutput(
         index=0,
-        text="Hello",
-        token_ids=[100],
+        text="" if before_first_token else "Hello",
+        token_ids=[] if before_first_token else [100],
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason="error",
+        finish_reason=finish_reason,
     )
 
     request_output_2 = RequestOutput(
@@ -210,7 +225,8 @@ async def test_chat_error_stream():
     )
 
     async def mock_generate(*args, **kwargs):
-        yield request_output_1
+        if not before_first_token:
+            yield request_output_1
         yield request_output_2
 
     mock_engine.generate = MagicMock(side_effect=mock_generate)
@@ -224,14 +240,14 @@ async def test_chat_error_stream():
 
     response = await serving_chat.create_chat_completion(request)
 
-    chunks = []
-    async for chunk in response:
-        chunks.append(chunk)
+    chunks = [chunk async for chunk in response]
 
-    assert len(chunks) >= 2
-    assert any("Internal server error" in chunk for chunk in chunks), (
-        f"Expected error message in chunks: {chunks}"
+    error = next(
+        json.loads(chunk.removeprefix("data: "))["error"]
+        for chunk in chunks
+        if '"error"' in chunk
     )
+    assert (error["type"], error["code"]) == expected_error
     assert chunks[-1] == "data: [DONE]\n\n"
 
 

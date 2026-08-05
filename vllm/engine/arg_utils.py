@@ -458,6 +458,7 @@ class EngineArgs:
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
+    waiting_timeout_seconds: float = SchedulerConfig.waiting_timeout_seconds
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
@@ -1182,6 +1183,10 @@ class EngineArgs:
             "--scheduling-policy", **scheduler_kwargs["policy"]
         )
         scheduler_group.add_argument(
+            "--waiting-timeout-seconds",
+            **scheduler_kwargs["waiting_timeout_seconds"],
+        )
+        scheduler_group.add_argument(
             "--enable-chunked-prefill",
             **{
                 **scheduler_kwargs["enable_chunked_prefill"],
@@ -1746,6 +1751,7 @@ class EngineArgs:
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
+            waiting_timeout_seconds=self.waiting_timeout_seconds,
             scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,

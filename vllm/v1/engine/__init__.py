@@ -27,12 +27,12 @@ PauseMode = Literal["abort", "wait", "keep"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "timeout")
 
 
 class FinishReason(enum.IntEnum):
     """
-    Reason a request finished - stop, length, abort, or error.
+    Reason a request finished - stop, length, abort, error, or timeout.
 
     Int rather than Str for more compact serialization.
 
@@ -41,6 +41,8 @@ class FinishReason(enum.IntEnum):
     abort - aborted by client
     error - retryable request-level internal error (e.g., KV load failure).
             Invariant: always converted to 500 Internal Server Error.
+    timeout - the request exceeded its scheduling wait limit before its first
+              model execution.
 
     """
 
@@ -48,6 +50,7 @@ class FinishReason(enum.IntEnum):
     LENGTH = 1
     ABORT = 2
     ERROR = 3
+    TIMEOUT = 4
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]

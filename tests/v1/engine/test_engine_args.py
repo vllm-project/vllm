@@ -7,6 +7,7 @@ import pytest
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms.cpu import CpuPlatform
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.hashing import _xxhash
@@ -67,6 +68,7 @@ def test_prefix_caching_xxhash_from_cli():
 def test_defaults_with_usage_context():
     engine_args = EngineArgs(model="facebook/opt-125m")
     vllm_config: VllmConfig = engine_args.create_engine_config(UsageContext.LLM_CLASS)
+    assert vllm_config.scheduler_config.waiting_timeout_seconds == 0.0
 
     from vllm.platforms import current_platform
     from vllm.utils.mem_constants import GiB_bytes
@@ -88,5 +90,19 @@ def test_defaults_with_usage_context():
 
     engine_args = EngineArgs(model="facebook/opt-125m")
     vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+    assert vllm_config.scheduler_config.waiting_timeout_seconds == 0.0
     assert vllm_config.scheduler_config.max_num_seqs == default_max_num_seqs
     assert vllm_config.scheduler_config.max_num_batched_tokens == default_server_tokens  # noqa: E501
+
+
+def test_waiting_timeout_cli_override():
+    from unittest.mock import patch
+
+    with patch("vllm.platforms.current_platform", CpuPlatform()):
+        parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    assert EngineArgs.from_cli_args(args).waiting_timeout_seconds == 0.0
+
+    args = parser.parse_args(["--waiting-timeout-seconds", "12.5"])
+    assert EngineArgs.from_cli_args(args).waiting_timeout_seconds == 12.5

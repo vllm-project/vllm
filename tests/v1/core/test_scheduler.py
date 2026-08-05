@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -26,6 +26,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -48,6 +49,73 @@ def test_add_requests():
         scheduler.add_request(request)
         assert request.request_id in scheduler.requests
         assert len(scheduler.waiting) == i + 1
+
+
+@pytest.mark.parametrize(
+    "status", [RequestStatus.WAITING, RequestStatus.WAITING_FOR_FSM]
+)
+def test_waiting_request_times_out(status: RequestStatus):
+    scheduler = create_scheduler(waiting_timeout_seconds=600)
+    (request,) = create_requests(num_requests=1)
+    request.status = status
+
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=0.0):
+        scheduler.add_request(request)
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=600.0):
+        scheduler_output = scheduler.schedule()
+
+    model_output = ModelRunnerOutput(
+        req_ids=[], req_id_to_index={}, sampled_token_ids=[]
+    )
+    timeout_output = scheduler.update_from_output(scheduler_output, model_output)[
+        0
+    ].outputs[0]
+    assert request.request_id not in scheduler.requests
+    assert request.request_id in scheduler_output.finished_req_ids
+    assert timeout_output.request_id == request.request_id
+    assert timeout_output.finish_reason == FinishReason.TIMEOUT
+
+
+def test_waiting_timeout_disabled():
+    scheduler = create_scheduler(waiting_timeout_seconds=0)
+    with patch.object(scheduler, "_expire_waiting_requests") as expire:
+        scheduler.schedule()
+    expire.assert_not_called()
+
+
+def test_waiting_timeout_does_not_expire_reused_request_id_early():
+    scheduler = create_scheduler(waiting_timeout_seconds=600)
+    (old_req,) = create_requests(num_requests=1, req_ids=["reused"])
+
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=0.0):
+        scheduler.add_request(old_req)
+    scheduler.finish_requests(old_req.request_id, RequestStatus.FINISHED_ABORTED)
+
+    (new_req,) = create_requests(num_requests=1, req_ids=[old_req.request_id])
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=100.0):
+        scheduler.add_request(new_req)
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=600.0):
+        scheduler._expire_waiting_requests()
+    assert scheduler.requests[new_req.request_id] is new_req
+
+
+def test_preempted_request_gets_new_waiting_timeout():
+    scheduler = create_scheduler(waiting_timeout_seconds=600)
+    (request,) = create_requests(num_requests=1)
+
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=0.0):
+        scheduler.add_request(request)
+        scheduler.schedule()
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, timestamp=700.0)
+
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=600.0):
+        scheduler._expire_waiting_requests()
+    assert request.request_id in scheduler.requests
+
+    with patch("vllm.v1.core.sched.scheduler.time.monotonic", return_value=1300.0):
+        scheduler._expire_waiting_requests()
+    assert request.request_id not in scheduler.requests
 
 
 def test_finish_request():

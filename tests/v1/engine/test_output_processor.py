@@ -22,6 +22,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -966,6 +967,40 @@ def test_iteration_stats(dummy_test_vectors):
 
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active
+
+
+def test_timeout_skips_model_execution_stats():
+    output_processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="request-0-ext",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, None)
+    iteration_stats = IterationStats()
+
+    result = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.TIMEOUT,
+            )
+        ],
+        time.monotonic(),
+        iteration_stats,
+    )
+
+    assert result.request_outputs[0].outputs[0].finish_reason == "timeout"
+    assert not iteration_stats.finished_requests
+    assert not output_processor.has_unfinished_requests()
 
 
 @pytest.mark.parametrize("log_stats", [True, False])

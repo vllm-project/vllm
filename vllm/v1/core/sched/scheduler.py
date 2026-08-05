@@ -47,7 +47,12 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -161,6 +166,9 @@ class Scheduler(SchedulerInterface):
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
+        self.waiting_timeout_seconds = self.scheduler_config.waiting_timeout_seconds
+        self._waiting_deadlines: deque[tuple[float, float, Request]] = deque()
+        self._pending_timeout_outputs: list[tuple[int, EngineCoreOutput]] = []
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -330,6 +338,9 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+
+        if self.waiting_timeout_seconds > 0:
+            self._expire_waiting_requests()
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -793,6 +804,7 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
+                self._cancel_waiting_timer(request)
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
@@ -930,6 +942,70 @@ class Scheduler(SchedulerInterface):
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
+        self._start_waiting_timer(request, timestamp)
+
+    def _start_waiting_timer(
+        self, request: Request, timestamp: float | None = None
+    ) -> None:
+        if self.waiting_timeout_seconds <= 0 or request.sampling_params is None:
+            return
+        timestamp = time.monotonic() if timestamp is None else timestamp
+        request.waiting_since = timestamp
+        self._waiting_deadlines.append(
+            (
+                timestamp + self.waiting_timeout_seconds,
+                timestamp,
+                request,
+            )
+        )
+
+    @staticmethod
+    def _cancel_waiting_timer(request: Request) -> None:
+        request.waiting_since = None
+
+    def _expire_waiting_requests(self) -> None:
+        if self.waiting_timeout_seconds <= 0:
+            return
+
+        now = time.monotonic()
+        expired: list[Request] = []
+        while self._waiting_deadlines and self._waiting_deadlines[0][0] <= now:
+            _, waiting_since, request = self._waiting_deadlines.popleft()
+            if (
+                self.requests.get(request.request_id) is not request
+                or request.waiting_since != waiting_since
+            ):
+                continue
+            expired.append(request)
+
+        if not expired:
+            return
+
+        for request in expired:
+            self._pending_timeout_outputs.append(
+                (
+                    request.client_index,
+                    EngineCoreOutput(
+                        request_id=request.request_id,
+                        new_token_ids=[],
+                        finish_reason=FinishReason.TIMEOUT,
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                        num_cached_tokens=max(request.num_cached_tokens, 0),
+                    ),
+                )
+            )
+
+        self.finish_requests(
+            [request.request_id for request in expired],
+            RequestStatus.FINISHED_TIMEOUT,
+        )
+        logger.warning(
+            "Timed out %d generation request(s) after waiting for scheduling "
+            "resources for %.1f seconds.",
+            len(expired),
+            self.waiting_timeout_seconds,
+        )
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1274,6 +1350,10 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        if self._pending_timeout_outputs:
+            for client_index, output in self._pending_timeout_outputs:
+                outputs[client_index].append(output)
+            self._pending_timeout_outputs.clear()
         spec_decoding_stats: SpecDecodingStats | None = None
         kv_connector_stats: KVConnectorStats | None = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
@@ -1677,6 +1757,7 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self.waiting.add_request(request)
             self.requests[request.request_id] = request
+            self._start_waiting_timer(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1714,6 +1795,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
             valid_requests.append(request)
+            self._cancel_waiting_timer(request)
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
             else:

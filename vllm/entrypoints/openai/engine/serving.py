@@ -134,9 +134,21 @@ from vllm.utils.mistral import is_mistral_tokenizer
 class GenerationError(Exception):
     """raised when finish_reason indicates internal server error (500)"""
 
+    error_type = "InternalServerError"
+
     def __init__(self, message: str = "Internal server error"):
         super().__init__(message)
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class RequestTimeoutError(GenerationError):
+    """Raised when a request times out in the scheduler waiting queue."""
+
+    error_type = "RequestTimeoutError"
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.status_code = HTTPStatus.SERVICE_UNAVAILABLE
 
 
 logger = init_logger(__name__)
@@ -680,14 +692,26 @@ class OpenAIServing:
         )
         return json_str
 
-    def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
-        """Raise GenerationError if finish_reason indicates an error."""
+    def _raise_if_error(
+        self,
+        finish_reason: str | None,
+        request_id: str,
+    ) -> None:
+        """Raise GenerationError if finish_reason indicates an API error."""
         if finish_reason == "error":
             logger.error(
                 "Request %s failed with an internal error during generation",
                 request_id,
             )
             raise GenerationError("Internal server error")
+        if finish_reason == "timeout":
+            logger.warning(
+                "Request %s timed out waiting for scheduling resources",
+                request_id,
+            )
+            raise RequestTimeoutError(
+                "Request timed out while waiting for scheduling resources."
+            )
 
     def _convert_generation_error_to_response(
         self, e: GenerationError
@@ -695,7 +719,7 @@ class OpenAIServing:
         """Convert GenerationError to ErrorResponse."""
         return self.create_error_response(
             str(e),
-            err_type="InternalServerError",
+            err_type=e.error_type,
             status_code=e.status_code,
         )
 
@@ -705,7 +729,7 @@ class OpenAIServing:
         """Convert GenerationError to streaming error response."""
         return self.create_streaming_error_response(
             str(e),
-            err_type="InternalServerError",
+            err_type=e.error_type,
             status_code=e.status_code,
         )
 

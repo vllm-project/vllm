@@ -57,6 +57,7 @@ def create_scheduler(
     pipeline_parallel_size: int = 1,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    waiting_timeout_seconds: float = 0.0,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -89,6 +90,7 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        waiting_timeout_seconds=waiting_timeout_seconds,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
