@@ -141,6 +141,34 @@ def algos_owned_by(config_name: str) -> tuple[str, ...]:
     return tuple(a for a, (owner, _) in LINEAR_ALGOS.items() if owner == config_name)
 
 
+def _wrap_weight_loader_for_transpose(weight_loader, packed_input_dim):
+    """Wrap weight_loader to handle transposed NVFP4 checkpoints.
+
+    Some NVFP4 checkpoints store weights as (packed_in_features, out_features)
+    instead of the expected (out_features, packed_in_features). This wrapper
+    detects the mismatch against the expected checkpoint dimensions and
+    transposes before the original loader runs, preventing shape validation
+    failures during TP sharding.
+
+    Args:
+        weight_loader: The original weight loader to wrap.
+        packed_input_dim: Expected checkpoint dim of the input dimension,
+            i.e. the packed width of the layer this parameter belongs to.
+    """
+
+    def wrapped(param, loaded_weight, *args, **kwargs):
+        """Transpose the loaded weight when it is in checkpoint (packed_in, out)."""
+        if (
+            loaded_weight.ndim == 2
+            and loaded_weight.shape[0] == packed_input_dim
+            and loaded_weight.shape[1] != packed_input_dim
+        ):
+            loaded_weight = loaded_weight.t()
+        return weight_loader(param, loaded_weight, *args, **kwargs)
+
+    return wrapped
+
+
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
     """
     Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints.
@@ -1861,12 +1889,27 @@ class KNvfp4Static(QuantKeyScheme):
     key = kNvfp4Static
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
+        """Register the packed NVFP4 weight and scale params.
+
+        The weight and per-block scale loaders are wrapped to transpose
+        checkpoints that store those tensors as (packed_in, out_features).
+        """
         if role is not WEIGHT:
             self.reject(role)
         if shapes.input_size_per_partition % 16 != 0:
             raise ValueError(
                 "Unsupported model when in features size is not multiple of 16"
             )
+        # Input dim is not TP-sharded for these column-parallel params, so
+        # input_size_per_partition is the full packed checkpoint dim. Some
+        # checkpoints store the NVFP4 weights/scales transposed as
+        # (packed_in, out); wrap the loader to transpose those back.
+        packed_input_dim = shapes.input_size_per_partition // 2
+        packed_scale_input_dim = shapes.input_size_per_partition // ctx.group_size
+        weight_loader = _wrap_weight_loader_for_transpose(wl, packed_input_dim)
+        weight_scale_loader = _wrap_weight_loader_for_transpose(
+            wl, packed_scale_input_dim
+        )
         # Packed NVFP4 weight: 2 fp4 items per byte along the input dim.
         self.register_params(
             layer,
@@ -1874,7 +1917,7 @@ class KNvfp4Static(QuantKeyScheme):
             (shapes.output_size_per_partition, shapes.input_size_per_partition // 2),
             torch.uint8,
             ModelWeightParameter,
-            wl,
+            weight_loader,
             input_dim=1,
             output_dim=0,
         )
@@ -1897,7 +1940,7 @@ class KNvfp4Static(QuantKeyScheme):
             ),
             torch.float8_e4m3fn,
             ModelWeightParameter,
-            wl,
+            weight_scale_loader,
             input_dim=1,
             output_dim=0,
         )
