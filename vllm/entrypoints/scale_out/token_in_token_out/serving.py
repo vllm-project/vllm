@@ -3,6 +3,7 @@
 
 
 import asyncio
+import hashlib
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
@@ -55,6 +56,45 @@ from .protocol import (
 )
 
 logger = init_logger(__name__)
+
+
+def _bind_mm_hashes_to_kwargs_data(
+    mm_hashes: dict[str, list[str]],
+    kwargs_data: dict[str, list[str | None]] | None,
+) -> dict[str, list[str]]:
+    """Derive scale-out cache keys from the submitted serialized MM payload."""
+    if kwargs_data is None:
+        raise ValueError(
+            "Scale-out multimodal generate requests must include kwargs_data."
+        )
+    if kwargs_data.keys() != mm_hashes.keys():
+        raise ValueError(
+            "Scale-out multimodal kwargs_data modalities must match mm_hashes."
+        )
+
+    bound_hashes: dict[str, list[str]] = {}
+    for modality, hashes in mm_hashes.items():
+        items = kwargs_data[modality]
+        if len(items) != len(hashes):
+            raise ValueError(
+                f"Scale-out multimodal kwargs_data[{modality!r}] length must "
+                f"match mm_hashes[{modality!r}]."
+            )
+
+        bound_hashes[modality] = []
+        for item in items:
+            if item is None:
+                raise ValueError(
+                    "Scale-out multimodal generate requests must include "
+                    "serialized kwargs for every item."
+                )
+            digest = hashlib.sha256()
+            digest.update(modality.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(item.encode("ascii"))
+            bound_hashes[modality].append(digest.hexdigest())
+
+    return bound_hashes
 
 
 class ServingTokens(GenerateBaseServing):
@@ -165,38 +205,44 @@ class ServingTokens(GenerateBaseServing):
                 [prompt]
             )
         elif features := request.features:
+            try:
+                mm_hashes = _bind_mm_hashes_to_kwargs_data(
+                    features.mm_hashes,
+                    features.kwargs_data,
+                )
+            except ValueError as e:
+                return self.create_error_response(e)
+
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
                 modality: [p.to_placeholder_range() for p in ranges]
                 for modality, ranges in features.mm_placeholders.items()
             }
 
-            # Deserialize tensor data when present; None → cache hit.
+            # Deserialize the content-bound tensor data.
             mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
-            if features.kwargs_data is not None:
-                try:
-                    mm_processor = self.online_renderer.renderer.get_mm_processor()
-                    for modality, items in features.kwargs_data.items():
-                        mm_kwargs[modality] = [
+            assert features.kwargs_data is not None
+            try:
+                mm_processor = self.online_renderer.renderer.get_mm_processor()
+                for modality, items in features.kwargs_data.items():
+                    decoded_items: list[MultiModalKwargsItem | None] = []
+                    for item in items:
+                        assert item is not None
+                        decoded_items.append(
                             decode_mm_kwargs_item(
                                 item,
                                 modality=modality,
                                 mm_processor=mm_processor,
                             )
-                            if item is not None
-                            else None
-                            for item in items
-                        ]
-                except ValueError as e:
-                    return self.create_error_response(e)
-            else:
-                for modality, hashes in features.mm_hashes.items():
-                    mm_kwargs[modality] = [None] * len(hashes)
+                        )
+                    mm_kwargs[modality] = decoded_items
+            except ValueError as e:
+                return self.create_error_response(e)
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
                 mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-                mm_hashes=features.mm_hashes,
+                mm_hashes=mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
             )
