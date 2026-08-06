@@ -32,6 +32,22 @@ MAX_LOGPROB_TOKEN_IDS = 128
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
 
+def _verify_num_sequences(value: int, parameter_name: str) -> None:
+    if not isinstance(value, int):
+        raise VLLMValidationError(
+            f"{parameter_name} must be an int, but is of type {type(value)}"
+        )
+    if value < 1:
+        raise VLLMValidationError(f"{parameter_name} must be at least 1, got {value}.")
+    max_n = envs.VLLM_MAX_N_SEQUENCES
+    if value > max_n:
+        raise VLLMValidationError(
+            f"{parameter_name} must be at most {max_n}, got {value}. "
+            "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
+            "environment variable."
+        )
+
+
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
     """Validate ``thinking_token_budget``; return ``None`` if unset."""
     if value is None:
@@ -513,19 +529,7 @@ class SamplingParams(
             self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
-        if not isinstance(self.n, int):
-            raise VLLMValidationError(
-                f"n must be an int, but is of type {type(self.n)}"
-            )
-        if self.n < 1:
-            raise VLLMValidationError(f"n must be at least 1, got {self.n}.")
-        max_n = envs.VLLM_MAX_N_SEQUENCES
-        if self.n > max_n:
-            raise VLLMValidationError(
-                f"n must be at most {max_n}, got {self.n}. "
-                "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
-                "environment variable."
-            )
+        _verify_num_sequences(self.n, "n")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -1147,3 +1151,6 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+
+    def __post_init__(self) -> None:
+        _verify_num_sequences(self.beam_width, "beam_width")
