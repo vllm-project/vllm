@@ -333,6 +333,10 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
 
         num_tokens = hidden_states.shape[0]
         is_padding = resolve_mega_moe_is_padding(num_tokens)
+        topk_ids = apply_mega_moe_routing_preprocess(
+            topk_ids,
+            is_padding=is_padding,
+        )
 
         # Validated-once fast path (mirrors the microbench's cached-launch
         # loop): MoEEpMegaLayer.forward() re-runs bootstrap/dist checks and
@@ -347,43 +351,6 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         fast = self._fast_ctx
         if fast is not None:
             kernel, workspace, transformed, hidden_size, zero_copy = fast
-            if not zero_copy:
-                # deep_gemm_mega consumes the same deep_gemm SymBuffer the
-                # native path fills, so stage with the native fused
-                # prepare_megamoe kernel (single launch, is_padding fused)
-                # instead of flashinfer's staging path — the wrapper then
-                # differs from native only by the output copy.
-                from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
-                    prepare_megamoe_inputs,
-                )
-
-                x_slot = workspace.x[:num_tokens]
-                if x_slot.dtype != torch.float8_e4m3fn:
-                    x_slot = x_slot.view(torch.float8_e4m3fn)
-                prepare_megamoe_inputs(
-                    hidden_states,
-                    topk_weights,
-                    topk_ids,
-                    x_slot,
-                    workspace.x_sf[:num_tokens],
-                    workspace.topk_idx[:num_tokens],
-                    workspace.topk_weights[:num_tokens],
-                    is_padding=is_padding,
-                )
-                # deep_gemm_mega: its compute() requires a real output tensor
-                # (arg0 of the pybind fp8_fp4_mega_moe) — output=None lands as
-                # None in the binding and TypeErrors (found 2026-07-19).
-                out = torch.empty(
-                    num_tokens,
-                    hidden_size,
-                    dtype=torch.bfloat16,
-                    device=hidden_states.device,
-                )
-                return kernel.compute(workspace, transformed, output=out)
-            topk_ids = apply_mega_moe_routing_preprocess(
-                topk_ids,
-                is_padding=is_padding,
-            )
             t = MoEEpTensors(
                 hidden_states=hidden_states,
                 topk_ids=topk_ids,
@@ -392,15 +359,24 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
                 fc2_alpha=fc2_alpha,
             )
             kernel.stage_inputs(t, workspace, quantize_input=True)
-            # Zero-copy (cutedsl backends): consume the workspace [:n]
-            # view directly (valid under stream ordering until the next
-            # MoE layer's launch on the shared workspace — downstream
-            # ops are enqueued first).
-            return kernel.compute(workspace, transformed, output=None)
-        topk_ids = apply_mega_moe_routing_preprocess(
-            topk_ids,
-            is_padding=is_padding,
-        )
+            if zero_copy:
+                # Zero-copy (cutedsl backends): consume the workspace [:n]
+                # view directly (valid under stream ordering until the next
+                # MoE layer's launch on the shared workspace — downstream
+                # ops are enqueued first).
+                return kernel.compute(workspace, transformed, output=None)
+            # deep_gemm_mega: its compute() requires a real output tensor
+            # (arg0 of the pybind fp8_fp4_mega_moe) — output=None lands as
+            # None in the binding and TypeErrors (found 2026-07-19; the
+            # fast path had only been exercised on cutedsl backends since
+            # the zero-copy change).
+            out = torch.empty(
+                num_tokens,
+                hidden_size,
+                dtype=torch.bfloat16,
+                device=hidden_states.device,
+            )
+            return kernel.compute(workspace, transformed, output=out)
 
         ensure_fi_moe_ep_runtime(self._vllm_config)
         self.finalize_weights()
