@@ -340,6 +340,7 @@ class SpeculativeConfig:
             "deepseek_v3",
             "deepseek_v32",
             "glm_moe_dsa",
+            "telechat4",
         ):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
