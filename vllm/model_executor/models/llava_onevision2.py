@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import operator
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache
 from typing import (
@@ -470,6 +471,7 @@ def _create_field_factory(
 # ``vllm_hf_chat`` adapter, and empirically scores higher on Video-MME than
 # OV2's native VideoProcessor frame extractor.
 _DEFAULT_TIMESTAMP_DECIMALS = 1
+_MAX_TIMESTAMP_DECIMALS = 6
 _DEFAULT_FPS = 1.0
 _DEFAULT_MAX_FRAMES = 32
 # OV2 vision tower has spatial_merge_size=2 -> temporal frame count must be
@@ -481,6 +483,27 @@ _TEMPORAL_MERGE_SIZE = 2
 # (timestamp + image_pad block).
 _VIDEO_MARKER = "<|vision_start|><|video_pad|><|vision_end|>"
 _IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>"
+
+
+def _validate_timestamp_decimals(timestamp_decimals: object) -> int:
+    if isinstance(timestamp_decimals, bool):
+        raise ValueError(
+            "LlavaOneVision2 timestamp_decimals must be an integer "
+            f"between 0 and {_MAX_TIMESTAMP_DECIMALS}."
+        )
+    try:
+        decimals = operator.index(timestamp_decimals)
+    except TypeError as exc:
+        raise ValueError(
+            "LlavaOneVision2 timestamp_decimals must be an integer "
+            f"between 0 and {_MAX_TIMESTAMP_DECIMALS}."
+        ) from exc
+    if not 0 <= decimals <= _MAX_TIMESTAMP_DECIMALS:
+        raise ValueError(
+            "LlavaOneVision2 timestamp_decimals must be an integer between "
+            f"0 and {_MAX_TIMESTAMP_DECIMALS}."
+        )
+    return decimals
 
 
 def _frame_video_to_pil_and_timestamps(
@@ -557,6 +580,7 @@ def _expand_video_markers_in_prompt(
     Replacement is positional: the *i*-th marker consumes
     ``per_video_timestamps[i]``.
     """
+    timestamp_decimals = _validate_timestamp_decimals(timestamp_decimals)
     parts: list[str] = []
     cursor = 0
     idx = 0
@@ -1546,6 +1570,16 @@ class LlavaOnevision2MultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        _videos = mm_data.get("videos")
+        videos_present = _videos is not None and len(_videos) > 0
+        timestamp_decimals = (
+            _validate_timestamp_decimals(
+                mm_kwargs.get("timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS)
+            )
+            if videos_present
+            else _DEFAULT_TIMESTAMP_DECIMALS
+        )
+
         # The wrapped OV2 processor is a bare custom class without the standard
         # ProcessorMixin ``_merge_kwargs`` machinery, so vLLM's default path
         # fails; overriding this method routes the base class to call us
@@ -1574,8 +1608,6 @@ class LlavaOnevision2MultiModalProcessor(
         # Explicit None + length checks: ``mm_data[...]`` may be a list, numpy
         # array, or tensor, and ``and <array>`` would raise on the ambiguous
         # truth value of a multi-element array.
-        _videos = mm_data.get("videos")
-        videos_present = _videos is not None and len(_videos) > 0
 
         codec_video_paths = (
             _extract_codec_video_paths(mm_data["videos"]) if videos_present else None
@@ -1652,10 +1684,6 @@ class LlavaOnevision2MultiModalProcessor(
         # provided by the backend's ``compute_frames_index_to_sample``; SSRF /
         # local-file gating is enforced by the connector before decoding.
         if videos_present:
-            timestamp_decimals = int(
-                mm_kwargs.get("timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS)
-            )
-
             per_video_frames: list[list[Image.Image]] = []
             per_video_timestamps: list[list[float]] = []
             for item in mm_data["videos"]:
@@ -1870,6 +1898,11 @@ class LlavaOnevision2MultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        decimals = _validate_timestamp_decimals(
+            hf_processor_mm_kwargs.get(
+                "timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS
+            )
+        )
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
@@ -1879,7 +1912,6 @@ class LlavaOnevision2MultiModalProcessor(
         vision_end_id = vocab["<|vision_end|>"]
         newline_ids = tokenizer.encode("\n", add_special_tokens=False)
         merge_length = image_processor.merge_size**2
-        decimals = int(hf_processor_mm_kwargs.get("timestamp_decimals", 1))
 
         def get_image_replacement(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
