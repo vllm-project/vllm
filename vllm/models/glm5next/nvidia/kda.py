@@ -267,8 +267,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
         num_tokens = hidden_states.size(0)
         q = self.q_proj(hidden_states)[0]
         k = self.k_proj(hidden_states)[0]
@@ -282,7 +281,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
 
-        core_attn_out = torch.zeros(
+        core_attn_out = torch.empty(
             (1, num_tokens, self.local_num_heads, self.head_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -303,7 +302,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        output[:] = self.o_proj(core_attn_out)[0]
+        return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
     def _forward(

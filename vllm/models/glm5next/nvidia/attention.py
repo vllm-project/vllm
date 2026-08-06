@@ -545,8 +545,8 @@ class Glm5NextMLAAttention(nn.Module):
         )
 
     def forward(
-        self, hidden_states: torch.Tensor, positions: torch.Tensor, output: torch.Tensor
-    ) -> None:
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
         # Delegate to the MultiHeadLatentAttentionWrapper, which performs the
         # q/kv projection, RoPE, the sparse-indexer top-k selection
         # (``self.indexer``), the inner MLA attention, and the output
@@ -554,4 +554,4 @@ class Glm5NextMLAAttention(nn.Module):
         # ``mla_attn`` directly would skip the indexer call, leaving the topk
         # buffer empty and silently corrupting attention. Mirrors
         # DeepseekV2MLAAttention.forward.
-        output[:] = self.mla_attn(positions, hidden_states)
+        return self.mla_attn(positions, hidden_states)

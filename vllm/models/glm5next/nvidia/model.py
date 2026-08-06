@@ -401,11 +401,9 @@ class Glm5NextDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
 
-            attn_output = torch.empty_like(hidden_states)
-            self.self_attn(
+            attn_output = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
-                output=attn_output,
             )
             hidden_states = residual + attn_output
             residual = hidden_states
@@ -426,13 +424,10 @@ class Glm5NextDecoderLayer(nn.Module):
         )
         x = self.input_layernorm(x)
 
-        attn_output = torch.empty_like(x)
-        self.self_attn(
+        x = self.self_attn(
             hidden_states=x,
             positions=positions,
-            output=attn_output,
         )
-        x = attn_output
 
         x = self.hc_post(x, residual, post, comb)
 
