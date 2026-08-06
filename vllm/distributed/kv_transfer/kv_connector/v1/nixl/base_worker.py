@@ -773,8 +773,7 @@ class NixlBaseConnectorWorker:
                                 "TP_ratio > 1."
                             )
                             # Since LBNHC will not support Decode/Prefill
-                            # TP_ratio > 1, we can leverage host_buffer for
-                            # permute.
+                            # TP_ratio > 1, we can leverage host_buffer for permute.
                             self.host_buffer_kv_cache_layout = "LBHNC"
                         else:
                             # Packed KV layout is logical (B, H, N, 2*D). Allocate

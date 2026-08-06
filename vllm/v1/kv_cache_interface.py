@@ -115,6 +115,7 @@ class KVCacheSpec:
       state_content_size_bytes: int — bytes per state per head
     """
 
+    # number of tokens in a block
     block_size: int
 
     @property

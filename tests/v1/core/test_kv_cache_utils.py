@@ -1711,7 +1711,8 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # 6 full + 5 sliding
+    # 6 full + 5 sliding, pad to 6 full + 6 sliding. This is a typical case for gpt-oss
+    # eagle where there is only one more full attention layer than sliding window layers
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(),
         "layer_2": new_kv_cache_spec(),
@@ -2554,7 +2555,6 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
     128-dim KV heads. The resulting page sizes are 3:2 rather than an integer
     block-size multiple, so the smaller page must be padded instead.
     """
-    # Both layers' backends opt into the padded-page strided view (e.g.
     # Attention layers read padded pages through a strided view, so padding
     # is allowed.
     target_spec = new_kv_cache_spec(

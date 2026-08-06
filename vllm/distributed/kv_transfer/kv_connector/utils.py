@@ -35,8 +35,8 @@ BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
-    # NOTE (NickLucche) When running disaggregated PD with NIXL, LBHNC layout
-    # is used for faster transfer.
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, the LBHNC
+    # layout is used for faster transfer.
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
