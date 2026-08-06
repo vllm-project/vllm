@@ -1771,3 +1771,27 @@ def test_load_config_rejects_invalid_safetensors_load_strategy():
 def test_load_config_rejects_non_string_load_format(bad_load_format):
     with pytest.raises(pydantic.ValidationError):
         LoadConfig(load_format=bad_load_format)
+
+
+@patch("vllm.config.model.resolve_revision", return_value="main")
+def test_revision_not_resolved_when_weights_differ_from_model(mock_resolve):
+    """When model_weights points to a different repo than model (e.g.
+    GGUF, where model is redirected to the base repo for config), the shared
+    revision must stay unresolved, or the config repo's commit hash would
+    leak into the weights download and 404 against the weights repo."""
+    config = ModelConfig(
+        "Qwen/Qwen3-0.6B",
+        model_weights="unsloth/Qwen3-0.6B-GGUF:Q8_0",
+    )
+
+    assert config.revision is None
+
+
+@patch("vllm.config.model.resolve_revision", return_value="main")
+def test_revision_resolved_when_weights_match_model(mock_resolve):
+    """Normal case: weights come from model, so the shared revision is
+    resolved once against that repo."""
+    config = ModelConfig("Qwen/Qwen3-0.6B")
+
+    assert config.revision == "main"
+    mock_resolve.assert_any_call("Qwen/Qwen3-0.6B", None, config.hf_token)
