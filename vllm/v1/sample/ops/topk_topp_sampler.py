@@ -25,20 +25,6 @@ def _skip_aiter_sampler_on_gfx1250() -> bool:
     return on_gfx1250()
 
 
-def _aiter_topk_topp_unsupported_on_gfx942() -> bool:
-    """AITER's ``top_k_top_p_sampling_from_probs`` is a gfx950-only prebuilt.
-
-    It segfaults on gfx942 (MI325X / MI300X), so callers must fall back to the
-    native torch sampler on that architecture.
-    """
-    try:
-        from vllm.platforms.rocm import on_gfx942
-
-        return on_gfx942()
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
@@ -132,7 +118,6 @@ class TopKTopPSampler(nn.Module):
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
             and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
-            and not _aiter_topk_topp_unsupported_on_gfx942()
         ):
             self.aiter_ops = None
             self._aiter_ops_import_failed = False

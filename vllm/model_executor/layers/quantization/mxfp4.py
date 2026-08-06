@@ -566,7 +566,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if self.is_k3_situ_aiter or self.is_k3_situ_int4_gfx942:
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
-            logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
+            if self.is_k3_situ_int4_gfx942:
+                logger.warning_once(
+                    "Requantizing Kimi-K3 MXFP4 experts to groupwise int4 "
+                    "for gfx942. This conversion is lossy and was explicitly "
+                    "enabled by --quantization-config.moe.weight "
+                    "int4_per_group_32."
+                )
+            else:
+                logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
             from vllm._aiter_ops import rocm_aiter_ops
 
             if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled():
@@ -1003,17 +1011,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                         dtype=chunk_scale.dtype,
                         device=chunk_scale.device,
                     )
+                assert out_packed is not None
+                assert out_scale is not None
                 out_packed[lo:hi].copy_(chunk_packed)
                 out_scale[lo * scale_stride : hi * scale_stride].copy_(chunk_scale)
                 del weight_packed, weight_scale, chunk_packed, chunk_scale
-                torch.cuda.empty_cache()
+                torch.accelerator.empty_cache()
 
             # Every chunk has been read, so let the source storage go before
             # the caller converts the next tensor.
             del w_all, s_all
+            assert out_packed is not None
+            assert out_scale is not None
             weight.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
             scale.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
             return out_packed, out_scale
 
         # Install each result before converting the next tensor so only one
@@ -1022,13 +1034,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         del w13, w13_scale
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
         w2, w2_scale = convert(layer.w2_weight, layer.w2_weight_scale)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         del w2, w2_scale
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
 

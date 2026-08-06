@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kInt8StaticChannelSym,
     kMxfp8Dynamic,
 )
@@ -31,6 +32,12 @@ def test_quant_spec_resolves_string_to_quant_key():
 def test_quant_spec_accepts_quant_key_directly():
     spec = QuantSpec(weight=kFp8StaticTensorSym)
     assert spec.weight is kFp8StaticTensorSym
+    assert spec.activation is None
+
+
+def test_quant_spec_resolves_groupwise_int4_weight():
+    spec = QuantSpec(weight="int4_per_group_32")
+    assert spec.weight == kInt4Static32
     assert spec.activation is None
 
 
