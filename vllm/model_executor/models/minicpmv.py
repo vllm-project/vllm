@@ -26,7 +26,7 @@
 
 import math
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set
 from functools import cached_property, partial
 from itertools import chain
 from typing import Annotated, Any, Literal, TypeAlias
@@ -485,11 +485,14 @@ class MiniCPMVImageEmbeddingItems(DictEmbeddingItems):
             [Mapping[str, torch.Tensor]],
             Mapping[str, MultiModalFieldConfig],
         ],
+        required_fields: Set[str],
+        optional_fields: Set[str] = frozenset(),
     ) -> None:
         super().__init__(
             data,
             modality="image",
-            required_fields={"image_embeds", "image_sizes"},
+            required_fields=required_fields,
+            optional_fields=optional_fields,
             fields_factory=fields_factory,
         )
 
@@ -506,11 +509,14 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
             [Mapping[str, torch.Tensor]],
             Mapping[str, MultiModalFieldConfig],
         ],
+        required_fields: Set[str],
+        optional_fields: Set[str] = frozenset(),
     ) -> None:
         super().__init__(
             data,
             modality="video",
-            required_fields={"video_embeds", "video_image_sizes"},
+            required_fields=required_fields,
+            optional_fields=optional_fields,
             fields_factory=fields_factory,
         )
 
@@ -523,14 +529,23 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
 
 
 class MiniCPMVMultiModalDataParser(MultiModalDataParser):
+    # The per-item sizes are what size the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_sizes": "metadata"},
+        "video": {"video_embeds": "values", "video_image_sizes": "metadata"},
+    }
+
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return MiniCPMVImageEmbeddingItems(
                 data,
                 fields_factory=_minicpmv_field_config,
+                required_fields=required,
+                optional_fields=optional,
             )
 
         return super()._parse_image_data(data)
@@ -540,9 +555,12 @@ class MiniCPMVMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("video")
             return MiniCPMVVideoEmbeddingItems(
                 data,
                 fields_factory=_minicpmv_field_config,
+                required_fields=required,
+                optional_fields=optional,
             )
 
         return super()._parse_video_data(data)
@@ -630,6 +648,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return MiniCPMVMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_model_version(self):

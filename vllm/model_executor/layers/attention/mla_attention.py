@@ -344,6 +344,20 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     return kv_cache_dtype
 
 
+def _get_kv_b_proj_input_dtype(
+    kv_b_proj: ColumnParallelLinear, use_fp8_prefill: bool
+) -> torch.dtype | None:
+    weight = getattr(kv_b_proj, "weight", None)
+    weight_dtype = weight.dtype if weight is not None else kv_b_proj.params_dtype
+    if weight_dtype == torch.int32:
+        return kv_b_proj.params_dtype
+    if weight_dtype == torch.uint8:
+        return None
+    if weight_dtype == current_platform.fp8_dtype() and not use_fp8_prefill:
+        return None
+    return weight_dtype
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -399,10 +413,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if cache_config is not None:
             kv_cache_dtype: CacheDType = cache_config.cache_dtype
-            calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
-            calculate_kv_scales = False
         self.quant_config = quant_config
 
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
@@ -411,7 +423,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             layer_idx = extract_layer_index(prefix)
             if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
                 kv_cache_dtype = "auto"
-                calculate_kv_scales = False
             logger.debug(
                 "Layer %s: kv_cache_dtype=%s",
                 prefix,
@@ -460,7 +471,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Initialize KV cache quantization attributes
         self.kv_cache_dtype = kv_cache_dtype
-        self.calculate_kv_scales = calculate_kv_scales
         _init_kv_cache_quant(self, quant_config, prefix)
 
         if (
@@ -560,11 +570,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
-        # Initialize q/k/v range constants.
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
-
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
@@ -606,14 +611,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(
-                q,
-                kv_c_normed,
-                k_pe,
-                _encode_layer_name(self.layer_name),
-            )
-
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata_raw = forward_context.attn_metadata
@@ -786,6 +783,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     query_len=prefill.max_query_len,
                     seq_len=prefill_max_seq_len,
                 )
+                and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
             )
             use_mha = (use_dense_mha or use_masked_mha) and not (
                 self._vllm_config.attention_config.sparse_mla_force_mqa
@@ -1109,30 +1107,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
-
-    def calc_kv_scales(
-        self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
-    ) -> None:
-        """Optional scale calculation for MLA inputs.
-
-        Mirrors Attention.calc_kv_scales. Not all MLA backends require this
-        """
-        # Use safe defaults if ranges are not present
-        q_range = getattr(self, "q_range", torch.tensor(1.0))
-        k_range = getattr(self, "k_range", torch.tensor(1.0))
-        v_range = getattr(self, "v_range", torch.tensor(1.0))
-
-        self._q_scale.copy_(torch.abs(q).max() / q_range)
-        # kv_c_normed is the compressed KV representation; use it for k/v
-        kv_abs_max = torch.abs(kv_c_normed).max()
-        self._k_scale.copy_(kv_abs_max / k_range)
-        self._v_scale.copy_(kv_abs_max / v_range)
-        self._q_scale_float = self._q_scale.item()
-        self._k_scale_float = self._k_scale.item()
-        self._v_scale_float = self._v_scale.item()
-        self._k_scale_cpu.fill_(self._k_scale_float)
-        self._v_scale_cpu.fill_(self._v_scale_float)
-        self.calculate_kv_scales = False
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
@@ -2311,6 +2285,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert prefill_metadata.chunked_context is not None
 
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(
+            self.kv_b_proj, use_fp8_prefill
+        )
 
         output = None
         merge_output = None
@@ -2356,21 +2333,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
             # Extract kv_c_normed from workspace
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
-            # When FP8 weights are used without FP8 prefill, kv_b_proj expects
-            # model dtype input and will quantize internally.
-            # For quantized layers (AWQ/GPTQ) that lack a .weight attribute,
-            # use params_dtype which is the expected input dtype.
-            _kv_b_proj_w_dtype = (
-                self.kv_b_proj.weight.dtype
-                if hasattr(self.kv_b_proj, "weight")
-                else self.kv_b_proj.params_dtype
-            )
-            # For NVFP4, weights are packed uint8 — keep input in model dtype
-            # since the NVFP4 linear layer quantizes internally.
-            if (
-                use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
-            ) and _kv_b_proj_w_dtype != torch.uint8:
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+            if kv_b_proj_input_dtype is not None:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -2441,6 +2405,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert prefill_metadata.chunked_context.chunk_size is not None
 
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(
+            self.kv_b_proj, use_fp8_prefill
+        )
         output = None
         merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
@@ -2522,16 +2489,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 chunk_idx=i,
                 toks=toks,
             )
-
-            kv_b_proj_w_dtype = (
-                self.kv_b_proj.weight.dtype
-                if hasattr(self.kv_b_proj, "weight")
-                else self.kv_b_proj.params_dtype
-            )
-            if (
-                use_fp8_prefill or kv_b_proj_w_dtype != current_platform.fp8_dtype()
-            ) and kv_b_proj_w_dtype != torch.uint8:
-                kv_c_normed = kv_c_normed.to(kv_b_proj_w_dtype)
+            if kv_b_proj_input_dtype is not None:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
