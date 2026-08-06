@@ -468,6 +468,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             routed_scaling_factor=layer.routed_scaling_factor,
         )
 
+
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
