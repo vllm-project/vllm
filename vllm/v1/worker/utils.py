@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -55,7 +56,9 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
 @triton.jit(do_not_specialize=["n_blocks"])
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
-    seg_page_sizes_ptr,
+    seg_strides_ptr,
+    seg_lens_ptr,
+    seg_ratios_ptr,
     block_ids_ptr,
     n_blocks,
     N_SEGS: tl.constexpr,
@@ -64,20 +67,20 @@ def _zero_kv_blocks_kernel(
 ):
     """Zero KV cache blocks across all segments in a single launch.
 
-    Each segment is a contiguous region of one block's data.  For backends
-    where blocks are outermost (block_dim=0) there is one segment per
-    buffer.  For backends where K/V is outermost (block_dim=1) there are
-    two segments per buffer (one for K, one for V).
+    A segment is one independent block sequence of one layer view under the
+    standardized layout: layer-compact layouts have one segment per layer,
+    heads-outside-blocks layouts one per (layer, head-group) plane, and
+    block-major layouts one per layer *column* inside the shared block. A
+    segment's kernel block therefore owns ``len`` contiguous int32 units
+    every ``stride`` units; stride == len only when blocks are dense.
 
-    Segments may have different page sizes (e.g. models with multiple KV
-    cache groups like MLA + DSA indexer).  Each segment's page size is
-    read from seg_page_sizes_ptr; programs whose chunk_index falls beyond
-    their segment's page size early-exit.
+    Scheduler block ids cover ``ratio`` consecutive kernel blocks (virtual
+    block splitting). Programs map as (block_index, seg_index, chunk_index)
+    with chunk_index spanning ratio * len // BLOCK_SIZE chunks; segments
+    with fewer chunks than MAX_CHUNKS early-exit.
 
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
-
-    Programs are mapped as (block_index, seg_index, chunk_index).
     """
     pid = tl.program_id(0)
     work_per_block = N_SEGS * MAX_CHUNKS
@@ -87,15 +90,21 @@ def _zero_kv_blocks_kernel(
     remainder = pid % work_per_block
     seg_index = remainder // MAX_CHUNKS
     chunk_index = remainder % MAX_CHUNKS
-    page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
-    if chunk_index >= page_size_el // BLOCK_SIZE:
+    len_el = tl.load(seg_lens_ptr + seg_index)
+    ratio = tl.load(seg_ratios_ptr + seg_index)
+    chunks_per_kernel_block = len_el // BLOCK_SIZE
+    if chunk_index >= ratio * chunks_per_kernel_block:
         return
+    stride_el = tl.load(seg_strides_ptr + seg_index)
     block_id = tl.load(block_ids_ptr + block_index)
+    kernel_block = (
+        block_id.to(tl.int64) * ratio + chunk_index // chunks_per_kernel_block
+    )
     seg_addr = tl.load(seg_addrs_ptr + seg_index)
     ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
     offset = (
-        block_id.to(tl.int64) * page_size_el.to(tl.int64)
-        + chunk_index.to(tl.int64) * BLOCK_SIZE
+        kernel_block * stride_el.to(tl.int64)
+        + (chunk_index % chunks_per_kernel_block) * BLOCK_SIZE
     )
     cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
     tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
@@ -117,26 +126,35 @@ class KVBlockZeroer:
         static_forward_context: dict[str, Any],
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
-        """Precompute the absolute-address table for the Triton zeroing kernel.
+        """Precompute the segment table for the Triton zeroing kernel.
 
-        Each entry is the absolute byte address of a segment start on the
-        GPU, so segments in different CUDA allocations work correctly.
+        A segment is one independent block sequence of one layer view:
+        dimensions physically outside B (heads under LHBNC) each get their
+        own segment, and under block-major layouts a layer's segment strides
+        by the full cross-layer block while zeroing only that layer's bytes,
+        so co-located slots of other groups (e.g. sliding-window layers) are
+        never touched. Segment addresses are absolute so segments may live
+        in different CUDA allocations.
 
-        Block IDs from the scheduler reference logical blocks whose size
-        may differ from the kernel block size (virtual block splitting).
-        Each segment's page_size_el accounts for this ratio so that
-        ``block_id * page_size_el`` lands at the correct offset.
+        Block IDs from the scheduler reference logical blocks whose size may
+        differ from the kernel block size (virtual block splitting); each
+        segment carries the ratio.
 
-        Only AttentionSpec layers are processed; Mamba layers are skipped.
+        Only FullAttentionSpec layers are processed; Mamba layers are skipped.
         """
         self.device = device
-        self._meta: tuple[torch.Tensor, torch.Tensor, int, int, int] | None = None
+        self._meta: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]
+            | None
+        ) = None
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
-        seen_ptrs: set[int] = set()
+        seen: set[tuple[int, int]] = set()
         seg_addrs: list[int] = []
-        seg_page_sizes: list[int] = []
+        seg_strides_el: list[int] = []
+        seg_lens_el: list[int] = []
+        seg_ratios: list[int] = []
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
@@ -152,33 +170,51 @@ class KVBlockZeroer:
                 kv = static_forward_context[layer_name].kv_cache
                 if not isinstance(kv, torch.Tensor):
                     continue
-                dp = kv.data_ptr()
-                if dp in seen_ptrs:
-                    continue
-                seen_ptrs.add(dp)
 
                 el = kv.element_size()
-                cur_bytes = kv.stride(0) * el
-                assert cur_bytes % 4 == 0
-                kernel_block_el = cur_bytes // 4
-                cur_page_el = kernel_block_el * ratio
-
-                seg_addrs.append(dp)
-                seg_page_sizes.append(cur_page_el)
+                stride_bytes = kv.stride(0) * el
+                # Absorb densely-packed trailing dims into one contiguous
+                # run; every non-dense dim (head-group planes under LHBNC, the
+                # head dim under BHLNC where L interleaves) splits the block
+                # into independent segments.
+                len_bytes = el
+                split_dims = []
+                for dim in range(kv.ndim - 1, 0, -1):
+                    if kv.stride(dim) * el == len_bytes:
+                        len_bytes *= kv.shape[dim]
+                    elif kv.shape[dim] > 1:
+                        split_dims.append(dim)
+                assert stride_bytes % 4 == 0 and len_bytes % 4 == 0
+                for indices in itertools.product(
+                    *(range(kv.shape[dim]) for dim in split_dims)
+                ):
+                    addr = kv.data_ptr() + sum(
+                        index * kv.stride(dim) * el
+                        for dim, index in zip(split_dims, indices)
+                    )
+                    if (addr, stride_bytes) in seen:
+                        continue
+                    seen.add((addr, stride_bytes))
+                    seg_addrs.append(addr)
+                    seg_strides_el.append(stride_bytes // 4)
+                    seg_lens_el.append(len_bytes // 4)
+                    seg_ratios.append(ratio)
 
         if not seg_addrs:
             self._meta = None
             return
 
-        max_page_size_el = max(seg_page_sizes)
         blk_size = min(
-            min(largest_power_of_2_divisor(ps) for ps in seg_page_sizes),
+            min(largest_power_of_2_divisor(n) for n in seg_lens_el),
             1024,
         )
+        max_chunks = max(r * (n // blk_size) for r, n in zip(seg_ratios, seg_lens_el))
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
-            max_page_size_el // blk_size,
+            torch.tensor(seg_strides_el, dtype=torch.int64, device=self.device),
+            torch.tensor(seg_lens_el, dtype=torch.int32, device=self.device),
+            torch.tensor(seg_ratios, dtype=torch.int32, device=self.device),
+            max_chunks,
             blk_size,
             len(seg_addrs),
         )
@@ -187,13 +223,17 @@ class KVBlockZeroer:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._meta is None:
             return
-        seg_addrs, seg_page_sizes, max_chunks, blk_size, n_segs = self._meta
+        seg_addrs, seg_strides, seg_lens, seg_ratios, max_chunks, blk_size, n_segs = (
+            self._meta
+        )
         n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
         grid = (n_blocks * n_segs * max_chunks,)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
-            seg_page_sizes,
+            seg_strides,
+            seg_lens,
+            seg_ratios,
             idx,
             n_blocks,
             N_SEGS=n_segs,

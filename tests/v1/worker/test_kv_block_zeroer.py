@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
-from vllm.v1.worker.utils import KVBlockZeroer, _zero_kv_blocks_kernel
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    reshape_kv_cache,
+)
+from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer, _zero_kv_blocks_kernel
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -21,7 +28,8 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
-        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int32, device=device),
+        torch.ones(len([storage.data_ptr()]), dtype=torch.int32, device=device),
         page_size_el // page_size_el,  # max_chunks = 1
         page_size_el,  # blk_size
         1,  # n_segs
@@ -72,7 +80,8 @@ def test_non_uniform_page_sizes():
             device=device,
         ),
         torch.tensor(seg_page_sizes, dtype=torch.int64, device=device),
-        torch.tensor(seg_page_sizes, dtype=torch.int64, device=device),
+        torch.tensor(seg_page_sizes, dtype=torch.int32, device=device),
+        torch.ones(2, dtype=torch.int32, device=device),
         max_ps // blk_size,
         blk_size,
         2,
@@ -111,7 +120,8 @@ def test_packed_segment_zeros_only_its_last_block_page():
             device=device,
         ),
         torch.tensor([block_stride_el], dtype=torch.int64, device=device),
-        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int32, device=device),
+        torch.ones(1, dtype=torch.int32, device=device),
         1,
         page_size_el,
         1,
@@ -142,7 +152,8 @@ def test_warmup_compiles_every_n_blocks_specialization():
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
-        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int32, device=device),
+        torch.ones(len([storage.data_ptr()]), dtype=torch.int32, device=device),
         1,  # max_chunks
         page_size_el,  # blk_size
         1,  # n_segs
@@ -179,7 +190,8 @@ def test_warmup_respects_available_block_count():
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
-        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int32, device=device),
+        torch.ones(len([storage.data_ptr()]), dtype=torch.int32, device=device),
         1,
         page_size_el,
         1,
@@ -189,3 +201,48 @@ def test_warmup_respects_available_block_count():
     torch.accelerator.synchronize()
 
     assert torch.all(storage == 1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
+    """The zeroer must zero every byte of the target block in every layer and
+    nothing else — per head-group plane under LHBNC, and only each layer's own
+    column of the shared block under block-major layouts (no out-of-bounds
+    writes past the allocation, no clobbering co-located slots)."""
+    device = torch.device("cuda")
+    num_blocks, num_layers = 4, 2
+    spec = FullAttentionSpec(
+        block_size=4, num_kv_heads=2, head_size=8, dtype=torch.float32
+    )
+    raw = torch.empty(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+        device=device,
+    ).fill_(1)
+    views = reshape_kv_cache(raw, spec, num_blocks, num_layers, layout)
+    groups = [
+        AttentionGroup(
+            backend=None,
+            layer_names=[f"layer.{i}" for i in range(num_layers)],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+    ctx = {f"layer.{i}": SimpleNamespace(kv_cache=views[i]) for i in range(num_layers)}
+    zeroer = KVBlockZeroer(
+        device,
+        attn_groups_iter=iter(groups),
+        kernel_block_sizes=[spec.block_size],
+        static_forward_context=ctx,
+    )
+    zeroer.zero_block_ids([2])
+    torch.cuda.synchronize()
+
+    for view in views:
+        assert (view[2] == 0).all(), layout
+        for b in (0, 1, 3):
+            assert (view[b].view(torch.int8) == 1).all(), layout
+    # Full-allocation accounting: exactly the target block's bytes are zero.
+    zeroed = int((raw == 0).sum())
+    assert zeroed == num_layers * spec.page_size_bytes
