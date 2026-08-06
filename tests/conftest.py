@@ -968,8 +968,10 @@ class VllmRunner:
         enforce_eager: bool | None = False,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
+        wait_for_rocm_memory: bool = True,
         **kwargs,
     ) -> None:
+        self.wait_for_rocm_memory = wait_for_rocm_memory
         init_ctx = (
             nullcontext()
             if default_torch_num_threads is None
@@ -993,7 +995,7 @@ class VllmRunner:
 
         from vllm.platforms import current_platform
 
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() and self.wait_for_rocm_memory:
             gpu_memory_utilization = kwargs.get(
                 "gpu_memory_utilization",
                 CacheConfig.gpu_memory_utilization,
@@ -1362,7 +1364,8 @@ class VllmRunner:
         del self.llm
         torch._dynamo.reset()
         cleanup_dist_env_and_memory()
-        self._wait_for_rocm_memory_release(gpu_memory_utilization)
+        if self.wait_for_rocm_memory:
+            self._wait_for_rocm_memory_release(gpu_memory_utilization)
 
 
 @pytest.fixture(scope="session")
