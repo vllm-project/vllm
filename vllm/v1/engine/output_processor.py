@@ -188,9 +188,15 @@ class RequestState:
         self.input_chunk_queue: deque[StreamingUpdate] | None = (
             deque() if stream_input else None
         )
+        # A final request can overlap the last segment. Delay the stream
+        # sentinel until that segment has produced its final output.
+        self.streaming_final_pending = False
+        self.stream_finished_sent = False
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
+        if update.final:
+            self.streaming_final_pending = True
         self.streaming_input = not update.final
         # TODO also include relevant output tokens in new prompt here
         #     (match scheduler behavior).
@@ -562,14 +568,12 @@ class OutputProcessor:
             if req_state.input_chunk_queue is None:
                 # Engine already finished - emit final output and clean up.
                 self._finish_request(req_state)
-                if req_state.queue is not None:
-                    # Emit a final output with finished=True
-                    # to unblock the generate() loop.
-                    req_state.queue.put(STREAM_FINISHED)
+                self._emit_stream_finished(req_state)
             elif req_state.input_chunk_queue:
                 req_state.input_chunk_queue[-1].final = True
             else:
                 req_state.streaming_input = False
+                req_state.streaming_final_pending = True
             return
 
         update = StreamingUpdate(
@@ -693,6 +697,8 @@ class OutputProcessor:
                         req_state.input_chunk_queue = None
                 else:
                     self._finish_request(req_state)
+                    if req_state.streaming_final_pending:
+                        self._emit_stream_finished(req_state)
                     if not engine_core_output.finished:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.
@@ -723,6 +729,13 @@ class OutputProcessor:
         parent_req = req_state.parent_req
         if parent_req and not parent_req.child_requests:
             self.parent_requests.pop(parent_req.request_id, None)
+
+    @staticmethod
+    def _emit_stream_finished(req_state: RequestState) -> None:
+        """Put the stream sentinel exactly once for AsyncLLM."""
+        if req_state.queue is not None and not req_state.stream_finished_sent:
+            req_state.queue.put(STREAM_FINISHED)
+            req_state.stream_finished_sent = True
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)

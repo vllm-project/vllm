@@ -26,6 +26,8 @@ single-shot transcription vs ~69% for independent fixed-size segments.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
 from collections import deque
 from collections.abc import AsyncGenerator, Mapping
 
@@ -65,7 +67,23 @@ _DEFAULT_SEGMENT_DURATION_S = 2.0
 _DEFAULT_UNFIXED_CHUNKS = 2
 _DEFAULT_ROLLBACK_TOKENS = 5
 _MAX_AUDIO_ACCUMULATION_S = 300.0
-_MAX_PREFIX_TOKENS = 1024
+# Full-prefix mode is the Qwen3-ASR streaming default. ``None`` (or an
+# explicit session value of 0) means that confirmed text is never silently
+# removed. A positive value remains available for deliberately bounded,
+# non-standard long-running sessions.
+_MAX_PREFIX_TOKENS: int | None = None
+
+
+def _normalize_realtime_text(text: str) -> str:
+    """Remove protocol markers and formatting artifacts from ASR text."""
+    if not text:
+        return ""
+    text = text.replace("\r", "").replace("\n", "")
+    if _ASR_TEXT_TAG in text:
+        text = text.rsplit(_ASR_TEXT_TAG, 1)[1]
+    elif text.startswith("language "):
+        text = ""
+    return text.strip()
 
 
 class Qwen3ASRRealtimeBuffer:
@@ -83,6 +101,9 @@ class Qwen3ASRRealtimeBuffer:
         self._buffer: np.ndarray = np.empty(self._buffer_size, dtype=np.float32)
         self._filled_len = 0
         self._consumed_len = 0
+        self._last_new_segment = np.empty(0, dtype=np.float32)
+        self._last_active_window_start = 0
+        self._last_active_window_complete = False
 
     def write_audio(self, audio: np.ndarray) -> None:
         put_end = self._filled_len + len(audio)
@@ -104,8 +125,37 @@ class Qwen3ASRRealtimeBuffer:
         """Return ALL accumulated audio and mark the new chunk as consumed."""
         if not self.has_new_segment():
             return None
-        self._consumed_len = self._filled_len
-        return self._buffer[: self._filled_len].copy()
+        # Advance by exactly one model segment instead of consuming every
+        # transport sample currently buffered. This keeps AuT window boundaries
+        # aligned even when WebSocket packet sizes do not divide the segment.
+        self._consumed_len += self._segment_size
+        return self._buffer[: self._consumed_len].copy()
+
+    def read_new_segment(self) -> np.ndarray | None:
+        if not self.has_new_segment():
+            return None
+        start = self._consumed_len
+        self._consumed_len += self._segment_size
+        return self._buffer[start:self._consumed_len].copy()
+
+    def read_active_window(self, window_size: int) -> np.ndarray | None:
+        """Return the current fixed window after consuming one new segment.
+
+        Completed windows are never returned again.  While a window is
+        active, every call returns that window from its fixed left boundary so
+        its bidirectional AuT representation can be recomputed exactly.
+        """
+        if not self.has_new_segment():
+            return None
+        new_start = self._consumed_len
+        self._consumed_len += self._segment_size
+        window_start = ((self._consumed_len - 1) // window_size) * window_size
+        self._last_new_segment = self._buffer[
+            new_start:self._consumed_len
+        ].copy()
+        self._last_active_window_start = window_start
+        self._last_active_window_complete = self._consumed_len % window_size == 0
+        return self._buffer[window_start:self._consumed_len].copy()
 
     def flush(self) -> np.ndarray | None:
         """Return any remaining accumulated audio (final segment)."""
@@ -115,6 +165,54 @@ class Qwen3ASRRealtimeBuffer:
             return None
         self._consumed_len = self._filled_len
         return self._buffer[: self._filled_len].copy()
+
+    def flush_new(self) -> np.ndarray | None:
+        if self._filled_len == self._consumed_len:
+            return None
+        start = self._consumed_len
+        self._consumed_len = self._filled_len
+        tail = self._buffer[start:self._filled_len].copy()
+        # The Qwen3-ASR feature extractor cannot process an arbitrarily short
+        # standalone waveform.  Append-only mode pads only the final new item
+        # to a complete inference window; previously cached audio is untouched.
+        if tail.shape[0] < self._segment_size:
+            tail = np.pad(tail, (0, self._segment_size - tail.shape[0]))
+        return tail
+
+    def flush_active_window(self, window_size: int) -> np.ndarray | None:
+        """Return the final partial fixed window and mark it committable."""
+        if self._filled_len == self._consumed_len:
+            return None
+        new_start = self._consumed_len
+        self._consumed_len = self._filled_len
+        window_start = ((self._consumed_len - 1) // window_size) * window_size
+        self._last_new_segment = self._buffer[
+            new_start:self._consumed_len
+        ].copy()
+        self._last_active_window_start = window_start
+        self._last_active_window_complete = True
+        active = self._buffer[window_start:self._consumed_len].copy()
+        # Keep the final real sample count in the trace, but pad a very short
+        # active window so the Whisper frontend can process it.
+        if active.shape[0] < self._segment_size:
+            active = np.pad(active, (0, self._segment_size - active.shape[0]))
+        return active
+
+    @property
+    def consumed_len(self) -> int:
+        return self._consumed_len
+
+    @property
+    def last_new_segment(self) -> np.ndarray:
+        return self._last_new_segment
+
+    @property
+    def last_active_window_start(self) -> int:
+        return self._last_active_window_start
+
+    @property
+    def last_active_window_complete(self) -> bool:
+        return self._last_active_window_complete
 
     @property
     def accumulated_duration_s(self) -> float:
@@ -146,10 +244,19 @@ def _rollback_prefix(raw_decoded: str, tokenizer, rollback_tokens: int) -> str:
     return prefix
 
 
-def _cap_prefix_tokens(prefix: str, tokenizer, max_tokens: int) -> str:
-    """Truncate prefix from the left so it stays under max_tokens."""
+def _cap_prefix_tokens(
+    prefix: str, tokenizer, max_tokens: int | None
+) -> str:
+    """Apply an explicitly requested prefix cap.
+
+    ``None`` and non-positive values preserve the complete prefix. This makes
+    unlimited mode intentional instead of relying on Python's ``[-0:]`` slice
+    behaviour.
+    """
     if not prefix:
         return ""
+    if max_tokens is None or max_tokens <= 0:
+        return prefix
     token_ids = tokenizer.encode(prefix)
     if len(token_ids) <= max_tokens:
         return prefix
@@ -236,6 +343,20 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
     realtime_max_tokens = 128
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        aut_window_frames = os.environ.get("QWEN3_ASR_AUT_WINDOW_FRAMES")
+        if aut_window_frames is not None:
+            frames = int(aut_window_frames)
+            if frames <= 0:
+                raise ValueError(
+                    "QWEN3_ASR_AUT_WINDOW_FRAMES must be a positive integer"
+                )
+            audio_config = (
+                vllm_config.model_config.hf_config.thinker_config.audio_config
+            )
+            audio_config.n_window_infer = frames
+            logger.info(
+                "QWEN3_ASR_AUT_WINDOW_OVERRIDE n_window_infer=%d", frames
+            )
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     @classmethod
@@ -251,8 +372,10 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         rollback_tokens: int = _DEFAULT_ROLLBACK_TOKENS,
         unfixed_chunks: int = _DEFAULT_UNFIXED_CHUNKS,
         max_audio_s: float = _MAX_AUDIO_ACCUMULATION_S,
-        max_prefix_tokens: int = _MAX_PREFIX_TOKENS,
+        max_prefix_tokens: int | None = _MAX_PREFIX_TOKENS,
         prefix_texts: deque[str] | None = None,
+        request_id: str | None = None,
+        segment_traces: deque[dict] | None = None,
     ) -> AsyncGenerator[PromptType, None]:
         """SDK-style streaming: growing audio + prefix rollback.
 
@@ -275,6 +398,12 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         feature_extractor = processor.feature_extractor
         sampling_rate = feature_extractor.sampling_rate
         tokenizer = cached_tokenizer_from_config(model_config)
+        if not np.isfinite(segment_duration_s) or segment_duration_s <= 0:
+            raise ValueError("realtime segment duration must be a finite positive number")
+        logger.info(
+            "QWEN3_ASR_REALTIME_SEGMENT_DURATION segment_duration_s=%.6f",
+            segment_duration_s,
+        )
 
         buffer = Qwen3ASRRealtimeBuffer(
             sampling_rate=sampling_rate,
@@ -282,6 +411,12 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         )
 
         audio_placeholder = cls.get_placeholder_str("audio", 0)
+        # The first audio item opens the multimodal span.  In append-only
+        # audio-history mode, later updates must extend that span instead of
+        # opening a second one with another audio_start marker.
+        audio_history_append_placeholder = audio_placeholder.replace(
+            "<|audio_start|>", "", 1
+        )
 
         _chatml_delims = ("<|im_start|>", "<|im_end|>")
         context = prompt or ""
@@ -300,8 +435,66 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
             f"<|im_start|>assistant\n{lang_prefix}"
         )
 
+        stream_mode = os.environ.get(
+            "QWEN3_ASR_REALTIME_MODE", "cumulative"
+        ).strip().lower()
+        if stream_mode not in {
+            "cumulative",
+            "delta_turn",
+            "audio_history_kv",
+            "aut_stable_window_kv",
+        }:
+            raise ValueError(
+                "QWEN3_ASR_REALTIME_MODE must be cumulative, delta_turn, "
+                "audio_history_kv, or aut_stable_window_kv, "
+                f"got {stream_mode!r}"
+            )
+        aut_stable_window_mode = stream_mode == "aut_stable_window_kv"
+        aut_window_s = float(
+            os.environ.get("QWEN3_ASR_AUT_STABLE_WINDOW_S", "8")
+        )
+        if aut_stable_window_mode:
+            if not np.isfinite(aut_window_s) or aut_window_s <= 0:
+                raise ValueError(
+                    "QWEN3_ASR_AUT_STABLE_WINDOW_S must be finite and positive"
+                )
+            aut_window_samples = int(round(aut_window_s * sampling_rate))
+            segment_samples = int(round(segment_duration_s * sampling_rate))
+            if aut_window_samples % segment_samples != 0:
+                raise ValueError(
+                    "AuT stable window must be an integer multiple of the "
+                    "realtime segment: "
+                    f"window={aut_window_s}s segment={segment_duration_s}s"
+                )
+            if max_audio_s > 0:
+                raise ValueError(
+                    "aut_stable_window_kv requires max_audio_s=0 because "
+                    "fixed AuT window boundaries cannot move after commit"
+                )
+            logger.info(
+                "QWEN3_ASR_AUT_STABLE_WINDOW_CONFIG window_s=%.6f "
+                "window_samples=%d segment_samples=%d",
+                aut_window_s,
+                aut_window_samples,
+                segment_samples,
+            )
+        else:
+            aut_window_samples = 0
+        if (
+            stream_mode in {"audio_history_kv", "aut_stable_window_kv"}
+            and audio_history_append_placeholder == audio_placeholder
+        ):
+            raise ValueError(
+                "audio-history append requires an <|audio_start|> marker in "
+                "the model audio placeholder"
+            )
+        delta_turn_prompt = (
+            f"<|im_end|>\n<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
         raw_decoded = ""
         chunk_id = 0
+        last_emitted_samples = 0
 
         async for audio_chunk in audio_stream:
             buffer.write_audio(audio_chunk)
@@ -309,54 +502,299 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
             if max_audio_s > 0:
                 buffer.trim_to(max_audio_s)
 
-            while (accumulated := buffer.read_accumulated()) is not None:
-                if chunk_id < unfixed_chunks:
+            while (accumulated := (
+                buffer.read_active_window(aut_window_samples)
+                if aut_stable_window_mode
+                else buffer.read_new_segment()
+                if stream_mode == "audio_history_kv"
+                else buffer.read_accumulated()
+            )) is not None:
+                if stream_mode == "delta_turn" or chunk_id < unfixed_chunks:
                     prefix = ""
                 else:
                     prefix = _rollback_prefix(raw_decoded, tokenizer, rollback_tokens)
                     prefix = _cap_prefix_tokens(prefix, tokenizer, max_prefix_tokens)
 
                 full_prompt = prompt_base + prefix
+                if stream_mode == "delta_turn" and chunk_id > 0:
+                    full_prompt = delta_turn_prompt
+                elif (
+                    stream_mode in {"audio_history_kv", "aut_stable_window_kv"}
+                    and chunk_id > 0
+                ):
+                    full_prompt = (
+                        f"{audio_history_append_placeholder}<|im_end|>\n"
+                        f"<|im_start|>assistant\n{lang_prefix}{prefix}"
+                    )
                 prompt_token_ids = tokenizer.encode(full_prompt)
+
+                if aut_stable_window_mode:
+                    new_audio_start_sample = last_emitted_samples
+                    new_audio = buffer.last_new_segment
+                    llm_audio = accumulated
+                    audio_samples = buffer.consumed_len
+                elif stream_mode == "audio_history_kv":
+                    # ``accumulated`` is segment-local in append-only mode.
+                    # The previous implementation sliced it with a cumulative
+                    # offset, making diagnostics report zero new samples and
+                    # computing an empty new_audio hash after segment 1.
+                    new_audio_start_sample = last_emitted_samples
+                    new_audio = accumulated
+                    llm_audio = accumulated
+                    audio_samples = last_emitted_samples + len(accumulated)
+                else:
+                    new_audio_start_sample = last_emitted_samples
+                    new_audio = accumulated[new_audio_start_sample:]
+                    audio_samples = len(accumulated)
+                if stream_mode == "delta_turn":
+                    llm_audio = new_audio
+                else:
+                    llm_audio = accumulated if stream_mode != "audio_history_kv" else llm_audio
+                audio_bytes = np.ascontiguousarray(llm_audio).view(np.uint8)
+                new_audio_bytes = np.ascontiguousarray(new_audio).view(np.uint8)
+                audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
+                new_audio_sha256 = hashlib.sha256(new_audio_bytes).hexdigest()
+
+                segment_id = chunk_id + 1
+                trace = {
+                    "segment_id": segment_id,
+                    "audio_samples": audio_samples,
+                    "audio_duration_s": audio_samples / sampling_rate,
+                    "new_audio_samples": audio_samples - last_emitted_samples,
+                    "new_audio_start_sample": new_audio_start_sample,
+                    "new_audio_end_sample": audio_samples,
+                    "emit_reason": "threshold",
+                    "stream_mode": stream_mode,
+                    "llm_audio_samples": len(llm_audio),
+                    "text_prompt_tokens": len(prompt_token_ids),
+                    "prefix_tokens": len(tokenizer.encode(prefix)),
+                    "prefix_chars": len(prefix),
+                    "audio_sha256": audio_sha256,
+                    "new_audio_sha256": new_audio_sha256,
+                    "audio_rms": float(np.sqrt(np.mean(np.square(accumulated)))),
+                    "new_audio_rms": float(np.sqrt(np.mean(np.square(new_audio)))),
+                    "aut_window_start_sample": (
+                        buffer.last_active_window_start
+                        if aut_stable_window_mode
+                        else None
+                    ),
+                    "aut_window_samples": (
+                        len(accumulated) if aut_stable_window_mode else None
+                    ),
+                    "aut_window_commit": (
+                        buffer.last_active_window_complete
+                        if aut_stable_window_mode
+                        else False
+                    ),
+                }
+                last_emitted_samples = audio_samples
+                if segment_traces is not None:
+                    segment_traces.append(trace)
+                logger.info(
+                    "QWEN3_ASR_RT_SEGMENT_INPUT request_id=%s segment_id=%d "
+                    "emit_reason=%s audio_samples=%d audio_duration_s=%.6f "
+                    "new_audio_samples=%d new_audio_range_samples=[%d,%d) "
+                    "new_audio_range_s=[%.6f,%.6f) audio_sha256=%s "
+                    "new_audio_sha256=%s audio_rms=%.8f new_audio_rms=%.8f "
+                    "text_prompt_tokens=%d prefix_tokens=%d prefix_chars=%d "
+                    "prompt_text=%r prompt_token_ids=%s",
+                    request_id or "-", segment_id, trace["emit_reason"],
+                    audio_samples, trace["audio_duration_s"],
+                    trace["new_audio_samples"], trace["new_audio_start_sample"],
+                    trace["new_audio_end_sample"], new_audio_start_sample / sampling_rate,
+                    audio_samples / sampling_rate, trace["audio_sha256"],
+                    trace["new_audio_sha256"], trace["audio_rms"],
+                    trace["new_audio_rms"], trace["text_prompt_tokens"],
+                    trace["prefix_tokens"], trace["prefix_chars"], full_prompt,
+                    prompt_token_ids,
+                )
+                logger.info(
+                    "QWEN3_ASR_RT_AB_INPUT request_id=%s segment_id=%d "
+                    "stream_mode=%s cumulative_audio_samples=%d "
+                    "llm_audio_samples=%d prompt_text=%r",
+                    request_id or "-", segment_id, stream_mode,
+                    audio_samples, len(llm_audio), full_prompt,
+                )
+                if aut_stable_window_mode:
+                    logger.info(
+                        "QWEN3_ASR_AUT_STABLE_WINDOW request_id=%s "
+                        "segment_id=%d window_start_sample=%d "
+                        "active_samples=%d new_samples=%d commit=%s",
+                        request_id or "-",
+                        segment_id,
+                        buffer.last_active_window_start,
+                        len(accumulated),
+                        len(new_audio),
+                        buffer.last_active_window_complete,
+                    )
 
                 if prefix_texts is not None:
                     prefix_texts.append(prefix)
-                yield TokensPrompt(
+                prompt = TokensPrompt(
                     prompt_token_ids=prompt_token_ids,
-                    multi_modal_data={"audio": accumulated},
+                    multi_modal_data={"audio": llm_audio},
                 )
+                yield prompt
 
-                gen_text = await cls._collect_generation(input_stream, tokenizer)
-                raw_decoded = (prefix + gen_text).rstrip("\n").rstrip()
+                gen_text = await cls._collect_generation(
+                    input_stream,
+                    tokenizer,
+                    request_id=request_id,
+                    segment_id=segment_id,
+                )
+                # Normalize only after the complete candidate is assembled.
+                # Stripping a generated fragment first removes the leading
+                # separator carried by English continuation tokens, while full
+                # candidate normalization remains safe for Chinese text.
+                raw_decoded = _normalize_realtime_text(prefix + gen_text)
                 chunk_id += 1
 
-        remaining = buffer.flush()
+        remaining = (
+            buffer.flush_active_window(aut_window_samples)
+            if aut_stable_window_mode
+            else buffer.flush_new()
+            if stream_mode == "audio_history_kv"
+            else buffer.flush()
+        )
         if remaining is not None and len(remaining) > 0:
-            if chunk_id < unfixed_chunks:
+            if stream_mode == "delta_turn" or chunk_id < unfixed_chunks:
                 prefix = ""
             else:
                 prefix = _rollback_prefix(raw_decoded, tokenizer, rollback_tokens)
                 prefix = _cap_prefix_tokens(prefix, tokenizer, max_prefix_tokens)
 
             full_prompt = prompt_base + prefix
+            if stream_mode == "delta_turn" and chunk_id > 0:
+                full_prompt = delta_turn_prompt
+            elif (
+                stream_mode in {"audio_history_kv", "aut_stable_window_kv"}
+                and chunk_id > 0
+            ):
+                full_prompt = (
+                    f"{audio_history_append_placeholder}<|im_end|>\n"
+                    f"<|im_start|>assistant\n{lang_prefix}{prefix}"
+                )
             prompt_token_ids = tokenizer.encode(full_prompt)
+
+            if aut_stable_window_mode:
+                new_audio_start_sample = last_emitted_samples
+                new_audio = buffer.last_new_segment
+                llm_audio = remaining
+                audio_samples = buffer.consumed_len
+            elif stream_mode == "audio_history_kv":
+                new_audio_start_sample = last_emitted_samples
+                new_audio = remaining
+                llm_audio = remaining
+                audio_samples = last_emitted_samples + len(remaining)
+            else:
+                new_audio_start_sample = last_emitted_samples
+                new_audio = remaining[new_audio_start_sample:]
+                audio_samples = len(remaining)
+            if stream_mode == "delta_turn":
+                llm_audio = new_audio
+            else:
+                llm_audio = remaining if stream_mode != "audio_history_kv" else llm_audio
+            audio_bytes = np.ascontiguousarray(llm_audio).view(np.uint8)
+            new_audio_bytes = np.ascontiguousarray(new_audio).view(np.uint8)
+            audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
+            new_audio_sha256 = hashlib.sha256(new_audio_bytes).hexdigest()
+
+            segment_id = chunk_id + 1
+            trace = {
+                "segment_id": segment_id,
+                "audio_samples": audio_samples,
+                "audio_duration_s": audio_samples / sampling_rate,
+                "new_audio_samples": audio_samples - last_emitted_samples,
+                "new_audio_start_sample": new_audio_start_sample,
+                "new_audio_end_sample": audio_samples,
+                "emit_reason": "flush",
+                "stream_mode": stream_mode,
+                "llm_audio_samples": len(llm_audio),
+                "text_prompt_tokens": len(prompt_token_ids),
+                "prefix_tokens": len(tokenizer.encode(prefix)),
+                "prefix_chars": len(prefix),
+                "audio_sha256": audio_sha256,
+                "new_audio_sha256": new_audio_sha256,
+                "audio_rms": float(np.sqrt(np.mean(np.square(remaining)))),
+                "new_audio_rms": float(np.sqrt(np.mean(np.square(new_audio)))),
+                "aut_window_start_sample": (
+                    buffer.last_active_window_start
+                    if aut_stable_window_mode
+                    else None
+                ),
+                "aut_window_samples": (
+                    len(remaining) if aut_stable_window_mode else None
+                ),
+                "aut_window_commit": aut_stable_window_mode,
+            }
+            if segment_traces is not None:
+                segment_traces.append(trace)
+            logger.info(
+                "QWEN3_ASR_RT_SEGMENT_INPUT request_id=%s segment_id=%d "
+                "emit_reason=%s audio_samples=%d audio_duration_s=%.6f "
+                "new_audio_samples=%d new_audio_range_samples=[%d,%d) "
+                "new_audio_range_s=[%.6f,%.6f) audio_sha256=%s "
+                "new_audio_sha256=%s audio_rms=%.8f new_audio_rms=%.8f "
+                "text_prompt_tokens=%d prefix_tokens=%d prefix_chars=%d "
+                "prompt_text=%r prompt_token_ids=%s",
+                request_id or "-", segment_id, trace["emit_reason"],
+                audio_samples, trace["audio_duration_s"],
+                trace["new_audio_samples"], trace["new_audio_start_sample"],
+                trace["new_audio_end_sample"], new_audio_start_sample / sampling_rate,
+                audio_samples / sampling_rate, trace["audio_sha256"],
+                trace["new_audio_sha256"], trace["audio_rms"],
+                trace["new_audio_rms"], trace["text_prompt_tokens"],
+                trace["prefix_tokens"], trace["prefix_chars"], full_prompt,
+                prompt_token_ids,
+            )
+            logger.info(
+                "QWEN3_ASR_RT_AB_INPUT request_id=%s segment_id=%d "
+                "stream_mode=%s cumulative_audio_samples=%d "
+                "llm_audio_samples=%d prompt_text=%r",
+                request_id or "-", segment_id, stream_mode,
+                audio_samples, len(llm_audio), full_prompt,
+            )
+            if aut_stable_window_mode:
+                logger.info(
+                    "QWEN3_ASR_AUT_STABLE_WINDOW request_id=%s "
+                    "segment_id=%d window_start_sample=%d "
+                    "active_samples=%d new_samples=%d commit=True",
+                    request_id or "-",
+                    segment_id,
+                    buffer.last_active_window_start,
+                    len(remaining),
+                    len(new_audio),
+                )
 
             if prefix_texts is not None:
                 prefix_texts.append(prefix)
-            yield TokensPrompt(
+            prompt = TokensPrompt(
                 prompt_token_ids=prompt_token_ids,
-                multi_modal_data={"audio": remaining},
+                multi_modal_data={"audio": llm_audio},
+            )
+            yield prompt
+
+            # The final short segment uses the same token-stream handshake as
+            # every full segment. Consume its completion marker so the prompt
+            # generator can finish and the realtime connection can send done.
+            await cls._collect_generation(
+                input_stream,
+                tokenizer,
+                request_id=request_id,
+                segment_id=segment_id,
             )
 
     @staticmethod
     async def _collect_generation(
         input_stream: asyncio.Queue[list[int]],
         tokenizer,
+        request_id: str | None = None,
+        segment_id: int | None = None,
     ) -> str:
         """Read generated token IDs from the engine until segment completes.
 
         An empty list ``[]`` in the stream signals completion.  Returns
-        the decoded text for the entire segment.
+        the decoded text for the entire segment and logs the exact token IDs.
         """
         all_ids: list[int] = []
         while True:
@@ -365,6 +803,12 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
                 break
             all_ids.extend(token_ids)
         text = tokenizer.decode(all_ids, skip_special_tokens=True) if all_ids else ""
+        logger.info(
+            "QWEN3_ASR_RT_SEGMENT_LLM_OUTPUT request_id=%s segment_id=%s "
+            "generated_tokens=%d token_ids=%s generated_text=%r",
+            request_id or "-", segment_id if segment_id is not None else "-",
+            len(all_ids), all_ids, text,
+        )
         return text
 
     @classmethod

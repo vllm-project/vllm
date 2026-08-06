@@ -130,6 +130,15 @@ class EngineCoreRequest(
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
 
+    # Realtime append-only audio-history update metadata.  These fields are
+    # carried with the resumable request so the scheduler can truncate only
+    # the text/MM suffix while retaining all prior audio KV.
+    segment_id: int | None = None
+    truncate_to_token: int | None = None
+    audio_history_token_end: int | None = None
+    new_audio_feature_count: int = 0
+    final_segment: bool = False
+
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned
     # to the request_id field, see InputProcessor.assign_request_id().
