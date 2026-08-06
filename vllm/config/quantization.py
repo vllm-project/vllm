@@ -117,7 +117,7 @@ class QuantizationConfigArgs:
 
     targets: dict[str, str] | None = None
     """Per-layer online quantization overrides, keyed by exact layer name or
-    regex patternes with a `re:` , mapping to an online shorthand name (see
+    regex patterns with a `re:` , mapping to an online shorthand name (see
     `_ONLINE_SHORTHANDS`). A layer that matches no pattern is left unquantized.
     Mutually exclusive with `linear` and `moe`.
     """

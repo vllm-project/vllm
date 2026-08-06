@@ -151,6 +151,7 @@ from vllm import LLM
 
 llm = LLM(
     "Qwen/Qwen3.5-35B-A3B",
+    quantization="online",
     quantization_config={
         "targets": {
             "re:.*o_proj.*": "mxfp8",
@@ -163,6 +164,7 @@ Or with the CLI:
 
 ```bash
 vllm serve Qwen/Qwen3.5-35B-A3B \
+  --quantization online \
   --quantization-config.targets '{"re:.*o_proj.*":"mxfp8"}'
 ```
 
@@ -172,17 +174,3 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
     - A layer that matches no `targets` pattern is left unquantized.
     - A layer name may not match both `targets` and `ignore`.
     - A layer may not match more than one `targets` pattern.
-
-Partially pre-quantized models are supported. Examples:
-
-```bash
-vllm serve nvidia/Qwen3-30B-A3B-NVFP4 \
-  --quantization-config.targets '{"re:.*o_proj.*":"mxfp8"}'
-
-vllm serve amd/Qwen3-30B-A3B-MXFP4 \
-  --quantization-config.targets '{"re:.*o_proj.*":"mxfp8"}'
-
-# Enables shared expert fusion.
-vllm serve amd/Qwen3.5-397B-A17B-MXFP4 \
-  --quantization-config.targets '{"re:.*shared_experts.*":"mxfp8"}'
-```

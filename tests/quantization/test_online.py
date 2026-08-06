@@ -11,6 +11,7 @@ from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
 )
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.config import ModelConfig
 from vllm.config.quantization import QuantizationConfigArgs
@@ -118,8 +119,9 @@ def test_online_quantization(
     Does not test performance, peak memory usage, etc.
     """
 
-    if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
+        rocm_aiter_ops.refresh_env_variables()
 
     if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
         pytest.skip("Skip test for online fp8_per_block on XPU platform.")
@@ -174,6 +176,13 @@ def test_online_quantization(
                         assert isinstance(o_proj.quant_method, expected_linear_cls)
 
                 # every .*self_attn.qkv_proj is skipped
+                for layer_idx in range(len(model.model.layers)):
+                    qkv_proj = model.model.layers[layer_idx].self_attn.qkv_proj
+                    assert isinstance(qkv_proj.quant_method, UnquantizedLinearMethod)
+
+            if isinstance(online_quant_args, dict) and "targets" in online_quant_args:
+                # qkv_proj matches neither target pattern and must remain in
+                # full precision when targets are used instead of global specs.
                 for layer_idx in range(len(model.model.layers)):
                     qkv_proj = model.model.layers[layer_idx].self_attn.qkv_proj
                     assert isinstance(qkv_proj.quant_method, UnquantizedLinearMethod)
@@ -284,7 +293,7 @@ def test_online_quantization_targets_ignore_collision() -> None:
         )
 
 
-def test_log_online_quantization(default_vllm_config, caplog_vllm) -> None:
+def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
     config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor"))
     config.quantized_layers = {
         "model.layers.0.mlp.down_proj": ("linear", "fp8_per_tensor", None),
@@ -297,13 +306,21 @@ def test_log_online_quantization(default_vllm_config, caplog_vllm) -> None:
     }
     default_vllm_config.quant_config = config
 
+    logged_messages: list[str] = []
+
+    def record_info(message: str, *args: object) -> None:
+        logged_messages.append(message % args)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.base_loader.logger.info", record_info
+    )
     log_online_quantization(default_vllm_config)
 
-    assert (
+    assert logged_messages == [
         "Quantized 3 layers of types: mlp.down_proj: 2 (from linear: "
-        "fp8_per_tensor), self_attn.qkv_proj: 1 (from targets: "
-        "re:.*qkv_proj.* mxfp4)" in caplog_vllm.text
-    )
+        "fp8_per_tensor); self_attn.qkv_proj: 1 (from targets: "
+        "re:.*qkv_proj.*, mxfp4)"
+    ]
 
 
 @pytest.mark.skipif(
