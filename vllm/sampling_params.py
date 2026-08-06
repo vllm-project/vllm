@@ -31,6 +31,9 @@ MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
+MAX_NUM_BAD_WORDS = 128
+"""Upper bound on tokenized bad-word entries per request."""
+
 
 def _verify_num_sequences(value: int, parameter_name: str) -> None:
     if not isinstance(value, int):
@@ -498,6 +501,8 @@ class SamplingParams(
 
         if self.bad_words is None:
             self.bad_words = []
+        else:
+            self.bad_words = list(dict.fromkeys(self.bad_words))
 
         if self.logprobs is True:
             self.logprobs = 1
@@ -700,6 +705,14 @@ class SamplingParams(
                     and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
+                    if len(self._bad_words_token_ids) > MAX_NUM_BAD_WORDS:
+                        raise VLLMValidationError(
+                            f"Too many bad words after tokenization: "
+                            f"{len(self._bad_words_token_ids)}. "
+                            f"The max number is {MAX_NUM_BAD_WORDS}.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
 
         invalid_token_ids = [
             token_id
