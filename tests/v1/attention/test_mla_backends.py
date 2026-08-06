@@ -280,6 +280,10 @@ BATCH_SPECS = {
     "spec_decode_medium": BatchSpec(
         seq_lens=[512, 1024, 2048, 512, 1024, 2048], query_lens=[8, 8, 8, 8, 8, 8]
     ),
+    "chunked_context_prefill": BatchSpec(
+        seq_lens=[1568, 520, 8, 80, 96, 8],
+        query_lens=[32, 8, 8, 16, 16, 8],
+    ),
 }
 
 
@@ -1049,6 +1053,7 @@ def run_attention_backend(
     k_scale: float,
     kv_cache_dtype: str = "auto",
     prefill_backend: MLAPrefillBackendEnum | None = None,
+    chunked_prefill_workspace_size: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -1137,6 +1142,13 @@ def run_attention_backend(
 
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+        if chunked_prefill_workspace_size is not None:
+            builder.chunked_prefill_workspace_size = chunked_prefill_workspace_size
+            builder.chunked_prefill_workspace = (
+                builder.chunked_prefill_workspace.new_empty(
+                    chunked_prefill_workspace_size, head_size
+                )
+            )
         attn_metadata = builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
@@ -1156,32 +1168,7 @@ def run_attention_backend(
         return output
 
 
-@pytest.mark.parametrize(
-    "batch_spec_name",
-    [
-        "small_decode",
-        "small_prefill",
-        "mixed_small",
-        "medium_decode",
-        "medium_prefill",
-        "mixed_medium",
-        "large_decode",
-        "large_prefill",
-        "single_decode",
-        "single_prefill",
-        "spec_decode_small",
-        "spec_decode_medium",
-    ],
-)
-@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
-@pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
-@pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
-@pytest.mark.parametrize(
-    ("prefill_backend", "qk_nope_head_dim", "v_head_dim"),
-    _prefill_backend_dimension_params(),
-)
-def test_backend_correctness(
+def _run_backend_correctness(
     default_vllm_config,
     dist_init,
     workspace_init,
@@ -1194,6 +1181,7 @@ def test_backend_correctness(
     prefill_backend: MLAPrefillBackendEnum,
     qk_nope_head_dim: int,
     v_head_dim: int,
+    chunked_prefill_workspace_size: int | None = None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -1592,6 +1580,7 @@ def test_backend_correctness(
             q_scale=q_scale,
             k_scale=k_scale,
             kv_cache_dtype=kv_cache_dtype,
+            chunked_prefill_workspace_size=chunked_prefill_workspace_size,
         )
 
         # Use backend_idx to get the correct SDPA output for this backend
@@ -1643,3 +1632,90 @@ def test_backend_correctness(
         summary = f"{len(failures)} backend(s) failed: {', '.join(backend_names)}"
         detailed_msg = "\n".join(failures)
         pytest.fail(f"{summary}\n{detailed_msg}")
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_small",
+        "medium_decode",
+        "medium_prefill",
+        "mixed_medium",
+        "large_decode",
+        "large_prefill",
+        "single_decode",
+        "single_prefill",
+        "spec_decode_small",
+        "spec_decode_medium",
+    ],
+)
+@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
+@pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
+@pytest.mark.parametrize(
+    ("prefill_backend", "qk_nope_head_dim", "v_head_dim"),
+    _prefill_backend_dimension_params(),
+)
+def test_backend_correctness(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
+    kv_cache_dtype: str,
+    q_scale: float,
+    k_scale: float,
+    prefill_backend: MLAPrefillBackendEnum,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
+):
+    _run_backend_correctness(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        batch_spec_name,
+        model,
+        tensor_parallel_size,
+        kv_cache_dtype,
+        q_scale,
+        k_scale,
+        prefill_backend,
+        qk_nope_head_dim,
+        v_head_dim,
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefill_backend", "qk_nope_head_dim", "v_head_dim"),
+    _prefill_backend_dimension_params(),
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_chunked_context_backend_correctness(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    prefill_backend: MLAPrefillBackendEnum,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
+    kv_cache_dtype: str,
+):
+    """Split, packed, and context-free requests match the SDPA reference."""
+    _run_backend_correctness(
+        default_vllm_config,
+        dist_init,
+        workspace_init,
+        batch_spec_name="chunked_context_prefill",
+        model="deepseek-ai/DeepSeek-R1",
+        tensor_parallel_size=16,
+        kv_cache_dtype=kv_cache_dtype,
+        q_scale=1.0,
+        k_scale=1.0,
+        prefill_backend=prefill_backend,
+        qk_nope_head_dim=qk_nope_head_dim,
+        v_head_dim=v_head_dim,
+        chunked_prefill_workspace_size=1024,
+    )

@@ -875,7 +875,7 @@ def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expect
         _masked_mha_workspace_fits(
             batch_size=1,
             max_query_len=max_query_len,
-            context_chunk_max_seq_lens=None,
+            max_context_chunk_seq_len=0,
             workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
         )
         is expected
@@ -884,7 +884,7 @@ def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expect
 
 def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
     """Request count and context chunk length are independent multipliers."""
-    base = dict(batch_size=2, max_query_len=2048, context_chunk_max_seq_lens=[2048])
+    base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
     exact = math.prod(_topk_mask_shape(2, 2048, 2048))
 
     assert _masked_mha_workspace_fits(**base, workspace_numel=exact)
@@ -892,7 +892,7 @@ def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
         **{**base, "batch_size": 3}, workspace_numel=exact
     )
     assert not _masked_mha_workspace_fits(
-        **{**base, "context_chunk_max_seq_lens": [4096]}, workspace_numel=exact
+        **{**base, "max_context_chunk_seq_len": 4096}, workspace_numel=exact
     )
 
 
