@@ -59,11 +59,11 @@ from vllm.v1.attention.backends.utils import (
     split_prefill_chunks,
 )
 from vllm.v1.attention.ops import flashmla
-from vllm.v1.kv_offload.sparse import hisparse_cache as hisparse
-from vllm.v1.kv_offload.sparse.hisparse_cache import (
+from vllm.v1.kv_offload.sparse import hisparse_runtime
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     HiSparseCacheHandle,
-    HiSparseOffloadRuntime,
     HiSparsePrefillStagingPlan,
+    HiSparseRuntime,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
     build_hisparse_prefill_staging_plan,
@@ -1408,7 +1408,7 @@ requires_hisparse_ops = pytest.mark.skipif(
 
 
 def fallback_swap_in(
-    runtime: HiSparseOffloadRuntime,
+    runtime: HiSparseRuntime,
     global_indices: torch.Tensor,
     hot_indices: torch.Tensor,
 ) -> None:
@@ -1473,7 +1473,7 @@ def fallback_swap_in(
         runtime.hot.cache.view(-1, runtime.row_width).index_copy_(0, dst, rows)
 
 
-def _make_hisparse_offload_runtime(
+def _make_hisparse_runtime(
     *,
     top_k: int = 4,
     device_buffer_size: int = 5,
@@ -1481,8 +1481,8 @@ def _make_hisparse_offload_runtime(
     row_width: int = 8,
     block_size: int = 64,
     max_swap_rows: int | None = None,
-) -> HiSparseOffloadRuntime:
-    runtime = HiSparseOffloadRuntime(
+) -> HiSparseRuntime:
+    runtime = HiSparseRuntime(
         config=ResolvedHiSparseConfig(
             top_k=top_k,
             device_buffer_size=device_buffer_size,
@@ -1530,7 +1530,7 @@ def _make_hisparse_cache_handle(
     row_width: int = 8,
     block_size: int = 64,
 ) -> HiSparseCacheHandle:
-    runtime = _make_hisparse_offload_runtime(
+    runtime = _make_hisparse_runtime(
         top_k=top_k,
         device_buffer_size=device_buffer_size,
         max_num_reqs=max_num_reqs,
@@ -1540,7 +1540,7 @@ def _make_hisparse_cache_handle(
     return HiSparseCacheHandle(runtime)
 
 
-def _hisparse_hot_slot(runtime: HiSparseOffloadRuntime, row: int, logical: int) -> int:
+def _hisparse_hot_slot(runtime: HiSparseRuntime, row: int, logical: int) -> int:
     assert runtime.hot is not None
     assert runtime.hot_block_table is not None
     block_size = runtime.hot.cache.shape[1]
@@ -1552,7 +1552,7 @@ def _hisparse_hot_slot(runtime: HiSparseOffloadRuntime, row: int, logical: int) 
 def test_hisparse_uses_graph_stable_request_state_mapping():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 64, 8
-    runtime = _make_hisparse_offload_runtime(
+    runtime = _make_hisparse_runtime(
         top_k=1,
         device_buffer_size=2,
         max_num_reqs=2,
@@ -1659,15 +1659,15 @@ def test_hisparse_kernel_matches_fallback():
     ).pin_memory()
     flat_pool = kv_pool.reshape(-1, row_width)
 
-    def make() -> HiSparseOffloadRuntime:
-        c = _make_hisparse_offload_runtime(
+    def make() -> HiSparseRuntime:
+        runtime = _make_hisparse_runtime(
             top_k=top_k,
             device_buffer_size=buf,
             max_num_reqs=num_reqs,
             row_width=row_width,
         )
-        c.bind_source_cache(kv_pool)
-        return c
+        runtime.bind_source_cache(kv_pool)
+        return runtime
 
     kernel_c = make()
     fallback_c = make()
@@ -1753,16 +1753,16 @@ def test_hisparse_apply_multi_step_plan_matches_independent():
         (num_blocks, block_size, row_width), dtype=torch.float32
     ).pin_memory()
 
-    def make() -> HiSparseOffloadRuntime:
-        c = _make_hisparse_offload_runtime(
+    def make() -> HiSparseRuntime:
+        runtime = _make_hisparse_runtime(
             top_k=top_k,
             device_buffer_size=buf,
             max_num_reqs=num_reqs,
             row_width=row_width,
             max_swap_rows=2 * num_reqs,
         )
-        c.bind_source_cache(kv_pool)
-        return c
+        runtime.bind_source_cache(kv_pool)
+        return runtime
 
     blocks_per_req = num_blocks // num_reqs
     block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(
@@ -1770,7 +1770,7 @@ def test_hisparse_apply_multi_step_plan_matches_independent():
     )
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
-    hisparse._get_group_plan.cache_clear()
+    hisparse_runtime._get_group_plan.cache_clear()
     producer, shared, indep = make(), make(), make()
     shared.join_group(producer)
     for _ in range(8):
@@ -1860,7 +1860,7 @@ def test_hisparse_prefill_writes_resident_and_host_rows():
 def test_hisparse_remaps_strided_hma_rows_for_attention():
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 4, 8
-    runtime = _make_hisparse_offload_runtime(
+    runtime = _make_hisparse_runtime(
         max_num_reqs=1,
         block_size=block_size,
         row_width=row_width,
@@ -2055,7 +2055,7 @@ def test_hisparse_compresses_deepseek_v4_slot_mapping():
     )
     positions = source.clone()
 
-    result = hisparse.compress_hisparse_slot_mapping(
+    result = hisparse_runtime.compress_hisparse_slot_mapping(
         source,
         positions,
         logical_block_size=256,

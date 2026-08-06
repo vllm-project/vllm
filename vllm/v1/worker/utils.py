@@ -38,7 +38,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_offload.sparse.hisparse_cache import wait_for_hisparse_host_writes
+from vllm.v1.kv_offload.sparse.hisparse_runtime import wait_for_hisparse_host_writes
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)

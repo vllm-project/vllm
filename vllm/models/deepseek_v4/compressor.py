@@ -35,7 +35,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-from vllm.v1.kv_offload.sparse.hisparse_cache import (
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     compress_hisparse_slot_mapping,
     get_indexer_source,
 )

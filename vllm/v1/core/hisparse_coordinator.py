@@ -35,7 +35,7 @@ class _PendingSpill:
     copy_enqueued: bool = False
 
 
-class HiSparseManager:
+class HiSparseCoordinator:
     """Own HiSparse host allocation, prefix state, and GPU residency transitions."""
 
     @staticmethod

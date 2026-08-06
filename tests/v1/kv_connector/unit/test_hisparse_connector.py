@@ -37,39 +37,39 @@ def _vllm_config():
 
 
 def test_hisparse_connector_routes_commands_and_completions():
-    manager = MagicMock()
+    coordinator = MagicMock()
     command = SparseKVOffloadCommand({}, [], fully_resident=True)
-    manager.build_offload_command.return_value = command
+    coordinator.build_offload_command.return_value = command
     scheduler_output = SchedulerOutput.make_empty()
     scheduler_output.num_scheduled_tokens = {"request": 1}
 
-    scheduler = HiSparseConnector(
-        _vllm_config(), KVConnectorRole.SCHEDULER, _kv_cache_config(), manager
+    scheduler_connector = HiSparseConnector(
+        _vllm_config(), KVConnectorRole.SCHEDULER, _kv_cache_config(), coordinator
     )
-    metadata = scheduler.build_connector_meta(scheduler_output)
+    metadata = scheduler_connector.build_connector_meta(scheduler_output)
 
     assert metadata == HiSparseConnectorMetadata(command)
-    manager.build_offload_command.assert_called_once_with(["request"])
+    coordinator.build_offload_command.assert_called_once_with(["request"])
 
-    worker_runtime = MagicMock()
-    worker_runtime.take_completed_transfer_ids.return_value = [3, 7]
-    worker = HiSparseConnector(
+    hisparse_worker = MagicMock()
+    hisparse_worker.take_completed_transfer_ids.return_value = [3, 7]
+    worker_connector = HiSparseConnector(
         _vllm_config(), KVConnectorRole.WORKER, _kv_cache_config()
     )
-    worker.bind_worker(worker_runtime)
-    worker.bind_connector_metadata(metadata)
-    worker.prepare_step(scheduler_output)
-    worker.finish_forward()
-    worker_metadata = worker.build_connector_worker_meta()
+    worker_connector.bind_worker(hisparse_worker)
+    worker_connector.bind_connector_metadata(metadata)
+    worker_connector.prepare_step(scheduler_output)
+    worker_connector.finish_forward()
+    worker_metadata = worker_connector.build_connector_worker_meta()
 
-    worker_runtime.prepare_step.assert_called_once_with(command, scheduler_output)
-    worker_runtime.finish_forward.assert_called_once_with()
+    hisparse_worker.prepare_step.assert_called_once_with(command, scheduler_output)
+    hisparse_worker.finish_forward.assert_called_once_with()
     assert worker_metadata == HiSparseConnectorWorkerMetadata([3, 7])
 
-    scheduler.update_connector_output(
+    scheduler_connector.update_connector_output(
         KVConnectorOutput(kv_connector_worker_meta=worker_metadata)
     )
-    manager.complete_spills.assert_called_once_with([3, 7])
+    coordinator.complete_spills.assert_called_once_with([3, 7])
 
 
 def test_hisparse_connector_composes_without_replacing_existing_connector():
@@ -85,9 +85,9 @@ def test_hisparse_connector_composes_without_replacing_existing_connector():
     assert isinstance(connector, MultiConnector)
     assert connector._connectors[0] is primary
 
-    runtime = MagicMock()
-    bind_hisparse_worker(connector, runtime)
-    assert connector._connectors[1]._worker is runtime
+    worker = MagicMock()
+    bind_hisparse_worker(connector, worker)
+    assert connector._connectors[1]._worker is worker
 
     metadata = MultiKVConnectorMetadata(
         (KVConnectorMetadata(), HiSparseConnectorMetadata(None))

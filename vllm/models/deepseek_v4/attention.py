@@ -64,7 +64,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
-from vllm.v1.kv_offload.sparse.hisparse_cache import (
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     HiSparseCacheHandle,
     create_hisparse_cache_handle,
 )

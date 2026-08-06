@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-import vllm.v1.kv_offload.sparse.hisparse_cache as hisparse_cache_module
+import vllm.v1.kv_offload.sparse.hisparse_runtime as hisparse_runtime_module
 import vllm.v1.kv_offload.sparse.hisparse_worker as hisparse_worker_module
 import vllm.v1.worker.utils as worker_utils
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -15,7 +15,7 @@ from vllm.v1.kv_offload.sparse.base import (
     SparseKVPageTransfer,
 )
 from vllm.v1.kv_offload.sparse.hisparse_worker import (
-    HiSparseOffloadWorker,
+    HiSparseWorker,
     _expand_source_block_ids,
 )
 from vllm.v1.metrics.stats import HiSparseStats
@@ -60,7 +60,7 @@ def test_expand_hisparse_source_blocks_into_kernel_pages():
 
 
 def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
-    worker = object.__new__(HiSparseOffloadWorker)
+    worker = object.__new__(HiSparseWorker)
     worker.request_state_indices = torch.arange(4, dtype=torch.int32)
     original_ptr = worker.request_state_indices.data_ptr()
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
@@ -74,33 +74,37 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
 def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatch):
     """Followers must release duplicate LRU state before memory profiling."""
     config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_seqs=2),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=2,
+        ),
+        speculative_config=None,
         kv_transfer_config=None,
     )
-    resolved = hisparse_cache_module.ResolvedHiSparseConfig(
+    resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
         top_k=4,
         device_buffer_size=8,
         host_pool_gib=1.0,
     )
-    monkeypatch.setattr(hisparse_cache_module, "_has_hisparse_ops", lambda: True)
+    monkeypatch.setattr(hisparse_runtime_module, "_has_hisparse_ops", lambda: True)
     monkeypatch.setattr(
-        hisparse_cache_module.ResolvedHiSparseConfig,
+        hisparse_runtime_module.ResolvedHiSparseConfig,
         "from_vllm_config",
         classmethod(lambda cls, vllm_config, model_top_k: resolved),
     )
     monkeypatch.setattr(
-        hisparse_cache_module,
+        hisparse_runtime_module,
         "_get_group_plan",
         lambda device, max_rows, top_k: object(),
     )
     monkeypatch.setattr(
-        hisparse_cache_module, "_get_copy_stream", lambda device: object()
+        hisparse_runtime_module, "_get_copy_stream", lambda device: object()
     )
-    monkeypatch.setattr(hisparse_cache_module, "_CURRENT_INDEX_GROUP", None)
+    monkeypatch.setattr(hisparse_runtime_module, "_CURRENT_INDEX_GROUP", None)
     group_scope = object()
 
     def make_cache_handle(is_leader: bool):
-        cache_handle = hisparse_cache_module.create_hisparse_cache_handle(
+        cache_handle = hisparse_runtime_module.create_hisparse_cache_handle(
             config,
             model_top_k=4,
             index_group_scope=group_scope,
@@ -125,9 +129,9 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     assert second_follower.runtime.lru_slots is None
 
 
-def test_hisparse_offload_worker_invalidates_only_index_group_leaders(monkeypatch):
+def test_hisparse_worker_invalidates_only_index_group_leaders(monkeypatch):
     """Recycled blocks must not enter followers whose LRU state was released."""
-    worker = object.__new__(HiSparseOffloadWorker)
+    worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 2
     calls: list[tuple[str, torch.Tensor]] = []
     leader = SimpleNamespace(
@@ -158,8 +162,8 @@ def test_hisparse_offload_worker_invalidates_only_index_group_leaders(monkeypatc
     torch.testing.assert_close(calls[0][1], torch.tensor([6, 7]))
 
 
-def test_hisparse_offload_worker_prepare_step_invalidates_and_restores(monkeypatch):
-    worker = object.__new__(HiSparseOffloadWorker)
+def test_hisparse_worker_prepare_step_invalidates_and_restores(monkeypatch):
+    worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 64
     worker._post_forward_transfers = []
     scheduler_output = SimpleNamespace(
@@ -189,8 +193,8 @@ def test_hisparse_offload_worker_prepare_step_invalidates_and_restores(monkeypat
     assert worker._post_forward_transfers == []
 
 
-def test_hisparse_offload_worker_prepare_step_accepts_warmup_without_command():
-    worker = object.__new__(HiSparseOffloadWorker)
+def test_hisparse_worker_prepare_step_accepts_warmup_without_command():
+    worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 64
     worker._post_forward_transfers = [object()]
     scheduler_output = SimpleNamespace(
@@ -210,8 +214,8 @@ def test_hisparse_offload_worker_prepare_step_accepts_warmup_without_command():
     assert calls == [("invalidate", []), ("restore", scheduler_output)]
 
 
-def test_hisparse_offload_worker_enqueues_fused_page_spill(monkeypatch):
-    worker = object.__new__(HiSparseOffloadWorker)
+def test_hisparse_worker_enqueues_fused_page_spill(monkeypatch):
+    worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 4
     worker.blocks_per_kv_block = 2
     worker.spill_row_capacity = 8
@@ -279,8 +283,8 @@ def test_hisparse_offload_worker_enqueues_fused_page_spill(monkeypatch):
     assert recorded_streams == [current_stream]
 
 
-def test_hisparse_offload_worker_finish_forward_enqueues_deferred_spills(monkeypatch):
-    worker = object.__new__(HiSparseOffloadWorker)
+def test_hisparse_worker_finish_forward_enqueues_deferred_spills(monkeypatch):
+    worker = object.__new__(HiSparseWorker)
     worker.hot_backing = SimpleNamespace(device="cuda:0")
     transfer = object()
     worker._post_forward_transfers = [transfer]
@@ -300,8 +304,8 @@ def test_hisparse_offload_worker_finish_forward_enqueues_deferred_spills(monkeyp
     assert recorded_streams == [current_stream]
 
 
-def test_hisparse_offload_worker_finish_step_counts_each_index_group_once():
-    worker = object.__new__(HiSparseOffloadWorker)
+def test_hisparse_worker_finish_step_counts_each_index_group_once():
+    worker = object.__new__(HiSparseWorker)
     worker._metrics_calls = hisparse_worker_module._METRICS_INTERVAL - 1
     worker._metrics_last = HiSparseStats()
     worker.leader_runtimes = [
@@ -311,16 +315,16 @@ def test_hisparse_offload_worker_finish_step_counts_each_index_group_once():
     assert worker.finish_step() == HiSparseStats(7, 3, 48)
 
 
-def test_hisparse_offload_worker_reports_each_completed_transfer_once():
-    worker = object.__new__(HiSparseOffloadWorker)
+def test_hisparse_worker_reports_each_completed_transfer_once():
+    worker = object.__new__(HiSparseWorker)
     worker._completed_transfer_ids = [3, 5]
 
     assert worker.take_completed_transfer_ids() == [3, 5]
     assert worker.take_completed_transfer_ids() is None
 
 
-def test_hisparse_offload_worker_shutdown_releases_pinned_state(monkeypatch):
-    worker = object.__new__(HiSparseOffloadWorker)
+def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
+    worker = object.__new__(HiSparseWorker)
     worker.cache_handles = []
     released = False
 

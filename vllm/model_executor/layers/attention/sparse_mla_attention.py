@@ -42,7 +42,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_offload.sparse.hisparse_cache import (
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     FP8_DS_MLA_ROW_BYTES,
     HiSparseCacheHandle,
     HiSparsePrefillStagingPlan,

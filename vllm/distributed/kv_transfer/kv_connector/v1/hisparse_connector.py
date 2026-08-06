@@ -31,10 +31,10 @@ from vllm.v1.outputs import KVConnectorOutput
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.forward_context import ForwardContext
-    from vllm.v1.core.hisparse_manager import HiSparseManager
+    from vllm.v1.core.hisparse_coordinator import HiSparseCoordinator
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseOffloadWorker
+    from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseWorker
     from vllm.v1.request import Request
 
 
@@ -67,24 +67,24 @@ def _hisparse_config(vllm_config: VllmConfig) -> VllmConfig:
 
 
 class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
-    """Join the scheduler's residency manager to the worker's transfer engine."""
+    """Join the scheduler coordinator to the worker's transfer engine."""
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
-        manager: HiSparseManager | None = None,
+        coordinator: HiSparseCoordinator | None = None,
     ) -> None:
         super().__init__(_hisparse_config(vllm_config), role, kv_cache_config)
-        self._manager = manager
-        self._worker: HiSparseOffloadWorker | None = None
+        self._coordinator = coordinator
+        self._worker: HiSparseWorker | None = None
 
     @property
     def requires_kv_delivery(self) -> bool:
         return False
 
-    def bind_worker(self, worker: HiSparseOffloadWorker) -> None:
+    def bind_worker(self, worker: HiSparseWorker) -> None:
         self._worker = worker
 
     def prepare_step(self, scheduler_output: SchedulerOutput) -> None:
@@ -143,20 +143,20 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        assert self._manager is not None
+        assert self._coordinator is not None
         return HiSparseConnectorMetadata(
-            self._manager.build_offload_command(
+            self._coordinator.build_offload_command(
                 list(scheduler_output.num_scheduled_tokens)
             )
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
-        assert self._manager is not None
+        assert self._coordinator is not None
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
-        self._manager.complete_spills(metadata.completed_transfer_ids)
+        self._coordinator.complete_spills(metadata.completed_transfer_ids)
 
     def request_finished_all_groups(
         self,
@@ -178,19 +178,19 @@ def attach_hisparse_connector(
     vllm_config: VllmConfig,
     role: KVConnectorRole,
     kv_cache_config: KVCacheConfig,
-    manager: HiSparseManager | None = None,
+    coordinator: HiSparseCoordinator | None = None,
 ) -> KVConnectorBase_V1:
-    hisparse = HiSparseConnector(vllm_config, role, kv_cache_config, manager)
+    hisparse_connector = HiSparseConnector(
+        vllm_config, role, kv_cache_config, coordinator
+    )
     if connector is None:
-        return hisparse
+        return hisparse_connector
     return _HiSparseMultiConnector.from_connectors(
-        vllm_config, role, kv_cache_config, [connector, hisparse]
+        vllm_config, role, kv_cache_config, [connector, hisparse_connector]
     )
 
 
-def bind_hisparse_worker(
-    connector: KVConnectorBase_V1, worker: HiSparseOffloadWorker
-) -> None:
+def bind_hisparse_worker(connector: KVConnectorBase_V1, worker: HiSparseWorker) -> None:
     if isinstance(connector, HiSparseConnector):
         connector.bind_worker(worker)
         return

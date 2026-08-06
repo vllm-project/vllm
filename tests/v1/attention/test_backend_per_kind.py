@@ -11,7 +11,7 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.kv_cache_interface import KVCacheSpecKind
-from vllm.v1.kv_offload.sparse.hisparse_cache import ResolvedHiSparseConfig
+from vllm.v1.kv_offload.sparse.hisparse_runtime import ResolvedHiSparseConfig
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,7 @@ from typing import NamedTuple
 from vllm import envs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.hisparse_manager import HiSparseManager
+from vllm.v1.core.hisparse_coordinator import HiSparseCoordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -117,7 +117,7 @@ class KVCacheCoordinator(ABC):
             for group in kv_cache_config.kv_cache_groups
             if group.role is KVCacheGroupRole.HISPARSE_SOURCE
         ]
-        host_block_pool = HiSparseManager.create_host_block_pool(
+        host_block_pool = HiSparseCoordinator.create_host_block_pool(
             kv_cache_config,
             enable_caching=(
                 enable_caching
@@ -165,7 +165,7 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
-        self.hisparse_manager = HiSparseManager(
+        self.hisparse_coordinator = HiSparseCoordinator(
             kv_cache_config, self.single_type_managers, max_model_len
         )
 
@@ -213,7 +213,7 @@ class KVCacheCoordinator(ABC):
         apply_admission_cap: bool = False,
     ) -> tuple[int, ...]:
         """Get allocation requirements independently for each block pool."""
-        self.hisparse_manager.require_hot_if_needed(
+        self.hisparse_coordinator.require_hot_if_needed(
             request_id,
             new_computed_blocks[0],
             total_computed_tokens,
@@ -349,7 +349,7 @@ class KVCacheCoordinator(ABC):
                 num_computed_tokens,
                 retention_interval=self.retention_interval,
             )
-        self.hisparse_manager.plan_prefix_materialization(
+        self.hisparse_coordinator.plan_prefix_materialization(
             request.request_id, num_computed_tokens
         )
 
@@ -360,7 +360,7 @@ class KVCacheCoordinator(ABC):
         Args:
             request_id: The request ID.
         """
-        self.hisparse_manager.free(request_id)
+        self.hisparse_coordinator.free(request_id)
         for manager in self.single_type_managers:
             manager.free(request_id)
 
@@ -378,7 +378,7 @@ class KVCacheCoordinator(ABC):
         Returns:
             The request's blocks in allocation order.
         """
-        self.hisparse_manager.free(request_id)
+        self.hisparse_coordinator.free(request_id)
         blocks: list[KVCacheBlock] = []
         for manager in self.single_type_managers:
             blocks.extend(manager.pop_blocks_for_free(request_id))
@@ -767,7 +767,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
             )
-        self.hisparse_manager.plan_prefix_materialization(
+        self.hisparse_coordinator.plan_prefix_materialization(
             request.request_id, aligned_num_computed_tokens
         )
 

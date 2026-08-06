@@ -31,12 +31,12 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_offload.sparse.hisparse_cache import (
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     allocate_pinned_host_pool,
     check_hisparse_host_memory,
 )
 from vllm.v1.kv_offload.sparse.hisparse_worker import (
-    HiSparseOffloadWorker,
+    HiSparseWorker,
     init_hisparse_worker,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -501,7 +501,7 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
     block_tables: "BlockTables",
-) -> tuple[dict[str, Any], "HiSparseOffloadWorker | None"]:
+) -> tuple[dict[str, Any], "HiSparseWorker | None"]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     kv_cache_raw_tensors = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device

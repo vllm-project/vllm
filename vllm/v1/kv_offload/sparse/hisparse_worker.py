@@ -28,7 +28,7 @@ from vllm.v1.kv_offload.sparse.base import (
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
 )
-from vllm.v1.kv_offload.sparse.hisparse_cache import (
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     HiSparseCacheHandle,
     register_host_write_event,
     register_indexer_source,
@@ -63,7 +63,7 @@ def _get_hisparse_cache(
     return hisparse_cache
 
 
-class HiSparseOffloadWorker:
+class HiSparseWorker:
     """Own HiSparse host/hot state and execute its worker-side transfers."""
 
     def __init__(
@@ -430,7 +430,7 @@ def init_hisparse_worker(
     max_model_len: int,
     max_concurrent_batches: int,
     device: torch.device,
-) -> HiSparseOffloadWorker:
+) -> HiSparseWorker:
     tensor_configs = {
         name: tensor_config
         for tensor_config in kv_cache_config.kv_cache_tensors
@@ -548,7 +548,7 @@ def init_hisparse_worker(
     assert block_size % indexer_block_size == 0
     if not cache_handles or hot_backing is None:
         raise RuntimeError("HiSparse worker found no hot-cache handles.")
-    return HiSparseOffloadWorker(
+    return HiSparseWorker(
         cache_pairs,
         cache_handles,
         hot_backing,

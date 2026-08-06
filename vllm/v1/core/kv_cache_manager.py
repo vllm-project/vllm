@@ -164,7 +164,7 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pools = self.coordinator.block_pools
         self.block_pool = self.coordinator.block_pool
-        self.hisparse_manager = self.coordinator.hisparse_manager
+        self.hisparse_coordinator = self.coordinator.hisparse_coordinator
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
@@ -495,9 +495,9 @@ class KVCacheManager:
                 )
             )
             host_blocks_to_allocate = 0
-            if self.hisparse_manager.has_host_cache:
+            if self.hisparse_coordinator.has_host_cache:
                 host_blocks_to_allocate = (
-                    self.hisparse_manager.get_num_host_blocks_to_allocate(
+                    self.hisparse_coordinator.get_num_host_blocks_to_allocate(
                         request_id=request.request_id,
                         num_tokens=full_num_tokens,
                         new_computed_blocks=new_computed_block_list,
@@ -508,8 +508,10 @@ class KVCacheManager:
                     )
                 )
             if (
-                self.hisparse_manager.has_host_cache
-                and not self.hisparse_manager.has_host_capacity(host_blocks_to_allocate)
+                self.hisparse_coordinator.has_host_cache
+                and not self.hisparse_coordinator.has_host_capacity(
+                    host_blocks_to_allocate
+                )
             ) or any(
                 required + watermark > pool.get_num_free_blocks()
                 for required, watermark, pool in zip(
@@ -549,9 +551,9 @@ class KVCacheManager:
             num_tokens_main_model=num_tokens_main_model,
         )
         host_blocks_to_allocate = 0
-        if self.hisparse_manager.has_host_cache:
+        if self.hisparse_coordinator.has_host_cache:
             host_blocks_to_allocate = (
-                self.hisparse_manager.get_num_host_blocks_to_allocate(
+                self.hisparse_coordinator.get_num_host_blocks_to_allocate(
                     request_id=request.request_id,
                     num_tokens=num_tokens_need_slot,
                     new_computed_blocks=new_computed_block_list,
@@ -562,8 +564,8 @@ class KVCacheManager:
                     num_tokens_main_model=num_tokens_main_model,
                 )
             )
-        if self.hisparse_manager.has_host_cache and not (
-            self.hisparse_manager.has_host_capacity(
+        if self.hisparse_coordinator.has_host_cache and not (
+            self.hisparse_coordinator.has_host_capacity(
                 host_blocks_to_allocate + reserved_host_blocks
             )
         ):
@@ -597,7 +599,7 @@ class KVCacheManager:
             ):
                 shortage = required + watermark + reserved - pool.get_num_free_blocks()
                 if shortage > 0:
-                    self.hisparse_manager.reclaim_resident_blocks(pool_id, shortage)
+                    self.hisparse_coordinator.reclaim_resident_blocks(pool_id, shortage)
             lacks_capacity = any(
                 required + watermark > pool.get_num_free_blocks() - reserved
                 for required, watermark, reserved, pool in zip(
@@ -704,8 +706,8 @@ class KVCacheManager:
     def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
         """Return blocks to their owning physical pool."""
         device_blocks = (
-            self.hisparse_manager.free_host_blocks(blocks)
-            if self.hisparse_manager.has_host_cache
+            self.hisparse_coordinator.free_host_blocks(blocks)
+            if self.hisparse_coordinator.has_host_cache
             else blocks
         )
         by_pool: dict[int, list[KVCacheBlock]] = {}
@@ -723,7 +725,7 @@ class KVCacheManager:
         """
         # Connector eviction IDs refer to the persistent/source domain. Other
         # pools can reuse the same numeric IDs for ephemeral allocations.
-        if not self.hisparse_manager.evict_host_blocks(block_ids):
+        if not self.hisparse_coordinator.evict_host_blocks(block_ids):
             self.block_pool.evict_blocks(block_ids)
 
     def reset_prefix_cache(self) -> bool:
@@ -737,7 +739,7 @@ class KVCacheManager:
         """
         if not all(pool.reset_prefix_cache() for pool in self.block_pools):
             return False
-        if not self.hisparse_manager.reset_prefix_cache():
+        if not self.hisparse_coordinator.reset_prefix_cache():
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -785,7 +787,7 @@ class KVCacheManager:
             A list of KV cache events.
         """
         events = [event for pool in self.block_pools for event in pool.take_events()]
-        events.extend(self.hisparse_manager.take_events())
+        events.extend(self.hisparse_coordinator.take_events())
         for event in events:
             if not isinstance(event, BlockStored):
                 continue

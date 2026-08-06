@@ -63,7 +63,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, MambaSpec
-from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseOffloadWorker
+from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseWorker
 from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.outputs import (
     DraftTokenIds,
@@ -294,7 +294,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
         # HiSparse state if configured.
-        self.hisparse_worker: HiSparseOffloadWorker | None = None
+        self.hisparse_worker: HiSparseWorker | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None

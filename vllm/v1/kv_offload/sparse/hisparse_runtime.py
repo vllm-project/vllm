@@ -222,7 +222,7 @@ def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
     )
 
 
-def release_pinned_state(runtimes: list[HiSparseOffloadRuntime]) -> None:
+def release_pinned_state(runtimes: list[HiSparseRuntime]) -> None:
     """Synchronize, unregister host KV pools, and drop global state."""
     global _CURRENT_INDEX_GROUP
 
@@ -362,7 +362,7 @@ class _GroupPlan:
 _PINNED_HOST_POOLS: list[torch.Tensor] = []
 _INDEXER_SOURCES: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 _HOST_WRITE_EVENTS: dict[str, torch.Event] = {}
-_CURRENT_INDEX_GROUP: tuple[object, HiSparseOffloadRuntime | None] | None = None
+_CURRENT_INDEX_GROUP: tuple[object, HiSparseRuntime | None] | None = None
 
 
 @cache
@@ -375,7 +375,7 @@ def _get_copy_stream(device: torch.device) -> torch.Stream:
     return torch.Stream(device=device)
 
 
-class HiSparseOffloadRuntime:
+class HiSparseRuntime:
     """Per-cache host/hot data plane and GPU replacement state."""
 
     def __init__(
@@ -444,8 +444,8 @@ class HiSparseOffloadRuntime:
         self._plan = _get_group_plan(
             self.device, max_swap_rows or max_num_reqs, config.top_k
         )
-        self.followers: list[HiSparseOffloadRuntime] = []
-        self.leader: HiSparseOffloadRuntime | None = None
+        self.followers: list[HiSparseRuntime] = []
+        self.leader: HiSparseRuntime | None = None
         self._prefetch_event: torch.Event | None = None
         self._copy_stream = _get_copy_stream(self.device)
 
@@ -454,7 +454,7 @@ class HiSparseOffloadRuntime:
         self.resident_source_index = -1
         self.request_state_indices: torch.Tensor | None = None
 
-    def join_group(self, leader: HiSparseOffloadRuntime) -> None:
+    def join_group(self, leader: HiSparseRuntime) -> None:
         self.leader = leader
         self._plan = leader._plan
         leader.followers.append(self)
@@ -504,7 +504,7 @@ class HiSparseOffloadRuntime:
     def bind_source_cache(self, kv_cache: torch.Tensor) -> None:
         if kv_cache.dtype != self.kv_dtype or kv_cache.shape[-1] != self.row_width:
             raise ValueError(
-                "HiSparse offload runtime bound to a KV cache with mismatched "
+                "HiSparse runtime bound to a KV cache with mismatched "
                 f"layout: expected ({self.row_width}, {self.kv_dtype}), got "
                 f"({kv_cache.shape[-1]}, {kv_cache.dtype})."
             )
@@ -763,7 +763,7 @@ class HiSparseOffloadRuntime:
 class HiSparseCacheHandle:
     """Attention-facing handle for resident KV and sparse offload state."""
 
-    def __init__(self, runtime: HiSparseOffloadRuntime) -> None:
+    def __init__(self, runtime: HiSparseRuntime) -> None:
         self.view: PagedCacheView | None = None
         self.block_table: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None
@@ -935,7 +935,7 @@ def create_hisparse_cache_handle(
             current_platform.device_type, torch.accelerator.current_device_index()
         )
 
-    runtime = HiSparseOffloadRuntime(
+    runtime = HiSparseRuntime(
         config=config,
         max_num_reqs=max_num_reqs,
         max_swap_rows=max_swap_rows,

@@ -33,7 +33,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.kv_offload.sparse.hisparse_cache import get_indexer_source
+from vllm.v1.kv_offload.sparse.hisparse_runtime import get_indexer_source
 
 
 class DeepseekV32Indexer(nn.Module):
