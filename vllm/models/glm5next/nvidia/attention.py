@@ -542,6 +542,7 @@ class Glm5NextMLAAttention(nn.Module):
             quant_config,
             prefix,
             skip_topk=_skip_topk,
+            fuse_qkv_rmsnorm=True,
         )
 
     def forward(

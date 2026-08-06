@@ -8,6 +8,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
 
 
@@ -69,6 +70,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         skip_topk: bool = False,
         non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
+        fuse_qkv_rmsnorm: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -98,6 +100,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # the topk_tokens buffer written by a previous layer in the same pass.
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
         self.skip_topk = skip_topk
+        # When True, fuse the q_a and kv_a RMSNorms into a single kernel launch
+        # (MLA layers with q-LoRA). Opt-in; default False preserves other models.
+        self.fuse_qkv_rmsnorm = fuse_qkv_rmsnorm
         # qrep is active when the query projection is a DCP-group-sharded layer
         # that materializes the full group head set locally.
         q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
@@ -172,8 +177,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
             q_proj_layer = self.q_b_proj
+            if not self.fuse_qkv_rmsnorm:
+                q_c = self.q_a_layernorm(q_c)
             q_proj_input = q_c
         else:
             assert self.kv_a_proj_with_mqa is not None, (
@@ -187,7 +193,18 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q_proj_input = hidden_states
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+        if self.fuse_qkv_rmsnorm and q_c is not None:
+            # Fuse q_a + kv_a RMSNorm into one kernel launch (q_c is still the
+            # pre-norm projection output here).
+            q_proj_input, kv_c_normed = fused_q_kv_rmsnorm(
+                q_c,
+                kv_c,
+                self.q_a_layernorm.weight.data,
+                self.kv_a_layernorm.weight.data,
+                self.q_a_layernorm.variance_epsilon,
+            )
+        else:
+            kv_c_normed = self.kv_a_layernorm(kv_c)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
