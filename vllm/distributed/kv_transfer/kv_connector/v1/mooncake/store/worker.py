@@ -1699,7 +1699,11 @@ class MooncakeStoreWorker:
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
         fine_grained = self.coord.enable_partial_hash_hits
-        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
+        lookup_masks = (
+            None
+            if fine_grained
+            else self.coord.lookup_mask(token_len, apply_eagle=apply_eagle)
+        )
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]

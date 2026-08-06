@@ -830,7 +830,6 @@ def generate_eagle_block_hash_extra_keys(
     )
     return (
         (
-            "eagle_successor",
             block_extra_keys,
             request.all_token_ids[end_token_idx],
             successor_extra_keys,
@@ -871,7 +870,7 @@ def get_request_block_hash_event_data(
         BlockHash | None,
         int,
         int,
-        tuple[Any, ...] | None,
+        list[tuple[Any, ...] | None],
     ]
     | None
 ):
@@ -881,16 +880,22 @@ def get_request_block_hash_event_data(
     assert block_size > hash_block_size
     assert block_size % hash_block_size == 0
 
-    hash_end = (block_idx + 1) * block_size
-    hash_start = hash_end - hash_block_size
+    hash_start = block_idx * block_size
+    hash_end = hash_start + block_size
     hash_idx = hash_end // hash_block_size - 1
-    parent_hash = request.block_hashes[hash_idx - 1] if hash_idx > 0 else None
-    extra_keys, _ = generate_request_block_hash_extra_keys(
-        request,
-        hash_start,
-        hash_end,
-        0,
-    )
+    parent_idx = hash_start // hash_block_size - 1
+    parent_hash = request.block_hashes[parent_idx] if parent_idx >= 0 else None
+    extra_keys: list[tuple[Any, ...] | None] = []
+    curr_mm_idx = 0
+    for unit_start in range(hash_start, hash_end, hash_block_size):
+        unit_extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
+            request,
+            unit_start,
+            unit_start + hash_block_size,
+            curr_mm_idx,
+        )
+        extra_keys.append(unit_extra_keys)
+
     return (
         request.block_hashes[hash_idx],
         parent_hash,

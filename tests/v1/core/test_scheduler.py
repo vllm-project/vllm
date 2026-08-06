@@ -258,12 +258,104 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
     scheduler._update_requests_with_invalid_blocks(
         [request], {block_ids[0]}, {}, evict_blocks=False
     )
-    assert request.num_materialized_block_hashes == 0
+    assert request.num_publishable_block_hashes == 0
 
-    request.mark_eagle_kv_materialized(4, block_size)
+    request.mark_eagle_hashes_publishable(4, block_size)
     scheduler.running.remove(request)
     scheduler._preempt_request(request, timestamp=0.0)
-    assert request.num_materialized_block_hashes == 0
+    assert request.num_publishable_block_hashes == 0
+
+
+def test_scheduler_does_not_publish_eagle_blocks_without_worker_acknowledgement():
+    block_size = 2
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=16,
+    )
+    scheduler.use_eagle_prefix_cache_hashing = True
+    request = Request(
+        request_id="request",
+        prompt_token_ids=[0, 1, 2, 3, 4],
+        sampling_params=SamplingParams(max_tokens=3),
+        pooling_params=None,
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        eagle_hashing_enabled=True,
+    )
+    scheduler.add_request(request)
+
+    first_step = scheduler.schedule()
+    scheduler.update_from_output(
+        first_step,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[5]],
+        ),
+    )
+    assert request.num_publishable_block_hashes == 0
+
+    second_step = scheduler.schedule()
+    assert second_step.scheduled_cached_reqs is not None
+    scheduler.update_from_output(
+        second_step,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[6]],
+        ),
+    )
+
+    assert request.num_publishable_block_hashes == 0
+
+
+def test_connector_finish_includes_partial_eagle_block(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    block_size = 16
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=64,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(33)),
+        sampling_params=SamplingParams(max_tokens=2),
+        pooling_params=None,
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        eagle_hashing_enabled=True,
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[33]],
+            draft_kv_materialized_req_ids={request.request_id},
+        ),
+    )
+    assert request.num_computed_tokens == 33
+    assert request.num_publishable_block_hashes == 2
+
+    captured_block_ids = None
+
+    def request_finished(_request, block_ids):
+        nonlocal captured_block_ids
+        captured_block_ids = block_ids
+        return False, None
+
+    assert scheduler.connector is not None
+    monkeypatch.setattr(scheduler.connector, "request_finished", request_finished)
+    scheduler._connector_finished(request)
+
+    assert captured_block_ids is not None
+    assert len(captured_block_ids) == 3
 
 
 def test_schedule_multimodal_requests():

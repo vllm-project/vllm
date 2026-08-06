@@ -313,6 +313,8 @@ class BlockPool:
                 kv_cache_group_id,
             ):
                 return
+            if not new_hashes:
+                return
 
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
@@ -363,6 +365,9 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
     ) -> bool:
+        if not request.eagle_hashing_enabled or block_size == self.hash_block_size:
+            return False
+
         for block_idx in block_indices:
             event_data = get_request_block_hash_event_data(
                 request,
@@ -370,19 +375,23 @@ class BlockPool:
                 block_size,
                 self.hash_block_size,
             )
-            if event_data is None:
-                return False
-            block_hash, parent_hash, hash_start, hash_end, extra_keys = event_data
+            assert event_data is not None
+            block_hash, parent_hash, block_start, block_end, extra_keys = event_data
             self.kv_event_queue.append(
                 self._build_block_stored_event(
                     request,
                     block_hashes=[maybe_convert_block_hash(block_hash)],
-                    parent_block_hash=parent_hash,
-                    start_token_idx=hash_start,
-                    end_token_idx=hash_end,
-                    block_size=self.hash_block_size,
+                    parent_block_hash=(
+                        maybe_convert_block_hash(parent_hash)
+                        if parent_hash is not None
+                        else None
+                    ),
+                    start_token_idx=block_start,
+                    end_token_idx=block_end,
+                    block_size=block_size,
                     kv_cache_group_id=kv_cache_group_id,
-                    extra_keys_list=[extra_keys],
+                    extra_keys_list=extra_keys,
+                    hash_block_size=self.hash_block_size,
                 )
             )
         return True
@@ -397,6 +406,7 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         extra_keys_list: list[tuple[Any, ...] | None],
+        hash_block_size: int | None = None,
     ) -> BlockStored:
         """Build a ``BlockStored`` KV event for ``request``.
 
@@ -414,6 +424,7 @@ class BlockPool:
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
+            hash_block_size=hash_block_size,
         )
 
     def emit_cached_block_events(

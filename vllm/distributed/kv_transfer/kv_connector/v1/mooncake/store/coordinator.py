@@ -211,6 +211,7 @@ class MooncakeStoreCoordinator:
     def lookup_mask(
         self,
         aligned_token_len: int,
+        apply_eagle: bool = True,
     ) -> tuple[list[bool] | None, ...]:
         """Per-group lookup masks.
 
@@ -223,7 +224,7 @@ class MooncakeStoreCoordinator:
             0,
             retention_interval=None,
             num_prompt_tokens=None,
-            apply_eagle=True,
+            apply_eagle=apply_eagle,
         )
 
     def _reachable_masks(

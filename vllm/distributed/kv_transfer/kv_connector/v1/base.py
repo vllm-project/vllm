@@ -101,7 +101,12 @@ class SupportsHMA(ABC):
 
         NOTE(Kuntai): This function is only supported by connectors that support HMA.
 
-        The connector may assumes responsibility for freeing the blocks
+        ``block_ids`` contains every resident block covering the request's
+        computed prefix, including a partial physical tail. Content-addressed
+        connectors must apply ``request.num_publishable_block_hashes`` before
+        storing blocks by hash.
+
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
@@ -183,7 +188,10 @@ class KVConnectorBase_V1(ABC):
 
     @property
     def supports_eagle_prefix_cache_hashing(self) -> bool:
-        """Whether this engine can use successor-aware EAGLE cache keys."""
+        """Whether this engine can use successor-aware EAGLE cache keys.
+
+        Engines sharing a content-addressed cache must make the same choice.
+        """
         return False
 
     @property
@@ -570,7 +578,12 @@ class KVConnectorBase_V1(ABC):
         Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        ``block_ids`` contains every resident block covering the request's
+        computed prefix, including a partial physical tail. Content-addressed
+        connectors must apply ``request.num_publishable_block_hashes`` before
+        storing blocks by hash.
+
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:

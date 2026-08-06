@@ -838,7 +838,7 @@ def test_eagle_materialized_prefix_is_retried_without_new_blocks():
         all_token_ids=token_ids,
         block_hashes=[b"eagle-0"],
         eagle_hashing_enabled=True,
-        num_materialized_block_hashes=1,
+        num_publishable_block_hashes=1,
         num_output_placeholders=0,
     )
     scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
@@ -881,7 +881,7 @@ def test_eagle_finished_request_flushes_materialized_prefix():
         block_hashes=[b"eagle-0"],
         eagle_hashing_enabled=True,
         num_tokens=32,
-        num_materialized_block_hashes=1,
+        num_publishable_block_hashes=1,
     )
     scheduler._request_trackers["req-0"] = RequestTracker(
         req_id="req-0",

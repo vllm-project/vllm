@@ -677,7 +677,7 @@ def test_stale_output_does_not_restore_eagle_materialization():
     assert in_flight_step.scheduled_cached_reqs.num_computed_tokens == [9]
 
     scheduler.reset_prefix_cache(reset_running_requests=True)
-    assert request.num_materialized_block_hashes == 0
+    assert request.num_publishable_block_hashes == 0
     assert request.num_stale_output_tokens > 0
 
     scheduler.update_from_output(
@@ -686,7 +686,7 @@ def test_stale_output_does_not_restore_eagle_materialization():
     )
 
     assert request.num_stale_output_tokens == 0
-    assert request.num_materialized_block_hashes == 0
+    assert request.num_publishable_block_hashes == 0
 
 
 def test_requires_kv_delivery_defaults_to_producer_role():

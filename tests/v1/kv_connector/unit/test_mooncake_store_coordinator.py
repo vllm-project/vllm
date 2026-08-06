@@ -636,6 +636,23 @@ def test_successor_hashes_skip_legacy_eagle_drop():
     assert successor_hit == 64
 
 
+def test_successor_hash_lookup_and_store_masks_match():
+    groups = [
+        KVCacheGroupSpec(["full"], _full(64)),
+        KVCacheGroupSpec(
+            ["mtp"],
+            _swa(block_size=16, sliding_window=32),
+            is_eagle_group=True,
+        ),
+    ]
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+
+    store_masks = coord.store_mask(128, apply_eagle=False)
+    lookup_masks = coord.lookup_mask(128, apply_eagle=False)
+
+    assert lookup_masks == store_masks
+
+
 def test_dsv4_five_group_eagle_store_lookup_round_trip():
     """Cover the five KV groups observed with DeepSeek-V4-Flash + MTP.
 

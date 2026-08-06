@@ -33,9 +33,9 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-def _materialized_hashes(request: Request) -> list[BlockHash]:
+def _publishable_hashes(request: Request) -> list[BlockHash]:
     if request.eagle_hashing_enabled:
-        return request.block_hashes[: request.num_materialized_block_hashes]
+        return request.block_hashes[: request.num_publishable_block_hashes]
     return request.block_hashes
 
 
@@ -59,7 +59,7 @@ def _request_hashes_for_meta(
 ) -> list[BlockHash]:
     if load_spec is not None and load_spec.can_load:
         return request.block_hashes
-    return _materialized_hashes(request)
+    return _publishable_hashes(request)
 
 
 def _max_save_tokens(
@@ -73,7 +73,7 @@ def _max_save_tokens(
         and load_spec.can_load
     ):
         return None
-    return request.num_materialized_block_hashes * hash_block_size
+    return request.num_publishable_block_hashes * hash_block_size
 
 
 class MooncakeStoreScheduler:
@@ -362,7 +362,7 @@ class MooncakeStoreScheduler:
                         self._block_size,
                         load_spec=None,
                         skip_save=force_skip_save,
-                        block_hashes=_materialized_hashes(unfinished_req),
+                        block_hashes=_publishable_hashes(unfinished_req),
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
@@ -436,7 +436,7 @@ class MooncakeStoreScheduler:
                         req_id=req_id,
                         token_len_chunk=0,
                         block_ids=tracker.allocated_block_ids,
-                        block_hashes=_materialized_hashes(req_tuple[0]),
+                        block_hashes=_publishable_hashes(req_tuple[0]),
                         eagle_hashing_enabled=req_tuple[0].eagle_hashing_enabled,
                         can_save=True,
                         num_prompt_tokens=tracker.prefill_end_tokens,
@@ -464,13 +464,13 @@ class MooncakeStoreScheduler:
         if request.eagle_hashing_enabled:
             tracker.token_len = min(
                 request.num_tokens,
-                request.num_materialized_block_hashes * self._hash_block_size,
+                request.num_publishable_block_hashes * self._hash_block_size,
             )
             tracker.allocated_block_ids = tuple(group.copy() for group in block_ids)
             req_meta = ReqMeta.from_request_tracker(
                 tracker,
                 self._block_size,
-                block_hashes=_materialized_hashes(request),
+                block_hashes=_publishable_hashes(request),
                 is_last_chunk=True,
                 eagle_hashing_enabled=True,
                 max_save_tokens=_max_save_tokens(request, self._hash_block_size),

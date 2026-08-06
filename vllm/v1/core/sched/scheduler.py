@@ -1300,7 +1300,7 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
-        request.invalidate_eagle_kv_materialization()
+        request.invalidate_eagle_hash_publication()
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -1680,13 +1680,13 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
-    def _mark_eagle_kv_materialized(
+    def _mark_eagle_hashes_publishable(
         self,
         request: Request,
         num_tokens: int,
     ) -> None:
         if request.eagle_hashing_enabled:
-            request.mark_eagle_kv_materialized(
+            request.mark_eagle_hashes_publishable(
                 num_tokens,
                 self.kv_cache_manager.block_pool.hash_block_size,
             )
@@ -1707,17 +1707,14 @@ class Scheduler(SchedulerInterface):
         draft_kv_materialized_req_ids = (
             model_runner_output.draft_kv_materialized_req_ids or set()
         )
-        materialized_prefix_tokens = {
-            req.req_id: req.num_computed_tokens
-            for req in scheduler_output.scheduled_new_reqs
-        }
-        if (cached_reqs := scheduler_output.scheduled_cached_reqs) is not None:
-            materialized_prefix_tokens.update(
-                zip(
-                    cached_reqs.req_ids,
-                    cached_reqs.num_computed_tokens,
-                )
-            )
+        publishable_prefix_tokens = (
+            {
+                req.req_id: req.num_computed_tokens
+                for req in scheduler_output.scheduled_new_reqs
+            }
+            if self.use_eagle_prefix_cache_hashing
+            else {}
+        )
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -1795,9 +1792,9 @@ class Scheduler(SchedulerInterface):
             if (
                 not output_is_stale
                 and request.eagle_hashing_enabled
-                and (prefix_tokens := materialized_prefix_tokens.get(req_id, 0))
+                and (prefix_tokens := publishable_prefix_tokens.get(req_id, 0))
             ):
-                self._mark_eagle_kv_materialized(request, prefix_tokens)
+                self._mark_eagle_hashes_publishable(request, prefix_tokens)
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
@@ -1865,13 +1862,13 @@ class Scheduler(SchedulerInterface):
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
             ):
-                num_materialized_tokens = (
+                num_publishable_tokens = (
                     request.num_computed_tokens - request.num_output_placeholders
                 )
-                self._mark_eagle_kv_materialized(request, num_materialized_tokens)
+                self._mark_eagle_hashes_publishable(request, num_publishable_tokens)
                 self.kv_cache_manager.cache_blocks(
                     request,
-                    num_materialized_tokens,
+                    num_publishable_tokens,
                 )
 
             if new_token_ids and self.structured_output_manager.should_advance(
@@ -2656,16 +2653,11 @@ class Scheduler(SchedulerInterface):
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
-        num_transferable_tokens = request.num_computed_tokens
-        if request.eagle_hashing_enabled:
-            num_transferable_tokens = min(
-                num_transferable_tokens,
-                request.num_materialized_block_hashes
-                * self.kv_cache_manager.block_pool.hash_block_size,
-            )
+        # Direct-transfer connectors need the partial physical tail. Store-style
+        # connectors enforce the EAGLE hash-publication fence themselves.
         block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
             request_id=request.request_id,
-            num_computed_tokens=num_transferable_tokens,
+            num_computed_tokens=request.num_computed_tokens,
         )
 
         if not isinstance(self.connector, SupportsHMA):
@@ -2714,7 +2706,7 @@ class Scheduler(SchedulerInterface):
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
                 # Cache any valid computed tokens.
-                self._mark_eagle_kv_materialized(
+                self._mark_eagle_hashes_publishable(
                     request,
                     request.num_computed_tokens,
                 )
@@ -2737,7 +2729,7 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            self._mark_eagle_kv_materialized(
+            self._mark_eagle_hashes_publishable(
                 request,
                 request.num_computed_tokens,
             )
@@ -2914,7 +2906,7 @@ class Scheduler(SchedulerInterface):
                     )
                     request.num_computed_tokens = req_num_computed_tokens
 
-                request.invalidate_eagle_kv_materialization(
+                request.invalidate_eagle_hash_publication(
                     request.num_computed_tokens
                     // self.kv_cache_manager.block_pool.hash_block_size,
                 )

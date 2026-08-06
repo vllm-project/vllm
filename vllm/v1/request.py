@@ -203,7 +203,9 @@ class Request:
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []
-        self.num_materialized_block_hashes = 0
+        # Leading successor-aware hashes whose target and draft KV are ready
+        # for content-addressed publication.
+        self.num_publishable_block_hashes = 0
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -276,36 +278,34 @@ class Request:
         num_hashes = max(num_tokens - int(self.eagle_hashing_enabled), 0)
         num_hashes //= hash_block_size
         del self.block_hashes[num_hashes:]
-        self.num_materialized_block_hashes = min(
-            self.num_materialized_block_hashes,
+        self.num_publishable_block_hashes = min(
+            self.num_publishable_block_hashes,
             num_hashes,
         )
 
-    def mark_eagle_kv_materialized(
+    def mark_eagle_hashes_publishable(
         self,
-        num_tokens: int | None = None,
-        hash_block_size: int | None = None,
+        num_tokens: int,
+        hash_block_size: int,
     ) -> None:
-        """Publish successor hashes whose draft KV was written by the worker."""
-        materialized_tokens = min(
-            self.num_tokens,
-            self.num_tokens if num_tokens is None else num_tokens,
+        """Advance the successor-hash publication fence after worker ACK."""
+        acknowledged_tokens = min(self.num_tokens, num_tokens)
+        num_hashes = min(
+            len(self.block_hashes),
+            acknowledged_tokens // hash_block_size,
         )
-        num_hashes = len(self.block_hashes)
-        if hash_block_size is not None:
-            num_hashes = min(num_hashes, materialized_tokens // hash_block_size)
-        self.num_materialized_block_hashes = max(
-            self.num_materialized_block_hashes,
+        self.num_publishable_block_hashes = max(
+            self.num_publishable_block_hashes,
             num_hashes,
         )
 
-    def invalidate_eagle_kv_materialization(
+    def invalidate_eagle_hash_publication(
         self,
         num_hashes: int = 0,
     ) -> None:
-        """Discard draft-KV readiness beyond a surviving resident prefix."""
-        self.num_materialized_block_hashes = min(
-            self.num_materialized_block_hashes,
+        """Lower the publication fence to a surviving resident prefix."""
+        self.num_publishable_block_hashes = min(
+            self.num_publishable_block_hashes,
             num_hashes,
         )
 
