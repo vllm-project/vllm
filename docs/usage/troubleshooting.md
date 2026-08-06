@@ -320,7 +320,7 @@ If you see an error like `RuntimeError: CUDA error: the provided PTX was compile
 
 The released vLLM wheels are compiled with a specific version of CUDA toolkit, and the compiled code might fail to run on lower versions of CUDA drivers. Read [CUDA compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/) for more details. **This is only supported on select professional and datacenter NVIDIA GPUs.**
 
-If you are using the vLLM official Docker image, you can solve this by adding `-e VLLM_ENABLE_CUDA_COMPATIBILITY=1` to your `docker run` command. This will enable the pre-installed CUDA forward compatibility libraries.
+If you are using the vLLM official Docker image, you can solve this by adding `-e VLLM_ENABLE_CUDA_COMPATIBILITY=1` to your `docker run` command. This will enable the pre-installed CUDA forward compatibility libraries. For CUDA 13 images, the oldest supported combination is an R535 host driver on Linux 3.10 or newer. See [Running on Systems with Older CUDA Drivers](../getting_started/installation/gpu.md#running-on-systems-with-older-cuda-drivers) for the complete requirements.
 
 If you are running vLLM outside of Docker, the solution is to install the `cuda-compat` package from your package manager with the [CUDA repository](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/) enabled. For example, on Ubuntu, you can run `sudo apt-get install cuda-compat-12-9`, and then set `export VLLM_ENABLE_CUDA_COMPATIBILITY=1` and `export VLLM_CUDA_COMPATIBILITY_PATH="/usr/local/cuda-12.9/compat"`.
 
