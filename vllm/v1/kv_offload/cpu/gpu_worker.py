@@ -3,7 +3,9 @@
 import functools
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -18,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    CanonicalPageMapping,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingWorker,
@@ -33,7 +36,7 @@ logger = init_logger(__name__)
 
 
 def _select_swap_blocks_fn(
-    kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
+    layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
 ):
     """Resolve the swap_blocks function for a handler at init time."""
@@ -46,7 +49,7 @@ def _select_swap_blocks_fn(
     # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
     if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
         return ops.swap_blocks_batch
-    page_sizes = [r.page_size_bytes for g in kv_cache_groups_data_refs for r in g]
+    page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
     # Triton wins only on small, 8-byte-aligned payloads.
     if (
         not page_sizes
@@ -120,34 +123,44 @@ def compute_sub_block_ptrs(
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
 
-def _ref_copy_expansion(
-    ref: CanonicalKVCacheRef, gpu_to_cpu: bool
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Static per-sub-block (src_offsets, dst_offsets, sizes) for one data ref
-    under the canonical CPU layout, expanded from the ref's mapped runs."""
+class CopyPlan(NamedTuple):
+    """Precomputed fragment-copy template for one data ref under the canonical
+    CPU layout, unrolled from the ref's mapped runs. Offsets are relative to
+    the per-block base pointers on each side."""
+
+    frag_offsets_src: np.ndarray
+    frag_offsets_dst: np.ndarray
+    frag_sizes: np.ndarray
+
+    @property
+    def num_frags(self) -> int:
+        return len(self.frag_sizes)
+
+
+def _build_copy_plan(ref: CanonicalKVCacheRef, gpu_to_cpu: bool) -> CopyPlan:
+    """Unroll one data ref's mapped runs into a per-fragment CopyPlan."""
     mapping = ref.mapping
     assert mapping is not None
-    runs = mapping.runs
     local: list[int] = []
     canonical: list[int] = []
     sizes: list[int] = []
-    for run in runs:
+    for run in mapping.runs:
         for i in range(run.num_fragments):
             local.append(run.local_offset + i * run.local_stride)
             canonical.append(run.canonical_offset + i * run.canonical_stride)
             sizes.append(run.fragment_size)
     src, dst = (local, canonical) if gpu_to_cpu else (canonical, local)
-    return (
-        np.asarray(src, dtype=np.uint64),
-        np.asarray(dst, dtype=np.uint64),
-        np.asarray(sizes, dtype=np.int64),
+    return CopyPlan(
+        frag_offsets_src=np.asarray(src, dtype=np.uint64),
+        frag_offsets_dst=np.asarray(dst, dtype=np.uint64),
+        frag_sizes=np.asarray(sizes, dtype=np.int64),
     )
 
 
-def _sub_block_ids(
+def _canonical_page_ids(
     block_ids: np.ndarray, blocks_per_chunk: int, count: int, skip_count: int
 ) -> np.ndarray:
-    """Global sub-block ids matching compute_sub_block_ptrs' enumeration.
+    """Global canonical page ids matching compute_sub_block_ptrs' enumeration.
     These identify canonical pages consistently across ranks, so they key
     CanonicalPageMapping.is_writer rotation."""
     if blocks_per_chunk == 1:
@@ -158,20 +171,21 @@ def _sub_block_ids(
     return flat[skip_count : skip_count + count]
 
 
-def _canonical_tensor_areas(
-    kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]], num_tensors: int
+def _canonical_block_sizes(
+    layer_refs_per_group: list[list[CanonicalKVCacheRef]], num_tensors: int
 ) -> list[int]:
     """Canonical CPU bytes per GPU block for each tensor, taken from the refs'
     mappings. Requires every ref to carry a mapping."""
-    areas = [0] * num_tensors
-    for group_refs in kv_cache_groups_data_refs:
-        for ref in group_refs:
+    canonical_bytes_per_block = [0] * num_tensors
+    for layer_refs in layer_refs_per_group:
+        for ref in layer_refs:
             assert ref.mapping is not None
-            areas[ref.tensor_idx] = max(
-                areas[ref.tensor_idx], ref.mapping.canonical_page_size_bytes
+            canonical_bytes_per_block[ref.tensor_idx] = max(
+                canonical_bytes_per_block[ref.tensor_idx],
+                ref.mapping.canonical_page_size_bytes,
             )
-    assert all(area > 0 for area in areas)
-    return areas
+    assert all(size > 0 for size in canonical_bytes_per_block)
+    return canonical_bytes_per_block
 
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
@@ -230,7 +244,7 @@ class SingleDirectionOffloadingHandler:
         gpu_tensors: list[torch.Tensor],
         cpu_tensors: list[torch.Tensor],
         blocks_per_chunk: int,
-        kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
+        layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
@@ -244,7 +258,7 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors: list of CPU KV cache tensors.
                 Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
                 Order should match gpu_tensors.
-            kv_cache_groups_data_refs: list of CanonicalKVCacheRef per group.
+            layer_refs_per_group: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
@@ -252,8 +266,8 @@ class SingleDirectionOffloadingHandler:
         assert len(gpu_tensors) == len(cpu_tensors)
         assert len(gpu_tensors) > 0
 
-        canonical_areas = (
-            _canonical_tensor_areas(kv_cache_groups_data_refs, len(gpu_tensors))
+        canonical_bytes_per_block = (
+            _canonical_block_sizes(layer_refs_per_group, len(gpu_tensors))
             if canonical_layout
             else None
         )
@@ -268,8 +282,10 @@ class SingleDirectionOffloadingHandler:
             assert cpu_tensor.device.type == "cpu"
             _, gpu_page_size = gpu_tensor.shape
             _, cpu_page_size = cpu_tensor.shape
-            if canonical_areas is not None:
-                assert cpu_page_size == canonical_areas[t_idx] * blocks_per_chunk
+            if canonical_bytes_per_block is not None:
+                assert (
+                    cpu_page_size == canonical_bytes_per_block[t_idx] * blocks_per_chunk
+                )
             else:
                 assert cpu_page_size == gpu_page_size * blocks_per_chunk
 
@@ -280,9 +296,9 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors if gpu_to_cpu else gpu_tensors
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
-        self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
+        self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
-            kv_cache_groups_data_refs, gpu_to_cpu
+            layer_refs_per_group, gpu_to_cpu
         )
 
         # GPU blocks may be smaller
@@ -290,13 +306,11 @@ class SingleDirectionOffloadingHandler:
         self.src_blocks_per_chunk = 1 if self.gpu_to_cpu else blocks_per_chunk
         self.dst_blocks_per_chunk = blocks_per_chunk if self.gpu_to_cpu else 1
 
-        # Per (group, ref) static copy-op expansions for the canonical layout
-        self._ref_expansions: (
-            list[list[tuple[np.ndarray, np.ndarray, np.ndarray]]] | None
-        ) = (
+        # Per (group, ref) static copy plans for the canonical layout
+        self._canonical_copy_plans: list[list[CopyPlan]] | None = (
             [
-                [_ref_copy_expansion(ref, gpu_to_cpu) for ref in group_refs]
-                for group_refs in kv_cache_groups_data_refs
+                [_build_copy_plan(ref, gpu_to_cpu) for ref in layer_refs]
+                for layer_refs in layer_refs_per_group
             ]
             if canonical_layout
             else None
@@ -314,6 +328,152 @@ class SingleDirectionOffloadingHandler:
         self._event_pool: list[torch.Event] = []
         # list of pinned descriptor buffer sets available for re-use
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+    def _estimate_max_copy_ops(self, group_sizes: Sequence[int]) -> int:
+        """Upper bound on the number of copy descriptors for a transfer.
+
+        Exact for the legacy layout. The canonical path may fill fewer:
+        writer rotation later drops the blocks this rank does not write."""
+        num_copy_ops = 0
+        for g_idx, (group_size, layer_refs) in enumerate(
+            zip(group_sizes, self.layer_refs_per_group)
+        ):
+            if self._canonical_copy_plans is None:
+                num_copy_ops += group_size * len(layer_refs)
+            else:
+                num_copy_ops += group_size * sum(
+                    plan.num_frags for plan in self._canonical_copy_plans[g_idx]
+                )
+        return num_copy_ops
+
+    def _fill_legacy_ops(
+        self,
+        g_idx: int,
+        group_src: np.ndarray,
+        group_dst: np.ndarray,
+        group_size: int,
+        src_skip_count: int,
+        dst_skip_count: int,
+        all_src: np.ndarray,
+        all_dst: np.ndarray,
+        all_sizes: np.ndarray,
+        op_idx: int,
+    ) -> tuple[int, int]:
+        """Fill one group's copy descriptors for the legacy (worker-private)
+        layout: one whole-page copy per (block, ref).
+
+        Returns (op_idx past the filled descriptors, bytes added)."""
+        num_bytes = 0
+        for data_ref in self.layer_refs_per_group[g_idx]:
+            t_idx = data_ref.tensor_idx
+            end_idx = op_idx + group_size
+
+            compute_sub_block_ptrs(
+                group_src,
+                self.src_blocks_per_chunk,
+                all_src[op_idx:end_idx],
+                self.src_tensors[t_idx],
+                skip_count=src_skip_count,
+            )
+            compute_sub_block_ptrs(
+                group_dst,
+                self.dst_blocks_per_chunk,
+                all_dst[op_idx:end_idx],
+                self.dst_tensors[t_idx],
+                skip_count=dst_skip_count,
+            )
+
+            all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
+            num_bytes += group_size * data_ref.page_size_bytes
+            op_idx = end_idx
+        return op_idx, num_bytes
+
+    def _fill_canonical_ops(
+        self,
+        g_idx: int,
+        group_src: np.ndarray,
+        group_dst: np.ndarray,
+        group_size: int,
+        src_skip_count: int,
+        dst_skip_count: int,
+        all_src: np.ndarray,
+        all_dst: np.ndarray,
+        all_sizes: np.ndarray,
+        op_idx: int,
+    ) -> tuple[int, int]:
+        """Fill one group's copy descriptors for the canonical layout:
+        scatter each block through the ref's precomputed CopyPlan, keeping
+        only the blocks this rank writes.
+
+        Returns (op_idx past the filled descriptors, bytes added)."""
+        assert self._canonical_copy_plans is not None
+        num_bytes = 0
+        for plan, data_ref in zip(
+            self._canonical_copy_plans[g_idx], self.layer_refs_per_group[g_idx]
+        ):
+            if plan.num_frags == 0:
+                continue
+            t_idx = data_ref.tensor_idx
+            block_bases_src = np.empty(group_size, dtype=np.uint64)
+            block_bases_dst = np.empty(group_size, dtype=np.uint64)
+            compute_sub_block_ptrs(
+                group_src,
+                self.src_blocks_per_chunk,
+                block_bases_src,
+                self.src_tensors[t_idx],
+                skip_count=src_skip_count,
+            )
+            compute_sub_block_ptrs(
+                group_dst,
+                self.dst_blocks_per_chunk,
+                block_bases_dst,
+                self.dst_tensors[t_idx],
+                skip_count=dst_skip_count,
+            )
+            mapping = data_ref.mapping
+            assert mapping is not None
+            if self.gpu_to_cpu and mapping.num_writers > 1:
+                block_bases_src, block_bases_dst = self._filter_writer_blocks(
+                    block_bases_src,
+                    block_bases_dst,
+                    mapping,
+                    group_dst,
+                    group_size,
+                    dst_skip_count,
+                )
+            num_active_blocks = len(block_bases_src)
+            end_idx = op_idx + num_active_blocks * plan.num_frags
+            all_src[op_idx:end_idx] = (
+                block_bases_src[:, None] + plan.frag_offsets_src[None, :]
+            ).ravel()
+            all_dst[op_idx:end_idx] = (
+                block_bases_dst[:, None] + plan.frag_offsets_dst[None, :]
+            ).ravel()
+            all_sizes[op_idx:end_idx] = np.tile(plan.frag_sizes, num_active_blocks)
+            num_bytes += num_active_blocks * int(plan.frag_sizes.sum())
+            op_idx = end_idx
+        return op_idx, num_bytes
+
+    def _filter_writer_blocks(
+        self,
+        block_bases_src: np.ndarray,
+        block_bases_dst: np.ndarray,
+        mapping: CanonicalPageMapping,
+        group_dst: np.ndarray,
+        group_size: int,
+        dst_skip_count: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Keep only the blocks this rank writes: replicated ranks take turns
+        writing shared canonical pages, keyed by the rank-consistent CPU-side
+        canonical page id."""
+        cpu_page_ids = _canonical_page_ids(
+            group_dst,
+            self.dst_blocks_per_chunk,
+            group_size,
+            dst_skip_count,
+        )
+        writer_mask = cpu_page_ids % mapping.num_writers == mapping.writer_index
+        return block_bases_src[writer_mask], block_bases_dst[writer_mask]
 
     def transfer_async(
         self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
@@ -352,22 +512,13 @@ class SingleDirectionOffloadingHandler:
         gpu_spec = src_spec if self.gpu_to_cpu else dst_spec
         assert isinstance(gpu_spec, GPULoadStoreSpec)
         group_sizes = gpu_spec.group_sizes
-        assert len(group_sizes) == len(self.kv_cache_groups_data_refs)
+        assert len(group_sizes) == len(self.layer_refs_per_group)
 
         # extract block indices from the GPU spec
         block_indices = gpu_spec.block_indices
-        assert len(block_indices) == len(self.kv_cache_groups_data_refs)
+        assert len(block_indices) == len(self.layer_refs_per_group)
 
-        num_copy_ops = 0
-        for g_idx, (group_size, group_data_refs) in enumerate(
-            zip(group_sizes, self.kv_cache_groups_data_refs)
-        ):
-            if self._ref_expansions is None:
-                num_copy_ops += group_size * len(group_data_refs)
-            else:
-                num_copy_ops += group_size * sum(
-                    len(sizes) for _, _, sizes in self._ref_expansions[g_idx]
-                )
+        num_copy_ops = self._estimate_max_copy_ops(group_sizes)
 
         # reuse a pooled buffer set, growing it if this transfer needs more room
         batch_src, batch_dst, batch_sizes = (
@@ -385,13 +536,19 @@ class SingleDirectionOffloadingHandler:
         all_dst = dst.numpy()
         all_sizes = sizes.numpy()
 
+        fill_group_ops = (
+            self._fill_legacy_ops
+            if self._canonical_copy_plans is None
+            else self._fill_canonical_ops
+        )
+
         src_offset = 0
         dst_offset = 0
         op_idx = 0
         # count total number of bytes copied
         num_transfer_bytes = 0
-        for g_idx, (group_size, block_idx, group_data_refs) in enumerate(
-            zip(group_sizes, block_indices, self.kv_cache_groups_data_refs)
+        for g_idx, (group_size, block_idx) in enumerate(
+            zip(group_sizes, block_indices)
         ):
             if group_size == 0:
                 continue
@@ -409,77 +566,19 @@ class SingleDirectionOffloadingHandler:
             src_end_offset = src_offset + src_blocks_count
             assert src_end_offset <= num_src_blocks
 
-            group_src = src_blocks[src_offset:src_end_offset]
-            group_dst = dst_blocks[dst_offset:dst_end_offset]
-
-            for r_idx, data_ref in enumerate(group_data_refs):
-                t_idx = data_ref.tensor_idx
-
-                if self._ref_expansions is None:
-                    end_idx = op_idx + group_size
-
-                    compute_sub_block_ptrs(
-                        group_src,
-                        self.src_blocks_per_chunk,
-                        all_src[op_idx:end_idx],
-                        self.src_tensors[t_idx],
-                        skip_count=src_logical_blocks_to_skip,
-                    )
-                    compute_sub_block_ptrs(
-                        group_dst,
-                        self.dst_blocks_per_chunk,
-                        all_dst[op_idx:end_idx],
-                        self.dst_tensors[t_idx],
-                        skip_count=dst_logical_blocks_to_skip,
-                    )
-
-                    all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
-                    num_transfer_bytes += group_size * data_ref.page_size_bytes
-                    op_idx = end_idx
-                    continue
-
-                src_off, dst_off, frag_sizes = self._ref_expansions[g_idx][r_idx]
-                if len(frag_sizes) == 0:
-                    continue
-                src_base = np.empty(group_size, dtype=np.uint64)
-                dst_base = np.empty(group_size, dtype=np.uint64)
-                compute_sub_block_ptrs(
-                    group_src,
-                    self.src_blocks_per_chunk,
-                    src_base,
-                    self.src_tensors[t_idx],
-                    skip_count=src_logical_blocks_to_skip,
-                )
-                compute_sub_block_ptrs(
-                    group_dst,
-                    self.dst_blocks_per_chunk,
-                    dst_base,
-                    self.dst_tensors[t_idx],
-                    skip_count=dst_logical_blocks_to_skip,
-                )
-                mapping = data_ref.mapping
-                assert mapping is not None
-                if self.gpu_to_cpu and mapping.num_writers > 1:
-                    # Replicas take turns writing shared canonical pages,
-                    # keyed by the rank-consistent CPU-side sub-block id
-                    cpu_sub_block_ids = _sub_block_ids(
-                        group_dst,
-                        self.dst_blocks_per_chunk,
-                        group_size,
-                        dst_logical_blocks_to_skip,
-                    )
-                    writer_mask = (
-                        cpu_sub_block_ids % mapping.num_writers == mapping.writer_index
-                    )
-                    src_base = src_base[writer_mask]
-                    dst_base = dst_base[writer_mask]
-                num_blocks_written = len(src_base)
-                end_idx = op_idx + num_blocks_written * len(frag_sizes)
-                all_src[op_idx:end_idx] = (src_base[:, None] + src_off[None, :]).ravel()
-                all_dst[op_idx:end_idx] = (dst_base[:, None] + dst_off[None, :]).ravel()
-                all_sizes[op_idx:end_idx] = np.tile(frag_sizes, num_blocks_written)
-                num_transfer_bytes += num_blocks_written * int(frag_sizes.sum())
-                op_idx = end_idx
+            op_idx, group_bytes = fill_group_ops(
+                g_idx,
+                group_src=src_blocks[src_offset:src_end_offset],
+                group_dst=dst_blocks[dst_offset:dst_end_offset],
+                group_size=group_size,
+                src_skip_count=src_logical_blocks_to_skip,
+                dst_skip_count=dst_logical_blocks_to_skip,
+                all_src=all_src,
+                all_dst=all_dst,
+                all_sizes=all_sizes,
+                op_idx=op_idx,
+            )
+            num_transfer_bytes += group_bytes
 
             src_offset = src_end_offset
             dst_offset = dst_end_offset
@@ -617,8 +716,8 @@ class CPUOffloadingWorker(OffloadingWorker):
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
 
-        canonical_areas = (
-            _canonical_tensor_areas(kv_caches.group_data_refs, len(kv_caches.tensors))
+        canonical_bytes_per_block = (
+            _canonical_block_sizes(kv_caches.group_data_refs, len(kv_caches.tensors))
             if canonical_layout
             else None
         )
@@ -632,13 +731,13 @@ class CPUOffloadingWorker(OffloadingWorker):
             )
             cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
 
-            if canonical_areas is not None:
+            if canonical_bytes_per_block is not None:
                 assert mmap_region is not None
-                cpu_tensor = mmap_region.create_next_shared_view(
-                    canonical_areas[t_idx] * blocks_per_chunk
+                cpu_tensor = mmap_region.create_next_canonical_view(
+                    canonical_bytes_per_block[t_idx] * blocks_per_chunk
                 )
             elif mmap_region is not None:
-                cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
+                cpu_tensor = mmap_region.create_next_worker_view(cpu_page_size_bytes)
             else:
                 t0 = time.monotonic()
                 cpu_tensor = torch.zeros(
@@ -662,7 +761,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             blocks_per_chunk=blocks_per_chunk,
-            kv_cache_groups_data_refs=kv_caches.group_data_refs,
+            layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
             mmap_region=mmap_region,
             canonical_layout=canonical_layout,
@@ -672,7 +771,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             blocks_per_chunk=blocks_per_chunk,
-            kv_cache_groups_data_refs=kv_caches.group_data_refs,
+            layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=False,
             canonical_layout=canonical_layout,
         )

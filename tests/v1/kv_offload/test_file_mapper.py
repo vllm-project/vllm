@@ -210,7 +210,7 @@ def test_parallel_agnostic_separates_persistent_layouts():
 
 def test_canonical_layout_changes_storage_namespace():
     # Canonical bytes are not interchangeable with the legacy layout, so the
-    # schema id must fork the storage namespace.
+    # format id must fork the storage namespace.
     from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
     set_kv_cache_layout("NHD")
@@ -221,8 +221,8 @@ def test_canonical_layout_changes_storage_namespace():
         )
     finally:
         set_kv_cache_layout(None)
-    assert "canonical_schema" not in legacy.fields
-    assert canonical.fields["canonical_schema"] == "v1-nhd"
+    assert "canonical_format" not in legacy.fields
+    assert canonical.fields["canonical_format"] == "v1-nhd"
     assert legacy.base_path != canonical.base_path
 
 
