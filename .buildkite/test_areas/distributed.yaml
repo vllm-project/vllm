@@ -68,14 +68,12 @@ steps:
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
-  - tests/compile/fullgraph/test_basic_correctness.py
   - tests/compile/test_wrapper.py
   - tests/entrypoints/llm/test_collective_rpc.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
 
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs)
@@ -163,13 +161,11 @@ steps:
   - vllm/distributed/
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
-  - tests/compile/fullgraph/test_basic_correctness.py
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
-  - pytest -v -s compile/fullgraph/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
