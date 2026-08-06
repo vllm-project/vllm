@@ -1,6 +1,6 @@
 #include "../../../../quantization/w8a8/fp8/common.cuh"
 #include "../../../dispatch_utils.h"
-#include "../../../../cub_helpers.h"
+#include "../../../cub_helpers.h"
 #include "../../vectorization_utils.cuh"
 #include "../../../torch_utils.h"
 #include <torch/csrc/stable/macros.h>

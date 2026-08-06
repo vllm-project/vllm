@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use itertools::Itertools as _;
@@ -6,6 +9,7 @@ use serde_json::Value;
 use validator::{Validate, ValidationErrors};
 use vllm_chat::{ChatOptions, ChatRequest, ChatToolChoice, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
+use vllm_text::{Prompt, TextRequest};
 
 use crate::error::ApiError;
 use crate::routes::openai::chat_completions::convert::{
@@ -32,6 +36,28 @@ pub struct TokenizeCompletionRequest {
     pub add_special_tokens: bool,
     #[serde(default)]
     pub return_token_strs: bool,
+}
+
+impl TokenizeCompletionRequest {
+    /// Lower this tokenize body into a [`TextRequest`] for prompt tokenization.
+    pub fn into_text_request(self, request_id: String) -> TextRequest {
+        TextRequest {
+            request_id,
+            prompt: Prompt::Text(self.prompt),
+            mm_features: None,
+            sampling_params: SamplingParams::default(),
+            decode_options: TextDecodeOptions::default(),
+            intermediate: false,
+            priority: 0,
+            cache_salt: None,
+            add_special_tokens: self.add_special_tokens,
+            data_parallel_rank: None,
+            session_id: None,
+            reasoning_parser_kwargs: None,
+            lora_request: None,
+            arrival_time: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Validate)]
@@ -79,10 +105,12 @@ impl TokenizeChatRequest {
                 generation_prompt_mode,
                 chat_template: self.chat_template,
                 reasoning_effort: None,
+                response_format: None,
                 template_kwargs: self.chat_template_kwargs.unwrap_or_default(),
             },
             tools: convert_tools(self.tools)?,
             tool_choice: ChatToolChoice::Auto,
+            parallel_tool_calls: true,
             decode_options: TextDecodeOptions::default(),
             intermediate: false,
             priority: 0,
@@ -90,6 +118,7 @@ impl TokenizeChatRequest {
             cache_salt: None,
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
+            session_id: None,
             lora_request: None,
         })
     }
@@ -101,12 +130,13 @@ pub struct DetokenizeRequest {
     pub tokens: Vec<u32>,
 }
 
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenizeResponse {
     pub count: usize,
     pub max_model_len: u32,
     pub tokens: Vec<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_strs: Option<Vec<String>>,
 }
 

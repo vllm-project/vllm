@@ -2,7 +2,7 @@
   "_comment": "Auto-generated from Dockerfile ARGs. Do not edit manually. Run: python tools/generate_versions_json.py",
   "variable": {
     "CUDA_VERSION": {
-      "default": "13.0.2"
+      "default": "13.0.3"
     },
     "PYTHON_VERSION": {
       "default": "3.12"
@@ -10,14 +10,14 @@
     "UBUNTU_VERSION": {
       "default": "22.04"
     },
+    "NCCL_VERSION": {
+      "default": "2.30.7"
+    },
     "BUILD_BASE_IMAGE": {
-      "default": "nvidia/cuda:13.0.2-devel-ubuntu22.04"
+      "default": "pytorch/manylinux2_28-builder:cuda13.0"
     },
     "FINAL_BASE_IMAGE": {
-      "default": "nvidia/cuda:13.0.2-base-ubuntu22.04"
-    },
-    "BUILD_OS": {
-      "default": "ubuntu"
+      "default": "nvidia/cuda:13.0.3-base-ubuntu22.04"
     },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
@@ -34,15 +34,6 @@
     "INSTALL_KV_CONNECTORS": {
       "default": "false"
     },
-    "TORCH_CUDA_ARCH_LIST": {
-      "default": "7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX"
-    },
-    "MAX_JOBS": {
-      "default": "2"
-    },
-    "NVCC_THREADS": {
-      "default": "8"
-    },
     "SCCACHE_BUCKET_NAME": {
       "default": "vllm-build-sccache"
     },
@@ -52,11 +43,20 @@
     "SCCACHE_S3_NO_CREDENTIALS": {
       "default": "0"
     },
+    "TORCH_CUDA_ARCH_LIST": {
+      "default": "7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0"
+    },
+    "MAX_JOBS": {
+      "default": "2"
+    },
+    "NVCC_THREADS": {
+      "default": "8"
+    },
     "vllm_target_device": {
       "default": "cuda"
     },
     "DEEPEP_COMMIT_HASH": {
-      "default": "73b6ea4"
+      "default": "d4f41e4e93"
     },
     "GIT_REPO_CHECK": {
       "default": "0"
@@ -68,7 +68,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.12"
+      "default": "0.6.15.post1"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"

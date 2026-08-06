@@ -9,12 +9,13 @@ We currently support the following OpenAI APIs:
 - [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
-- [Responses API](#responses-api) (`/v1/responses`)
-    - Only applicable to [text generation models](../../models/generative_models.md).
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](../online_serving/README.md#chat-template).
     - *Note: `user` parameter is ignored.*
     - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
+- [Chat Completions batch API](#chat-api) (`/v1/chat/completions/batch`)
+- [Responses API](#responses-api) (`/v1/responses`, `/v1/responses/{response_id}`, `/v1/responses/{response_id}/cancel`)
+    - Only applicable to [text generation models](../../models/generative_models.md).
 - [Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Transcriptions API](./speech_to_text.md#transcriptions-api) (`/v1/audio/transcriptions`)
@@ -82,8 +83,8 @@ completion = client.chat.completions.create(
 
 ## Extra HTTP Headers
 
-Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
-with `--enable-request-id-headers`.
+The `X-Request-Id` HTTP request header can be enabled with
+`--enable-request-id-headers`.
 
 ??? code
 
@@ -108,6 +109,19 @@ with `--enable-request-id-headers`.
     )
     print(completion._request_id)
     ```
+
+The Completions, Chat Completions, and Responses APIs also support the
+`X-Vllm-Priority` request header. Its value must be an integer and overrides
+the `priority` value in the JSON request body. Non-zero priorities require the
+server to use priority scheduling.
+
+```python
+completion = client.chat.completions.create(
+    model="NousResearch/Meta-Llama-3-8B-Instruct",
+    messages=[{"role": "user", "content": "Hello!"}],
+    extra_headers={"X-Vllm-Priority": "-10"},
+)
+```
 
 ## API Reference
 

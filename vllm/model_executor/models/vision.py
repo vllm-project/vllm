@@ -139,11 +139,23 @@ def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
     return num_heads * round_up(head_dim, 16)
 
 
-def is_vit_use_data_parallel():
+def is_vit_use_data_parallel(num_heads: int | None = None) -> bool:
     """
     Get the tensor parallel type for Vision Transformer.
     """
     mm_cfg = get_multimodal_config()
+    can_split = (
+        num_heads % get_tensor_model_parallel_world_size() == 0
+        if num_heads is not None
+        else None
+    )
+    if num_heads is not None and not can_split:
+        logger.warning_once(
+            "The number of vision attention heads is not divisible by "
+            "the tensor parallel size. Falling back to data parallelism "
+            "for the vision encoder."
+        )
+        return True
     return mm_cfg is not None and mm_cfg.mm_encoder_tp_mode == "data"
 
 
@@ -568,40 +580,3 @@ def run_dp_sharded_mrope_vision_model(
         "Found unassigned embeddings"
     )
     return out_embeddings
-
-
-def get_llm_pos_ids_for_vision(
-    start_idx: int,
-    vision_idx: int,
-    spatial_merge_size: int,
-    t_index: list[int],
-    grid_hs: torch.Tensor,
-    grid_ws: torch.Tensor,
-) -> torch.Tensor:
-    llm_pos_ids_list = []
-    llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
-    llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
-    h_index = (
-        torch.arange(llm_grid_h)
-        .view(1, -1, 1)
-        .expand(len(t_index), -1, llm_grid_w)
-        .flatten()
-    )
-    w_index = (
-        torch.arange(llm_grid_w)
-        .view(1, 1, -1)
-        .expand(len(t_index), llm_grid_h, -1)
-        .flatten()
-    )
-    t_index_tensor = (
-        torch.Tensor(t_index)
-        .to(llm_grid_h.device)
-        .view(-1, 1)
-        .expand(-1, llm_grid_h * llm_grid_w)
-        .long()
-        .flatten()
-    )
-    _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
-    llm_pos_ids_list.append(_llm_pos_ids + start_idx)
-    llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
-    return llm_pos_ids

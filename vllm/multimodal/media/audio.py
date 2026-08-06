@@ -9,10 +9,12 @@ import numpy.typing as npt
 import pybase64
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.multimodal.audio import resample_audio_pyav
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
+from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
 
 from .base import MediaIO
 
@@ -92,8 +94,9 @@ def load_audio_pyav(
                     raise ValueError(
                         f"Audio exceeds maximum allowed duration of "
                         f"{max_duration_s}s (metadata reports "
-                        f"{metadata_duration_s:.1f}s). This limit "
-                        f"prevents decompression-bomb attacks."
+                        f"{metadata_duration_s:.1f}s). Set "
+                        f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                        f"increase this limit."
                     )
 
             max_samples = (
@@ -129,8 +132,9 @@ def load_audio_pyav(
                     raise ValueError(
                         f"Audio exceeds maximum allowed duration of "
                         f"{max_duration_s}s (decoded {total_samples} "
-                        f"samples at {sr}Hz). This limit prevents "
-                        f"decompression-bomb attacks."
+                        f"samples at {sr}Hz). Set "
+                        f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                        f"increase this limit."
                     )
     except (ValueError, ImportError):
         raise
@@ -166,8 +170,9 @@ def load_audio_soundfile(
                 raise ValueError(
                     f"Audio exceeds maximum allowed duration of "
                     f"{max_duration_s}s (file contains "
-                    f"{file_duration_s:.1f}s at {native_sr}Hz). "
-                    f"This limit prevents decompression-bomb attacks."
+                    f"{file_duration_s:.1f}s at {native_sr}Hz). Set "
+                    f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                    f"increase this limit."
                 )
         y = f.read(dtype="float32", always_2d=False).T
 
@@ -232,7 +237,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         self.kwargs = kwargs
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
-        return load_audio(BytesIO(data), sr=None)
+        return load_audio(
+            BytesIO(data),
+            sr=None,
+            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+        )
 
     def load_base64(
         self,
@@ -242,7 +251,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         return self.load_bytes(pybase64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
-        return load_audio(filepath, sr=None)
+        return load_audio(
+            filepath,
+            sr=None,
+            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+        )
 
     def encode_base64(
         self,
@@ -270,9 +283,7 @@ class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def load_bytes(self, data: bytes) -> torch.Tensor:
         buffer = BytesIO(data)
-        # Enable sparse tensor integrity checks to prevent out-of-bounds
-        # writes from maliciously crafted tensors
-        with torch.sparse.check_sparse_tensor_invariants():
+        with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
             return tensor.to_dense()
 
@@ -280,9 +291,7 @@ class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> torch.Tensor:
-        # Enable sparse tensor integrity checks to prevent out-of-bounds
-        # writes from maliciously crafted tensors
-        with torch.sparse.check_sparse_tensor_invariants():
+        with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(filepath, weights_only=True)
             return tensor.to_dense()
 

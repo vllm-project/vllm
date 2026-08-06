@@ -138,9 +138,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
         assert vllm_config.kv_transfer_config is not None
         assert kv_cache_config is not None, "kv_cache_config is required"
-        self._validate_kv_cache_config(vllm_config, kv_cache_config)
-        self._kv_cache_config = kv_cache_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        # Capacity-only: contributes its segment to the store pool but transfers
+        # no KV, so the KV-cache-shape invariants below cannot be reached.
+        self._capacity_only = self.kv_role == "kv_consumer" and not (
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "enable_lookup", True
+            )
+        )
+        if not self._capacity_only:
+            self._validate_kv_cache_config(vllm_config, kv_cache_config)
+        self._kv_cache_config = kv_cache_config
         self._kv_cache_events: MooncakeStoreKVEvents | None = None
 
         self.connector_scheduler: MooncakeStoreScheduler | None = None
@@ -176,7 +184,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         request: Request,
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens

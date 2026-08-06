@@ -28,9 +28,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
-    FusedMoEModularMethod,
-)
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -292,6 +289,11 @@ class MoERunner(MoERunnerInterface):
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
 
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        return self.routed_experts.load_weights(weights)
+
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -343,11 +345,12 @@ class MoERunner(MoERunnerInterface):
         return self.routed_experts.quant_method
 
     def apply_routed_input_transform(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Apply transform for routed experts (e.g., latent projection).
 
-        This is called by FusedMoE.forward_native. The original hidden_states
+        This is called by MoERunner.forward_native. The original hidden_states
         is saved separately so shared experts get [S, hidden_size] while
         routed experts get the transformed [S, moe_latent_size].
 
@@ -411,6 +414,7 @@ class MoERunner(MoERunnerInterface):
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool | None = None,
     ) -> torch.Tensor | None:
         """All-reduce shared expert output when the combine kernel already
         reduced fused output.
@@ -420,18 +424,43 @@ class MoERunner(MoERunnerInterface):
         * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
           in the model.
         """
+        if fused_output_is_reduced is None:
+            fused_output_is_reduced = self._fused_output_is_reduced
+
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
-            and self._fused_output_is_reduced
+            and fused_output_is_reduced
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
+
+    def _maybe_reduce_routed_output_before_transform(
+        self,
+        fused_output: torch.Tensor,
+        fused_output_is_reduced: bool,
+    ) -> tuple[torch.Tensor, bool]:
+        """All-reduce latent routed output before its output transform.
+
+        Latent MoE output transforms may contain non-linear ops, e.g. RMSNorm.
+        TP partial routed outputs must be summed in latent space before such
+        transforms are applied.
+        """
+        if (
+            self.routed_output_transform is not None
+            and not self.moe_config.is_sequence_parallel
+            and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
+            and not fused_output_is_reduced
+        ):
+            fused_output = tensor_model_parallel_all_reduce(fused_output)
+            fused_output_is_reduced = True
+        return fused_output, fused_output_is_reduced
 
     def _maybe_reduce_final_output(
         self,
         states: torch.Tensor,
         trunc_size: int | None,
+        output_is_reduced: bool | None = None,
     ) -> torch.Tensor:
         """All-reduce the combined output if needed.
 
@@ -440,13 +469,24 @@ class MoERunner(MoERunnerInterface):
         here. Skipped when sequence-parallel is active (SP handles its
         own reduction) or when the early path already reduced both outputs.
         """
+        # skip_final_all_reduce must not coexist with a pre-reduced fused
+        # output. This should be enforced by MoE config initialization.
+        if self.moe_config.skip_final_all_reduce:
+            assert not self._fused_output_is_reduced, (
+                "skip_final_all_reduce requires an un-reduced fused output"
+            )
+
         # We don't need to reduce the final output if:
         # - We are not running with TP or DP
         # - The MK already reduced the fused output itself.
+        if output_is_reduced is None:
+            output_is_reduced = self._fused_output_is_reduced
+
         if (
             not self.moe_config.is_sequence_parallel
+            and not self.moe_config.skip_final_all_reduce
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
-            and not self._fused_output_is_reduced
+            and not output_is_reduced
         ):
             states = tensor_model_parallel_all_reduce(states)
 
@@ -499,11 +539,13 @@ class MoERunner(MoERunnerInterface):
         #   pre_xform:  applied to fused_output BEFORE routed_output_transform
         #   post_xform: applied to the final result AFTER all-reduce
         #
-        # Latent MoE with shared experts (NemotronH):
-        #   - pre_xform strips padding from the latent dim so
-        #     routed_output_transform receives the correct input size
-        #   - post_xform truncates to shared_experts_hidden_dim (full hidden)
-        #     after shared + routed outputs are combined and all-reduced
+        # MoE with routed output transform or shared experts:
+        #   - pre_xform applies if the transform needs unpadded routed output
+        #     or shared+routed add needs matching hidden dims. For Nemotron-3
+        #     Nano, TRTLLM NVFP4 pads routed MoE hidden dim 2688->2816, while
+        #     shared output stays 2688.
+        #   - post_xform uses shared_experts_hidden_dim when transform and shared
+        #     experts make the final output full hidden dim.
         #
         # Standard MoE / MoE without transforms (GPT-OSS, Mixtral):
         #   - pre_xform is None (no early truncation)
@@ -511,12 +553,12 @@ class MoERunner(MoERunnerInterface):
         if transformed_hidden_dim == hidden_states.shape[-1]:
             transformed_hidden_dim = None
 
-        if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
+        pre_xform_trunc_size = None
+        if self.routed_output_transform is not None or shared_experts_hidden_dim > 0:
             pre_xform_trunc_size = transformed_hidden_dim
+        post_xform_trunc_size = transformed_hidden_dim
+        if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
             post_xform_trunc_size = shared_experts_hidden_dim
-        else:
-            pre_xform_trunc_size = None
-            post_xform_trunc_size = transformed_hidden_dim
 
         return hidden_states, pre_xform_trunc_size, post_xform_trunc_size
 
@@ -601,7 +643,7 @@ class MoERunner(MoERunnerInterface):
     ):
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
-        #        parallel execution of shared experts with the FusedMoE via
+        #        parallel execution of shared experts with the RoutedExperts via
         #        separate cuda stream)
         if self._shared_experts is not None:
             assert shared_experts_input is not None
@@ -628,6 +670,7 @@ class MoERunner(MoERunnerInterface):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
@@ -649,11 +692,16 @@ class MoERunner(MoERunnerInterface):
            _moe_forward and _moe_forward_shared must be split.
         """
 
-        # Apply transform for routed experts (e.g., latent projection
-        # for latent MoE)
-        hidden_states, shared_experts_input = self.apply_routed_input_transform(
-            hidden_states
-        )
+        # Apply transform for routed experts (e.g., latent projection for
+        # latent MoE). When the caller pre-applies the routed input transform
+        # outside the runner (e.g. to overlap it on a separate stream), it
+        # passes the already-transformed routed input as ``hidden_states`` and
+        # the original hidden states as ``shared_experts_input``; skip the
+        # transform in that case so shared experts still see the original input.
+        if shared_experts_input is None:
+            hidden_states, shared_experts_input = self.apply_routed_input_transform(
+                hidden_states
+            )
 
         # Record before `_maybe_pad_hidden_states` pads activations to match
         # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
@@ -693,9 +741,22 @@ class MoERunner(MoERunnerInterface):
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
-        # If combine kernel already reduced fused, reduce shared to match.
+        fused_output_is_reduced = self._fused_output_is_reduced
+
+        # Latent routed output has to be reduced before output transform,
+        # because the transform may include non-linear normalization.
+        fused_output, fused_output_is_reduced = (
+            self._maybe_reduce_routed_output_before_transform(
+                fused_output,
+                fused_output_is_reduced,
+            )
+        )
+
+        # If routed output is already reduced, reduce shared to match.
         # See note above re: the two all-reduce points.
-        shared_output = self._maybe_reduce_shared_expert_output(shared_output)
+        shared_output = self._maybe_reduce_shared_expert_output(
+            shared_output, fused_output_is_reduced
+        )
 
         shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
             shared_output, fused_output
@@ -709,15 +770,17 @@ class MoERunner(MoERunnerInterface):
         else:
             result = fused_output
 
-        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
+        result = self._maybe_reduce_final_output(
+            result, og_hidden_dim_post_xform, fused_output_is_reduced
+        )
 
         return self._maybe_add_zero_expert_output(result)
 
     @property
     def do_naive_dispatch_combine(self) -> bool:
         return (
-            self.moe_config.dp_size > 1 and not self._quant_method.supports_internal_mk
-        )
+            self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel
+        ) and not self._quant_method.supports_internal_mk
 
     def _maybe_dispatch(
         self,
@@ -737,18 +800,12 @@ class MoERunner(MoERunnerInterface):
             assert len(result) == 2
             hidden_states, router_logits = result
 
-        # NOTE: Similar with DP, PCP also needs dispatch and combine. For
-        # simplicity, AgRsAll2All was added separately for PCP here. Maybe
-        # we should modify All2AllManager abstraction to better support PCP.
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
-            )
-            router_logits = get_pcp_group().all_gather(
-                router_logits,
-                dim=0,
-            )
+        if (
+            self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
+            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
 
         return hidden_states, router_logits
 
@@ -762,11 +819,11 @@ class MoERunner(MoERunnerInterface):
                 hidden_states, self.moe_config.is_sequence_parallel
             )
 
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().reduce_scatter(
-                hidden_states,
-                dim=0,
-            )
+        if (
+            self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
         if self.shared_experts is not None:
             assert shared_output is not None
@@ -835,44 +892,6 @@ class MoERunner(MoERunnerInterface):
     # Old methods from FusedMoE layer. Remove when possible.
     #
     #########################################################
-
-    # Note: maybe_init_modular_kernel should only be called by
-    # prepare_communication_buffer_for_model.
-    # This is called after all weight loading and post-processing, so it
-    # should be safe to swap out the quant_method.
-    def maybe_init_modular_kernel(self) -> None:
-        # NOTE(rob): WIP refactor. For quant methods that own the MK
-        # we create the MK during process_weights_after_loading.
-        if (
-            self.routed_experts.quant_method.supports_internal_mk
-            or self.routed_experts.quant_method.is_monolithic
-        ):
-            return None
-
-        self.routed_experts._ensure_moe_quant_config_init()
-        # routing_tables only needed for round-robin expert placement with
-        # DeepEP all2all backend.
-        routing_tables = self._expert_routing_tables()
-
-        if isinstance(self.routed_experts.quant_method, FusedMoEModularMethod):
-            base_quant_method = self.routed_experts.quant_method.old_quant_method
-        else:
-            base_quant_method = self.routed_experts.quant_method
-
-        prepare_finalize = base_quant_method.maybe_make_prepare_finalize(
-            routing_tables=routing_tables
-        )
-        if prepare_finalize is not None:
-            logger.debug(
-                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
-            )
-            self._replace_quant_method(
-                FusedMoEModularMethod.make(
-                    self.routed_experts,
-                    base_quant_method,
-                    prepare_finalize,
-                )
-            )
 
     #
     # Properties

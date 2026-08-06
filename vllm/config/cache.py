@@ -29,6 +29,7 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
@@ -52,17 +53,17 @@ class CacheConfig:
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
-    hash_block_size: int | None = Field(default=None, gt=0)
-    """Block size (in tokens) used for computing Request's block_hashes.
+    prefix_match_unit: int | None = Field(default=None, gt=0)
+    """The finest token boundary (in tokens) a prefix-cache hit can land on.
 
-    This can be set to a finer granularity than the physical KV cache block
-    sizes (e.g. 8) as long as every KV cache group's `block_size` is divisible
-    by it. This enables prefix-caching keys to be computed at the finest common
-    granularity and then merged for larger physical block sizes.
+    Prefix-cache keys are computed every `prefix_match_unit` tokens. It can
+    be set finer than the physical KV cache block sizes (e.g. 32 vs a
+    1024-token hybrid-model block) as long as every KV cache group's
+    `block_size` is divisible by it, enabling cache hits at boundaries
+    inside a physical block. It controls matching granularity only, not how
+    often states are stored.
 
-    This config is not static default. If left unspecified, vLLM will choose a
-    default based on the resolved KV cache groups (typically the smallest KV
-    cache block size when there are multiple groups).
+    This equals to the `hash_block_size` used throughout the KV cache code.
     """
     gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
@@ -107,17 +108,17 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
-    calculate_kv_scales: bool = False
-    """Deprecated: This option is deprecated and will be removed in v0.19.
-    It enables dynamic calculation of `k_scale` and `v_scale` when
-    kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
-    checkpoint if available. Otherwise, the scales will default to 1.0."""
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
+    skip_page_size_padded: int | None = None
+    """Optional override for the page size of layers skipped from KV cache
+    quantization (``--kv-cache-dtype-skip-layers``); set during block-size
+    alignment so unquantized skip layers pad up to the quantized primary's
+    page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
     Can be set only when prefix caching is enabled.
@@ -131,14 +132,25 @@ class CacheConfig:
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
     mamba_cache_mode: MambaCacheMode = "none"
-    """The cache strategy for Mamba layers.
+    """The cache strategy for Mamba layers:
+
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size. This is
-           the default behavior (for models that support it) when prefix caching is
-           enabled.
+    - "all": cache the mamba state of all tokens at position i * block_size.
     - "align": only cache the mamba state of the last token of each scheduler step and
-           when the token is at position i * block_size.
+      when the token is at position i * block_size. This is the default when prefix
+      caching is enabled.
     """
+    replayssm_buffer_len: int = Field(default=16, gt=0)
+    """ReplaySSM history buffer length B: with use_replayssm, standard decode
+    caches recent SSM inputs in a size-B ring buffer and flushes the checkpoint
+    state to HBM every B steps. Default 16."""
+    use_replayssm: bool = False
+    """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
+    the per-step full-state store, writing the checkpoint back only on flush.
+    Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
+    mamba backend; standard (non-speculative) decode only. In align mode flushes
+    are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
+    but this is not required."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -146,14 +158,20 @@ class CacheConfig:
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
-    kv_sharing_fast_prefill: bool = False
-    """This feature is work in progress and no prefill optimization takes place
-    with this flag enabled currently.
+    # Set after KV cache initialization.
+    kv_cache_size_tokens: int | None = field(default=None, init=False)
+    """Per-DP-engine KV cache capacity in tokens (group-aware). Uses
+    group-aware capacity since num_gpu_blocks * block_size can be wrong
+    for hybrid models where requests occupy multiple KV cache groups."""
+    kv_cache_max_concurrency: float | None = field(default=None, init=False)
+    """Per-DP-engine maximum concurrency at max_model_len tokens."""
 
-    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    kv_sharing_fast_prefill: bool = False
+    """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
+    NOTE: KV cache sharing is not supported for MRv2 (v2 model runner).
     """
 
     kv_cache_memory_bytes: int | None = None
@@ -191,19 +209,23 @@ class CacheConfig:
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
+            "kv_cache_memory_bytes",
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
-            "hash_block_size",
+            "prefix_match_unit",
             "mamba_page_size_padded",
+            "skip_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
             "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "kv_cache_size_tokens",
+            "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
         }
@@ -242,18 +264,6 @@ class CacheConfig:
         if self.mamba_block_size is not None:
             self.user_specified_mamba_block_size = True
         return self
-
-    @field_validator("calculate_kv_scales", mode="after")
-    @classmethod
-    def _warn_deprecated_calculate_kv_scales(cls, calculate_kv_scales: bool) -> bool:
-        if calculate_kv_scales:
-            logger.warning(
-                "The `--calculate-kv-scales` option is deprecated and will "
-                "be removed in v0.19. The scales will be loaded from the "
-                "model checkpoint if available, otherwise they default to "
-                "1.0."
-            )
-        return calculate_kv_scales
 
     @field_validator("cache_dtype", mode="after")
     @classmethod

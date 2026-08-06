@@ -159,7 +159,7 @@ class HarmonyPythonTool(Tool):
 
         assert isinstance(context, ParsableContext)
 
-        last_msg = context.parser.response_messages[-1]
+        last_msg = context.response_messages[-1]
         args = json.loads(last_msg.arguments)
 
         last_msg_harmony = Message(

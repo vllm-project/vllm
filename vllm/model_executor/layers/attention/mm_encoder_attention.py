@@ -24,13 +24,16 @@ from vllm.model_executor.models.vision import (
     get_multimodal_config,
     get_vit_attn_backend,
 )
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
+    vit_aiter_fp8_attn_wrapper,
     vit_flash_attn_wrapper,
     vit_flashinfer_wrapper,
     vit_torch_sdpa_wrapper,
@@ -311,7 +314,7 @@ class MMEncoderAttention(CustomOp):
                 )
                 cu_seqlens = np.concatenate([cu_seqlens_qko, cu_seqlens_v])
 
-        cu_seqlens = torch.from_numpy(cu_seqlens).to(device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device=device)
         return cu_seqlens
 
     def __init__(
@@ -379,8 +382,8 @@ class MMEncoderAttention(CustomOp):
         No-op if FP8 is not requested. Raises ``ValueError`` if FP8 is
         requested but the platform does not support it.
         """
-        # Populate defaults so ``_forward_flashinfer`` can
-        # check ``self.fp8_enabled`` and others without AttributeError.
+        # Populate defaults so backend forward methods can check
+        # ``self.fp8_enabled`` and related state without AttributeError.
         self.fp8_enabled = False
         self._fp8_dynamic_scale = False
         self.fp8_quant: QuantFP8 | None = None
@@ -392,13 +395,38 @@ class MMEncoderAttention(CustomOp):
         if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
             return
 
-        # FP8 path
-        if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
+        if self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
+            if not current_platform.is_rocm():
+                raise ValueError("AITER FP8 ViT attention requires ROCm.")
+
+            from vllm.platforms.rocm import on_mi3xx
+
+            if not on_mi3xx():
+                raise ValueError(
+                    "AITER FP8 ViT attention requires an MI300-series or "
+                    "MI350-series GPU (gfx942 or gfx950)."
+                )
+            try:
+                from aiter import flash_attn_varlen_fp8_pertensor_func  # noqa: F401
+            except ImportError as exc:
+                raise ValueError(
+                    "mm_encoder_attn_dtype='fp8' with ROCM_AITER_FA requires "
+                    "an AITER build that provides "
+                    "flash_attn_varlen_fp8_pertensor_func."
+                ) from exc
+        elif self.attn_backend == AttentionBackendEnum.FLASHINFER:
+            if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
+                raise ValueError(
+                    "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
+                    "cuDNN backend with cuDNN >= 9.17.1 on Blackwell (SM 100) "
+                    "or newer. cuDNN's FP8 SDPA path with bf16/fp16 output is "
+                    "not available on Hopper (H100/H200) or earlier."
+                )
+        else:
             raise ValueError(
-                "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
-                "cuDNN backend with cuDNN >= 9.17.1 on Blackwell (SM 100) "
-                "or newer. cuDNN's FP8 SDPA path with bf16/fp16 output is "
-                "not available on Hopper (H100/H200) or earlier."
+                "mm_encoder_attn_dtype='fp8' requires either the "
+                "ROCM_AITER_FA backend on ROCm or the FlashInfer cuDNN "
+                f"backend on CUDA, got {self.attn_backend}."
             )
 
         self.fp8_enabled = True
@@ -641,6 +669,37 @@ class MMEncoderAttention(CustomOp):
             buffer_wrapped,
         )
 
+    def _quantize_qkv_fp8(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert self.fp8_quant is not None
+
+        if self._fp8_dynamic_scale:
+            self._record_amax_and_update_scales(query, key, value)
+
+        query = quantize_fp8_maybe_pad_head_dim(
+            query,
+            self._fp8_q_scale,
+            skip_scale=self.skip_scale_q,
+            fp8_quant=self.fp8_quant,
+        )
+        key = quantize_fp8_maybe_pad_head_dim(
+            key,
+            self._fp8_k_scale,
+            skip_scale=self.skip_scale_k,
+            fp8_quant=self.fp8_quant,
+        )
+        value = quantize_fp8_maybe_pad_head_dim(
+            value,
+            self._fp8_v_scale,
+            skip_scale=self.skip_scale_v,
+            fp8_quant=self.fp8_quant,
+        )
+        return query, key, value
+
     def _forward_flashinfer(
         self,
         query: torch.Tensor,
@@ -652,29 +711,7 @@ class MMEncoderAttention(CustomOp):
         | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         if self.fp8_enabled:
-            assert self.fp8_quant is not None
-
-            if self._fp8_dynamic_scale:
-                self._record_amax_and_update_scales(query, key, value)
-
-            query = quantize_fp8_maybe_pad_head_dim(
-                query,
-                self._fp8_q_scale,
-                skip_scale=self.skip_scale_q,
-                fp8_quant=self.fp8_quant,
-            )
-            key = quantize_fp8_maybe_pad_head_dim(
-                key,
-                self._fp8_k_scale,
-                skip_scale=self.skip_scale_k,
-                fp8_quant=self.fp8_quant,
-            )
-            value = quantize_fp8_maybe_pad_head_dim(
-                value,
-                self._fp8_v_scale,
-                skip_scale=self.skip_scale_v,
-                fp8_quant=self.fp8_quant,
-            )
+            query, key, value = self._quantize_qkv_fp8(query, key, value)
 
         output = vit_flashinfer_wrapper(
             q=query,
@@ -694,6 +731,44 @@ class MMEncoderAttention(CustomOp):
         if self.fp8_enabled and output.shape[-1] != self.head_size:
             output = output[..., : self.head_size].contiguous()
 
+        return output
+
+    def _forward_aiter_fp8(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert (cu_seqlens is not None and max_seqlen is not None) or (
+            cu_seqlens is None and max_seqlen is None
+        ), "cu_seqlens and max_seqlen should be both set or both None."
+
+        bsz, q_len = query.size()[:2]
+        kv_len = key.size(1)
+        is_reshaped = query.dim() != 4
+        query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
+
+        query, key, value = self._quantize_qkv_fp8(query, key, value)
+
+        output = vit_aiter_fp8_attn_wrapper(
+            q=query,
+            k=key,
+            v=value,
+            q_descale=self._fp8_q_scale,
+            k_descale=self._fp8_k_scale,
+            v_descale=self._fp8_v_scale,
+            batch_size=bsz,
+            output_dtype=self.dtype,
+            scale=self.scale,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        if output.shape[-1] != self.head_size:
+            output = output[..., : self.head_size].contiguous()
+        if is_reshaped:
+            output = output.reshape(bsz, q_len, -1)
         return output
 
     def forward_native(
@@ -718,7 +793,9 @@ class MMEncoderAttention(CustomOp):
         sequence_lengths: torch.Tensor
         | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
-        if self.is_flash_attn_backend:
+        if self.fp8_enabled and self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
+            return self._forward_aiter_fp8(query, key, value, cu_seqlens, max_seqlen)
+        elif self.is_flash_attn_backend:
             return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
         elif self.attn_backend == AttentionBackendEnum.TRITON_ATTN:
             return self._forward_triton(query, key, value, cu_seqlens, max_seqlen)

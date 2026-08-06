@@ -9,13 +9,20 @@ This module provides helpers for running standard attention backends
 """
 
 import logging
+import statistics
 import types
 from contextlib import contextmanager
 
-import numpy as np
 import torch
 from batch_spec import parse_batch_spec, reorder_for_flashinfer
-from common import BenchmarkConfig, BenchmarkResult, MockLayer, get_attention_scale
+from common import (
+    BenchmarkConfig,
+    BenchmarkResult,
+    MockLayer,
+    get_attention_scale,
+    run_do_bench,
+    run_ncu_profile,
+)
 
 from vllm.config import (
     CacheConfig,
@@ -208,6 +215,13 @@ def _create_backend_impl(
 
     scale = get_attention_scale(config.head_dim)
 
+    # Set v_head_dim for diff-headdim backends. Always reset (defaulting to
+    # head_dim) so a prior run's value doesn't leak into this one via the
+    # backend's class-level state.
+    if hasattr(backend_class, "set_head_size_v"):
+        v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
+        backend_class.set_head_size_v(v_dim)
+
     impl = backend_class.get_impl_cls()(
         num_heads=config.num_q_heads,
         head_size=config.head_dim,
@@ -300,6 +314,7 @@ def _create_input_tensors(
         from vllm.platforms import current_platform
 
         q_dtype = current_platform.fp8_dtype()
+    v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
     q_list = [
         torch.randn(
             total_q, config.num_q_heads, config.head_dim, device=device, dtype=dtype
@@ -313,9 +328,7 @@ def _create_input_tensors(
         for _ in range(config.num_layers)
     ]
     v_list = [
-        torch.randn(
-            total_q, config.num_kv_heads, config.head_dim, device=device, dtype=dtype
-        )
+        torch.randn(total_q, config.num_kv_heads, v_dim, device=device, dtype=dtype)
         for _ in range(config.num_layers)
     ]
     return q_list, k_list, v_list
@@ -389,14 +402,17 @@ def _run_single_benchmark(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple:
-    """Run single benchmark iteration with warmup and timing loop."""
-    total_q = q_list[0].shape[0]
-    out = torch.empty(
-        total_q, config.num_q_heads, config.head_dim, device=device, dtype=dtype
-    )
+    """Run single benchmark using triton's do_bench_cudagraph/do_bench.
 
-    # Warmup
-    for _ in range(config.warmup_iters):
+    Returns:
+        (timing_stats, mem_stats) where timing_stats is a dict with
+        mean/std/min/max in seconds per layer.
+    """
+    total_q = q_list[0].shape[0]
+    v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
+    out = torch.empty(total_q, config.num_q_heads, v_dim, device=device, dtype=dtype)
+
+    def benchmark_fn():
         for i in range(config.num_layers):
             impl.forward(
                 layer,
@@ -407,52 +423,22 @@ def _run_single_benchmark(
                 attn_metadata,
                 output=out,
             )
-    torch.accelerator.synchronize()
 
-    # Optionally capture a CUDA graph after warmup.
-    # Graph replay eliminates CPU launch overhead so timings reflect pure
-    # kernel time.
-    if config.use_cuda_graphs:
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            for i in range(config.num_layers):
-                impl.forward(
-                    layer,
-                    q_list[i],
-                    k_list[i],
-                    v_list[i],
-                    cache_list[i],
-                    attn_metadata,
-                    output=out,
-                )
-        benchmark_fn = graph.replay
+    if config.ncu_profile:
+        run_ncu_profile(benchmark_fn)
+        timing_stats = dict.fromkeys(("mean", "median", "std", "min", "max"), 0.0)
     else:
+        all_ms = run_do_bench(benchmark_fn, config.use_cuda_graphs, config.warmup_ms)
 
-        def benchmark_fn():
-            for i in range(config.num_layers):
-                impl.forward(
-                    layer,
-                    q_list[i],
-                    k_list[i],
-                    v_list[i],
-                    cache_list[i],
-                    attn_metadata,
-                    output=out,
-                )
-
-    # Benchmark
-    times = []
-    for _ in range(config.repeats):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-
-        start.record()
-        benchmark_fn()
-        end.record()
-
-        torch.accelerator.synchronize()
-        elapsed_ms = start.elapsed_time(end)
-        times.append(elapsed_ms / 1000.0 / config.num_layers)  # seconds per layer
+        # Convert ms to seconds per layer
+        times = [t / 1000.0 / config.num_layers for t in all_ms]
+        timing_stats = {
+            "mean": statistics.mean(times),
+            "std": statistics.stdev(times) if len(times) > 1 else 0.0,
+            "min": min(times),
+            "max": max(times),
+            "median": statistics.median(times),
+        }
 
     mem_stats = {}
     if config.profile_memory:
@@ -461,7 +447,7 @@ def _run_single_benchmark(
             "reserved_mb": torch.accelerator.memory_reserved(device) / 1024**2,
         }
 
-    return times, mem_stats
+    return timing_stats, mem_stats
 
 
 # ============================================================================
@@ -541,6 +527,12 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 common_attn_metadata=common_metadata,
             )
 
+            # Override num_splits for split-K testing (FlashAttention only)
+            if config.num_splits is not None and hasattr(
+                attn_metadata, "max_num_splits"
+            ):
+                attn_metadata.max_num_splits = config.num_splits
+
             # Only quantize queries when the impl supports it
             quantize_query = config.kv_cache_dtype.startswith("fp8") and getattr(
                 impl, "supports_quant_query_input", False
@@ -553,7 +545,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 config, max_num_blocks, backend_class, device, dtype
             )
 
-            times, mem_stats = _run_single_benchmark(
+            timing_stats, mem_stats = _run_single_benchmark(
                 config,
                 impl,
                 layer,
@@ -566,15 +558,16 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 dtype,
             )
 
-    mean_time = np.mean(times)
+    mean_time = timing_stats["mean"]
     throughput = total_q / mean_time if mean_time > 0 else 0
 
     return BenchmarkResult(
         config=config,
         mean_time=mean_time,
-        std_time=np.std(times),
-        min_time=np.min(times),
-        max_time=np.max(times),
+        median_time=timing_stats["median"],
+        std_time=timing_stats["std"],
+        min_time=timing_stats["min"],
+        max_time=timing_stats["max"],
         throughput_tokens_per_sec=throughput,
         memory_allocated_mb=mem_stats.get("allocated_mb"),
         memory_reserved_mb=mem_stats.get("reserved_mb"),

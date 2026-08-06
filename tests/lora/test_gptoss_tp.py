@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import pytest
 
 import vllm
@@ -41,6 +42,14 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
+def reformat(text: str) -> str:
+    # Remove all spaces immediately before or after comma
+    text = ",".join(map(str.strip, text.split(",")))
+    # Remove duplicated blank spaces
+    text = " ".join(map(str.strip, text.split()))
+    return text
+
+
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(
@@ -67,20 +76,31 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        # The generated text may have different numbers of blank space,
+        # so reformat to compare.
+        compactGeneratedStr = reformat(generated_texts[i])
+        compactExpectedStr = reformat(EXPECTED_LORA_OUTPUT[i])
+        if not generated_texts[i].startswith(
+            EXPECTED_LORA_OUTPUT[i]
+        ) and not compactGeneratedStr.startswith(compactExpectedStr):
+            raise AssertionError(
+                f"Generated: {generated_texts[i]}, Expected: {EXPECTED_LORA_OUTPUT[i]}"
+            )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason=(
-        "Mxfp4 LoRA on ROCm is blocked by a spawn compatibility issue. "
-        "The fused_moe_lora Triton kernel crashes in spawned subprocesses, "
-        "and vLLM forces spawn mode when HIP is initialized before "
-        "multiprocessing. Fixing this requires either making the LoRA "
-        "Triton kernel spawn-safe or pre-warming the kernel cache."
-    ),
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
     gptoss20b_lora_files,
@@ -109,7 +129,19 @@ def test_gpt_oss_lora(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
+            ),
+        ),
+    ],
+)
 def test_gpt_oss_lora_tp2(
     gptoss20b_lora_files,
     fully_sharded_loras,

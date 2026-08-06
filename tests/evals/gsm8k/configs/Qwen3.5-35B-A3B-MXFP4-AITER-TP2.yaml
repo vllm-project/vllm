@@ -10,3 +10,4 @@ server_args: >-
   --moe-backend aiter
 env:
   VLLM_ROCM_USE_AITER: "1"
+  ENABLE_CK: "0"  # Avoid AITER CK-based MHA JIT compilation to save time

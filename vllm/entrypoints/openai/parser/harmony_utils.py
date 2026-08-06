@@ -13,6 +13,7 @@ from openai_harmony import (
     HarmonyEncodingName,
     Message,
     ReasoningEffort,
+    RenderConversationConfig,
     Role,
     StreamableParser,
     SystemContent,
@@ -220,7 +221,6 @@ def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
     for chat_msg in chat_msgs:
         msgs.extend(parse_chat_input_to_harmony_message(chat_msg, tool_id_names))
 
-    msgs = auto_drop_analysis_messages(msgs)
     return msgs
 
 
@@ -447,9 +447,12 @@ def parse_chat_input_to_harmony_message(
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:
+    messages = auto_drop_analysis_messages(messages)
     conversation = Conversation.from_messages(messages)
     token_ids = get_encoding().render_conversation_for_completion(
-        conversation, Role.ASSISTANT
+        conversation,
+        Role.ASSISTANT,
+        config=RenderConversationConfig(auto_drop_analysis=False),
     )
     return token_ids
 
