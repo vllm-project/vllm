@@ -600,7 +600,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // SituGLU implementation used in Kimi models.
   ops.def(
       "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
-      "linear_beta=-1.0) -> ()");
+      "linear_beta=-1.0, Tensor? valid_rows=None) -> ()");
   ops.def(
       "masked_situ_and_mul(Tensor! out, Tensor input, Tensor "
       "expert_num_tokens, float beta=1.0, float linear_beta=-1.0) -> ()");
