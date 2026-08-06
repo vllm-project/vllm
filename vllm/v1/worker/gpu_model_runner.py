@@ -5522,7 +5522,15 @@ class GPUModelRunner(
 
         layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
         if not layer_ids:
-            layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
+            dspark_layer_ids = getattr(hf_config, "dspark_target_layer_ids", None)
+            if dspark_layer_ids:
+                # dspark_target_layer_ids name the layers whose OUTPUT the
+                # drafter was trained on, but the capture hook fires on
+                # `idx + 1 in aux_hidden_state_layers` (the input of layer L).
+                # Convert like the DFlash branch below and the V2 runner
+                # (eagle3_utils.py); passing them raw shifts every aux hidden
+                # state down one layer and silently degrades acceptance.
+                layer_ids = [i + 1 for i in dspark_layer_ids]
         if not layer_ids:
             dflash_config = getattr(hf_config, "dflash_config", None)
             eagle_config = getattr(hf_config, "eagle_config", None)
