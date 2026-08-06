@@ -751,6 +751,17 @@ class SpecDecodeBaseProposer:
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[: batch_size + 1]
         ).clone()
+        # The layout just changed from the ragged first pass (one row per
+        # TOKEN) to one row per REQUEST, so every mapping derived from the
+        # old query_start_loc is now wrong. token_to_req_indices() caches its
+        # result on this object; a stale hit hands draft rows > 0 an EARLIER
+        # request's identity in mixed batches (pure-decode batches alias the
+        # two layouts, which is why this never fired there). The SWA window
+        # then anchors at that request's seq_len -- one past its last written
+        # slot -- and the drafter attends over unwritten fp8, poisoning the
+        # whole hidden row with NaN.
+        common_attn_metadata._token_to_req_indices_cache = None
+        common_attn_metadata._num_computed_tokens_cache = None
 
         # In padded drafter batch, we need to adjust the sequence lengths
         # to remove the "padding" (i.e. rejected tokens).
