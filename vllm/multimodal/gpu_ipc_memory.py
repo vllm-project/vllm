@@ -157,19 +157,43 @@ def reserve_mm_ipc_gpu_memory(
     mm_config: "MultiModalConfig | None",
     api_process_count: int = 1,
 ) -> int:
-    """Carve frontend multimodal GPU memory out of the KV cache.
+    """Return KV-cache memory remaining after frontend multimodal reservations.
 
-    Raw decoded frames are bounded by ``mm_ipc_gpu_memory_gb`` and acquired by
-    the frontend semaphore. Some decoders also keep persistent surfaces around;
-    reserve a fixed upper bound for those when a GPU backend is configured.
+    The reservation covers:
+
+    * The total ``mm_ipc_gpu_memory_gb`` budget for transient decoded-frame
+      buffers. This budget is divided among API processes, so it is not
+      multiplied by ``api_process_count``.
+    * For GPU video backends, a fixed upper bound for each API process's
+      retained decoder surfaces and CUDA context. The PyNvVideoCodec surface
+      reservation scales with its configured ``hw_decoders`` value, and the
+      entire decoder reservation scales with ``api_process_count`` because
+      these resources are not shared between processes.
+
+    Args:
+        available_kv_cache_memory_bytes: KV-cache capacity before reserving
+            memory for frontend multimodal processing.
+        mm_config: Multimodal configuration, or ``None`` when multimodal
+            processing is disabled.
+        api_process_count: Number of frontend API processes sharing the GPU.
+            Values below one are treated as one.
+
+    Returns:
+        KV-cache capacity after subtracting the frontend reservation.
+
+    Raises:
+        ValueError: If the reservation leaves no memory for the KV cache.
     """
     if mm_config is None:
         return available_kv_cache_memory_bytes
 
+    from vllm import envs
     from vllm.multimodal.video import (
         PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
         PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
-        PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
+        PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+        PYNVVIDEOCODEC_VIDEO_BACKEND,
+        validate_pynvvideocodec_hw_decoders,
     )
 
     raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
@@ -177,8 +201,24 @@ def reserve_mm_ipc_gpu_memory(
     # context on the GPU, outside the worker memory pool. Reserve that footprint
     # per process so gpu_memory_utilization bounds total GPU usage across them.
     num_api_servers = max(1, api_process_count)
+    video_kwargs = mm_config.media_io_kwargs.get("video", {})
+    video_loader_backend = (
+        video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+    )
+    codec_backend = video_kwargs.get("backend")
+    uses_pynvvideocodec = (
+        video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+        or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+    )
+    hw_decoders = (
+        validate_pynvvideocodec_hw_decoders(
+            video_kwargs.get("hw_decoders", PYNVVIDEOCODEC_DEFAULT_HW_DECODERS)
+        )
+        if uses_pynvvideocodec
+        else 1
+    )
     per_server_decoder_bytes = (
-        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * hw_decoders
         + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
     )
     decoder_reserved_bytes = (
@@ -198,8 +238,9 @@ def reserve_mm_ipc_gpu_memory(
             f"({format_gib(raw_frame_reserved_bytes)} GiB raw-frame budget, "
             f"{format_gib(decoder_reserved_bytes)} GiB decoder cache budget), "
             f"but only {format_gib(available_kv_cache_memory_bytes)} GiB is "
-            "available for the KV cache. Reduce mm_ipc_gpu_memory_gb, use a "
-            "different video backend, or increase gpu_memory_utilization."
+            "available for the KV cache. Reduce mm_ipc_gpu_memory_gb or "
+            "hw_decoders, use a different video backend, or increase "
+            "gpu_memory_utilization."
         )
     logger.info_once(
         "Reserving %s GiB of GPU memory for frontend multimodal decoding "

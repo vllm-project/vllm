@@ -8,15 +8,15 @@ import os
 import unittest.mock as mock
 
 import pytest
-from huggingface_hub import snapshot_download
 
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 from ..conftest import AudioTestAssets, VllmRunner
 from ..utils import create_new_process_for_each_test
 
-MODEL_PATH = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+MODEL_PATH = hf_api().snapshot_download("microsoft/Phi-4-multimodal-instruct")
 AUDIO_LORA_PATH = os.path.join(MODEL_PATH, "speech-lora")
 IMAGE_LORA_PATH = os.path.join(MODEL_PATH, "vision-lora")
 

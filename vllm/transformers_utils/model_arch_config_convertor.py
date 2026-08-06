@@ -164,6 +164,19 @@ class ModelArchConfigConvertorBase:
             num_experts = self.get_num_experts_from_block_configs()
         return num_experts
 
+    def get_num_experts_per_token(self) -> int:
+        names = [
+            "num_experts_per_tok",
+            "num_experts_per_token",
+            "top_k_experts",
+            "moe_topk",
+            "moe_top_k",
+        ]
+        num_experts_per_token = getattr_iter(self.hf_text_config, names, 0)
+        if isinstance(num_experts_per_token, list):
+            return max(num_experts_per_token, default=0)
+        return num_experts_per_token or 0
+
     @final
     @classmethod
     def get_torch_dtype(
@@ -261,12 +274,13 @@ class ModelArchConfigConvertorBase:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
-            "AXK1",
+            "axk1",
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
             "deepseek_v4",
             "deepseek_mtp",
+            "k3_dspark",
             "glm_moe_dsa",
             "glm4_moe_lite",
             "glm4_moe_lite_mtp",
@@ -278,6 +292,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
             "bailing_hybrid_mtp",
+            "bailing_hybrid_v3_mtp",
         ):
             # check is deepseek_v4 model
             if hasattr(self.hf_text_config, "compress_ratios"):
@@ -290,7 +305,7 @@ class ModelArchConfigConvertorBase:
             return (
                 self.hf_text_config.model.model_type
                 in (
-                    "AXK1",
+                    "axk1",
                     "deepseek_v2",
                     "deepseek_v3",
                     "deepseek_v32",
@@ -300,8 +315,16 @@ class ModelArchConfigConvertorBase:
             )
         return False
 
-    def is_mm_prefix_lm(self) -> bool:
-        """Whether to use bidirectional attention for mm positions."""
+    def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
+        """Whether to use bidirectional attention for mm positions.
+
+        ``supports_multimodal`` is False when the deployment is configuration-
+        disabled for multimodal inputs (text-only serving). In that case
+        mm_prefix is unnecessary and must stay off so attention backends
+        without ``supports_mm_prefix()`` remain eligible.
+        """
+        if not supports_multimodal:
+            return False
         if hasattr(self.hf_config, "is_mm_prefix_lm"):
             return bool(self.hf_config.is_mm_prefix_lm)
         # fallback to list of known models
@@ -358,7 +381,7 @@ class ModelArchConfigConvertorBase:
             derived_max_model_len = tmp_max_len
         return derived_max_model_len, max_len_key
 
-    def convert(self) -> ModelArchitectureConfig:
+    def convert(self, supports_multimodal: bool = True) -> ModelArchitectureConfig:
         model_arch_config = ModelArchitectureConfig(
             architectures=self.get_architectures(),
             model_type=self.hf_config.model_type,
@@ -370,9 +393,10 @@ class ModelArchConfigConvertorBase:
             vocab_size=self.get_vocab_size(),
             total_num_kv_heads=self.get_total_num_kv_heads(),
             num_experts=self.get_num_experts(),
+            num_experts_per_token=self.get_num_experts_per_token(),
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
-            is_mm_prefix_lm=self.is_mm_prefix_lm(),
+            is_mm_prefix_lm=self.is_mm_prefix_lm(supports_multimodal),
             rswa_window=self.rswa_window(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
         )
@@ -401,7 +425,7 @@ class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
         return enc_num_kv_heads
 
-    def is_mm_prefix_lm(self) -> bool:
+    def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         return False
 
 
@@ -551,6 +575,12 @@ class BailingHybridMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
 
 
+class BailingHybridV3MTPModelArchConfigConvertor(
+    BailingHybridMTPModelArchConfigConvertor
+):
+    pass
+
+
 class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "mtp_num_hidden_layers", 0)
@@ -584,7 +614,9 @@ class Gemma4MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def is_mm_prefix_lm(self) -> bool:
+    def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
+        if not supports_multimodal:
+            return False
         return (
             getattr(self.hf_text_config, "use_bidirectional_attention", None)
             == "vision"
@@ -671,6 +703,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "moss_audio": MossAudioModelArchConfigConvertor,
     "mpt": MPTModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
+    "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
