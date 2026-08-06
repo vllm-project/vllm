@@ -66,6 +66,7 @@ from vllm.transformers_utils.processors.isaac import (
     IsaacImageProcessor,
     IsaacProcessor,
     get_image_size_for_max_num_patches,
+    validate_isaac_geometry_value,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -331,6 +332,23 @@ class IsaacProcessingInfo(BaseProcessingInfo):
         return IsaacConfig()
 
     def get_image_processor(self, **kwargs) -> IsaacImageProcessor:
+        hf_config = self.get_hf_config()
+        configured_geometry = {
+            "patch_size": hf_config.video_patch_size,
+            "vision_max_num_patches": hf_config.vision_max_num_patches,
+            "vision_min_num_patches": hf_config.vision_min_num_patches,
+            "pixel_shuffle_scale": hf_config.pixel_shuffle_scale,
+        }
+        for name, configured_value in configured_geometry.items():
+            if name in kwargs:
+                validate_isaac_geometry_value(
+                    name,
+                    kwargs[name],
+                    configured_value,
+                )
+            else:
+                kwargs[name] = configured_value
+
         return IsaacImageProcessor(**kwargs)
 
     def get_hf_processor(self, **kwargs) -> IsaacProcessor:

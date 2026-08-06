@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+from collections.abc import Mapping
 from typing import Any, TypedDict
 
 import numpy as np
@@ -315,7 +316,7 @@ def process_vision_for_patches(
 class IsaacImagesKwargs(TypedDict, total=False):
     patch_size: int
     max_num_patches: int
-    min_num_patches: int
+    min_num_patches: int | None
     pixel_shuffle_scale: int
 
 
@@ -327,14 +328,43 @@ class IsaacProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-
     }
 
 
+def validate_isaac_geometry_value(
+    name: str,
+    value: object,
+    configured_value: object,
+) -> None:
+    """Reject Isaac geometry values that differ from trusted configuration."""
+    if type(value) is not type(configured_value) or value != configured_value:
+        label = name.replace("_", " ")
+        raise ValueError(
+            f"{name}={value} must match the configured Isaac "
+            f"{label} of {configured_value}"
+        )
+
+
 class IsaacImageProcessor(ImageProcessingMixin):
     model_input_names = ["pixel_values", "image_grid_thw"]
+
+    def _validate_geometry_kwargs(self, kwargs: Mapping[str, object]) -> None:
+        configured_geometry = (
+            ("patch_size", self.patch_size),
+            ("max_num_patches", self.vision_max_num_patches),
+            ("min_num_patches", self.vision_min_num_patches),
+            ("pixel_shuffle_scale", self.pixel_shuffle_scale),
+        )
+        for name, configured_value in configured_geometry:
+            if name in kwargs:
+                validate_isaac_geometry_value(
+                    name,
+                    kwargs[name],
+                    configured_value,
+                )
 
     def __init__(
         self,
         patch_size: int = 16,
         vision_max_num_patches: int = 6144,
-        vision_min_num_patches: int = 256,
+        vision_min_num_patches: int | None = 256,
         pixel_shuffle_scale: int = 2,
     ) -> None:
         self.patch_size = patch_size
@@ -354,22 +384,17 @@ class IsaacImageProcessor(ImageProcessingMixin):
 
         all_pixel_values: list[torch.Tensor] = []
         all_image_grids: list[torch.Tensor] = []
+        self._validate_geometry_kwargs(kwargs)
 
         for image in images:
             image_tensor = extract_image_pil(image)
 
             patches, dims_virtual = process_vision_for_patches(
                 image_tensor,
-                patch_size=kwargs.get("patch_size", self.patch_size),
-                max_num_patches=kwargs.get(
-                    "max_num_patches", self.vision_max_num_patches
-                ),
-                min_num_patches=kwargs.get(
-                    "min_num_patches", self.vision_min_num_patches
-                ),
-                pixel_shuffle_scale=kwargs.get(
-                    "pixel_shuffle_scale", self.pixel_shuffle_scale
-                ),
+                patch_size=self.patch_size,
+                max_num_patches=self.vision_max_num_patches,
+                min_num_patches=self.vision_min_num_patches,
+                pixel_shuffle_scale=self.pixel_shuffle_scale,
             )
 
             # Isaac packs a dummy temporal dim for images
