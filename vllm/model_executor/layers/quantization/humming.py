@@ -728,10 +728,10 @@ class HummingMoEMethod(FusedMoEMethodBase):
         # The weight names of sublayer start with the prefix "{sublayer_name}_"
         layer.sublayer_configs = {
             "w13": {
-                "shape_n": intermediate_size_per_partition * 2,
+                "shape_n": intermediate_size_per_partition * self.moe.w13_num_shards,
                 "shape_k": hidden_size,
                 "tensors_attrs": self.weight_schema.get_padded_tensors_attrs(
-                    shape_n=intermediate_size_per_partition * 2,
+                    shape_n=intermediate_size_per_partition * self.moe.w13_num_shards,
                     shape_k=hidden_size,
                     num_experts=num_experts,
                     param_dtype=params_dtype,

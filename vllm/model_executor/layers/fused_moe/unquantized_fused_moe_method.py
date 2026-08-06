@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -18,10 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEExpertsModular,
-    FusedMoEPrepareAndFinalizeModular,
-)
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     convert_to_unquantized_kernel_format,
@@ -33,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.platforms.interface import CpuArchEnum
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
@@ -55,35 +49,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
 
     @property
-    def is_monolithic(self) -> bool:
-        # Escape hatch for CPU, which stays on the old monolithic path.
-        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
-            return True
-        return super().is_monolithic
-
-    @property
     def supports_eplb(self) -> bool:
         return True
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic for all but the CPU backend. CPU backend is monolithic. "
-            "So this function should not be called."
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: "RoutedExperts",
-    ) -> FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
 
     def create_weights(
         self,
@@ -201,6 +168,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 routing_tables=layer._expert_routing_tables(),
             )
 
+            if self.unquantized_backend == UnquantizedMoeBackend.CPU:
+                # The CPU experts need the layer itself for the setup that
+                # convert_to_unquantized_kernel_format cannot express, since
+                # it only sees the two weight tensors: padding and prepacking
+                # into the grouped-gemm layout (bias included), and capturing
+                # the router config that monolithic apply() cannot carry.
+                self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
 
@@ -221,38 +196,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # OOT handles internally.
             return
 
-        elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
-            # CPU stays on the old path — no oracle, no moe_kernel.
-            from vllm.model_executor.layers.fused_moe import cpu_fused_moe
-
-            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
-
-                dtype_w13 = layer.w13_weight.dtype
-                _, n_w13, k_w13 = layer.w13_weight.size()
-                dtype_w2 = layer.w2_weight.dtype
-                _, n_w2, k_w2 = layer.w2_weight.size()
-                if (
-                    envs.VLLM_CPU_SGL_KERNEL
-                    and check_cpu_sgl_kernel(n_w13, k_w13, dtype_w13)
-                    and check_cpu_sgl_kernel(n_w2, k_w2, dtype_w2)
-                ):
-                    packed_w13_weight = torch.ops._C.convert_weight_packed(
-                        layer.w13_weight
-                    )
-                    assert packed_w13_weight.size() == layer.w13_weight.size()
-                    layer.w13_weight.copy_(packed_w13_weight)
-                    del packed_w13_weight
-                    packed_w2_weight = torch.ops._C.convert_weight_packed(
-                        layer.w2_weight
-                    )
-                    assert packed_w2_weight.size() == layer.w2_weight.size()
-                    layer.w2_weight.copy_(packed_w2_weight)
-                    self.cpu_fused_moe: Callable = cpu_fused_moe.SGLFusedMOE(layer)
-                else:
-                    self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
-            else:
-                self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
         elif self.unquantized_backend == UnquantizedMoeBackend.XPU:
             w13 = layer.w13_weight
             w2 = layer.w2_weight
@@ -363,39 +306,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
-        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
-            assert self.moe_kernel is None
-            return self.cpu_fused_moe(
-                layer,
-                x,
-                layer.use_grouped_topk,
-                layer.top_k,
-                router_logits,
-                layer.renormalize,
-                layer.topk_group,
-                layer.num_expert_group,
-                layer.global_num_experts,
-                layer.expert_map,
-                layer.custom_routing_function,
-                layer.scoring_func,
-                layer.routed_scaling_factor,
-                layer.e_score_correction_bias,
-                layer.apply_router_weight_on_input,
-                layer.activation,
-            )
-        else:
-            assert self.moe_kernel is not None
-            return self.moe_kernel.apply_monolithic(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                router_logits,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                e_score_correction_bias=layer.e_score_correction_bias,
-                routed_scaling_factor=layer.routed_scaling_factor,
-            )
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+        )

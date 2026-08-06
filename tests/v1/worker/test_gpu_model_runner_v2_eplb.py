@@ -93,7 +93,6 @@ def _make_runner(**overrides: Any) -> Any:
 def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     FakeEplbState.instances.clear()
     model = SimpleNamespace(is_moe=True)
-    prepared: list[object] = []
 
     monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
     monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
@@ -102,7 +101,6 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
         "get_model_loader",
         lambda load_config: SimpleNamespace(load_model=lambda **_: model),
     )
-    monkeypatch.setattr(mrv2, "prepare_communication_buffer_for_model", prepared.append)
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
@@ -119,7 +117,6 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
 
     assert runner.model is model
     assert runner.model_state is not None
-    assert prepared == [model]
     assert runner.eplb_state is not None
     assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
     assert runner.eplb_state.async_started is True
@@ -128,7 +125,6 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
 def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
     FakeEplbState.instances.clear()
     model = SimpleNamespace(is_moe=True)
-    prepared: list[object] = []
 
     monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
     monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
@@ -137,7 +133,6 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
         "get_model_loader",
         lambda load_config: SimpleNamespace(load_model=lambda **_: model),
     )
-    monkeypatch.setattr(mrv2, "prepare_communication_buffer_for_model", prepared.append)
     monkeypatch.setattr(
         mrv2,
         "init_model_state",
@@ -149,7 +144,6 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
     mrv2.GPUModelRunner.load_model(runner, load_dummy_weights=True)
 
     assert runner.load_config.load_format == "dummy"
-    assert prepared == []
     assert runner.eplb_state is not None
     assert runner.eplb_state.add_model_calls == []
     assert runner.eplb_state.async_started is False
@@ -184,6 +178,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         hidden_states=None,
         aux_hidden_states=None,
         finished_req_ids=set(),
+        routed_experts=None,
         num_tokens_across_dp=None,
     )
     runner.req_states = SimpleNamespace()
