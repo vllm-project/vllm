@@ -21,6 +21,7 @@ from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     VideoLoader,
 )
+from vllm.renderers.params import ChatParams
 
 from ..utils import cosine_similarity, create_video_from_image, normalize_image
 
@@ -272,6 +273,27 @@ def _make_jpeg_b64_frames(n: int, width: int = 8, height: int = 8) -> list[str]:
     return frames
 
 
+def _load_request_jpeg_frames(
+    runtime_video_kwargs: dict[str, object],
+    *,
+    default_video_kwargs: dict[str, object] | None = None,
+    sent_frames: int = 40,
+) -> tuple[npt.NDArray, dict[str, object]]:
+    chat_params = ChatParams(
+        media_io_kwargs={"video": runtime_video_kwargs},
+    ).with_defaults(
+        default_media_io_kwargs=(
+            None if default_video_kwargs is None else {"video": default_video_kwargs}
+        ),
+    )
+
+    assert chat_params.media_io_kwargs is not None
+    videoio = VideoMediaIO(ImageMediaIO(), **chat_params.media_io_kwargs["video"])
+    return videoio.load_base64(
+        "video/jpeg", ",".join(_make_jpeg_b64_frames(sent_frames))
+    )
+
+
 def test_load_base64_jpeg_returns_metadata():
     """Regression test: load_base64 with video/jpeg must return metadata.
 
@@ -361,6 +383,79 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
 
     with pytest.raises(ValueError, match="num_frames must be greater than 0 or -1"):
         videoio.load_base64("video/jpeg", data)
+
+
+@pytest.mark.parametrize("runtime_num_frames", [-1, 64])
+def test_request_num_frames_cannot_raise_builtin_cap_without_operator_defaults(
+    runtime_num_frames: int,
+):
+    frames, metadata = _load_request_jpeg_frames({"num_frames": runtime_num_frames})
+
+    assert frames.shape[0] == 32
+    assert metadata["total_num_frames"] == 32
+
+
+@pytest.mark.parametrize("runtime_num_frames", [-1, 8])
+def test_request_num_frames_cannot_raise_finite_operator_cap(
+    runtime_num_frames: int,
+):
+    frames, metadata = _load_request_jpeg_frames(
+        {"num_frames": runtime_num_frames},
+        default_video_kwargs={"num_frames": 4},
+    )
+
+    assert frames.shape[0] == 4
+    assert metadata["total_num_frames"] == 4
+
+
+def test_request_fps_preserves_finite_operator_num_frames_cap():
+    frames, metadata = _load_request_jpeg_frames(
+        {"fps": 2.0},
+        default_video_kwargs={"num_frames": 4},
+    )
+
+    assert frames.shape[0] == 4
+    assert metadata["total_num_frames"] == 4
+
+
+def test_request_num_frames_can_reduce_finite_operator_cap():
+    frames, metadata = _load_request_jpeg_frames(
+        {"num_frames": 2},
+        default_video_kwargs={"num_frames": 4},
+    )
+
+    assert frames.shape[0] == 2
+    assert metadata["total_num_frames"] == 2
+
+
+def test_trusted_unlimited_operator_num_frames_remains_opt_in():
+    frames, metadata = _load_request_jpeg_frames(
+        {"num_frames": -1},
+        default_video_kwargs={"num_frames": -1},
+    )
+
+    assert frames.shape[0] == 40
+    assert metadata["total_num_frames"] == 40
+
+
+def test_trusted_unlimited_operator_num_frames_survives_fps_override():
+    result = VideoMediaIO.merge_kwargs(
+        default_kwargs={"num_frames": -1},
+        runtime_kwargs={"fps": 2.0},
+    )
+
+    assert result == {"num_frames": -1, "fps": 2.0}
+
+
+@pytest.mark.parametrize("runtime_num_frames", [-2, -1.0, True])
+def test_request_num_frames_rejects_invalid_unbounded_values(
+    runtime_num_frames: object,
+):
+    with pytest.raises(ValueError, match="num_frames must be greater than 0 or -1"):
+        VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"num_frames": runtime_num_frames},
+        )
 
 
 # ---------------------------------------------------------------------------
