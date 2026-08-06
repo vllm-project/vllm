@@ -204,9 +204,7 @@ class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
         raise NotImplementedError
 
 
-class LlavaNextMultiModalProcessor(
-    BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]
-):
+class LlavaNextMultiModalProcessor(BaseLlavaNextMultiModalProcessor[_I]):
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
