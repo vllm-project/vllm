@@ -378,8 +378,10 @@ def FusedMoE(
         **routed_experts_args if routed_experts_args is not None else {},
     )
 
-    if (num_fused_shared_experts > 0
-            and not routed_experts.quant_method.supports_fused_shared_experts):
+    if (
+        num_fused_shared_experts > 0
+        and not routed_experts.quant_method.supports_fused_shared_experts
+    ):
         raise ValueError(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 is not supported by "
             f"{routed_experts.quant_method.method_name}; fusing the shared expert into "
