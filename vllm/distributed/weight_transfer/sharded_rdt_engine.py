@@ -368,7 +368,7 @@ class ShardedRDTWeightTransferEngine(
     The plan is baked once at ``init_transfer_engine`` (a meta dry run over
     ``init_info.names``) into one ``_BakedModule`` per fully-loaded leaf module,
     indexed by source name. Every ``update_weights`` *replays* the leaf modules
-    its gathered names cover. See the module docstring and ``baked_rdt_replay.md``.
+    its gathered names cover. See the module docstring.
     """
 
     init_info_cls = ShardedRDTWeightTransferInitInfo

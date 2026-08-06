@@ -152,10 +152,18 @@ class WeightSource(ABC):
 
     def groups(self) -> list[list[str]]:
         """This rank's gather groups, in metadata order: `layerwise_groups` over
-        `metadata()`, restricted to `owned_groups()` when that is overridden."""
+        `metadata()`, restricted to `owned_groups()` when that is overridden.
+
+        The indices are normalized (sorted, de-duplicated) exactly as a trainer
+        engine normalizes them, so the two agree by construction: a source whose
+        `owned_groups()` came back unsorted would otherwise pair each group with
+        the wrong batch from this stream.
+        """
         groups = layerwise_groups([m.name for m in self.metadata()])
         owned = self.owned_groups()
-        return groups if owned is None else [groups[g] for g in owned]
+        if owned is None:
+            return groups
+        return [groups[g] for g in sorted({int(g) for g in owned})]
 
     def iter_groups(self) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
         """Yield one `(names, tensors)` batch per group from `groups()`.
