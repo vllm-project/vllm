@@ -255,7 +255,7 @@ def qwen3vl_vision_lora_files():
 
 @pytest.fixture(scope="session")
 def gemma4_vision_lora_files():
-    return snapshot_download(repo_id="EpochEcho/gemma4-e2b-it-lora-pokemon")
+    return hf_api().snapshot_download(repo_id="EpochEcho/gemma4-e2b-it-lora-pokemon")
 
 
 @pytest.fixture(scope="session")
