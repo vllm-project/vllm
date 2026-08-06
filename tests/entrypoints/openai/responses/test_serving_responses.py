@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from collections import deque
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -662,6 +664,43 @@ def test_responses_render_result_rejects_non_single_prompt(engine_inputs):
 
     assert isinstance(result, ErrorResponse)
     assert f"got {len(engine_inputs)}" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_background_stream_terminal_cursor_closes() -> None:
+    terminal_event = MagicMock()
+    terminal_event.type = "response.completed"
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.event_store = {
+        "resp_test": (deque([terminal_event]), asyncio.Event()),
+    }
+
+    stream = serving.responses_background_stream_generator(
+        "resp_test",
+        starting_after=0,
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(stream), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_background_stream_cursor_before_terminal_yields_terminal() -> None:
+    terminal_event = MagicMock()
+    terminal_event.type = "response.completed"
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.event_store = {
+        "resp_test": (deque([terminal_event]), asyncio.Event()),
+    }
+
+    stream = serving.responses_background_stream_generator(
+        "resp_test",
+        starting_after=-1,
+    )
+
+    assert await asyncio.wait_for(anext(stream), timeout=0.1) is terminal_event
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(stream), timeout=0.1)
 
 
 class TestInitializeToolSessions:
