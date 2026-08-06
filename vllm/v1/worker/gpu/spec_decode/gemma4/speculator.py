@@ -23,6 +23,23 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 logger = init_logger(__name__)
 
 
+def _copy_target_kv_scales(attn: nn.Module, target_attn: nn.Module) -> None:
+    """Copy target KV scales while preserving their tensor representation.
+
+    Default attention scales are scalar buffers, while some quantization
+    methods replace them with length-one or per-head parameters. Re-register
+    cloned buffers on the draft layer so the shared KV cache is interpreted
+    with the target's values and shapes without aliasing target parameters.
+    """
+    for scale_name in ("_k_scale", "_v_scale"):
+        target_scale = getattr(target_attn, scale_name)
+        attn.register_buffer(scale_name, target_scale.detach().clone())
+    for scale_name in ("_k_scale_float", "_v_scale_float"):
+        setattr(attn, scale_name, getattr(target_attn, scale_name))
+    for scale_name in ("_k_scale_cpu", "_v_scale_cpu"):
+        getattr(attn, scale_name).copy_(getattr(target_attn, scale_name))
+
+
 class Gemma4Speculator(AutoRegressiveSpeculator):
     @property
     def advance_draft_positions(self) -> bool:
@@ -136,10 +153,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
             target_attn = self.vllm_config.compilation_config.static_forward_context[
                 target_layer_name
             ]
-            attn._k_scale.copy_(target_attn._k_scale)
-            attn._v_scale.copy_(target_attn._v_scale)
-            attn._k_scale_float = target_attn._k_scale_float
-            attn._v_scale_float = target_attn._v_scale_float
+            _copy_target_kv_scales(attn, target_attn)
 
             logger.info(
                 "Gemma4 MTP: draft layer %d (%s) -> %s",
