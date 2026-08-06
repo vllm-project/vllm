@@ -707,7 +707,7 @@ class FusedInputNorm(nn.Module):
 
         grid_thw = grid_thw.view(patches, self.channel, patch_size)
         grid_thw = F.batch_norm(
-            grid_thw.to(torch.float32),
+            grid_thw.to(self.dtype),
             running_mean=self.running_mean,
             running_var=self.running_var,
             weight=self.weight,
