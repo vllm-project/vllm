@@ -21,6 +21,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
+    LINEAR_ALGOS,
     ModelOptFp8Config,
     ModelOptLinearMethod,
     ModelOptMixedPrecisionConfig,
@@ -156,6 +157,65 @@ def test_modelopt_fp8_updates_weight_dims_after_transpose():
     assert layer.weight.input_dim == 0
     assert layer.weight.output_dim == 1
     method.kernel.process_weights_after_loading.assert_called_once_with(layer)
+
+
+def test_modelopt_linear_algos_table_matches_resolve():
+    """LINEAR_ALGOS is the single source of truth for supported linear algos.
+
+    Every entry must be dispatchable by resolve(), and every config's
+    validation list must be derived from it -- so adding a format is one row
+    here plus one row in resolve(), with nothing else to keep in sync.
+    """
+    from vllm.model_executor.layers.quantization.modelopt import (
+        QUANT_ALGOS,
+        algos_owned_by,
+        resolve,
+    )
+
+    class _Cfg:
+        group_size = 16
+
+    for algo in LINEAR_ALGOS:
+        spec, _, _ = resolve(algo, _Cfg(), "layer")
+        assert spec.weight is not None, algo
+
+    assert list(QUANT_ALGOS) == [*LINEAR_ALGOS, "MIXED_PRECISION"]
+    assert algos_owned_by("modelopt") == (
+        "FP8",
+        "FP8_PER_CHANNEL_PER_TOKEN",
+        "FP8_PB_WO",
+    )
+    assert algos_owned_by("modelopt_fp4") == ("NVFP4", "W4A16_NVFP4")
+    assert algos_owned_by("modelopt_mxfp8") == ("MXFP8",)
+
+
+@pytest.mark.parametrize("algo", list(LINEAR_ALGOS))
+def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
+    """Mixed precision must route every algo in LINEAR_ALGOS through the
+    generic method. FP8_PER_CHANNEL_PER_TOKEN and FP8_PB_WO used to fall
+    through to UnquantizedLinearMethod, which loses the checkpoint's scales.
+    """
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    config = m.ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": None,
+                "exclude_modules": [],
+                "group_size": 16,
+                "quantized_layers": {
+                    "model.layers.0.mlp.down_proj": {"quant_algo": algo}
+                },
+            }
+        }
+    )
+    method = config.get_quant_method(
+        MagicMock(spec=LinearBase), "model.layers.0.mlp.down_proj"
+    )
+
+    assert isinstance(method, ModelOptLinearMethod), (algo, type(method).__name__)
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
