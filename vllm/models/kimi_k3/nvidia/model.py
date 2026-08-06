@@ -242,9 +242,23 @@ class KimiRoutedOutputTransform(nn.Module):
         self.norm = norm
         self.up_proj = up_proj
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Project the routed latent back to the hidden dim.
+
+        Args:
+            hidden_states: Routed expert output in latent space.
+            residual: Optional tensor of the up-projection's output shape to
+                accumulate into. It is consumed in the GEMM's beta-add
+                epilogue, so adding it costs no extra kernel.
+        """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
+        if residual is not None:
+            return residual.addmm_(hidden_states, self.up_proj.weight.t())
         hidden_states, _ = self.up_proj(hidden_states)
         return hidden_states
 
@@ -523,8 +537,8 @@ class KimiMoE(nn.Module):
         if self.num_shared_experts is not None:
             shared_intermediate_size = moe_intermediate_size * self.num_shared_experts
             self.shared_experts = KimiMLP(
-                hidden_size=config.hidden_size,  # 7618
-                intermediate_size=shared_intermediate_size,  # 3072*2
+                hidden_size=config.hidden_size,
+                intermediate_size=shared_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
@@ -721,11 +735,16 @@ class KimiMoE(nn.Module):
                 topk_ids,
                 activation_clamp=None,
             )
-            final_hidden_states = self.routed_output_transform(final_hidden_states)
-            if self.shared_experts is not None:
-                final_hidden_states = final_hidden_states + self.shared_experts(
-                    hidden_states
-                )
+            # The shared output is folded into the up-projection GEMM's beta-add
+            # epilogue, so combining the two branches costs no extra kernel.
+            shared_output = (
+                self.shared_experts(hidden_states)
+                if self.shared_experts is not None
+                else None
+            )
+            final_hidden_states = self.routed_output_transform(
+                final_hidden_states, residual=shared_output
+            )
         else:
             # Routed experts consume the down-projected latent; shared experts
             # (inside MoERunner) get the original hidden states via
