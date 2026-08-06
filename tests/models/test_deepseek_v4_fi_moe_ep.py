@@ -91,6 +91,26 @@ def test_fi_backend_strings_are_registered_mega_moe_backends():
     assert set(FI_MOE_EP_BACKENDS) <= MEGA_MOE_BACKENDS
 
 
+@pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
+def test_all_mega_backends_get_sequence_parallel_moe(moe_backend):
+    """Every mega backend must qualify for sequence-parallel MoE at
+    TP>1/EP: the predicate once matched only the native backend string,
+    which silently ran the fi backends full-batch with an all-reduce on
+    every rank — 0.42-0.65x native e2e at TP8."""
+    from vllm.models.deepseek_v4.nvidia.model import _use_sequence_parallel
+
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            enable_expert_parallel=True,
+            tensor_parallel_size=8,
+            data_parallel_size=1,
+        ),
+        kernel_config=SimpleNamespace(moe_backend=moe_backend),
+    )
+    assert _use_sequence_parallel(vllm_config)
+
+
 def test_fi_moe_ep_backend_spec_kernel_and_nvshmem_contract():
     dg = fi_moe_ep_backend_spec("flashinfer_moe_ep_mega_deep_gemm")
     assert dg.megakernel == "deep_gemm_mega"
