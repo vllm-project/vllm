@@ -28,6 +28,15 @@ def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
     return None
 
 
+# Must stay in sync with the switch on num_experts in
+# csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.cu
+# (topkGatingSoftplusSqrtKernelLauncher): powers of two, plus multiples
+# of 64 in [192, 576]. Guarded by test_topk_softplus_sqrt.py.
+_SOFTPLUS_SQRT_SUPPORTED_EXPERTS = frozenset(
+    (1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512, 576)
+)
+
+
 def vllm_topk_softmax(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -131,33 +140,32 @@ def vllm_topk_softplus_sqrt(
 ) -> tuple[torch.Tensor, ...]:
     from vllm.platforms import current_platform
 
-    if current_platform.is_xpu():
-        return _topk_softplus_sqrt_torch(
+    n_experts = gating_output.shape[-1]
+    if not current_platform.is_xpu() and n_experts in _SOFTPLUS_SQRT_SUPPORTED_EXPERTS:
+        ops.topk_hash_softplus_sqrt(
             topk_weights,
             topk_indices,
             token_expert_indices,
             gating_output,
             renormalize,
+            routed_scaling_factor,
             e_score_correction_bias,
             input_tokens,
             hash_indices_table,
-            routed_scaling_factor,
+            is_padding=_get_padding_mask(topk_indices.shape[0]),
         )
-
-    ops.topk_hash_softplus_sqrt(
+        return topk_weights, topk_indices
+    return _topk_softplus_sqrt_torch(
         topk_weights,
         topk_indices,
         token_expert_indices,
         gating_output,
         renormalize,
-        routed_scaling_factor,
         e_score_correction_bias,
         input_tokens,
         hash_indices_table,
-        is_padding=_get_padding_mask(topk_indices.shape[0]),
+        routed_scaling_factor,
     )
-
-    return topk_weights, topk_indices
 
 
 @functools.lru_cache(maxsize=8)
