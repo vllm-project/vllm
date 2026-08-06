@@ -100,3 +100,5 @@ def test_image_cached_apply(model_id):
             hf_processor_mm_kwargs={},
         )
         assert len(result["mm_placeholders"]["image"]) == 1
+
+    assert cache.make_stats().hits == 1

@@ -16,7 +16,6 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from functools import partial
@@ -222,9 +221,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         def get_replacement(item_idx: int, modality: str):
             out_item = out_mm_kwargs[modality][item_idx]
-            repl_ids = out_item[f"{modality}_placeholder_ids"].data.tolist()
-            embed_id = Counter(repl_ids).most_common(1)[0][0]
-            return PromptUpdateDetails.select_token_id(repl_ids, embed_id)
+            repl_ids = out_item[f"{modality}_placeholder_ids"].data
+            embed_id = repl_ids.mode().values.item()
+            return PromptUpdateDetails.select_token_id(repl_ids.tolist(), embed_id)
 
         modalities: list[str] = []
         if self.info._is_audio_model():
@@ -263,8 +262,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     }
                 )
                 mm_fields["num_audio_tokens"] = MultiModalFieldConfig.batched("audio")
-            else:
-                mm_fields["audio_embeds"] = MultiModalFieldConfig.batched("audio")
             self._add_placeholder_fields("audio", hf_inputs, mm_fields)
         if self.info._is_image_model():
             num_image_patches = hf_inputs.get("num_image_patches")
@@ -283,8 +280,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 mm_fields["num_image_patches"] = MultiModalFieldConfig.batched(
                     "image", keep_on_cpu=True
                 )
-            else:
-                mm_fields["image_embeds"] = MultiModalFieldConfig.batched("image")
 
             # Keep these as batched, as they always have batch size as first dim
             mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
@@ -333,7 +328,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
     ) -> "BatchFeature":
         # Text-only input not supported in composite processor
         if not any(mm_data.get(key) for key in ("images", "audio")):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self.info.get_tokenizer().encode(prompt, **tok_kwargs)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -373,11 +368,13 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
         repl_ids: dict[str, list[list[int]]] = {}
         target_ids: dict[str, list[list[int]]] = {}
-        for off in offsets[0]:
-            ids = tokenizer.encode(off["replacement"], add_special_tokens=False)
-            repl_ids.setdefault(off["type"], []).append(ids)
-            target = tokenizer.encode(off["text"], add_special_tokens=False)
-            target_ids.setdefault(off["type"], []).append(target)
+        for offset in offsets[0]:
+            if offset["type"] == "video":
+                raise NotImplementedError(offset["type"])
+            ids = tokenizer.encode(offset["replacement"], add_special_tokens=False)
+            repl_ids.setdefault(offset["type"], []).append(ids)
+            target = tokenizer.encode(offset["text"], add_special_tokens=False)
+            target_ids.setdefault(offset["type"], []).append(target)
         for modality, per_item in repl_ids.items():
             processed_data[f"{modality}_placeholder_ids"] = torch.tensor(
                 [i for ids in per_item for i in ids]
@@ -389,8 +386,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 target_ids[modality]
             )
         if "audio" in repl_ids:
+            audio_ids = [torch.tensor(ids) for ids in repl_ids["audio"]]
             processed_data["num_audio_tokens"] = torch.tensor(
-                [Counter(ids).most_common(1)[0][1] for ids in repl_ids["audio"]]
+                [item.eq(item.mode().values).sum() for item in audio_ids]
             )
 
 
