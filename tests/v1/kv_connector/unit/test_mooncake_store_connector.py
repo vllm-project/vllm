@@ -18,9 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     scheduler,
     worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
-    MooncakeStoreConnectorMetadata,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import MooncakeStoreConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
@@ -88,6 +86,10 @@ def test_scheduler_role_initializes_store_scheduler_only():
     mock_worker.assert_not_called()
     assert connector.connector_scheduler is mock_scheduler.return_value
     assert connector.connector_worker is None
+    block_pool = MagicMock()
+
+    connector.bind_gpu_block_pool(block_pool)
+    mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
 def test_worker_methods_delegate_to_store_worker():
@@ -286,9 +288,11 @@ def test_update_connector_output_and_take_events():
 
     kv_events = mooncake_store_connector.MooncakeStoreKVEvents(num_workers=1)
     kv_events.add_events([event])
-    connector.update_connector_output(KVConnectorOutput(kv_cache_events=kv_events))
+    output = KVConnectorOutput(kv_cache_events=kv_events)
+    connector.update_connector_output(output)
 
     assert connector._kv_cache_events is kv_events
+    connector.connector_scheduler.update_connector_output.assert_called_once_with(output)
     assert list(connector.take_events()) == [event]
     assert connector._kv_cache_events is None
 
