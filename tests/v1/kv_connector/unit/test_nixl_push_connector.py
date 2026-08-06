@@ -1214,7 +1214,6 @@ class TestPushPrefixCaching:
         w.nixl_wrapper.make_prepped_xfer.return_value = 7
         w._ensure_handshake = lambda *a, **k: None
         w._logical_to_kernel_block_ids = lambda x, ratio: x
-        w._logical_to_remote_kernel_block_ids = lambda block_ids, ratio: block_ids
         return w, engine_id
 
     @staticmethod

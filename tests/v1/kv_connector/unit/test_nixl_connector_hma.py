@@ -448,7 +448,7 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
 
     with pytest.raises(AssertionError, match="unpairable SSM state slots"):
         worker._apply_prefix_caching(
-            [list(range(10)), [4, 5, 6, 7]], [list(range(10)), [8, 9]], 10
+            [list(range(10)), [4, 5, 6, 7]], [list(range(10)), [8, 9]], 10, 10
         )
 
 
