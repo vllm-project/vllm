@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from collections import deque
 from contextlib import AsyncExitStack
 from unittest.mock import MagicMock
 
@@ -300,6 +302,43 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
     assert event.response.text is not None
     assert event.response.text.format is not None
     assert event.response.text.format.model_dump(by_alias=True)["schema"] == schema
+
+
+@pytest.mark.asyncio
+async def test_background_stream_terminal_cursor_closes() -> None:
+    terminal_event = MagicMock()
+    terminal_event.type = "response.completed"
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.event_store = {
+        "resp_test": (deque([terminal_event]), asyncio.Event()),
+    }
+
+    stream = serving.responses_background_stream_generator(
+        "resp_test",
+        starting_after=0,
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(stream), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_background_stream_cursor_before_terminal_yields_terminal() -> None:
+    terminal_event = MagicMock()
+    terminal_event.type = "response.completed"
+    serving = OpenAIServingResponses.__new__(OpenAIServingResponses)
+    serving.event_store = {
+        "resp_test": (deque([terminal_event]), asyncio.Event()),
+    }
+
+    stream = serving.responses_background_stream_generator(
+        "resp_test",
+        starting_after=-1,
+    )
+
+    assert await asyncio.wait_for(anext(stream), timeout=0.1) is terminal_event
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(stream), timeout=0.1)
 
 
 class TestInitializeToolSessions:

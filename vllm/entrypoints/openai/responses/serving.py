@@ -1316,6 +1316,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                     return
                 current_index += 1
 
+            if event_deque and event_deque[-1].type == "response.completed":
+                return
+
             await new_event_signal.wait()
 
     async def retrieve_responses(
