@@ -163,10 +163,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/utils/import_utils.py
+  - scripts/benchmark_helion_kernels.py
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
-  - pip install helion==1.1.0
+  - pip install helion==1.4.0
   - pytest -v -s kernels/helion/
 
 #------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
@@ -330,7 +331,7 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
+  - pytest -v -s v1/e2e/spec_decode/draft_model/
 
 - label: Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
@@ -348,7 +349,8 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+  - pytest -v -s v1/e2e/spec_decode/speculators/
+  - pytest -v -s v1/e2e/spec_decode/mtp/
 
 - label: V1 others (CPU) # TBD
   timeout_in_minutes: 180
@@ -635,7 +637,7 @@ steps:
   - tests/compile
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+  - pytest -v -s compile/fullgraph/test_full_graph.py
 
 - label: Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
@@ -971,7 +973,7 @@ steps:
   - tests/test_logger
   - tests/test_vllm_port
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
 
 #--------------------------------------------------------  mi300 · entrypoints  --------------------------------------------------------#
 
@@ -1528,6 +1530,24 @@ steps:
   - pytest -v -s tests/ir
   - pytest -v -s tests/kernels/ir
 
+- label: Kernels MLA (MI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  - tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  commands:
+  - rocm-smi
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1611,8 +1631,12 @@ steps:
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
+  - csrc/rocm/
   - tests/kernels/moe
+  - tests/kernels/utils.py
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
@@ -1632,12 +1656,17 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/
+  - csrc/rocm/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
-  - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
   - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/model_executor/kernels/
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -1836,7 +1865,7 @@ steps:
   - tests/v1/spec_decode/test_max_len.py
   - tests/v1/spec_decode/test_rejection_sampler_utils.py
   - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-  - tests/v1/e2e/spec_decode/test_spec_decode.py
+  - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
   - set -x
@@ -1844,7 +1873,9 @@ steps:
   - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
   - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+  - pytest -v -s v1/e2e/spec_decode/eagle/
+  - pytest -v -s v1/e2e/spec_decode/speculators/
+  - pytest -v -s v1/e2e/spec_decode/mtp/
 
 #------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
 
@@ -2551,7 +2582,7 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
+  - pytest -v -s v1/e2e/spec_decode/draft_model/
 
 - label: Spec Decode Eagle # TBD
   timeout_in_minutes: 180
@@ -2569,7 +2600,7 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+  - pytest -v -s v1/e2e/spec_decode/eagle/
 
 - label: Spec Decode Ngram + Suffix # TBD
   timeout_in_minutes: 180
@@ -2587,7 +2618,7 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
+  - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
 
 - label: Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
@@ -2606,7 +2637,8 @@ steps:
   - tests/v1/e2e/spec_decode/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+    - pytest -v -s v1/e2e/spec_decode/speculators/
+    - pytest -v -s v1/e2e/spec_decode/mtp/
 
 - label: Speculators Correctness # TBD
   timeout_in_minutes: 180
@@ -2807,7 +2839,10 @@ steps:
   - vllm/
   - tests/v1/e2e
   commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
+    - >-
+      pytest -v -s
+      v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism
+      v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
 
 - label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
   timeout_in_minutes: 180
@@ -2968,20 +3003,6 @@ steps:
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
-
-- label: V1 e2e (4 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1/e2e
-  commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
 - label: V1 e2e (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
@@ -3384,6 +3405,24 @@ steps:
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
 
+- label: Kernels MLA (MI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  - tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  commands:
+  - rocm-smi
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3412,8 +3451,12 @@ steps:
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
+  - csrc/rocm/
   - tests/kernels/moe
+  - tests/kernels/utils.py
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
@@ -3432,12 +3475,17 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/
+  - csrc/rocm/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
-  - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
   - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/model_executor/kernels/
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 

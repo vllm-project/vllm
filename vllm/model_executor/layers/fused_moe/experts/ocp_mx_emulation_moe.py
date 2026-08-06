@@ -69,9 +69,15 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         self.quantization_emulation = True
 
         if self.ocp_mx_scheme in {
+            OCP_MX_Scheme.w_mxfp4,
+            OCP_MX_Scheme.w_mxfp6_e3m2,
+            OCP_MX_Scheme.w_mxfp6_e2m3,
+        }:
+            # Weight-only schemes leave activations unquantized.
+            self._quant_dtype = None
+        elif self.ocp_mx_scheme in {
             OCP_MX_Scheme.w_mxfp4_a_mxfp4,
         }:
-            # Weight has to be dequantized for mxfp4 emulation.
             self._quant_dtype = "mxfp4"
         elif self.ocp_mx_scheme in [
             OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,

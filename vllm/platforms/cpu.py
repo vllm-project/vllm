@@ -295,7 +295,8 @@ class CpuPlatform(Platform):
         # memory allocation overhead
         if (
             platform.system() == "Linux"
-            and cpu_architecture in (CpuArchEnum.ARM, CpuArchEnum.X86)
+            and cpu_architecture
+            in (CpuArchEnum.ARM, CpuArchEnum.X86, CpuArchEnum.S390X)
             and "libtcmalloc" not in ld_preload_str
         ):
             vllm_pkg = os.path.dirname(os.path.dirname(__file__))
