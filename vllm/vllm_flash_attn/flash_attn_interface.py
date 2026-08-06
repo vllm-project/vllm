@@ -408,17 +408,8 @@ def flash_attn_varlen_func(
         )
         if fa4_fp8_kv_dequant:
             fa4_q_descale = None
-            # clone the descales: vLLM's stride-0 broadcast -> stride-1 (cute requires it).
-            fa4_k_descale = (
-                k_descale.clone(memory_format=torch.contiguous_format)
-                if k_descale is not None
-                else None
-            )
-            fa4_v_descale = (
-                v_descale.clone(memory_format=torch.contiguous_format)
-                if v_descale is not None
-                else None
-            )
+            fa4_k_descale = k_descale
+            fa4_v_descale = v_descale
         else:
             fa4_q_descale = None
             fa4_k_descale = None

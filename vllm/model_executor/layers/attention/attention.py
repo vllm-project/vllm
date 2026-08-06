@@ -629,6 +629,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
             ).real_page_size_bytes
+            # KV-cache planning runs after model construction's config context exits.
+            # Restore it here because a backend's supported kernel block sizes can
+            # depend on runtime config (for example, FA4 FP8 KV cache on SM90).
             with set_current_vllm_config(vllm_config):
                 sw_block_size = _largest_kernel_block_within(
                     self.attn_backend, sw_per_token, shared_page, block_size
