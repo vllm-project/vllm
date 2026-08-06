@@ -179,6 +179,122 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_harmony_function_call_outputs_do_not_reverse_scan_per_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reverse_calls = 0
+
+    def count_reversed(items):
+        nonlocal reverse_calls
+        reverse_calls += 1
+        return reversed(items)
+
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.responses.harmony.reversed",
+        count_reversed,
+        raising=False,
+    )
+    renderer = _new_online_renderer()
+    renderer.use_harmony = True
+    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.renderer = SimpleNamespace(
+        tokenizer=SimpleNamespace(truncation_side="left")
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.online_renderer.render_for_completion",
+        lambda messages: [1],
+    )
+    request = ResponsesRequest(
+        model="test-model",
+        input=[
+            {
+                "type": "function_call",
+                "id": f"fc_{index}",
+                "call_id": f"call_{index}",
+                "name": f"function_{index}",
+                "arguments": "{}",
+            }
+            for index in range(32)
+        ]
+        + [
+            {
+                "type": "function_call_output",
+                "call_id": "call_0",
+                "output": "ok",
+            }
+            for _ in range(32)
+        ],
+    )
+
+    result = await renderer.render_responses(
+        request,
+        previous_messages=[],
+        previous_response_outputs=[],
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    assert len(result.messages) == 64
+    assert result.messages[-1].author.name == "functions.function_0"
+    assert reverse_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_harmony_function_call_index_keeps_latest_prior_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    earlier = ResponseFunctionToolCall(
+        id="fc_old",
+        call_id="call_test",
+        name="old_function",
+        arguments="{}",
+        type="function_call",
+    )
+    later = ResponseFunctionToolCall(
+        id="fc_new",
+        call_id="call_test",
+        name="new_function",
+        arguments="{}",
+        type="function_call",
+    )
+    reasoning = ResponseReasoningItem(
+        id="rs_test",
+        type="reasoning",
+        content=[],
+        summary=[],
+        status=None,
+    )
+    renderer = _new_online_renderer()
+    renderer.use_harmony = True
+    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.renderer = SimpleNamespace(
+        tokenizer=SimpleNamespace(truncation_side="left")
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.online_renderer.render_for_completion",
+        lambda messages: [1],
+    )
+    request = ResponsesRequest(
+        model="test-model",
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_test",
+                "output": "ok",
+            }
+        ],
+    )
+
+    result = await renderer.render_responses(
+        request,
+        previous_messages=[],
+        previous_response_outputs=[earlier, reasoning, later],
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    assert result.messages[-1].author.name == "functions.new_function"
+
+
 @pytest.mark.skip_global_cleanup
 def test_response_created_event_uses_public_json_schema_alias() -> None:
     schema = {
