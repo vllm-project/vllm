@@ -34,6 +34,10 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -262,11 +266,13 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
-def test_select_common_block_size_accepts_shared_multiple():
-    backend_a = _make_mock_backend_for_kernel_block_size([1, MultipleOf(16)])
-    backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])
+def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
 
-    selected_size = select_common_block_size(16, [backend_a, backend_b])
+    selected_size = select_common_block_size(
+        16,
+        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+    )
     assert selected_size == 16
 
 
