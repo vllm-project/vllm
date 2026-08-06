@@ -1361,3 +1361,174 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_fetch_finished_sending_reqs_cleans_ownerless_placeholders():
+    """Ownerless placeholders (p_req_id='') should be evicted once expired."""
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        prefill_connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        prefill_worker = prefill_connector.connector_worker
+
+        now = time.perf_counter()
+
+        # Ownerless placeholder that has expired.
+        prefill_worker.reqs_need_send["tx-orphan-expired"] = SendBlockMeta(
+            p_req_id="",
+            transfer_id="tx-orphan-expired",
+            local_block_ids=[],
+            ready=asyncio.Event(),
+            expire_time=now - 10,
+            created_at=now - 70,
+        )
+
+        # Ownerless placeholder that has NOT expired yet.
+        prefill_worker.reqs_need_send["tx-orphan-active"] = SendBlockMeta(
+            p_req_id="",
+            transfer_id="tx-orphan-active",
+            local_block_ids=[],
+            ready=asyncio.Event(),
+            expire_time=now + 50,
+            created_at=now - 10,
+        )
+
+        # Claimed entry that has expired (normal timeout path).
+        prefill_worker.reqs_need_send["tx-claimed-expired"] = SendBlockMeta(
+            p_req_id="p-req-claimed",
+            transfer_id="tx-claimed-expired",
+            local_block_ids=[[1, 2]],
+            ready=MagicMock(),
+            expire_time=now - 5,
+            created_at=now - 500,
+        )
+
+        # Claimed entry that is still active.
+        prefill_worker.reqs_need_send["tx-claimed-active"] = SendBlockMeta(
+            p_req_id="p-req-active",
+            transfer_id="tx-claimed-active",
+            local_block_ids=[[3, 4]],
+            ready=MagicMock(),
+            expire_time=now + 100,
+            created_at=now - 10,
+        )
+
+        finished_reqs = await prefill_worker.fetch_finished_sending_reqs()
+
+        # Ownerless expired entry removed, no p_req_id added to finished set.
+        assert "tx-orphan-expired" not in prefill_worker.reqs_need_send
+
+        # Ownerless non-expired entry still present.
+        assert "tx-orphan-active" in prefill_worker.reqs_need_send
+
+        # Claimed expired entry removed and its p_req_id is in finished set.
+        assert "tx-claimed-expired" not in prefill_worker.reqs_need_send
+        assert "p-req-claimed" in finished_reqs
+
+        # Claimed active entry still present.
+        assert "tx-claimed-active" in prefill_worker.reqs_need_send
+        assert "p-req-active" not in finished_reqs
+
+
+@pytest.mark.asyncio
+async def test_send_kv_to_decode_orphan_timeout_and_cleanup(monkeypatch):
+    """Unclaimed placeholders should time out using the orphan timeout
+    and be removed from reqs_need_send."""
+
+    monkeypatch.setattr(envs, "VLLM_MOONCAKE_ORPHAN_TRANSFER_TIMEOUT", 0)
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        prefill_connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        prefill_worker = prefill_connector.connector_worker
+        origin_sender_loop = prefill_worker.sender_loop
+        prefill_worker.sender_loop = asyncio.get_event_loop()
+
+        mock_socket = AsyncMock()
+
+        meta = MooncakeXferMetadata(
+            remote_engine_id="engine-d",
+            remote_hostname="decode-host",
+            remote_port=9999,
+            remote_tp_size=1,
+            remote_tp_rank=0,
+            req_blocks={"d-req-0": ("xfer-orphan-0", [0, 1])},
+            kv_caches_base_addr=[0x2000],
+            block_lens=[256],
+            kv_block_lens=[128],
+            registered_layer_names=["model.layers.0.self_attn"],
+            registered_layer_indices=[0],
+            registered_group_indices=[0],
+        )
+
+        prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
+        prefill_worker.registered_layer_indices = [0]
+        prefill_worker.registered_group_indices = [0]
+        prefill_worker.kv_caches_base_addr = [0x1000]
+        prefill_worker.block_len_per_layer = [256]
+        prefill_worker.kv_block_len_per_layer = [128]
+
+        await prefill_worker.send_kv_to_decode(b"identity", mock_socket, meta)
+
+        # The ownerless placeholder should have been removed after timeout.
+        assert "xfer-orphan-0" not in prefill_worker.reqs_need_send
+
+        # Verify an error response was sent.
+        mock_socket.send_multipart.assert_called_once()
+        _, payload = mock_socket.send_multipart.call_args[0][0]
+        response = prefill_worker._xfer_resp_decoder.decode(payload)
+        assert response.status == MooncakeXferResponseStatus.FINISH
+        assert "d-req-0" in response.err_reqs
+        assert "Timeout" in response.err_msg
+
+        prefill_worker.sender_loop = origin_sender_loop
+        prefill_worker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_claimed_placeholder_uses_full_timeout(monkeypatch):
+    """Once a placeholder is claimed via record_send_reqs, it should use
+    the full VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT, not the orphan timeout."""
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        prefill_connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        prefill_worker = prefill_connector.connector_worker
+
+        now = time.perf_counter()
+
+        # Simulate a placeholder that was created with the orphan timeout
+        # but then claimed by record_send_reqs (which resets expire_time).
+        prefill_worker.reqs_need_send["tx-claimed"] = SendBlockMeta(
+            p_req_id="p-req-claimed",
+            transfer_id="tx-claimed",
+            local_block_ids=[[1, 2]],
+            ready=MagicMock(),
+            expire_time=now + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+            created_at=now - 30,
+        )
+
+        finished_reqs = await prefill_worker.fetch_finished_sending_reqs()
+
+        # Should NOT be expired — it has the full abort timeout.
+        assert "tx-claimed" in prefill_worker.reqs_need_send
+        assert "p-req-claimed" not in finished_reqs

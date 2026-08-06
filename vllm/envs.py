@@ -237,6 +237,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_MOONCAKE_ORPHAN_TRANSFER_TIMEOUT: int = 60
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
@@ -1731,6 +1732,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
+    ),
+    # Timeout (in seconds) for unclaimed Mooncake transfer placeholders.
+    # Limits how long a sender task waits for a transfer ID that was never
+    # registered on the P side (e.g. request rejected before engine admission).
+    "VLLM_MOONCAKE_ORPHAN_TRANSFER_TIMEOUT": lambda: int(
+        os.getenv("VLLM_MOONCAKE_ORPHAN_TRANSFER_TIMEOUT", "60")
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
