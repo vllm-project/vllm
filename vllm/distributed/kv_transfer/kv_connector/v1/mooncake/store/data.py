@@ -372,11 +372,11 @@ class ReqMeta:
     # serve that purpose: it is reused once a preempted request resumes, so it
     # would release the wrong job's blocks.
     store_job_id: int | None = None
-    # Core-provided per-mamba-group
-    # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
-    # Present only on the producer's CoW step; drives the connector's offload
-    # (the FA group's block is derived from block_ids and boundary_tokens).
-    partial_tail_offloads: list[tuple[int, int, int]] | None = None
+    # Core-provided (group_id, block_id, boundary_tokens) mamba "align"
+    # boundary states. A block-aligned entry is a committed boundary snapshot;
+    # a non-aligned entry is the sub-block CoW tail. The store-job reference
+    # keeps each exact block alive until every worker rank finishes the job.
+    boundary_state_offloads: list[tuple[int, int, int]] | None = None
 
     @staticmethod
     def from_request_tracker(

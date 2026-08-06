@@ -198,12 +198,22 @@ class MooncakeStoreCoordinator:
 
         Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
         so the store retains exactly the blocks the local prefix cache would.
+
+        Mamba groups are always all-False: the normal save resolves blocks
+        positionally from the connector's append-only block-ID snapshot, but
+        an align-mode mamba block table is not append-only (interior state
+        blocks are nulled/freed, and speculative decoding relocates the spec
+        blocks in place), so a positional read may hit a null, freed, or live
+        speculative-state block and persist wrong bytes under a valid prefix
+        hash. Mamba state is persisted only through the connector-pinned exact
+        block hand-off path (``SchedulerOutput.boundary_state_offloads``).
         """
         return self._reachable_masks(
             aligned_token_len,
             start_token,
             retention_interval=self.retention_interval,
             num_prompt_tokens=num_prompt_tokens,
+            exclude_mamba=True,
         )
 
     def lookup_mask(
@@ -230,6 +240,7 @@ class MooncakeStoreCoordinator:
         *,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
+        exclude_mamba: bool = False,
     ) -> tuple[list[bool] | None, ...]:
         mask_alignment = (
             self.hash_block_size
@@ -245,6 +256,9 @@ class MooncakeStoreCoordinator:
             spec = _unwrap_spec(g.kv_cache_spec)
             end_chunk = aligned_token_len // spec.block_size
             start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
+            if exclude_mamba and isinstance(spec, MambaSpec):
+                masks.append([False] * (end_chunk - start_chunk))
+                continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
             use_eagle = g_idx in self.eagle_group_ids
