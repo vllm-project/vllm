@@ -1022,7 +1022,7 @@ def cutlass_fp4_moe_mm(
     An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
     the gemms for each combination based on the specified problem sizes.
 
-    This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
+    This is used as the MoE gemm during NVFP4 Quantized MoERunner forward.
     - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
                      input and expert weights.
     - a_/b_scales: The blockscales in FP8-E4M3 precision
@@ -2655,6 +2655,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     index_q_out: torch.Tensor | None = None,
     kv_cache_dtype: str = "auto",
     skip_index_branch: bool = False,
+    q_fp8_out: torch.Tensor | None = None,
+    q_fp8_scale: float = 1.0,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2676,6 +2678,9 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     instead of in place — folding the de-interleave into this kernel's store so
     callers skip a separate ``.contiguous()`` copy before the SM100 sparse
     attention's flat TMA descriptor.
+
+    If ``q_fp8_out`` is given, the same normalized q is also written in FP8
+    E4M3 using ``q_fp8_scale`` as its dequantization scale.
 
     When ``skip_index_branch`` is true, sparse rows still keep their packed
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
@@ -2704,6 +2709,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         index_q_out,
         kv_cache_dtype,
         skip_index_branch,
+        q_fp8_out,
+        q_fp8_scale,
     )
 
 

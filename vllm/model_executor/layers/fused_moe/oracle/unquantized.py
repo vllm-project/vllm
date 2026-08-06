@@ -143,6 +143,20 @@ def backend_to_kernel_cls(
 
         return [XPUExperts]
 
+    elif backend == UnquantizedMoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            ArmCPUUnquantizedExperts,
+            CPUUnquantizedExperts,
+            X86CPUUnquantizedExperts,
+        )
+
+        # Prefer architecture-specific kernels before the portable vector path.
+        return [
+            X86CPUUnquantizedExperts,
+            ArmCPUUnquantizedExperts,
+            CPUUnquantizedExperts,
+        ]
+
     else:
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
 
@@ -166,23 +180,21 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
 
 def _trtllm_bf16_lora_supported(moe_config: FusedMoEConfig) -> bool:
     """Gate for routing LoRA-enabled BF16 MoE to the FlashInfer TRT-LLM
-    gemm1_lora_delta path (PR #3153). Conservative: device + routing method;
-    the experts class's own _supports_* checks and the modular_kernel LoRA
-    gate provide the final filtering.
+    gemm1_lora_delta path (PR #3153).
     """
     from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
         TrtLlmBf16LoRAExperts,
     )
 
-    if not TrtLlmBf16LoRAExperts._supports_current_device():
-        return False
-    if not TrtLlmBf16LoRAExperts._supports_routing_method(
-        moe_config.routing_method, None, None
-    ):
-        return False
-    if not TrtLlmBf16LoRAExperts._supports_parallel_config(
-        moe_config.moe_parallel_config
-    ):
+    # LoRA path returns before the oracle loop; reuse is_supported_config here.
+    supported, _ = TrtLlmBf16LoRAExperts.is_supported_config(
+        TrtLlmBf16LoRAExperts,
+        moe_config,
+        None,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    if not supported:
         return False
     # The flashinfer trtllm fused-MoE kernel requires the per-partition
     # intermediate size to be a multiple of 128. Plain TP shards the MoE
@@ -198,10 +210,6 @@ def select_unquantized_moe_backend(
     Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
-    if current_platform.is_cpu():
-        # TODO: migrate to MK structure.
-        return UnquantizedMoeBackend.CPU, None
 
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
@@ -288,7 +296,12 @@ def select_unquantized_moe_backend(
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
-        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
+        skip_aiter_moe = (
+            not envs.VLLM_ROCM_USE_AITER
+            or not envs.VLLM_ROCM_USE_AITER_MOE
+            or rocm_aiter_ops.is_rdna_aiter_enabled()
+        )
+        if skip_aiter_moe:
             if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
