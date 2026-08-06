@@ -215,6 +215,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.supports_eagle_prefix_cache_hashing for c in self._connectors
         )
 
+    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
+        super().set_eagle_prefix_cache_hashing(enabled)
+        for connector in self._connectors:
+            connector.set_eagle_prefix_cache_hashing(enabled)
+
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)

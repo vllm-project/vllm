@@ -73,7 +73,6 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
-        eagle_hashing_enabled: bool = False,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
@@ -210,7 +209,6 @@ class Request:
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
         self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
-        self.eagle_hashing_enabled = eagle_hashing_enabled
         self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
@@ -229,7 +227,6 @@ class Request:
         cls,
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
-        eagle_hashing_enabled: bool = False,
     ) -> "Request":
         return cls(
             request_id=request.request_id,
@@ -246,7 +243,6 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
-            eagle_hashing_enabled=eagle_hashing_enabled,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
@@ -271,11 +267,16 @@ class Request:
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
 
-    def truncate_block_hashes(self, num_tokens: int, hash_block_size: int) -> None:
+    def truncate_block_hashes(
+        self,
+        num_tokens: int,
+        hash_block_size: int,
+        lookahead_tokens: int = 0,
+    ) -> None:
         """Discard hashes whose token dependencies extend past ``num_tokens``."""
         if self._block_hasher is None:
             return
-        num_hashes = max(num_tokens - int(self.eagle_hashing_enabled), 0)
+        num_hashes = max(num_tokens - lookahead_tokens, 0)
         num_hashes //= hash_block_size
         del self.block_hashes[num_hashes:]
         self.num_publishable_block_hashes = min(

@@ -563,7 +563,7 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        if not request.eagle_hashing_enabled:
+        if not self.coordinator.use_eagle_prefix_cache_hashing:
             self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)

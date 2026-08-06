@@ -13,16 +13,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 )
 
 
-def _make_request(**kwargs) -> SimpleNamespace:
-    kwargs.setdefault("eagle_hashing_enabled", False)
-    return SimpleNamespace(**kwargs)
-
-
 def _make_bare_scheduler(
     *, hash_block_size: int = 16, enable_partial_hash_hits: bool = False
 ) -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = "kv_both"
+    scheduler.use_eagle_prefix_cache_hashing = False
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
     scheduler.client = SimpleNamespace(discard=lambda req_id: None)
@@ -78,7 +74,7 @@ def _add_unfinished_request(
     block_hashes: list[bytes],
     prefill_end_tokens: int,
 ) -> None:
-    request = _make_request(
+    request = SimpleNamespace(
         all_token_ids=token_ids,
         block_hashes=block_hashes,
         num_output_placeholders=0,
@@ -159,7 +155,7 @@ def test_preemption_resets_tracker_before_request_finished():
     assert tracker.token_ids is None
     assert tracker.has_pending_offload is False
     assert tracker.prefill_end_tokens == 0
-    request = _make_request(request_id="req-0")
+    request = SimpleNamespace(request_id="req-0")
     assert scheduler.request_finished(request, ([0, 1],)) == (False, None)
 
 
@@ -191,7 +187,7 @@ def _make_pending_load_unfinished_request(
     block_hashes: list[bytes],
     block_ids: tuple[list[int], ...] = ([0, 1, 2],),
 ) -> None:
-    request = _make_request(
+    request = SimpleNamespace(
         num_tokens=num_tokens,
         block_hashes=block_hashes,
         num_output_placeholders=0,
@@ -259,7 +255,7 @@ def _make_resumed_unfinished_request(
     block_hashes: list[bytes],
     num_computed_tokens: int,
 ) -> None:
-    request = _make_request(
+    request = SimpleNamespace(
         all_token_ids=token_ids,
         block_hashes=block_hashes,
         num_computed_tokens=num_computed_tokens,
@@ -496,7 +492,6 @@ def test_from_request_tracker_waits_for_materialized_eagle_kv():
         tracker,
         block_size=16,
         block_hashes=[b"h0", b"h1", b"h2"],
-        eagle_hashing_enabled=True,
         max_save_tokens=0,
     )
     assert pending is None
@@ -506,7 +501,6 @@ def test_from_request_tracker_waits_for_materialized_eagle_kv():
         tracker,
         block_size=16,
         block_hashes=[b"h0", b"h1", b"h2"],
-        eagle_hashing_enabled=True,
         max_save_tokens=48,
     )
     assert ready is not None
@@ -538,7 +532,7 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     scheduler.load_async = True
     scheduler.client = _StubLookupClient(hit_tokens=32)
 
-    request = _make_request(
+    request = SimpleNamespace(
         request_id="req-0",
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -568,7 +562,7 @@ def test_full_external_hit_with_full_local_hit_skips_load():
     scheduler.load_async = True
     scheduler.client = _StubLookupClient(hit_tokens=32)
 
-    request = _make_request(
+    request = SimpleNamespace(
         request_id="req-0",
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -590,7 +584,7 @@ def test_partial_hash_hit_block_aligned_local_loads_partial_tail():
     scheduler.load_async = True
     scheduler.client = _StubLookupClient(hit_tokens=24)
 
-    request = _make_request(
+    request = SimpleNamespace(
         request_id="req-0",
         num_tokens=32,
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
@@ -615,7 +609,7 @@ def test_partial_hash_hit_no_remote_gain_skips_load():
     scheduler.load_async = True
     scheduler.client = _StubLookupClient(hit_tokens=16)
 
-    request = _make_request(
+    request = SimpleNamespace(
         request_id="req-0",
         num_tokens=32,
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
@@ -639,7 +633,7 @@ def test_sub_block_prompt_looks_up_with_fine_grained():
     scheduler.load_async = True
     scheduler.client = _StubLookupClient(hit_tokens=8)
 
-    request = _make_request(
+    request = SimpleNamespace(
         request_id="req-0",
         num_tokens=12,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -660,7 +654,7 @@ def test_sub_block_prompt_not_looked_up_without_fine_grained():
     scheduler = _make_bare_scheduler()
     scheduler.client = _StubLookupClient(hit_tokens=8)
 
-    request = _make_request(
+    request = SimpleNamespace(
         request_id="req-0",
         num_tokens=12,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -683,7 +677,7 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
     scheduler.enable_lookup = False
     scheduler.client = _StubLookupClient(hit_tokens=32)
 
-    request = _make_request(
+    request = SimpleNamespace(
         request_id="req-0",
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
@@ -706,7 +700,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     # the worker skips the normal save). Pending-offload state delays the free
     # without advancing the normal-save watermark before the put succeeds.
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
-    request = _make_request(
+    request = SimpleNamespace(
         all_token_ids=list(range(12)),
         block_hashes=[b"h0", b"h1", b"h2"],
         num_output_placeholders=0,
@@ -750,13 +744,13 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
     assert tracker.has_pending_offload is True
-    request = _make_request(request_id="req-0")
+    request = SimpleNamespace(request_id="req-0")
     assert scheduler.request_finished(request, ([0],)) == (True, None)
 
 
 def test_resumed_partial_tail_uses_handoff_boundary():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
-    request = _make_request(
+    request = SimpleNamespace(
         all_token_ids=list(range(20)),
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4"],
         num_output_placeholders=0,
@@ -801,7 +795,7 @@ def test_resumed_partial_tail_uses_handoff_boundary():
 
 def test_resumed_partial_tail_attached_to_save_keeps_handoff_boundary():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
-    request = _make_request(
+    request = SimpleNamespace(
         all_token_ids=list(range(48)),
         block_hashes=[b"h0", b"h1", b"h2"],
         num_output_placeholders=0,
@@ -833,11 +827,11 @@ def test_resumed_partial_tail_attached_to_save_keeps_handoff_boundary():
 
 def test_eagle_materialized_prefix_is_retried_without_new_blocks():
     scheduler = _make_bare_scheduler()
+    scheduler.use_eagle_prefix_cache_hashing = True
     token_ids = list(range(32))
-    request = _make_request(
+    request = SimpleNamespace(
         all_token_ids=token_ids,
         block_hashes=[b"eagle-0"],
-        eagle_hashing_enabled=True,
         num_publishable_block_hashes=1,
         num_output_placeholders=0,
     )
@@ -874,12 +868,12 @@ def test_eagle_materialized_prefix_is_retried_without_new_blocks():
 
 def test_eagle_finished_request_flushes_materialized_prefix():
     scheduler = _make_bare_scheduler()
+    scheduler.use_eagle_prefix_cache_hashing = True
     token_ids = list(range(32))
-    request = _make_request(
+    request = SimpleNamespace(
         request_id="req-0",
         all_token_ids=token_ids,
         block_hashes=[b"eagle-0"],
-        eagle_hashing_enabled=True,
         num_tokens=32,
         num_publishable_block_hashes=1,
     )

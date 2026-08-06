@@ -224,6 +224,11 @@ class KVConnectorBase_V1(ABC):
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
         self._role = role
+        self.use_eagle_prefix_cache_hashing = False
+
+    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
+        """Configure the engine-wide prefix-cache hash protocol."""
+        self.use_eagle_prefix_cache_hashing = enabled
 
     @property
     def role(self) -> KVConnectorRole:

@@ -165,6 +165,13 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
 
+    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
+        super().set_eagle_prefix_cache_hashing(enabled)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.use_eagle_prefix_cache_hashing = enabled
+        if self.connector_worker is not None:
+            self.connector_worker.use_eagle_prefix_cache_hashing = enabled
+
     def shutdown(self):
         """Release connector resources on teardown.
 

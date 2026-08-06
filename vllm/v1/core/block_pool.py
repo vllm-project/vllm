@@ -167,11 +167,13 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        use_eagle_prefix_cache_hashing: bool = False,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
+        self.use_eagle_prefix_cache_hashing = use_eagle_prefix_cache_hashing
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -341,7 +343,11 @@ class BlockPool:
                 block_start = i * block_size
                 block_end = block_start + block_size
                 extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
-                    request, block_start, block_end, curr_mm_idx
+                    request,
+                    block_start,
+                    block_end,
+                    curr_mm_idx,
+                    self.use_eagle_prefix_cache_hashing,
                 )
                 extra_keys_list.append(extra_keys)
 
@@ -365,7 +371,10 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
     ) -> bool:
-        if not request.eagle_hashing_enabled or block_size == self.hash_block_size:
+        if (
+            not self.use_eagle_prefix_cache_hashing
+            or block_size == self.hash_block_size
+        ):
             return False
 
         for block_idx in block_indices:
@@ -375,7 +384,6 @@ class BlockPool:
                 block_size,
                 self.hash_block_size,
             )
-            assert event_data is not None
             block_hash, parent_hash, block_start, block_end, extra_keys = event_data
             self.kv_event_queue.append(
                 self._build_block_stored_event(
@@ -470,7 +478,11 @@ class BlockPool:
             block_end = block_start + block_size
             cached_hashes.append(maybe_convert_block_hash(block_hashes[i]))
             extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
+                request,
+                block_start,
+                block_end,
+                curr_mm_idx,
+                self.use_eagle_prefix_cache_hashing,
             )
             extra_keys_list.append(extra_keys)
 
@@ -587,7 +599,11 @@ class BlockPool:
             block_end = num_tokens
             curr_mm_idx = -1 if block_start > 0 else 0
             extra_keys, _ = generate_request_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
+                request,
+                block_start,
+                block_end,
+                curr_mm_idx,
+                self.use_eagle_prefix_cache_hashing,
             )
             self.kv_event_queue.append(
                 BlockStored(

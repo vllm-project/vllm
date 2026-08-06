@@ -298,6 +298,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.use_eagle_prefix_cache_hashing = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
@@ -656,13 +657,15 @@ def test_stale_output_does_not_restore_eagle_materialization():
         block_size=block_size,
         max_num_batched_tokens=32,
     )
+    scheduler.use_eagle_prefix_cache_hashing = True
+    scheduler.kv_cache_manager.coordinator.use_eagle_prefix_cache_hashing = True
+    scheduler.kv_cache_manager.block_pool.use_eagle_prefix_cache_hashing = True
     request = Request(
         request_id="eagle",
         prompt_token_ids=list(range(9)),
         sampling_params=SamplingParams(max_tokens=4, ignore_eos=True),
         pooling_params=None,
         block_hasher=get_request_eagle_block_hasher(block_size, sha256),
-        eagle_hashing_enabled=True,
     )
     scheduler.add_request(request)
 

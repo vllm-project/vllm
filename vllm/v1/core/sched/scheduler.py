@@ -24,6 +24,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+    is_eagle_prefix_cache_hashing_enabled,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,
@@ -37,10 +40,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import (
-    KVCacheBlock,
-    is_eagle_prefix_cache_hashing_enabled,
-)
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -1393,6 +1393,7 @@ class Scheduler(SchedulerInterface):
         session.truncate_block_hashes(
             num_computed_tokens,
             self.kv_cache_manager.block_pool.hash_block_size,
+            lookahead_tokens=int(self.use_eagle_prefix_cache_hashing),
         )
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
@@ -1685,7 +1686,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         num_tokens: int,
     ) -> None:
-        if request.eagle_hashing_enabled:
+        if self.use_eagle_prefix_cache_hashing:
             request.mark_eagle_hashes_publishable(
                 num_tokens,
                 self.kv_cache_manager.block_pool.hash_block_size,
@@ -1791,7 +1792,7 @@ class Scheduler(SchedulerInterface):
 
             if (
                 not output_is_stale
-                and request.eagle_hashing_enabled
+                and self.use_eagle_prefix_cache_hashing
                 and (prefix_tokens := publishable_prefix_tokens.get(req_id, 0))
             ):
                 self._mark_eagle_hashes_publishable(request, prefix_tokens)
@@ -1858,7 +1859,7 @@ class Scheduler(SchedulerInterface):
 
             if (
                 req_id in draft_kv_materialized_req_ids
-                and request.eagle_hashing_enabled
+                and self.use_eagle_prefix_cache_hashing
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
             ):

@@ -51,6 +51,13 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def _enable_eagle_prefix_hashing(scheduler: Scheduler) -> None:
+    scheduler.use_eagle_prefix_cache_hashing = True
+    manager = scheduler.kv_cache_manager
+    manager.coordinator.use_eagle_prefix_cache_hashing = True
+    manager.block_pool.use_eagle_prefix_cache_hashing = True
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [
@@ -206,9 +213,9 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         block_size=block_size,
         max_num_batched_tokens=16,
     )
+    _enable_eagle_prefix_hashing(scheduler)
     coordinator = scheduler.kv_cache_manager.coordinator
     coordinator.eagle_group_ids = {0}
-    coordinator.use_eagle_prefix_cache_hashing = True
     coordinator.single_type_managers[0].use_eagle = True
 
     request = Request(
@@ -217,7 +224,6 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         sampling_params=SamplingParams(max_tokens=2),
         pooling_params=None,
         block_hasher=get_request_eagle_block_hasher(block_size, sha256),
-        eagle_hashing_enabled=True,
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -228,7 +234,6 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
         block_hasher=get_request_eagle_block_hasher(block_size, sha256),
-        eagle_hashing_enabled=True,
     )
     _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(before_ack)
     assert num_tokens == 0
@@ -249,7 +254,6 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
         block_hasher=get_request_eagle_block_hasher(block_size, sha256),
-        eagle_hashing_enabled=True,
     )
     _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(after_ack)
     assert num_tokens == 2 * block_size
@@ -274,14 +278,13 @@ def test_scheduler_does_not_publish_eagle_blocks_without_worker_acknowledgement(
         block_size=block_size,
         max_num_batched_tokens=16,
     )
-    scheduler.use_eagle_prefix_cache_hashing = True
+    _enable_eagle_prefix_hashing(scheduler)
     request = Request(
         request_id="request",
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=3),
         pooling_params=None,
         block_hasher=get_request_eagle_block_hasher(block_size, sha256),
-        eagle_hashing_enabled=True,
     )
     scheduler.add_request(request)
 
@@ -321,13 +324,13 @@ def test_connector_finish_includes_partial_eagle_block(
         max_num_batched_tokens=64,
         use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
     )
+    _enable_eagle_prefix_hashing(scheduler)
     request = Request(
         request_id="request",
         prompt_token_ids=list(range(33)),
         sampling_params=SamplingParams(max_tokens=2),
         pooling_params=None,
         block_hasher=get_request_eagle_block_hasher(block_size, sha256),
-        eagle_hashing_enabled=True,
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -3416,6 +3419,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.use_eagle_prefix_cache_hashing = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 

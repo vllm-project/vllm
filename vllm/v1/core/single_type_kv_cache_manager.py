@@ -465,7 +465,9 @@ class SingleTypeKVCacheManager(ABC):
             end_block=num_full_blocks,
             alignment_tokens=self.scheduler_block_size,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle and not request.eagle_hashing_enabled,
+            use_eagle=(
+                self.use_eagle and not self.block_pool.use_eagle_prefix_cache_hashing
+            ),
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
         )
@@ -806,7 +808,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         """
         hash_block_size = self.block_pool.hash_block_size
         max_boundary = request.num_prompt_tokens - int(
-            self.use_eagle and request.eagle_hashing_enabled
+            self.use_eagle and self.block_pool.use_eagle_prefix_cache_hashing
         )
         boundary_tokens = max_boundary // hash_block_size * hash_block_size
         if boundary_tokens == 0 or boundary_tokens > num_tokens:

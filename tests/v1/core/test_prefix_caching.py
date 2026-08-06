@@ -105,7 +105,6 @@ def make_request(
             if use_eagle_hashes
             else get_request_block_hasher(block_size, hash_fn)
         ),
-        eagle_hashing_enabled=use_eagle_hashes,
         resumable=resumable,
     )
 
@@ -2835,6 +2834,7 @@ def test_eagle_kv_event_reconstructs_hash_with_coarser_cache_block(
         enable_caching=True,
         hash_block_size=hash_block_size,
         enable_kv_cache_events=True,
+        use_eagle_prefix_cache_hashing=True,
     )
     request = make_request(
         "request",
@@ -2978,10 +2978,9 @@ def test_eagle_hashing_supports_resumable_requests():
     )
 
     original_hash = request.block_hashes.copy()
-    assert request.eagle_hashing_enabled
     assert len(original_hash) == 1
 
-    request.truncate_block_hashes(2, hash_block_size=2)
+    request.truncate_block_hashes(2, hash_block_size=2, lookahead_tokens=1)
     del request._all_token_ids[2:]
     request.append_output_token_ids(3)
 

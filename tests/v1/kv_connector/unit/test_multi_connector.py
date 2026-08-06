@@ -4,6 +4,7 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -122,11 +123,62 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
         return (False, None)
 
 
+class PrefixHashingTestConnector(KVConnectorBase_V1):
+    """Minimal real connector for prefix-hash protocol tests."""
+
+    @property
+    def supports_eagle_prefix_cache_hashing(self) -> bool:
+        return bool(
+            self._kv_transfer_config.kv_connector_extra_config.get(
+                "supports_eagle_prefix_cache_hashing", False
+            )
+        )
+
+    def start_load_kv(self, forward_context, **kwargs):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+    def build_connector_meta(self, scheduler_output):
+        return None
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        return (0, False)
+
+    def update_state_after_alloc(self, request, blocks, num_tokens) -> None:
+        pass
+
+
 # Register mock connectors
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 KVConnectorFactory.register_connector(
     "MockHMAConnector", __name__, MockHMAConnector.__name__
 )
+KVConnectorFactory.register_connector(
+    "PrefixHashingTestConnector", __name__, PrefixHashingTestConnector.__name__
+)
+
+
+def _prefix_hashing_connector_config(supported: bool) -> dict[str, Any]:
+    return {
+        "kv_connector": "PrefixHashingTestConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+        "kv_connector_extra_config": {
+            "supports_eagle_prefix_cache_hashing": supported,
+        },
+    }
+
+
+def _enable_eagle(vllm_config) -> None:
+    vllm_config.speculative_config = SimpleNamespace(use_eagle=lambda: True)
 
 
 @pytest.fixture
@@ -867,6 +919,72 @@ Options:
   1. Add delegation in MultiConnector (preferred)
   2. Add to INHERITED_OK if the base implementation works correctly
 """)
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_factory_configures_eagle_prefix_hashing(supported: bool):
+    connector_config = _prefix_hashing_connector_config(supported)
+    vllm_config = create_vllm_config(
+        kv_connector=connector_config["kv_connector"],
+        kv_connector_module_path=connector_config["kv_connector_module_path"],
+        kv_connector_extra_config=connector_config["kv_connector_extra_config"],
+        kv_role="kv_both",
+        disable_hybrid_kv_cache_manager=True,
+    )
+    _enable_eagle(vllm_config)
+
+    connector = KVConnectorFactory.create_connector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    assert connector.use_eagle_prefix_cache_hashing is supported
+
+
+@pytest.mark.parametrize(
+    ("child_support", "expected"),
+    [([True, True], True), ([True, False], False)],
+)
+def test_factory_configures_multi_connector_eagle_prefix_hashing(
+    child_support: list[bool], expected: bool
+):
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                _prefix_hashing_connector_config(supported)
+                for supported in child_support
+            ],
+        },
+        kv_role="kv_both",
+        disable_hybrid_kv_cache_manager=True,
+    )
+    _enable_eagle(vllm_config)
+
+    connector = KVConnectorFactory.create_connector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    assert isinstance(connector, MultiConnector)
+    assert connector.use_eagle_prefix_cache_hashing is expected
+    assert all(
+        child.use_eagle_prefix_cache_hashing is expected
+        for child in connector._connectors
+    )
+
+
+def test_multi_connector_propagates_eagle_prefix_hashing(mc: MultiConnector):
+    for connector in mc._connectors:
+        connector.reset_mock()
+
+    mc.set_eagle_prefix_cache_hashing(True)
+
+    assert mc.use_eagle_prefix_cache_hashing
+    for connector in mc._connectors:
+        connector.set_eagle_prefix_cache_hashing.assert_called_once_with(True)
 
 
 def test_multi_connector_prefer_cross_layer_blocks(mc):

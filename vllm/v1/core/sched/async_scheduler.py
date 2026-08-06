@@ -65,7 +65,7 @@ class AsyncScheduler(Scheduler):
         # Cache the new tokens. Preempted requests should be skipped.
         if (
             status_before_update == RequestStatus.RUNNING
-            and not request.eagle_hashing_enabled
+            and not self.use_eagle_prefix_cache_hashing
         ):
             self.kv_cache_manager.cache_blocks(
                 request,

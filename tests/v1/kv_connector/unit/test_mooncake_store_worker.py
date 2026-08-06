@@ -1747,6 +1747,7 @@ def _make_bare_worker(
     worker.store.register_buffer.return_value = 0
     worker.kv_role = kv_role
     worker._capacity_only = False
+    worker.use_eagle_prefix_cache_hashing = False
     worker.block_size = block_size
     worker.tp_rank = 0
     worker.enable_kv_events = False

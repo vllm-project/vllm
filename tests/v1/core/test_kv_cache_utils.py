@@ -14,6 +14,9 @@ import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+    is_eagle_prefix_cache_hashing_enabled,
+)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -39,7 +42,6 @@ from vllm.v1.core.kv_cache_utils import (
     group_and_unify_kv_cache_specs,
     hash_block_tokens,
     init_none_hash,
-    is_eagle_prefix_cache_hashing_enabled,
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
     tensor_data,

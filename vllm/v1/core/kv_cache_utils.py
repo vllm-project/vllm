@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
+from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -37,9 +37,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
-
-if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 
 # BlockHash represents the hash of a single KV-cache block used for
 # prefix caching.  Treating it as a distinct type from `bytes` helps
@@ -751,21 +748,6 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
-def is_eagle_prefix_cache_hashing_enabled(
-    vllm_config: VllmConfig,
-    kv_connector: "KVConnectorBase_V1 | None" = None,
-) -> bool:
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.use_eagle():
-        return False
-    if vllm_config.kv_transfer_config is not None:
-        return bool(
-            kv_connector is not None
-            and kv_connector.supports_eagle_prefix_cache_hashing
-        )
-    return vllm_config.cache_config.enable_prefix_caching
-
-
 def get_request_eagle_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
@@ -843,8 +825,9 @@ def generate_request_block_hash_extra_keys(
     start_token_idx: int,
     end_token_idx: int,
     start_mm_idx: int,
+    use_eagle_prefix_cache_hashing: bool,
 ) -> tuple[tuple[Any, ...] | None, int]:
-    if request.eagle_hashing_enabled:
+    if use_eagle_prefix_cache_hashing:
         return generate_eagle_block_hash_extra_keys(
             request,
             start_token_idx,
@@ -864,19 +847,14 @@ def get_request_block_hash_event_data(
     block_idx: int,
     block_size: int,
     hash_block_size: int,
-) -> (
-    tuple[
-        BlockHash,
-        BlockHash | None,
-        int,
-        int,
-        list[tuple[Any, ...] | None],
-    ]
-    | None
-):
+) -> tuple[
+    BlockHash,
+    BlockHash | None,
+    int,
+    int,
+    list[tuple[Any, ...] | None],
+]:
     """Describe an individually emitted hash unit for a cache block."""
-    if not request.eagle_hashing_enabled or block_size == hash_block_size:
-        return None
     assert block_size > hash_block_size
     assert block_size % hash_block_size == 0
 
@@ -888,7 +866,7 @@ def get_request_block_hash_event_data(
     extra_keys: list[tuple[Any, ...] | None] = []
     curr_mm_idx = 0
     for unit_start in range(hash_start, hash_end, hash_block_size):
-        unit_extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
+        unit_extra_keys, curr_mm_idx = generate_eagle_block_hash_extra_keys(
             request,
             unit_start,
             unit_start + hash_block_size,

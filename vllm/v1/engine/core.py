@@ -27,6 +27,9 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+    is_eagle_prefix_cache_hashing_enabled,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -219,8 +222,9 @@ class EngineCore:
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
-        self.use_eagle_prefix_cache_hashing = (
-            self.scheduler.use_eagle_prefix_cache_hashing
+        use_eagle_prefix_cache_hashing = is_eagle_prefix_cache_hashing_enabled(
+            vllm_config,
+            kv_connector,
         )
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
@@ -228,7 +232,7 @@ class EngineCore:
             )
             init_none_hash(caching_hash_fn)
 
-            if self.use_eagle_prefix_cache_hashing:
+            if use_eagle_prefix_cache_hashing:
                 self.request_block_hasher = get_request_eagle_block_hasher(
                     hash_block_size, caching_hash_fn
                 )
@@ -992,7 +996,6 @@ class EngineCore:
         req = Request.from_engine_core_request(
             request,
             self.request_block_hasher,
-            eagle_hashing_enabled=self.use_eagle_prefix_cache_hashing,
         )
         if req.use_structured_output:
             # Note on thread safety: no race condition.

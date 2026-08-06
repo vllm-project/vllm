@@ -463,6 +463,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_kv_event: bool = False,
         replicate_config: Any = None,
         record_operation: Callable[..., None] | None = None,
+        use_eagle_prefix_cache_hashing: bool = False,
     ):
         super().__init__(
             store,
@@ -477,6 +478,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
+        self.use_eagle_prefix_cache_hashing = use_eagle_prefix_cache_hashing
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.enable_kv_event = enable_kv_event
         # Caller always passes a non-None ReplicateConfig — see
@@ -734,7 +736,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 token_len,
                 save_start,
                 num_prompt_tokens=req_meta.num_prompt_tokens,
-                apply_eagle=not req_meta.eagle_hashing_enabled,
+                apply_eagle=not self.use_eagle_prefix_cache_hashing,
             )
 
             starts: list[int] = []
@@ -1180,6 +1182,7 @@ class MooncakeStoreWorker:
             )
         )
         self.cache_config = vllm_config.cache_config
+        self.use_eagle_prefix_cache_hashing = False
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -1508,6 +1511,7 @@ class MooncakeStoreWorker:
                 self.enable_kv_events,
                 self.store_replicate_config,
                 record_operation=self._record_kv_connector_operation,
+                use_eagle_prefix_cache_hashing=self.use_eagle_prefix_cache_hashing,
             )
             self.kv_send_thread.start()
 
