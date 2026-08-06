@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm.config import SchedulerConfig
+    from vllm.config import SchedulerConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -78,6 +78,15 @@ class EncoderCacheManager:
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
+
+    @classmethod
+    def from_vllm_config(
+        cls,
+        *,
+        cache_size: int,
+        vllm_config: "VllmConfig",
+    ) -> "EncoderCacheManager":
+        return cls(cache_size=cache_size)
 
     def reset(self) -> None:
         """Reset the encoder cache to its initial state.
