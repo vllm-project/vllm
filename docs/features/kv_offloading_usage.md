@@ -38,7 +38,7 @@ vllm serve <model> \
 
 ## Multi-Tier Setup
 
-Set `spec_name` to `"TieringOffloadingSpec"` and supply a `secondary_tiers` list. Each entry is a dict with a required `type` key plus tier-specific fields. The list is ordered: tier 0 is consulted before tier 1, and so on. See [Secondary Tiers](#secondary-tiers) for tier-specific keys.
+Set `spec_name` to `"TieringOffloadingSpec"` and supply a `secondary_tiers` list. Each entry is a dict with a required `type` key plus tier-specific fields (and an optional `module_path` for out-of-tree tiers). The list is ordered: tier 0 is consulted before tier 1, and so on. See [Secondary Tiers](#secondary-tiers) for tier-specific keys.
 
 ```bash
 vllm serve <model> \
@@ -271,6 +271,26 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
 
 In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
+
+### Out-of-Tree Secondary Tiers
+
+Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your own package — no vLLM fork or patch required — and point the tier config at it directly:
+
+```json
+{
+  "spec_name": "TieringOffloadingSpec",
+  "cpu_bytes_to_use": 10737418240,
+  "secondary_tiers": [
+    {
+      "type": "MyCustomTier",
+      "module_path": "my_package.my_module",
+      "custom_param": "value"
+    }
+  ]
+}
+```
+
+`type` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `module_path` and looks up `type` as a class name in that module.
 
 ## Tuning Tips
 
