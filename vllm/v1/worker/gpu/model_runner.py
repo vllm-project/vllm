@@ -1381,9 +1381,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 with self.ec_connector.maybe_get_output(
                     scheduler_output
                 ) as ec_connector_output:
-                    inputs_embeds = self.model_state.get_mm_embeddings(
-                        scheduled_encoder_inputs, input_batch, self.req_states
-                    )
+                    if self.is_encoder_only:
+                        # Encode and publish, nothing else: this instance runs no
+                        # language model, so the gather inside get_mm_embeddings
+                        # would build an inputs_embeds nobody reads -- and it
+                        # raises "Encoder cache miss" for any scheduled item this
+                        # instance did not encode, taking the engine down with it.
+                        self.model_state.encode_mm_inputs(scheduled_encoder_inputs)
+                    else:
+                        inputs_embeds = self.model_state.get_mm_embeddings(
+                            scheduled_encoder_inputs, input_batch, self.req_states
+                        )
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
 
