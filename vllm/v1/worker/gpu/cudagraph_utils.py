@@ -323,8 +323,7 @@ class CudaGraphManager:
                     forward_fn = create_forward_fn(desc, warmup=True)
 
                     # Warmup
-                    with current_platform.cudagraph_warmup_context(desc.cg_mode):
-                        forward_fn(CUDAGraphMode.NONE)
+                    forward_fn(CUDAGraphMode.NONE)
 
                     # Capture
                     logger.debug(

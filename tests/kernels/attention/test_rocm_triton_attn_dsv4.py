@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -39,69 +38,84 @@ HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
 @pytest.mark.parametrize(
-    ("warmup_mode", "capturing", "runtime_mode", "expected"),
+    ("eligible", "capturing", "runtime_mode", "dtype", "expected"),
     [
-        (CUDAGraphMode.FULL, False, CUDAGraphMode.NONE, True),
-        (CUDAGraphMode.PIECEWISE, False, CUDAGraphMode.NONE, False),
-        (None, True, CUDAGraphMode.FULL, True),
-        (None, True, CUDAGraphMode.NONE, True),
-        (None, True, CUDAGraphMode.PIECEWISE, False),
-        (None, False, CUDAGraphMode.FULL, False),
+        (True, True, CUDAGraphMode.NONE, torch.bfloat16, True),
+        (True, True, CUDAGraphMode.FULL, torch.bfloat16, True),
+        (True, True, CUDAGraphMode.PIECEWISE, torch.bfloat16, False),
+        (True, False, CUDAGraphMode.NONE, torch.bfloat16, False),
+        (False, True, CUDAGraphMode.NONE, torch.bfloat16, False),
+        (True, True, CUDAGraphMode.NONE, torch.float32, False),
     ],
 )
-def test_dsv4_aiter_tgemm_is_limited_to_full_graph_warmup_and_capture(
+def test_dsv4_aiter_tgemm_is_limited_to_full_graph_capture(
     monkeypatch,
-    warmup_mode: CUDAGraphMode | None,
+    eligible: bool,
     capturing: bool,
     runtime_mode: CUDAGraphMode,
+    dtype: torch.dtype,
     expected: bool,
 ) -> None:
     from vllm.models.deepseek_v4.amd import rocm
 
     attention = object.__new__(rocm.DeepseekV4ROCMAiterMLAAttention)
     torch.nn.Module.__init__(attention)
-    weight = torch.empty(0, dtype=torch.bfloat16)
-    attention.compressor = SimpleNamespace(
-        fused_wkv_wgate=SimpleNamespace(weight=weight)
-    )
-    attention.indexer = None
-
-    warmup_context = (
-        current_platform.cudagraph_warmup_context(warmup_mode)
-        if warmup_mode is not None
-        else nullcontext()
-    )
-    with warmup_context:
-        additional_kwargs = current_platform.set_additional_forward_context()
-
-    monkeypatch.setattr(rocm.rocm_aiter_ops, "is_tgemm_enabled", lambda: True)
+    attention._tgemm_static_eligible = eligible
     monkeypatch.setattr(
         rocm,
         "get_forward_context",
-        lambda: SimpleNamespace(
-            additional_kwargs=additional_kwargs,
-            cudagraph_runtime_mode=runtime_mode,
-        ),
+        lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
     )
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
 
-    hidden_states = torch.empty(0, dtype=torch.bfloat16)
-    assert attention._use_aiter_tgemm(hidden_states) is expected
+    assert attention._use_aiter_tgemm(torch.empty(0, dtype=dtype)) is expected
 
 
-def test_rocm_cudagraph_warmup_context_is_scoped() -> None:
-    def warmup_mode() -> CUDAGraphMode | None:
-        return current_platform.set_additional_forward_context()[
-            "cudagraph_warmup_mode"
-        ]
+def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:
+    tgemm = pytest.importorskip("aiter.tuned_gemm").tgemm
 
-    assert warmup_mode() is None
-    with current_platform.cudagraph_warmup_context(CUDAGraphMode.FULL):
-        assert warmup_mode() == CUDAGraphMode.FULL
-        with current_platform.cudagraph_warmup_context(CUDAGraphMode.PIECEWISE):
-            assert warmup_mode() == CUDAGraphMode.PIECEWISE
-        assert warmup_mode() == CUDAGraphMode.FULL
-    assert warmup_mode() is None
+    from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+
+    class StopAfterScores(Exception):
+        pass
+
+    hidden_states = torch.empty((2, 4), dtype=torch.bfloat16)
+    main_weight = torch.empty((3, 4), dtype=torch.bfloat16)
+    indexer_weight = torch.empty((5, 4), dtype=torch.bfloat16)
+    attention = object.__new__(DeepseekV4ROCMAiterMLAAttention)
+    torch.nn.Module.__init__(attention)
+    attention.compressor = SimpleNamespace(
+        fused_wkv_wgate=SimpleNamespace(weight=main_weight)
+    )
+    attention.indexer = SimpleNamespace(
+        compressor=SimpleNamespace(
+            fused_wkv_wgate=SimpleNamespace(weight=indexer_weight)
+        )
+    )
+
+    calls = []
+
+    def fake_mm(inp, weight, *, otype):
+        calls.append((inp, weight, otype))
+        return torch.empty((inp.shape[0], weight.shape[0]), dtype=otype)
+
+    def stop_after_scores(_hidden_states):
+        raise StopAfterScores
+
+    monkeypatch.setattr(tgemm, "mm", fake_mm)
+    attention._fused_wqa_wkv_gemm = stop_after_scores
+
+    with pytest.raises(StopAfterScores):
+        attention._forward_aiter_tgemm(
+            hidden_states,
+            torch.empty(0, dtype=torch.int64),
+            torch.empty(0, dtype=torch.bfloat16),
+        )
+
+    assert calls == [
+        (hidden_states, main_weight, torch.bfloat16),
+        (hidden_states, indexer_weight, torch.bfloat16),
+    ]
 
 
 def _ref_global_topk_ragged(

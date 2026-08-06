@@ -7,8 +7,7 @@ from typing import cast
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -450,14 +449,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str,
-        topk_indices_buffer: torch.Tensor | None = None,
-        aux_stream_list: list[torch.cuda.Stream] | None = None,
-    ):
-        super().__init__(vllm_config, prefix, topk_indices_buffer, aux_stream_list)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
@@ -473,24 +466,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
     def _use_aiter_tgemm(self, hidden_states: torch.Tensor) -> bool:
-        forward_context = get_forward_context()
+        if not self._tgemm_static_eligible or hidden_states.dtype != torch.bfloat16:
+            return False
 
-        return (
-            self._tgemm_static_eligible
-            and hidden_states.dtype == torch.bfloat16
-            and (
-                forward_context.additional_kwargs.get("cudagraph_warmup_mode")
-                == CUDAGraphMode.FULL
-                or (
-                    torch.cuda.is_current_stream_capturing()
-                    and forward_context.cudagraph_runtime_mode
-                    in (
-                        CUDAGraphMode.FULL,
-                        CUDAGraphMode.NONE,
-                    )
-                )
-            )
-        )
+        forward_context = get_forward_context()
+        if forward_context.cudagraph_runtime_mode not in (
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.NONE,
+        ):
+            return False
+
+        return torch.cuda.is_current_stream_capturing()
 
     def forward(
         self,
@@ -507,14 +493,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._forward_aiter_tgemm(
-            hidden_states,
-            positions,
-            output,
-        )
+        self._forward_aiter_tgemm(hidden_states, positions, output)
         return self._o_proj(output[:, : self.n_local_heads], positions)
 
-    @eager_break_during_capture
     def _forward_aiter_tgemm(
         self,
         hidden_states: torch.Tensor,
@@ -532,14 +513,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
         indexer_kv_score = None
         if self.indexer is not None:
-            indexer_compressor = self.indexer.compressor
             indexer_kv_score = tgemm.mm(
                 hidden_states,
-                indexer_compressor.fused_wkv_wgate.weight,
+                self.indexer.compressor.fused_wkv_wgate.weight,
                 otype=torch.bfloat16,
             )
 
-        qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+        qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         qr, kv = fused_q_kv_rmsnorm(
             qr,
