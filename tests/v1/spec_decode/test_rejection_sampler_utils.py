@@ -138,6 +138,16 @@ def _assert_distribution_match(
     )
 
 
+@pytest.mark.parametrize(
+    "num_speculative_steps,temperature",
+    [
+        (1, 0.6),
+        (3, 0.6),
+        (1, 1.0),
+        (3, 1.0),
+    ],
+)
+@pytest.mark.parametrize("draft_logits_dtype", [torch.float32, torch.bfloat16])
 def test_stochastic_rejection_sample(
     num_speculative_steps: int, temperature: float, draft_logits_dtype: torch.dtype
 ):
