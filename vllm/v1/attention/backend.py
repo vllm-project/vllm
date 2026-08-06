@@ -761,6 +761,13 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         )
 
     def update_draft_decode_metadata(self, metadata: M) -> None:
+        """Update step-dependent draft decode metadata in place.
+
+        The fused draft loop may call this method during full CUDA graph
+        capture. CUDA graph replay does not run this Python method, so
+        implementations must emit capture-safe operations and keep replayed
+        tensor state in persistent storage.
+        """
         raise NotImplementedError
 
     def use_cascade_attention(
