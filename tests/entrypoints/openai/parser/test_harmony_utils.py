@@ -1003,7 +1003,7 @@ class TestResponseInputToHarmonyReasoningItem:
             "content": [{"type": "reasoning_text", "text": "Thinking step by step"}],
         }
 
-        msg = response_input_to_harmony(item, prev_responses=[])
+        msg = response_input_to_harmony(item, function_calls_by_id={})
 
         assert msg is not None
         assert msg.author.role == Role.ASSISTANT
@@ -1022,7 +1022,7 @@ class TestResponseInputToHarmonyReasoningItem:
             ],
         }
 
-        msg = response_input_to_harmony(item, prev_responses=[])
+        msg = response_input_to_harmony(item, function_calls_by_id={})
 
         assert msg is not None
         assert msg.author.role == Role.ASSISTANT
@@ -1039,7 +1039,7 @@ class TestResponseInputToHarmonyReasoningItem:
             "summary": [{"type": "summary_text", "text": "Thinking about math"}],
         }
 
-        msg = response_input_to_harmony(item, prev_responses=[])
+        msg = response_input_to_harmony(item, function_calls_by_id={})
 
         assert msg is None
 
@@ -1052,7 +1052,7 @@ class TestResponseInputToHarmonyReasoningItem:
             "summary": [{"type": "summary_text", "text": "Thinking about math"}],
         }
 
-        msg = response_input_to_harmony(item, prev_responses=[])
+        msg = response_input_to_harmony(item, function_calls_by_id={})
 
         assert msg is None
 
@@ -1064,6 +1064,6 @@ class TestResponseInputToHarmonyReasoningItem:
             "content": [],
         }
 
-        msg = response_input_to_harmony(item, prev_responses=[])
+        msg = response_input_to_harmony(item, function_calls_by_id={})
 
         assert msg is None

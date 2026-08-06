@@ -398,7 +398,11 @@ class OnlineRenderer:
         else:
             messages.extend(previous_messages)
 
-        previous_outputs = list(previous_response_outputs or ())
+        function_calls_by_id = {
+            output.call_id: output
+            for output in previous_response_outputs or ()
+            if isinstance(output, ResponseFunctionToolCall)
+        }
         try:
             if isinstance(request_input, str):
                 if request_input or not request.previous_input_messages:
@@ -407,12 +411,12 @@ class OnlineRenderer:
                 for response_message in request_input:
                     new_message = response_input_to_harmony(
                         response_message,
-                        previous_outputs,
+                        function_calls_by_id,
                     )
                     if new_message is not None:
                         messages.append(new_message)
                     if isinstance(response_message, ResponseFunctionToolCall):
-                        previous_outputs.append(response_message)
+                        function_calls_by_id[response_message.call_id] = response_message
         except (ValueError, VLLMValidationError) as exc:
             return self.create_error_response(
                 str(exc),
