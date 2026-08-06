@@ -502,7 +502,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "Qwen3_5ForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-0.8B-text-only"),
-    "Qwen3_5MoeForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-35B-A3B-text-only"),
+    "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
+        "codecho/Qwen3.5-35B-A3B-text-only",
+        extras={"native-prefix": "imdatta0/small_qwen3_5_20b"},
+        max_model_len=4096,
+    ),
     "MellumForCausalLM": _HfExamplesInfo("JetBrains/Mellum2-12B-A2.5B-Base"),
     "Qwen3NextForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
@@ -992,6 +996,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
     ),
+    "InternS2MobiusForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "InternS2PreviewForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S2-Preview",
         trust_remote_code=True,
@@ -1106,13 +1115,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "2.6": "openbmb/MiniCPM-V-2_6",
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
-        },
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "MiniCPMVBatchFeature is incompatible with its base class in "
-                "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
-            )
         },
         trust_remote_code=True,
     ),
@@ -1684,6 +1686,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer_mode="inkling",
         trust_remote_code=True,
         max_model_len=4096,
+    ),
+    "InternS2MobiusMTP": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        speculative_model="internlm/Intern-S2-Mobius",
+        is_available_online=False,
     ),
     "KimiK3MTPModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
