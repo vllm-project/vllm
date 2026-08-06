@@ -120,6 +120,8 @@ class PassConfig:
     # New flags
     fuse_norm_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + quant ops."""
+    fuse_add_rms_norm_nvfp4: bool = False
+    """Fuse add-RMSNorm + NVFP4 quantization using FlashInfer."""
     fuse_act_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = None  # type: ignore[assignment]

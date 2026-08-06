@@ -791,7 +791,8 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
             if (
-                _FLASHINFER_NVFP4_RMS_QUANT_OP is not None
+                self.pass_config.fuse_add_rms_norm_nvfp4
+                and _FLASHINFER_NVFP4_RMS_QUANT_OP is not None
                 and current_platform.has_device_capability(100)
             ):
                 for is_sf_swizzled_layout in (True, False):
