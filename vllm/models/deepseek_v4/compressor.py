@@ -411,7 +411,7 @@ class DeepseekCompressor(nn.Module):
         source_k_cache_metadata = k_cache_metadata
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
-        hisparse_cache = getattr(k_cache_layer, "hisparse_cache", None)
+        hisparse_cache = k_cache_layer.hisparse_cache
         if hisparse_cache is not None:
             assert hisparse_cache.view is not None
             kv_cache = hisparse_cache.view.cache

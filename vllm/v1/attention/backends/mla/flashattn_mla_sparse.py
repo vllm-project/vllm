@@ -8,9 +8,9 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
+    SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
 from vllm.platforms.interface import DeviceCapability
@@ -18,7 +18,6 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionLayer,
-    AttentionMetadata,
     MLAAttentionImpl,
     MultipleOf,
 )
@@ -115,26 +114,8 @@ class FlashAttnMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class FlashAttnMLASparseMetadata(AttentionMetadata):
-    num_reqs: int
-    max_query_len: int
-    max_seq_len: int
-
-    num_actual_tokens: int
-    query_start_loc: torch.Tensor
-    slot_mapping: torch.Tensor
-
-    block_table: torch.Tensor
-    req_id_per_token: torch.Tensor
-    seq_lens: torch.Tensor
-    block_size: int = 64
-    topk_tokens: int = 2048
-    num_decodes: int = 0
-    num_prefills: int = 0
-    num_decode_tokens: int = 0
-    prefill_max_seq_len: int = 0
-    prefill: MLACommonPrefillMetadata | None = None
-    cp_kv_cache_interleave_size: int = 1
+class FlashAttnMLASparseMetadata(SparseMLACommonMetadata):
+    pass
 
 
 class FlashAttnMLASparseMetadataBuilder(

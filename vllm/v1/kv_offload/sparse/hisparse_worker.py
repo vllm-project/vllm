@@ -58,9 +58,7 @@ def _get_hisparse_cache(
     forward_context: dict[str, Any], layer_name: str
 ) -> HiSparseCacheHandle:
     attention_layer = forward_context[layer_name]
-    hisparse_cache = getattr(attention_layer, "hisparse_cache", None)
-    if hisparse_cache is None:
-        hisparse_cache = attention_layer.impl.hisparse_cache
+    hisparse_cache = attention_layer.hisparse_cache
     assert hisparse_cache is not None
     return hisparse_cache
 
@@ -460,12 +458,8 @@ def init_hisparse_worker(
         source_spec = source_specs.kv_cache_specs[cache_name]
         gpu_indexer_spec = indexer_specs.kv_cache_specs[layer_name]
         assert isinstance(source_spec, AttentionSpec)
-        kernel_block_size = getattr(
-            gpu_indexer_spec, "storage_block_size", gpu_indexer_spec.block_size
-        )
-        source_block_size = getattr(
-            source_spec, "storage_block_size", source_spec.block_size
-        )
+        kernel_block_size = gpu_indexer_spec.storage_block_size
+        source_block_size = source_spec.storage_block_size
         assert source_block_size % kernel_block_size == 0
         blocks_per_kv_block = source_block_size // kernel_block_size
         source_cache = torch.as_strided(

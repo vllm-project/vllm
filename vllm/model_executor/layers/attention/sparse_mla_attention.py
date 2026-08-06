@@ -5,7 +5,7 @@
 import math
 from dataclasses import dataclass
 from shutil import which
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 import numpy as np
 import torch
@@ -19,6 +19,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
+    MLACommonDecodeMetadata,
     MLACommonMetadata,
     MLACommonPrefillMetadata,
     accumulate_mla_context_chunk,
@@ -34,7 +35,7 @@ from vllm.utils.torch_utils import (
     kv_cache_dtype_str_to_dtype,
     np_to_pinned_tensor,
 )
-from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -56,8 +57,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
-
-T = TypeVar("T", bound=AttentionMetadata)
 
 GLOBAL_TOPK_MASK_MAX_BYTES = 128 * 1024 * 1024  # 128 MiB
 
@@ -117,6 +116,24 @@ def _is_masked_mha_available(
 @dataclass
 class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
     hisparse_staging_plan: HiSparsePrefillStagingPlan | None = None
+
+
+@dataclass(kw_only=True)
+class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
+    block_table: torch.Tensor
+    req_id_per_token: torch.Tensor
+    seq_lens: torch.Tensor | None = None
+    block_size: int = 64
+    topk_tokens: int = 2048
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
+    prefill_max_seq_len: int = 0
+    prefill: SparseMLAPrefillMetadata | None = None
+    cp_kv_cache_interleave_size: int = 1
+
+
+T = TypeVar("T", bound=SparseMLACommonMetadata)
 
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
@@ -276,7 +293,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         ) = self._build_prefill_fields(common_attn_metadata, num_decodes, num_prefills)
 
         prefill_max_seq_len = 0
-        prefill: MLACommonPrefillMetadata | None = None
+        prefill: SparseMLAPrefillMetadata | None = None
         if num_prefills > 0 and self._prefill_backend is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
@@ -981,20 +998,16 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
     ) -> None:
-        prefill = attn_metadata.prefill  # type: ignore[attr-defined]
-        if (
-            self.hisparse_cache is not None
-            and kv_c_and_k_pe_cache.device.type == "cpu"
-            and prefill is not None
-            and prefill.chunked_context is not None
-        ):
-            assert isinstance(prefill, SparseMLAPrefillMetadata)
-            assert prefill.hisparse_staging_plan is not None
+        prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata is not None
+        staging_plan = prefill_metadata.hisparse_staging_plan
+        if staging_plan is not None and kv_c_and_k_pe_cache.device.type == "cpu":
+            assert self.hisparse_cache is not None
             kv_c_and_k_pe_cache = self.hisparse_cache.runtime.gather_prefill_cache(
-                kv_c_and_k_pe_cache, prefill.hisparse_staging_plan
+                kv_c_and_k_pe_cache, staging_plan
             )
-        prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-        topk_tokens = attn_metadata.topk_tokens  # type: ignore[attr-defined]
+        prefill_max_seq_len = attn_metadata.prefill_max_seq_len
+        topk_tokens = attn_metadata.topk_tokens
         force_dense = getattr(self, "_sparse_mla_force_dense_mha", False)
         force_masked = getattr(self, "_sparse_mla_force_masked_mha", False)
         if force_dense or (prefill_max_seq_len <= topk_tokens and not force_masked):
@@ -1003,7 +1016,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 kv_c_normed,
                 k_pe,
                 kv_c_and_k_pe_cache,
-                cast(MLACommonMetadata, attn_metadata),
+                attn_metadata,
                 k_scale,
                 output,
                 output_scale,
@@ -1011,13 +1024,11 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
         assert output_scale is None
         assert self.masked_mha_available
-        prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
-        assert prefill_metadata is not None
         assert prefill_metadata.query_lens_cpu is not None
         assert self.topk_indices_buffer is not None
 
         q_lens = prefill_metadata.query_lens_cpu.tolist()
-        num_decode_tokens = attn_metadata.num_decode_tokens  # type: ignore[attr-defined]
+        num_decode_tokens = attn_metadata.num_decode_tokens
         topk_all = self.topk_indices_buffer[
             num_decode_tokens : num_decode_tokens + q.shape[0]
         ]

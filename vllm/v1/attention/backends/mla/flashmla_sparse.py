@@ -9,9 +9,9 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
+    SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
 from vllm.platforms import current_platform
@@ -22,7 +22,6 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionLayer,
-    AttentionMetadata,
     CommonAttentionMetadata,
     MultipleOf,
 )
@@ -143,28 +142,7 @@ class FlashMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class FlashMLASparseMetadata(AttentionMetadata):
-    num_reqs: int
-    max_query_len: int
-    max_seq_len: int
-
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    query_start_loc: torch.Tensor
-    slot_mapping: torch.Tensor
-
-    block_table: torch.Tensor
-    req_id_per_token: torch.Tensor
-    block_size: int = 64
-    topk_tokens: int = 2048
-
-    num_decodes: int = 0
-    num_prefills: int = 0
-    num_decode_tokens: int = 0
-    seq_lens: torch.Tensor | None = None
-    prefill_max_seq_len: int = 0
-    prefill: MLACommonPrefillMetadata | None = None
-    cp_kv_cache_interleave_size: int = 1
-
+class FlashMLASparseMetadata(SparseMLACommonMetadata):
     @dataclass
     class FP8KernelMetadata:
         scheduler_metadata: FlashMLASchedMeta
@@ -604,7 +582,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
     ) -> torch.Tensor:
-        if getattr(self, "_hisparse_decode_batch", False):
+        if self._hisparse_decode_batch:
             kv_c_and_k_pe_cache, topk_indices, topk_length = self._hisparse_swap_in(
                 topk_indices,
                 attn_metadata,
@@ -820,7 +798,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         prefill kernel which has head padding overhead when num_heads is small.
         Used when use_mixed_batch is True.
         """
-        if getattr(self, "_hisparse_decode_batch", False):
+        if self._hisparse_decode_batch:
             kv_c_and_k_pe_cache, topk_indices = self._hisparse_swap_in(
                 topk_indices,
                 attn_metadata,

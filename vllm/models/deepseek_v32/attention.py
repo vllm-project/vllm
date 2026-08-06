@@ -373,11 +373,11 @@ class DeepseekV32Attention(MLAAttention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
         indexer_slot = (
-            slot_mapping.get(self.indexer.k_cache.prefix)
+            slot_mapping[self.indexer.k_cache.prefix]
             if self.indexer is not None
             else None
         )
-        hisparse_cache = getattr(self.impl, "hisparse_cache", None)
+        hisparse_cache = self.hisparse_cache
         self.impl.prepare_for_batch(attn_metadata)
 
         if self.indexer is not None and not self.skip_topk:
@@ -437,9 +437,7 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         if hisparse_cache is not None and mla_slot is not None:
-            do_kv_cache_update = getattr(self.impl, "do_kv_cache_update", None)
-            assert do_kv_cache_update is not None
-            do_kv_cache_update(
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c,
                 k_pe,
                 self.kv_cache,

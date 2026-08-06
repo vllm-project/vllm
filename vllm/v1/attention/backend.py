@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
     from vllm.v1.kv_cache_interface import KVCacheSpec, KVQuantMode
+    from vllm.v1.kv_offload.sparse.hisparse_cache import HiSparseCacheHandle
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
@@ -1006,6 +1007,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
+    hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
 
     @abstractmethod

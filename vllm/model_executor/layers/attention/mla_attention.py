@@ -510,7 +510,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
+        impl = impl_cls(
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -532,6 +532,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             indexer=indexer,
             **extra_impl_args,
         )
+        self.impl = impl  # type: ignore[assignment]
+        self.hisparse_cache = impl.hisparse_cache
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
