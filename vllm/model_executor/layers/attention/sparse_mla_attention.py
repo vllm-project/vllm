@@ -616,7 +616,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
     def _hisparse_decode_batch(self) -> bool:
         return self.hisparse_cache is not None and self.hisparse_cache.decode_batch
 
-    def prepare_hisparse_for_batch(self, attn_metadata: Any | None) -> None:
+    def prepare_for_batch(self, attn_metadata: Any | None) -> None:
         self._hisparse_dummy_batch = attn_metadata is None
         if self.hisparse_cache is not None:
             self.hisparse_cache.decode_batch = (

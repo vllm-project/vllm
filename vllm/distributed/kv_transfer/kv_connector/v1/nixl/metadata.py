@@ -41,9 +41,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   4: Add KV block lease renewal through heartbeats
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
-#   6: Add packed KV cache region strides and per-region block counts to
+#   6: Validate EAGLE/MTP speculative configuration compatibility
+#   7: Add packed KV cache region strides and per-region block counts to
 #      NixlAgentMetadata
-#   7: Validate EAGLE/MTP speculative configuration compatibility
 #
 NIXL_CONNECTOR_VERSION: int = 7
 

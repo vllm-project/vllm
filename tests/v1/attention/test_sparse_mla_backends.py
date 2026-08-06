@@ -2449,7 +2449,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
             cache_handle.runtime.max_num_reqs, blocks_per_request
         ),
     )
-    impl.prepare_hisparse_for_batch(metadata)
+    impl.prepare_for_batch(metadata)
     assert not cache_handle.decode_batch
 
     # Device-resident reference: the whole batch converted against the full

@@ -378,12 +378,7 @@ class DeepseekV32Attention(MLAAttention):
             else None
         )
         hisparse_cache = getattr(self.impl, "hisparse_cache", None)
-        if hisparse_cache is not None:
-            prepare_hisparse_for_batch = getattr(
-                self.impl, "prepare_hisparse_for_batch", None
-            )
-            assert prepare_hisparse_for_batch is not None
-            prepare_hisparse_for_batch(attn_metadata)
+        self.impl.prepare_for_batch(attn_metadata)
 
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True

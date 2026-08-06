@@ -360,13 +360,6 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     return kv_cache_dtype
 
 
-def _prepare_hisparse_for_batch(impl, attn_metadata) -> None:
-    """Let a HiSparse-capable impl classify the batch before the KV update."""
-    prepare = getattr(impl, "prepare_hisparse_for_batch", None)
-    if prepare is not None:
-        prepare(attn_metadata)
-
-
 def _get_kv_b_proj_input_dtype(
     kv_b_proj: ColumnParallelLinear, use_fp8_prefill: bool
 ) -> torch.dtype | None:
@@ -652,7 +645,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
-            _prepare_hisparse_for_batch(self.impl, attn_metadata)
+            self.impl.prepare_for_batch(attn_metadata)
             layer_slot_mapping = slot_mapping.get(self.layer_name)
             kv_for_cache, kpe_for_cache, layer_slot_mapping = (
                 maybe_gather_mla_latent_cache_inputs(
@@ -1190,7 +1183,7 @@ def unified_mla_kv_cache_update(
         layer_name
     )
     if layer_slot_mapping is not None:
-        _prepare_hisparse_for_batch(attn_layer.impl, attn_metadata)
+        attn_layer.impl.prepare_for_batch(attn_metadata)
         kv_c_normed, k_pe, layer_slot_mapping = maybe_gather_mla_latent_cache_inputs(
             kv_c_normed,
             k_pe,
@@ -2503,22 +2496,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context is not None
 
-        block_table = prefill_metadata.block_table
-        if kv_c_and_k_pe_cache.device.type == "cpu":
-            hisparse_cache = getattr(self, "hisparse_cache", None)
-            assert hisparse_cache is not None, (
-                "CPU-resident MLA context requires a host-cache staging backend"
-            )
-            seq_lens = getattr(attn_metadata, "seq_lens", None)
-            assert seq_lens is not None
-            kv_c_and_k_pe_cache, block_table = (
-                hisparse_cache.runtime.stage_prefill_cache(
-                    kv_c_and_k_pe_cache,
-                    block_table,
-                    seq_lens[attn_metadata.num_decodes :],
-                )
-            )
-
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
         kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(
             self.kv_b_proj, use_fp8_prefill
@@ -2532,7 +2509,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output_lse = None
         for chunk in chunked_context.chunks:
             toks = chunk.num_context_tokens
-            chunk_block_table = block_table[chunk.request_slice]
+            chunk_block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
