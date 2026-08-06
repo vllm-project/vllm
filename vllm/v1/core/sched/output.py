@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
+    from vllm.distributed.artifact_connector.connector import (
+        ArtifactConnectorMetadata,
+    )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
@@ -21,6 +24,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
     from vllm.v1.request import Request
 else:
+    ArtifactConnectorMetadata = object
     ECConnectorMetadata = object
     KVConnectorMetadata = object
     KVCacheBlockCopy = object
@@ -245,6 +249,9 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
+
+    # Execution-artifact control metadata consumed by the worker connector.
+    artifact_connector_metadata: ArtifactConnectorMetadata | None = None
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None

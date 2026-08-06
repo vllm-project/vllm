@@ -474,6 +474,7 @@ class AsyncLLM(EngineClient):
             request_id=request_id,
             prompt=TokensPrompt(prompt_token_ids=[0]),
             params=sampling_params,
+            resumable=True,
             **inputs,  # type: ignore[arg-type]
         )
         self.input_processor.assign_request_id(final_req)

@@ -123,6 +123,7 @@ def test_add_requests():
 
 def test_finish_request():
     scheduler = create_scheduler()
+    scheduler.artifact_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -131,6 +132,9 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+        scheduler.artifact_connector.request_aborted.assert_called_with(
+            request.request_id
+        )
 
 
 def test_get_num_unfinished_requests():
@@ -1141,6 +1145,33 @@ def test_preemption_re_records_prefix_cache_query():
     assert stats.preempted_requests == 1
 
 
+def test_preemption_marks_artifact_output_as_stale():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    scheduler.artifact_connector = Mock()
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.artifact_connector.take_output.assert_called_once()
+    assert scheduler.artifact_connector.take_output.call_args.kwargs == {
+        "is_stale": True
+    }
+
+
 def test_prefix_cache_stats_not_recorded_when_caching_disabled():
     """With prefix caching off there is no local lookup, so admitting a request
     records no phantom miss."""
@@ -1229,6 +1260,7 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
 
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.artifact_connector = Mock()
     requests = create_requests(num_requests=10)
     for request in requests:
         scheduler.add_request(request)
@@ -1245,10 +1277,12 @@ def test_scheduler_reset_prefix_cache():
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
     assert not scheduler.reset_prefix_cache()
+    scheduler.artifact_connector.reset.assert_not_called()
 
     # Reset prefix cache with reset_running_requests=True. All running requests
     # Should be pushed back to the waiting queue and kv cache should be freed
     assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.artifact_connector.reset.assert_called_once_with()
 
     # Verify requests moved from running to waiting
     assert len(scheduler.waiting) == len(requests)
@@ -3251,10 +3285,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
+    scheduler.artifact_connector = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.vllm_config = Mock()
-    scheduler.vllm_config.model_config.enable_return_routed_experts = False
-    scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)

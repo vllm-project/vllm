@@ -3,12 +3,15 @@
 
 import numpy as np
 
+from vllm.distributed.artifact_connector.connector import (
+    ArtifactConnectorOutput,
+    ArtifactRequestOutput,
+)
 from vllm.v1.executor.ray_utils import detach_zero_copy_from_model_runner_output
 from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
-    RoutedExpertsLists,
 )
 
 
@@ -59,26 +62,21 @@ def test_detach_zero_copy_from_model_runner_output_copies_only_numpy_views():
     assert output.prompt_logprobs_dict["req-0"] is prompt_logprobs
 
 
-def test_detach_zero_copy_routed_experts_without_logprobs():
+def test_detach_zero_copy_artifact_output_without_logprobs():
+    rows = _make_readonly(np.arange(12, dtype=np.uint8).reshape(2, 3, 2))
     output = ModelRunnerOutput(
         req_ids=["req-0"],
         req_id_to_index={"req-0": 0},
-        routed_experts=RoutedExpertsLists(
-            routing_data=_make_readonly(np.arange(12, dtype=np.int32).reshape(2, 3, 2)),
-            slot_mapping=_make_readonly(np.array([7, 8], dtype=np.int64)),
+        artifact_connector_output=ArtifactConnectorOutput(
+            {"req-0": ArtifactRequestOutput(0, rows)}
         ),
     )
-    original = output.routed_experts
-    assert output.logprobs is None
 
     detach_zero_copy_from_model_runner_output(output)
 
-    detached = output.routed_experts
-    assert detached is not None
-    assert detached is not original
-    assert detached.routing_data is not original.routing_data
-    assert detached.slot_mapping is not original.slot_mapping
-    assert detached.routing_data.flags.writeable
-    assert detached.slot_mapping.flags.writeable
-    np.testing.assert_array_equal(detached.routing_data, original.routing_data)
-    np.testing.assert_array_equal(detached.slot_mapping, original.slot_mapping)
+    artifact_output = output.artifact_connector_output
+    assert artifact_output is not None
+    detached = artifact_output.requests["req-0"].rows
+    assert detached is not rows
+    assert detached.flags.writeable
+    np.testing.assert_array_equal(detached, rows)
