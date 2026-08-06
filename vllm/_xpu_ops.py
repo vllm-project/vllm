@@ -279,6 +279,7 @@ def _kda_attention_core_xpu_impl(
         spec_state_indices,
         attn_metadata.num_accepted_tokens,
         attn_metadata.num_actual_tokens,
+        self.gate_lower_bound,
     )
 
 
