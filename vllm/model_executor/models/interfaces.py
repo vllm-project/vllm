@@ -71,6 +71,13 @@ The output embeddings must be one of the following formats:
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
 
+MambaStateShapes: TypeAlias = (
+    tuple[tuple[int, int]]
+    | tuple[tuple[int, int, int]]
+    | tuple[tuple[int, int], tuple[int, int]]
+    | tuple[tuple[int, int], tuple[int, int, int]]
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DiarizedTranscriptionSegment:
@@ -147,6 +154,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     """
     A flag that indicates whether this model supports
     `multimodal_config.mm_encoder_tp_mode="data"`.
+    """
+
+    supports_mm_device_do_normalize: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_device_do_normalize`.
     """
 
     requires_raw_input_tokens: ClassVar[bool] = False
@@ -610,7 +623,7 @@ class SupportsLoRA(Protocol):
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    packed_modules_mapping: dict[str, list[str]] = {}
+    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
     lora_manager: "LoRAModelManager | None"
@@ -672,6 +685,15 @@ def _supports_lora(model: type[object] | object) -> bool:
     return isinstance(model, SupportsLoRA)
 
 
+class _MakeEmptyIntermediateTensors(Protocol):
+    def __call__(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> "IntermediateTensors": ...
+
+
 @runtime_checkable
 class SupportsPP(Protocol):
     """The interface required for all models that support pipeline parallel."""
@@ -685,14 +707,8 @@ class SupportsPP(Protocol):
         MRO of your model class.
     """
 
-    def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> "IntermediateTensors":
-        """Called when PP rank > 0 for profiling purposes."""
-        ...
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
+    """Called when PP rank > 0 for profiling purposes."""
 
     def forward(
         self,
@@ -700,7 +716,7 @@ class SupportsPP(Protocol):
         positions: Tensor,
         *,
         intermediate_tensors: "IntermediateTensors | None",
-    ) -> "IntermediateTensors | None":
+    ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]":
         """
         Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
         PP rank > 0.
@@ -717,12 +733,7 @@ class SupportsPP(Protocol):
 class _SupportsPPType(Protocol):
     supports_pp: Literal[True]
 
-    def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> "IntermediateTensors": ...
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
 
     def forward(
         self,
@@ -730,7 +741,7 @@ class _SupportsPPType(Protocol):
         positions: Tensor,
         *,
         intermediate_tensors: "IntermediateTensors | None",
-    ) -> "Tensor | IntermediateTensors": ...
+    ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]": ...
 
 
 @overload
@@ -779,7 +790,7 @@ def supports_pp(
 
 def _supports_pp_attributes(model: type[object] | object) -> bool:
     if isinstance(model, type):
-        return isinstance(model, _SupportsPPType)
+        return SupportsPP in model.__mro__ or isinstance(model, _SupportsPPType)
 
     return isinstance(model, SupportsPP)
 
@@ -861,16 +872,14 @@ class IsHybrid(Protocol):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
             vllm_config: vLLM config
 
         Returns:
-            Tuple containing:
-            - conv_state_shape: Shape for convolutional state cache
-            - temporal_state_shape: Shape for state space model cache
+            Shapes for each state cache used by the model.
         """
         ...
 
@@ -1084,7 +1093,7 @@ class SupportsQuant:
     """The interface required for all models that support quantization."""
 
     hf_to_vllm_mapper: ClassVar["WeightsMapper | None"] = None
-    packed_modules_mapping: ClassVar[dict[str, list[str]] | None] = None
+    packed_modules_mapping: ClassVar[dict[str, list[str]]]
     quant_config: QuantizationConfig | None = None
 
     def __new__(cls, *args, **kwargs) -> Self:
@@ -1119,8 +1128,8 @@ class SupportsQuant:
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
             unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
             self.quant_config.apply_vllm_mapper(unstacked_mapper)
-        if self.packed_modules_mapping is not None:
-            self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
+        if packed_modules_mapping := getattr(self, "packed_modules_mapping", None):
+            self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
 
 @runtime_checkable
