@@ -67,14 +67,13 @@ class TestMetaTensorMode:
             assert ref_tensor.new_full((5, 5), 7.0).device.type == "meta"
 
     def test_kwargs_none_handling(self):
-        """Test that kwargs=None is handled correctly.
+        """Test that a call carrying no kwargs is still redirected.
 
-        This verifies the fix for safer kwargs handling:
-        Previous: kwargs = kwargs or {}
-        Current:  kwargs = kwargs if kwargs is not None else {}
+        The dispatcher passes kwargs=None rather than an empty dict when the
+        caller supplies none, so __torch_dispatch__ has to substitute a dict
+        before it can set the device.
         """
         with MetaTensorMode():
-            # Call without explicit kwargs (internally None)
             tensor = torch.empty(10, 20)
             assert tensor.device.type == "meta"
 
@@ -87,7 +86,7 @@ class TestMetaTensorMode:
         with MetaTensorMode():
             ref_tensor = torch.tensor([[1.0, 2.0]])
 
-            # Basic factory ops (6)
+            # Basic factory ops
             assert torch.empty(5).device.type == "meta"
             assert torch.zeros(5).device.type == "meta"
             assert torch.ones(5).device.type == "meta"
@@ -95,7 +94,7 @@ class TestMetaTensorMode:
             assert torch.rand(5).device.type == "meta"
             assert torch.randn(5).device.type == "meta"
 
-            # Like operations (6)
+            # Like operations
             assert torch.empty_like(ref_tensor).device.type == "meta"
             assert torch.zeros_like(ref_tensor).device.type == "meta"
             assert torch.ones_like(ref_tensor).device.type == "meta"
@@ -103,16 +102,15 @@ class TestMetaTensorMode:
             assert torch.rand_like(ref_tensor).device.type == "meta"
             assert torch.randn_like(ref_tensor).device.type == "meta"
 
-            # Strided operation (1)
+            # Strided operations
             assert torch.empty_strided((5, 5), (5, 1)).device.type == "meta"
+            assert ref_tensor.new_empty_strided((5, 5), (5, 1)).device.type == "meta"
 
-            # New tensor methods (4)
+            # New tensor methods
             assert ref_tensor.new_empty(5).device.type == "meta"
             assert ref_tensor.new_zeros(5).device.type == "meta"
             assert ref_tensor.new_ones(5).device.type == "meta"
             assert ref_tensor.new_full((5,), 3.0).device.type == "meta"
-
-            # Note: new_empty_strided is covered implicitly via empty_strided
 
     def test_outside_context_manager(self):
         """Test that operations outside MetaTensorMode work normally."""
