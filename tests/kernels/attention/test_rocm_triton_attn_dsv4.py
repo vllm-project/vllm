@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -37,16 +38,19 @@ HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
 @pytest.mark.parametrize(
-    ("eligible", "dtype", "expected_optimized"),
+    ("eligible", "runtime_mode", "dtype", "expected_optimized"),
     [
-        (True, torch.bfloat16, True),
-        (False, torch.bfloat16, False),
-        (True, torch.float32, False),
+        (True, CUDAGraphMode.FULL, torch.bfloat16, True),
+        (True, CUDAGraphMode.NONE, torch.bfloat16, False),
+        (True, CUDAGraphMode.PIECEWISE, torch.bfloat16, False),
+        (False, CUDAGraphMode.FULL, torch.bfloat16, False),
+        (True, CUDAGraphMode.FULL, torch.float32, False),
     ],
 )
-def test_dsv4_aiter_tgemm_routing_uses_static_eligibility_and_input_dtype(
+def test_dsv4_aiter_tgemm_is_limited_to_full_graph_capture(
     monkeypatch,
     eligible: bool,
+    runtime_mode: CUDAGraphMode,
     dtype: torch.dtype,
     expected_optimized: bool,
 ) -> None:
@@ -57,12 +61,14 @@ def test_dsv4_aiter_tgemm_routing_uses_static_eligibility_and_input_dtype(
     attention._tgemm_static_eligible = eligible
     base_result = object()
     optimized_result = object()
+    context_calls = 0
 
-    monkeypatch.setattr(
-        rocm,
-        "get_forward_context",
-        lambda: pytest.fail("tgemm routing should not inspect forward context"),
-    )
+    def get_context():
+        nonlocal context_calls
+        context_calls += 1
+        return SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
+
+    monkeypatch.setattr(rocm, "get_forward_context", get_context)
     monkeypatch.setattr(
         rocm.DeepseekV4Attention,
         "attn_gemm_parallel_execute",
@@ -75,19 +81,20 @@ def test_dsv4_aiter_tgemm_routing_uses_static_eligibility_and_input_dtype(
     result = attention.attn_gemm_parallel_execute(torch.empty((1, 1), dtype=dtype))
 
     assert result is (optimized_result if expected_optimized else base_result)
+    assert context_calls == int(eligible and dtype == torch.bfloat16)
 
 
 def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:
     tgemm = pytest.importorskip("aiter.tuned_gemm").tgemm
 
-    from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
+    from vllm.models.deepseek_v4.amd import rocm
 
     hidden_states = torch.empty((2, 4), dtype=torch.bfloat16)
     main_weight = torch.empty((3, 4), dtype=torch.bfloat16)
     indexer_weight = torch.empty((5, 4), dtype=torch.bfloat16)
     indexer_weights = torch.empty((2, 1), dtype=torch.bfloat16)
     qr_kv = torch.empty((2, 2), dtype=torch.bfloat16)
-    attention = object.__new__(DeepseekV4ROCMAiterMLAAttention)
+    attention = object.__new__(rocm.DeepseekV4ROCMAiterMLAAttention)
     torch.nn.Module.__init__(attention)
     attention.compressor = SimpleNamespace(
         fused_wkv_wgate=SimpleNamespace(weight=main_weight)

@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import CUDAGraphMode
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -466,7 +467,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def attn_gemm_parallel_execute(
         self, hidden_states: torch.Tensor
     ) -> tuple[Any, ...]:
-        if not self._tgemm_static_eligible or hidden_states.dtype != torch.bfloat16:
+        if (
+            not self._tgemm_static_eligible
+            or hidden_states.dtype != torch.bfloat16
+            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
+        ):
             return super().attn_gemm_parallel_execute(hidden_states)
 
         return self._attn_gemm_parallel_execute_aiter_tgemm(hidden_states)
@@ -478,6 +483,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         assert self.compressor is not None
 
+        qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
         kv_score = tgemm.mm(
             hidden_states,
             self.compressor.fused_wkv_wgate.weight,
@@ -493,7 +499,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             indexer_weights, _ = self.indexer.weights_proj(hidden_states)
 
-        qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     @classmethod
