@@ -156,6 +156,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
+    supports_mm_device_do_normalize: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_device_do_normalize`.
+    """
+
     requires_raw_input_tokens: ClassVar[bool] = False
     """
     A flag that indicates this model processes input id tokens
