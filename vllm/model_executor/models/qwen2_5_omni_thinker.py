@@ -22,6 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal
@@ -77,16 +78,17 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
-)
+from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    MultiModalProcessingInfo,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -103,7 +105,6 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
-    split_list_into_ranges,
 )
 
 try:
@@ -112,6 +113,7 @@ except (ImportError, ModuleNotFoundError):
     flash_attn = None
 
 logger = init_logger(__name__)
+_MISSING_SECOND_PER_GRID_TS = object()
 
 
 def unpad_and_flat_audio_features(
@@ -352,6 +354,9 @@ class Qwen2_5OmniThinkerProcessingInfo(
         return self.ctx.get_hf_config(Qwen2_5OmniConfig).thinker_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
+        # Prompt-update timing is not a processor init kwarg and must not
+        # create one cached processor instance per request value.
+        kwargs.pop("second_per_grid_ts", None)
         return self.ctx.get_hf_processor(
             Qwen2_5OmniProcessor,
             use_fast=kwargs.pop("use_fast", True),
@@ -492,6 +497,24 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
 class Qwen2_5OmniThinkerMultiModalProcessor(
     BaseMultiModalProcessor[Qwen2_5OmniThinkerProcessingInfo]
 ):
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
+        if (
+            bool(hf_processor_mm_kwargs.get("use_audio_in_video", False))
+            and "second_per_grid_ts" in hf_processor_mm_kwargs
+        ):
+            self._normalize_second_per_grid_ts(
+                hf_processor_mm_kwargs["second_per_grid_ts"],
+                num_videos=inputs.mm_data_items.get_count("video", strict=False),
+            )
+            return self._apply_hf_processor(inputs, timing_ctx)
+
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -747,24 +770,103 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         t_index = (
             torch.arange(grid_t) * video_second_per_grid_t * tokens_per_second
         ).long()
-        t_index_split_chunk = split_list_into_ranges(t_index, t_ntoken_per_chunk)
+        chunk_ids = torch.div(t_index, t_ntoken_per_chunk, rounding_mode="floor")
+        occupied_chunk_ids, occupied_chunk_sizes = torch.unique_consecutive(
+            chunk_ids, return_counts=True
+        )
 
         updates = [audio_start_token_id]
         added_audio_len = 0
-        for t_chunk in t_index_split_chunk:
+        previous_chunk_id = -1
+        for chunk_id, chunk_size in zip(
+            occupied_chunk_ids.tolist(),
+            occupied_chunk_sizes.tolist(),
+        ):
+            empty_chunk_count = chunk_id - previous_chunk_id - 1
+            if empty_chunk_count > 0 and added_audio_len < audio_len:
+                audio_gap_size = min(
+                    empty_chunk_count * t_ntoken_per_chunk,
+                    audio_len - added_audio_len,
+                )
+                updates.extend([audio_token_id] * audio_gap_size)
+                added_audio_len += audio_gap_size
+
             vision_ntoken_per_chunk = (
-                len(t_chunk) * grid_h * grid_w // (spatial_merge_size**2)
+                chunk_size * grid_h * grid_w // (spatial_merge_size**2)
             )
             updates.extend([video_token_id] * vision_ntoken_per_chunk)
 
             audio_chunk_size = min(t_ntoken_per_chunk, audio_len - added_audio_len)
             updates.extend(audio_chunk_size * [audio_token_id])
             added_audio_len += audio_chunk_size
+            previous_chunk_id = chunk_id
         if added_audio_len < audio_len:
             updates.extend((audio_len - added_audio_len) * [audio_token_id])
         updates.extend([audio_end_token_id])
 
         return updates
+
+    @staticmethod
+    def _normalize_second_per_grid_ts(
+        second_per_grid_ts: object = _MISSING_SECOND_PER_GRID_TS,
+        *,
+        num_videos: int,
+    ) -> list[float]:
+        if second_per_grid_ts is _MISSING_SECOND_PER_GRID_TS:
+            return [1.0] * num_videos
+
+        if isinstance(second_per_grid_ts, (torch.Tensor, np.ndarray)):
+            if second_per_grid_ts.ndim != 1:
+                raise ValueError(
+                    "second_per_grid_ts must be a finite positive sequence "
+                    "with one value per video when use_audio_in_video=True"
+                )
+            values = second_per_grid_ts.tolist()
+        elif isinstance(second_per_grid_ts, Sequence) and not isinstance(
+            second_per_grid_ts, (str, bytes, bytearray)
+        ):
+            values = list(second_per_grid_ts)
+        else:
+            raise ValueError(
+                "second_per_grid_ts must be a finite positive sequence "
+                "with one value per video when use_audio_in_video=True"
+            )
+
+        if len(values) != num_videos:
+            raise ValueError(
+                "second_per_grid_ts must contain one finite positive value per "
+                "video when use_audio_in_video=True; "
+                f"got {len(values)} values for {num_videos} videos"
+            )
+
+        normalized = []
+        for item_idx, value in enumerate(values):
+            if isinstance(value, (bool, np.bool_, str, bytes, bytearray)):
+                raise ValueError(
+                    "second_per_grid_ts must contain only finite positive "
+                    "numbers when use_audio_in_video=True; "
+                    f"invalid value at index {item_idx}: {value!r}"
+                )
+
+            try:
+                value = float(value)
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "second_per_grid_ts must contain only finite positive "
+                    "numbers when use_audio_in_video=True; "
+                    f"invalid value at index {item_idx}: {value!r}"
+                ) from exc
+
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(
+                    "second_per_grid_ts must contain only finite positive "
+                    "numbers when use_audio_in_video=True; "
+                    f"invalid value at index {item_idx}: {value!r}"
+                )
+
+            normalized.append(value)
+
+        return normalized
 
     def _get_prompt_updates(
         self,
@@ -772,6 +874,19 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        use_audio_in_video = bool(
+            hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        )
+        second_per_grid_ts = None
+        if use_audio_in_video:
+            second_per_grid_ts = self._normalize_second_per_grid_ts(
+                hf_processor_mm_kwargs.get(
+                    "second_per_grid_ts",
+                    _MISSING_SECOND_PER_GRID_TS,
+                ),
+                num_videos=mm_items.get_count("video", strict=False),
+            )
+
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
@@ -826,7 +941,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             token_id = image_token_id if modality == "image" else video_token_id
             return [token_id] * (int(grid_thw.prod()) // merge_length)
 
-        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         thinker_config = self.info.get_hf_config()
 
         def get_replacement_qwen2_use_audio_in_video(item_idx: int):
@@ -837,11 +951,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
             audio_in_video_item_idx += 1
 
-            second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
-            if second_per_grid_ts:
-                video_second_per_grid_t = second_per_grid_ts[item_idx]
-            else:
-                video_second_per_grid_t = 1.0
+            assert second_per_grid_ts is not None
+            video_second_per_grid_t = second_per_grid_ts[item_idx]
 
             updates = self.omni_get_updates_use_audio_in_video(
                 thinker_config=thinker_config,

@@ -115,6 +115,47 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
     )
 
 
+def test_qwen2_5_omni_explicit_timing_mixed_cache_matches_baseline() -> None:
+    """Explicit per-video timing must retain positions across mixed cache hits."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-Omni-3B",
+        limit_mm_per_prompt={"audio": 2, "image": 0, "video": 2},
+        mm_processor_cache_gb=1,
+    )
+
+    baseline_processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config, cache=None
+    )
+    sender_cache = MultiModalProcessorSenderCache(ctx.model_config)
+    cached_processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config, cache=sender_cache
+    )
+
+    video_token_id = baseline_processor.info.get_hf_config().video_token_id
+    all_mm_data = create_mm_data(3)
+    hf_processor_mm_kwargs = {
+        "use_audio_in_video": True,
+        "second_per_grid_ts": [1.0, 2.0],
+    }
+
+    def run(processor, indices: list[int]) -> list[int]:
+        mm_data = {
+            "video": [all_mm_data["video"][index] for index in indices],
+            "audio": [all_mm_data["audio"][index] for index in indices],
+        }
+        return processor(
+            [video_token_id] * len(indices),
+            mm_items=baseline_processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )["prompt_token_ids"]
+
+    run(cached_processor, [0, 1])
+    baseline_second_ids = run(baseline_processor, [0, 2])
+    cached_second_ids = run(cached_processor, [0, 2])
+
+    assert cached_second_ids == baseline_second_ids
+
+
 @pytest.mark.parametrize("model_id", MODELS)
 def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
     """
