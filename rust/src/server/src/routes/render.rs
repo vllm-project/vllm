@@ -10,7 +10,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use thiserror_ext::AsReport as _;
-use vllm_chat::NewChatOutputProcessorOptions;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
@@ -112,13 +111,7 @@ async fn render_chat(
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     let (text_request, _) = state
         .chat
-        .prepare(
-            chat_request,
-            NewChatOutputProcessorOptions {
-                tool_call_parser: &state.tool_call_parser,
-                reasoning_parser: &state.reasoning_parser,
-            },
-        )
+        .prepare(chat_request)
         .await
         .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?;
     Ok(Json(lower_render_request(

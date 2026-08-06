@@ -687,14 +687,20 @@ async fn test_app() -> axum::Router {
 }
 
 fn test_render_app() -> axum::Router {
+    test_render_app_with_parser_selections(ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_render_app_with_parser_selections(
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
     let backend = Arc::new(FakeChatBackend::new());
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
-        tool_call_parser: ParserSelection::Auto,
-        reasoning_parser: ParserSelection::Auto,
         text: TextRequestProcessor::new(backend.clone(), 128),
-        chat: ChatRequestProcessor::render_only(backend),
+        chat: ChatRequestProcessor::render_only(backend)
+            .with_parser_selections(tool_call_parser, reasoning_parser),
     }))
 }
 
@@ -1101,6 +1107,39 @@ async fn render_chat_returns_generate_request_with_header_request_id() {
     assert!(!json["token_ids"].as_array().unwrap().is_empty());
     assert!(json.get("prompt_token_ids").is_none());
     assert!(json.get("mm_features").is_none());
+}
+
+#[tokio::test]
+async fn render_chat_uses_processor_owned_parser_selections() {
+    let mut app = test_render_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("definitely_missing_reasoning_parser".to_string()),
+    );
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("decode body");
+    assert!(
+        body.contains("reasoning parser `definitely_missing_reasoning_parser` is not registered")
+    );
 }
 
 #[tokio::test]

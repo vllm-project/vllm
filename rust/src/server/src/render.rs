@@ -48,8 +48,6 @@ impl RenderConfig {
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: Vec<String>,
-    pub(crate) tool_call_parser: ParserSelection,
-    pub(crate) reasoning_parser: ParserSelection,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
 }
@@ -72,12 +70,13 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         crate::effective_served_model_names(&config.model, &config.served_model_name);
     let text = TextRequestProcessor::new(loaded.text_backend, config.max_model_len)
         .with_max_logprobs(config.max_logprobs);
-    let chat = ChatRequestProcessor::render_only(loaded.chat_backend);
+    let chat = ChatRequestProcessor::render_only(loaded.chat_backend).with_parser_selections(
+        config.tool_call_parser.clone(),
+        config.reasoning_parser.clone(),
+    );
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
-        tool_call_parser: config.tool_call_parser.clone(),
-        reasoning_parser: config.reasoning_parser.clone(),
         text,
         chat,
     }))
