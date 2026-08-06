@@ -190,9 +190,8 @@ class Sampler:
             expanded_local_pos,
         )
 
-        # Force the reasoning end marker once a per-request thinking budget
-        # has been reached. This happens before temperature/top-k/top-p so the
-        # forced marker remains deterministic for both greedy and random paths.
+        # Force the reasoning end marker once a request's thinking budget is
+        # reached; applied before temperature so the forced token is always kept.
         self.thinking_budget_state.apply(
             logits,
             expanded_idx_mapping,

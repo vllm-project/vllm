@@ -232,3 +232,31 @@ def test_v2_thinking_budget_incrementally_scans_long_generation():
     _apply(state, torch.zeros((1, VOCAB_SIZE), device=DEVICE), [10], [0])
 
     assert state.cached_scan_pos[3].item() == len(tokens) + 1
+
+
+def test_v2_thinking_budget_clamps_oversized_budget():
+    """Budgets beyond int32 must not crash and behave as unlimited."""
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=2**40))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[12], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_continues_end_prefix_from_prompt():
+    """A resumed prompt ending with a partial forced-end marker must not
+    restart the marker sequence and duplicate its first token."""
+    req_states = _make_req_states([1, START, 10, 11, END_A], prompt_len=5)
+    state = ThinkingBudgetState(req_states, MockMultiTokenEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[END_A], local_pos=[0])
+
+    assert out[0, END_B] == pytest.approx(1.0e9)
+    assert out[0, END_A] == 0
