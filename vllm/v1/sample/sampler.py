@@ -108,6 +108,13 @@ class Sampler(nn.Module):
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
+        if sampling_metadata.trace_decode_token_ids is not None:
+            self._inject_trace_tokens(
+                sampled,
+                sampling_metadata.trace_decode_token_ids,
+                sampling_metadata.output_token_ids,
+            )
+
         # Handle logprob_token_ids if specified (more efficient than full vocab)
         # This is used by generative_scoring API to get logprobs for specific tokens
         logprob_token_ids_tensors = None
@@ -354,6 +361,24 @@ class Sampler(nn.Module):
         indices = indices.to(torch.int32)
 
         return LogprobsTensors(indices, logprobs, token_ranks)
+
+    @staticmethod
+    def _inject_trace_tokens(
+        sampled: torch.Tensor,
+        trace_decode_token_ids: list[list[int]],
+        output_token_ids: list[list[int]],
+    ) -> None:
+        """Overwrite sampled tokens with the current trace tokens in place."""
+        for req_idx, trace_tokens in enumerate(trace_decode_token_ids):
+            if not trace_tokens:
+                continue
+            produced = output_token_ids[req_idx]
+            # Ignore the trailing async placeholder.
+            step_idx = len(produced)
+            if step_idx and produced[-1] == -1:
+                step_idx -= 1
+            if step_idx < len(trace_tokens):
+                sampled[req_idx] = trace_tokens[step_idx]
 
     @staticmethod
     def _combine_outputs_with_spec_tokens(

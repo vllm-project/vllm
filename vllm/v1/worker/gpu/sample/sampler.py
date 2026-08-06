@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.sample.logprob import (
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+from vllm.v1.worker.gpu.sample.trace_replay import TraceReplayState
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -48,6 +49,7 @@ class Sampler:
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self.trace_replay_state = TraceReplayState(req_states)
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
 
@@ -59,6 +61,7 @@ class Sampler:
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self.trace_replay_state.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -66,6 +69,7 @@ class Sampler:
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
+        self.trace_replay_state.apply_staged_writes()
 
     def __call__(
         self,
@@ -97,6 +101,17 @@ class Sampler:
             input_ids,
             expanded_local_pos,
             return_logprobs=return_logprobs,
+        )
+
+        # Overwrite sampled tokens with the replay trace (if any) before
+        # computing logprobs, so logprobs and ranks reflect the real
+        # distribution of the forced token.
+        self.trace_replay_state.apply_trace(
+            sampled,
+            input_batch.idx_mapping,
+            idx_mapping_np,
+            self.req_states.total_len.gpu,
+            self.req_states.prompt_len.gpu,
         )
 
         if return_logprobs:

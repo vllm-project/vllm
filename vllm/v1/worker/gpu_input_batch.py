@@ -298,6 +298,8 @@ class InputBatch:
 
         # Store last speculative tokens for sampler.
         self.spec_token_ids: list[list[int]] = [[] for _ in range(max_num_reqs)]
+        self.trace_decode_token_ids: list[list[int]] = [[] for _ in range(max_num_reqs)]
+        self.num_trace_reqs: int = 0
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -358,10 +360,12 @@ class InputBatch:
             self._req_ids.append(req_id)
             self.req_output_token_ids.append(request.output_token_ids)
             self.spec_token_ids.append([])
+            self.trace_decode_token_ids.append([])
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
             self.spec_token_ids[req_index].clear()
+            self.trace_decode_token_ids[req_index].clear()
 
         self.req_id_to_index[req_id] = req_index
 
@@ -398,6 +402,12 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
+            if sampling_params.trace_decode_token_ids:
+                self.trace_decode_token_ids[req_index].extend(
+                    sampling_params.trace_decode_token_ids
+                )
+                self.num_trace_reqs += 1
+
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Should avoid division by zero later when apply_temperature.
                 self.temperature_cpu[req_index] = 0.0
@@ -545,6 +555,9 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
+        if self.trace_decode_token_ids[req_index]:
+            self.num_trace_reqs -= 1
+        self.trace_decode_token_ids[req_index].clear()
         self.block_table.clear_row(req_index)
 
         # LoRA
@@ -600,6 +613,10 @@ class InputBatch:
         self.spec_token_ids[i1], self.spec_token_ids[i2] = (
             self.spec_token_ids[i2],
             self.spec_token_ids[i1],
+        )
+        self.trace_decode_token_ids[i1], self.trace_decode_token_ids[i2] = (
+            self.trace_decode_token_ids[i2],
+            self.trace_decode_token_ids[i1],
         )
         assert old_id_i1 is not None and old_id_i2 is not None
         self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] = (
@@ -726,6 +743,7 @@ class InputBatch:
             self._req_ids.clear()
             self.req_output_token_ids.clear()
             self.spec_token_ids.clear()
+            self.trace_decode_token_ids.clear()
             return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
@@ -761,6 +779,14 @@ class InputBatch:
                 self.spec_token_ids[last_req_index],
             )
             self.spec_token_ids[last_req_index].clear()
+            (
+                self.trace_decode_token_ids[last_req_index],
+                self.trace_decode_token_ids[empty_index],
+            ) = (
+                self.trace_decode_token_ids[empty_index],
+                self.trace_decode_token_ids[last_req_index],
+            )
+            self.trace_decode_token_ids[last_req_index].clear()
 
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens
@@ -836,6 +862,7 @@ class InputBatch:
         del self._req_ids[num_reqs:]
         del self.req_output_token_ids[num_reqs:]
         del self.spec_token_ids[num_reqs:]
+        del self.trace_decode_token_ids[num_reqs:]
 
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
@@ -913,6 +940,7 @@ class InputBatch:
             not self.no_penalties
             or bool(self.bad_words_token_ids)
             or self.logitsprocs_need_output_token_ids
+            or self.num_trace_reqs > 0  # trace-replay needs step tracking
             or thinking_budget_tracks_reqs
         )
         output_token_ids = (
@@ -955,6 +983,11 @@ class InputBatch:
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=output_token_ids,
             spec_token_ids=self.spec_token_ids,
+            trace_decode_token_ids=(
+                self.trace_decode_token_ids[:num_reqs]
+                if self.num_trace_reqs > 0
+                else None
+            ),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,

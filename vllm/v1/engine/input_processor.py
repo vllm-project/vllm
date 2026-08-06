@@ -152,6 +152,22 @@ class InputProcessor:
                 f"but got {type(params).__name__}"
             )
 
+    @staticmethod
+    def _normalize_trace_replay_params(sampling_params: SamplingParams) -> None:
+        """Apply trace replay's generation semantics to request-local params."""
+        trace_token_ids = sampling_params.trace_decode_token_ids
+        assert trace_token_ids
+
+        # Apply this after the generation config so its EOS token cannot stop
+        # replay before the trace is exhausted.
+        sampling_params.max_tokens = len(trace_token_ids)
+        sampling_params.min_tokens = 0
+        sampling_params.ignore_eos = True
+        sampling_params._eos_token_id = None
+        sampling_params.stop = []
+        sampling_params.stop_token_ids = []
+        sampling_params._all_stop_token_ids = set()
+
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
             return
@@ -336,6 +352,8 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            if sampling_params.trace_decode_token_ids:
+                self._normalize_trace_replay_params(sampling_params)
         else:
             pooling_params = params.clone()
 
