@@ -246,11 +246,6 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
-        # TODO: clean up this backend-specific logic.
-        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
