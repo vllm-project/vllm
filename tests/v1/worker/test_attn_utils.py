@@ -36,6 +36,45 @@ class FakeHNDFlashAttentionBackend(FakeFlashAttentionBackend):
         return (0, 1, 3, 2, 4)
 
 
+def test_reshape_kv_cache_preserves_shared_host_row_stride():
+    num_blocks = 3
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    row_stride = spec.page_size_bytes + 32
+    backing = torch.zeros(num_blocks * row_stride, dtype=torch.int8)
+    raw_tensors = {
+        "layer": torch.as_strided(
+            backing,
+            size=(num_blocks, spec.page_size_bytes),
+            stride=(row_stride, 1),
+        )
+    }
+    attn_groups = [
+        AttentionGroup(
+            backend=FakeFlashAttentionBackend,
+            layer_names=["layer"],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+
+    kv_cache = _reshape_kv_cache(
+        attn_groups,
+        raw_tensors,
+        "auto",
+        [spec.block_size],
+        {},
+    )["layer"]
+
+    assert kv_cache.shape == (num_blocks, 2, 2, 1, 2)
+    assert kv_cache.stride(0) == row_stride // spec.dtype.itemsize
+    assert kv_cache[1].storage_offset() == row_stride // spec.dtype.itemsize
+
+
 def test_reshape_padded_flash_attention_kv_cache_strides_by_page():
     num_blocks = 3
     spec = FullAttentionSpec(

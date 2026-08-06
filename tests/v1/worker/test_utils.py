@@ -22,6 +22,104 @@ from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 
+def _hisparse_parallel_config(**overrides):
+    values = {
+        "tensor_parallel_size": 2,
+        "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "world_size": 2,
+        "distributed_executor_backend": "mp",
+        "nnodes_within_dp": 1,
+        "data_parallel_index": 3,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    config = SimpleNamespace(parallel_config=_hisparse_parallel_config())
+
+    assert hisparse_runtime_module.use_shared_hisparse_host_pool(config)
+
+    unsupported = (
+        {"tensor_parallel_size": 1, "world_size": 1},
+        {"pipeline_parallel_size": 2, "world_size": 4},
+        {"prefill_context_parallel_size": 2, "world_size": 4},
+        {"decode_context_parallel_size": 2},
+        {"world_size": 4},
+        {"distributed_executor_backend": "ray"},
+        {"nnodes_within_dp": 2},
+    )
+    for overrides in unsupported:
+        config.parallel_config = _hisparse_parallel_config(**overrides)
+        assert not hisparse_runtime_module.use_shared_hisparse_host_pool(config)
+
+
+def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+    class FakeSharedOffloadRegion:
+        BLOCK_SIZE_ALIGNMENT = 4096
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.total_size_bytes = kwargs["num_blocks"] * kwargs["kv_bytes_per_block"]
+            self.base_tensor = torch.empty(self.total_size_bytes, dtype=torch.int8)
+            self.is_pinned = False
+            self.view_sizes = []
+            self.offset = 0
+
+        def create_next_view(self, size):
+            self.view_sizes.append(size)
+            view = torch.as_strided(
+                self.base_tensor,
+                size=(self.kwargs["num_blocks"], size),
+                stride=(self.kwargs["kv_bytes_per_block"], 1),
+                storage_offset=self.offset,
+            )
+            self.offset += size
+            return view
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.setattr(
+        hisparse_runtime_module, "SharedOffloadRegion", FakeSharedOffloadRegion
+    )
+    pinned: list[torch.Tensor] = []
+    monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pinned.append)
+    config = SimpleNamespace(
+        instance_id="instance",
+        parallel_config=_hisparse_parallel_config(),
+    )
+
+    pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
+        config, [24, 40], num_blocks=4
+    )
+
+    assert region is not None
+    assert region.kwargs == {
+        "engine_id": "hisparse_instance_dp3",
+        "num_blocks": 4,
+        "rank": 0,
+        "kv_bytes_per_block": 4096,
+        "cpu_page_size": 16,
+    }
+    assert region.view_sizes == [6, 10]
+    assert [pool.shape for pool in pools] == [(4, 6), (4, 10)]
+    assert pinned == [region.base_tensor]
+    assert region.is_pinned
+    assert hisparse_runtime_module._covers_registered_host_range(
+        pools[1].data_ptr(), pools[1].nbytes
+    )
+    hisparse_runtime_module._SHARED_HOST_REGIONS.remove(region)
+
+
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding(monkeypatch):
     waited_for_host_writes = False
 
@@ -326,11 +424,13 @@ def test_hisparse_worker_reports_each_completed_transfer_once():
 def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker = object.__new__(HiSparseWorker)
     worker.cache_handles = []
+    worker.shared_host_region = object()
     released = False
 
-    def release_pinned_state(runtimes):
+    def release_pinned_state(runtimes, shared_host_region):
         nonlocal released
         assert runtimes == []
+        assert shared_host_region is worker.shared_host_region
         released = True
 
     monkeypatch.setattr(
