@@ -622,6 +622,13 @@ class Glm5NextModel(nn.Module):
             # Indexer: fuse wk and weights_proj
             (".wk_weights_proj", ".wk", 0),
             (".wk_weights_proj", ".weights_proj", 1),
+            # KDA: merge q, k, v, b, f_a, g_a projections into one GEMM
+            (".in_proj_qkvbfg_a", ".q_proj", 0),
+            (".in_proj_qkvbfg_a", ".k_proj", 1),
+            (".in_proj_qkvbfg_a", ".v_proj", 2),
+            (".in_proj_qkvbfg_a", ".b_proj", 3),
+            (".in_proj_qkvbfg_a", ".f_a_proj", 4),
+            (".in_proj_qkvbfg_a", ".g_a_proj", 5),
         ]
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales

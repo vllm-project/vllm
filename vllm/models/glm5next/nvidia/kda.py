@@ -24,7 +24,7 @@ from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    ReplicatedLinear,
+    MergedColumnParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
@@ -48,6 +48,69 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
 )
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+
+class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
+    """Merged projection with multiple replicated output shards.
+
+    Extends K3's ``_KimiGDNMergedColumnParallelLinear`` to support two
+    replicated shards (f_a, g_a) instead of one. Pre-multiplies each
+    replicated entry's output_size by tp_size so the per-rank shard
+    divides back to the full size, and forces tp_rank=0 during weight
+    loading for replicated shards.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        replicated_shard_ids: tuple[int, ...],
+        tp_size: int,
+        **kwargs,
+    ) -> None:
+        self.replicated_shard_ids = set(replicated_shard_ids)
+        output_sizes = output_sizes.copy()
+        for sid in self.replicated_shard_ids:
+            output_sizes[sid] *= tp_size
+        super().__init__(input_size, output_sizes, **kwargs)
+
+    def weight_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        if loaded_shard_id in self.replicated_shard_ids:
+            self.tp_rank = 0
+            if param_tp_rank is not None:
+                param.tp_rank = 0
+        try:
+            super().weight_loader(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
+
+    def weight_loader_v2(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        if loaded_shard_id in self.replicated_shard_ids:
+            self.tp_rank = 0
+            if param_tp_rank is not None:
+                param.tp_rank = 0
+        try:
+            super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
@@ -124,35 +187,26 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.local_num_heads = divide(self.num_heads, self.tp_size)
 
         projection_size = self.head_dim * self.num_heads
+        self.local_projection_size = divide(projection_size, self.tp_size)
 
-        self.q_proj = ColumnParallelLinear(
+        # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
+        # Order matches checkpoint's fused_qkvbfg_a_proj convention.
+        # Shards 4 (f_a) and 5 (g_a) are replicated across TP ranks.
+        self.in_proj_qkvbfg_a = _Glm5NextMergedColumnParallelLinear(
             self.hidden_size,
-            projection_size,
+            [
+                projection_size,   # q (shard 0)
+                projection_size,   # k (shard 1)
+                projection_size,   # v (shard 2)
+                self.num_heads,    # b (shard 3)
+                self.head_dim,     # f_a (shard 4, replicated)
+                self.head_dim,     # g_a (shard 5, replicated)
+            ],
+            replicated_shard_ids=(4, 5),
+            tp_size=self.tp_size,
             bias=False,
             quant_config=self.quant_config,
-            prefix=f"{prefix}.q_proj",
-        )
-        self.k_proj = ColumnParallelLinear(
-            self.hidden_size,
-            projection_size,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.k_proj",
-        )
-        self.v_proj = ColumnParallelLinear(
-            self.hidden_size,
-            projection_size,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.v_proj",
-        )
-
-        self.f_a_proj = ReplicatedLinear(
-            self.hidden_size,
-            self.head_dim,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.f_a_proj",
+            prefix=f"{prefix}.in_proj_qkvbfg_a",
         )
 
         self.f_b_proj = ColumnParallelLinear(
@@ -167,14 +221,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
 
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-
-        self.b_proj = ColumnParallelLinear(
-            self.hidden_size,
-            self.num_heads,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.b_proj",
-        )
 
         self.q_conv1d = ColumnParallelLinear(
             input_size=self.conv_size,
@@ -210,13 +256,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
 
-        self.g_a_proj = ReplicatedLinear(
-            self.hidden_size,
-            self.head_dim,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.g_a_proj",
-        )
         self.g_b_proj = ColumnParallelLinear(
             self.head_dim,
             projection_size,
@@ -269,16 +308,25 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         num_tokens = hidden_states.size(0)
-        q = self.q_proj(hidden_states)[0]
-        k = self.k_proj(hidden_states)[0]
-        v = self.v_proj(hidden_states)[0]
+        # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
+        projected = self.in_proj_qkvbfg_a(hidden_states)[0]
+        qkv, beta_raw, f_a, g_a = projected.split(
+            [
+                3 * self.local_projection_size,
+                self.local_num_heads,
+                self.head_dim,
+                self.head_dim,
+            ],
+            dim=-1,
+        )
+        q, k, v = qkv.split(self.local_projection_size, dim=-1)
 
-        beta = _cast_sigmoid(self.b_proj(hidden_states)[0])
-        g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
+        beta = _cast_sigmoid(beta_raw)
         beta = beta.unsqueeze(0)
+        g1 = self.f_b_proj(f_a)[0]
         g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
 
-        g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
+        g_proj_states = self.g_b_proj(g_a)[0]
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
 
         core_attn_out = torch.empty(
