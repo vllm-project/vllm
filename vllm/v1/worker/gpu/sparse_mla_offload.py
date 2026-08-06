@@ -103,9 +103,11 @@ def _get_sparse_mla_physical_kv_cache(
 
     physical_groups = []
     grouped_names = []
-    for group in kv_cache_config.kv_cache_groups:
-        layer_names = [name for name in group.layer_names if name in indexer_names]
-        physical_groups.append(replace(group, layer_names=layer_names))
+    for cache_group in kv_cache_config.kv_cache_groups:
+        layer_names = [
+            name for name in cache_group.layer_names if name in indexer_names
+        ]
+        physical_groups.append(replace(cache_group, layer_names=layer_names))
         grouped_names.extend(layer_names)
 
     missing_group_names = indexer_names.difference(grouped_names)
@@ -145,12 +147,16 @@ def _get_sparse_mla_physical_kv_cache(
     ):
         filtered_groups = []
         attention_names = []
-        for group in groups:
-            if group.kv_cache_group_id != group_index:
+        for attention_group in groups:
+            if attention_group.kv_cache_group_id != group_index:
                 raise ValueError("Sparse MLA physical Attention groups are misaligned")
-            layer_names = [name for name in group.layer_names if name in indexer_names]
+            layer_names = [
+                name for name in attention_group.layer_names if name in indexer_names
+            ]
             if layer_names:
-                filtered_groups.append(replace(group, layer_names=layer_names))
+                filtered_groups.append(
+                    replace(attention_group, layer_names=layer_names)
+                )
                 attention_names.extend(layer_names)
         if sorted(attention_names) != sorted(physical_group.layer_names):
             raise ValueError("Sparse MLA physical Attention layers are incomplete")

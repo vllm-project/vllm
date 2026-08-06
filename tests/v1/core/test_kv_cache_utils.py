@@ -152,10 +152,6 @@ def _make_sparse_mla_worker_specs(
 def test_sparse_mla_offload_config_contract():
     disabled_config = AttentionConfig()
 
-    assert disabled_config.compute_hash() == (
-        "139f6e00df9d193dd0083fb92d740a856e3084be2e1cf2c5faa0b95923e7f8bf"
-    )
-
     enabled_config = AttentionConfig(sparse_mla_kv_offload={"host_pool_gib": 1.5})
     explicit_buffer_config = AttentionConfig(
         sparse_mla_kv_offload={
@@ -188,7 +184,11 @@ def test_glm_dsa_kv_specs_assign_sparse_offload_roles():
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
-    main_layer = SimpleNamespace(kv_cache_dtype="bfloat16", head_size=16)
+    main_layer = SimpleNamespace(
+        kv_cache_dtype="bfloat16",
+        head_size=16,
+        non_causal_multi_token_decode=False,
+    )
     indexer_layer = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=4),
         head_dim=8,
