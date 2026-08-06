@@ -75,6 +75,48 @@ logger = init_logger(__name__)
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+_NAMESPACE_TOOL_SEPARATOR = "__"
+
+
+def _matches_flat_namespace_tool_name(
+    candidate: str,
+    namespace: str,
+    name: str,
+) -> bool:
+    separator_start = len(namespace)
+    separator_end = separator_start + len(_NAMESPACE_TOOL_SEPARATOR)
+    return (
+        len(candidate) == separator_end + len(name)
+        and candidate.startswith(namespace)
+        and candidate.startswith(_NAMESPACE_TOOL_SEPARATOR, separator_start)
+        and candidate.endswith(name)
+    )
+
+
+def _matches_response_tool_choice_name(tool_name: Any, tool: Any) -> bool:
+    if isinstance(tool, dict):
+        if tool.get("type") != "namespace":
+            return tool_name == tool.get("name")
+
+        namespace = tool.get("name")
+        for namespaced_tool in tool.get("tools", []):
+            namespaced_name = namespaced_tool.get("name")
+            if tool_name == namespaced_name:
+                return True
+            if (
+                isinstance(tool_name, str)
+                and isinstance(namespace, str)
+                and isinstance(namespaced_name, str)
+                and _matches_flat_namespace_tool_name(
+                    tool_name,
+                    namespace,
+                    namespaced_name,
+                )
+            ):
+                return True
+        return False
+
+    return tool_name == getattr(tool, "name", None)
 
 
 class InputTokensDetails(OpenAIBaseModel):
@@ -611,20 +653,9 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
         elif is_named_tool_choice and tools is not None:
             tool_name = tool_choice.get("name")
-            tool_names = set()
-            for tool in tools:
-                if isinstance(tool, dict):
-                    if tool.get("type") == "namespace":
-                        namespace = tool.get("name")
-                        for namespaced_tool in tool.get("tools", []):
-                            namespaced_name = namespaced_tool.get("name")
-                            tool_names.add(namespaced_name)
-                            tool_names.add(f"{namespace}__{namespaced_name}")
-                    else:
-                        tool_names.add(tool.get("name"))
-                else:
-                    tool_names.add(getattr(tool, "name", None))
-            if not tool_name or tool_name not in tool_names:
+            if not tool_name or not any(
+                _matches_response_tool_choice_name(tool_name, tool) for tool in tools
+            ):
                 raise VLLMValidationError(
                     "Tool choice 'function' not found in 'tools' parameter.",
                     parameter="tool_choice",

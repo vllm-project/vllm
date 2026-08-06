@@ -101,6 +101,7 @@ from vllm.parser import Parser, ParserManager
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.utils import projected_response_namespace_tool_name_chars
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -301,6 +302,10 @@ class OpenAIServingResponses(GenerateBaseServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="logprobs",
             )
+        if not self.use_harmony:
+            maybe_error = self._validate_namespace_tool_name_budget(request)
+            if maybe_error is not None:
+                return maybe_error
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
                 err_type="invalid_request_error",
@@ -323,6 +328,35 @@ class OpenAIServingResponses(GenerateBaseServing):
                 param="previous_response_id",
             )
         return None
+
+    def _validate_namespace_tool_name_budget(
+        self, request: ResponsesRequest
+    ) -> ErrorResponse | None:
+        projected_chars = projected_response_namespace_tool_name_chars(request.tools)
+        if projected_chars == 0:
+            return None
+
+        max_input_tokens = request.build_tok_params(self.model_config).max_input_tokens
+        if max_input_tokens is None:
+            return None
+
+        tokenizer = self.renderer.get_tokenizer()
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        if projected_chars <= max_input_chars:
+            return None
+
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=(
+                "Namespace tool names would expand to "
+                f"{projected_chars} characters before rendering, which exceeds "
+                f"this model's maximum input character budget of {max_input_chars}. "
+                "Please reduce the namespace length or number of nested "
+                "function tools."
+            ),
+            status_code=HTTPStatus.BAD_REQUEST,
+            param="tools",
+        )
 
     async def create_responses(
         self,

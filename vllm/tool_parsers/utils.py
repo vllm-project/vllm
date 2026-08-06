@@ -181,6 +181,25 @@ def flat_namespace_tool_name(namespace: str, name: str) -> str:
     return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
 
 
+def projected_response_namespace_tool_name_chars(
+    tools: list[ResponsesTool],
+) -> int:
+    """Count namespace-generated flat-name characters without materializing them."""
+    total_chars = 0
+    separator_chars = len(_NAMESPACE_TOOL_SEPARATOR)
+    for tool in tools:
+        if not isinstance(tool, NamespaceTool):
+            continue
+
+        namespace_chars = len(tool.name) + separator_chars
+        for namespaced_tool in tool.tools:
+            if namespaced_tool.type != "function":
+                continue
+            total_chars += namespace_chars + len(namespaced_tool.name)
+
+    return total_chars
+
+
 def iter_response_function_tool_info(
     tool: ResponsesTool,
 ) -> list[tuple[str, dict[str, Any] | None]]:
