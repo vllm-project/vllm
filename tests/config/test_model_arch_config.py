@@ -133,6 +133,44 @@ def test_head_size_falls_back_when_head_dim_is_zero():
     assert convertor.get_head_size() == 128
 
 
+def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.MonkeyPatch):
+    hf_config = PretrainedConfig(
+        model_type="deepseek_v2",
+        qk_rope_head_dim=128,
+        qk_nope_head_dim=128,
+    )
+    hf_config.name_or_path = "org/model"
+    observed: dict[str, object] = {}
+
+    def fake_get_hf_file_to_dict(file_name, model, revision):
+        observed.update(
+            {
+                "file_name": file_name,
+                "model": model,
+                "revision": revision,
+            }
+        )
+        return {"qk_rope_head_dim": 64}
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
+        fake_get_hf_file_to_dict,
+    )
+
+    convertor = ModelArchConfigConvertorBase(
+        hf_config,
+        hf_config,
+        revision="pinned-revision",
+    )
+
+    assert convertor._get_qk_rope_head_dim() == 64
+    assert observed == {
+        "file_name": "config.json",
+        "model": "org/model",
+        "revision": "pinned-revision",
+    }
+
+
 @pytest.mark.parametrize(
     "attribute",
     [
