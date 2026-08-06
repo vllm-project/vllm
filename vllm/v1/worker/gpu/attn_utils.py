@@ -22,8 +22,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayout,
     KVCacheSpec,
-    KVQuantMode,
-    MambaSpec,
     UniformTypeKVCacheSpecs,
     reshape_kv_cache,
 )

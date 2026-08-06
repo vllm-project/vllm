@@ -223,7 +223,7 @@ def resolve_kv_cache_layout(
             f"Unknown KV cache layout {layout_name!r}. "
             f"Valid layouts: {[m.name for m in KVCacheLayout]}"
         ) from None
-    logger.info_once("Resolved KV cache layout: %s", layout)
+    logger.debug_once("Resolved KV cache layout: %s", layout)
     return layout
 
 

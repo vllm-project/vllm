@@ -1114,6 +1114,8 @@ class FlashAttentionImpl(AttentionImpl):
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
+        # No TMA kernel is invoked here, so stride canonicalization is not needed.
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
         k_cache, v_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
