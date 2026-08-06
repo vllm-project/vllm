@@ -1205,6 +1205,56 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Audio Decoding Backend
+
+vLLM decodes audio bytes into waveforms using a selectable decoding backend.
+Four backends are supported:
+
+| Backend | Description |
+| --- | --- |
+| `auto` (default) | soundfile, falling back to PyAV for formats libsndfile cannot read |
+| `soundfile` | libsndfile only |
+| `pyav` | PyAV decoder |
+| `torchcodec` | TorchCodec (PyTorch-native) decoder |
+
+Select the backend by passing the `audio_backend` parameter via
+`--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen2.5-Omni-7B \
+  --media-io-kwargs '{"audio": {"audio_backend": "torchcodec"}}'
+```
+
+Or set it globally:
+
+```bash
+export VLLM_AUDIO_LOADER_BACKEND=torchcodec
+```
+
+`--media-io-kwargs` takes precedence over the environment variable, so the
+latter sets a default that individual servers can override.
+
+!!! tip
+    Consider `torchcodec` when many requests decode audio concurrently, such as
+    when audio tracks are extracted from video. `auto` and `pyav` drive FFmpeg
+    through a per-frame Python generator, so a multi-minute track crosses the
+    Python/C boundary once per 1024 samples; under concurrency those boundaries
+    contend on the GIL. `torchcodec` decodes each stream in a single call that
+    releases the GIL for its whole duration.
+
+    All backends decode to sample-equivalent waveforms at the native sample
+    rate (within decoder tolerance), which is what vLLM requests, so switching
+    backends does not change model outputs.
+
+!!! note
+    `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other
+    platforms (e.g. ROCm, TPU) install it before selecting this backend.
+
+    Selecting `soundfile` restricts you to what libsndfile can open: it does not
+    demux video containers, so extracting an audio track from MP4 or MKV fails
+    with this backend. Use `auto` (which falls back to PyAV), `pyav`, or
+    `torchcodec` for those inputs.
+
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
