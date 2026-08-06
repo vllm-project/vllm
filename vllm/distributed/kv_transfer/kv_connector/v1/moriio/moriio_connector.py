@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -65,7 +65,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
-from vllm.forward_context import ForwardContext
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -1920,8 +1920,14 @@ class MoRIIOConnectorWorker:
         return done_sending, done_recving
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """Block until all in-flight READs of this layer have landed."""
+        """Block until all in-flight READs of this layer have landed.
+
+        A host-side blocking wait must not run during full-graph capture.
+        """
         if self.is_producer or self.mode != MoRIIOMode.READ:
+            return
+
+        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
             return
 
         deadline = time.monotonic() + self.moriio_config.transfer_timeout
