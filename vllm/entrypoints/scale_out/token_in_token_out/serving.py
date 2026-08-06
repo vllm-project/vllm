@@ -176,11 +176,21 @@ class ServingTokens(GenerateBaseServing):
             # Deserialize tensor data when present; None → cache hit.
             mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
             if features.kwargs_data is not None:
-                for modality, items in features.kwargs_data.items():
-                    mm_kwargs[modality] = [
-                        decode_mm_kwargs_item(item) if item is not None else None
-                        for item in items
-                    ]
+                try:
+                    mm_processor = self.online_renderer.renderer.get_mm_processor()
+                    for modality, items in features.kwargs_data.items():
+                        mm_kwargs[modality] = [
+                            decode_mm_kwargs_item(
+                                item,
+                                modality=modality,
+                                mm_processor=mm_processor,
+                            )
+                            if item is not None
+                            else None
+                            for item in items
+                        ]
+                except ValueError as e:
+                    return self.create_error_response(e)
             else:
                 for modality, hashes in features.mm_hashes.items():
                     mm_kwargs[modality] = [None] * len(hashes)
