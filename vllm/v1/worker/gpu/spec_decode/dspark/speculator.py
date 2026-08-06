@@ -82,8 +82,8 @@ class DSparkSpeculator(DFlashSpeculator):
         self.draft_token_confidence_probs = torch.empty_like(
             self.draft_tokens, dtype=torch.float32
         )
-        self.use_adaptive_verification = (
-            self.speculative_config.use_adaptive_verification
+        self.enable_adaptive_verification = (
+            self.speculative_config.enable_adaptive_verification
         )
 
     def load_draft_model(
@@ -108,12 +108,12 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits.dtype,
                 device=self.device,
             )
-        if self.use_adaptive_verification and model.model.confidence_head is None:
+        if self.enable_adaptive_verification and model.model.confidence_head is None:
             logger.warning_once(
                 "DSpark checkpoint has no confidence head; disabling adaptive "
                 "verification and using fixed-length verification."
             )
-            self.use_adaptive_verification = False
+            self.enable_adaptive_verification = False
         return model
 
     def _sample_logits(
@@ -174,7 +174,7 @@ class DSparkSpeculator(DFlashSpeculator):
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
-            if self.use_adaptive_verification:
+            if self.enable_adaptive_verification:
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
@@ -184,13 +184,13 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.use_adaptive_verification:
-            torch.sigmoid(
-                self.model.compute_confidence(
-                    sample_hidden,
-                    torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
-                ).view(num_reqs, n_spec),
-                out=self.draft_token_confidence_probs[:num_reqs],
+        if self.enable_adaptive_verification:
+            confidence = self.model.compute_confidence(
+                sample_hidden,
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                num_reqs, n_spec
             )
 
     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
@@ -219,7 +219,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
-            if self.use_adaptive_verification:
+            if self.enable_adaptive_verification:
                 confidence_markov_embeds.append(markov_embed)
             logits_i = self.model.apply_markov_bias_gathered(
                 markov_embed,
@@ -233,13 +233,13 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.use_adaptive_verification:
-            torch.sigmoid(
-                self.model.compute_confidence(
-                    sample_hidden,
-                    torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
-                ).view(num_reqs, n_spec),
-                out=self.draft_token_confidence_probs[:num_reqs],
+        if self.enable_adaptive_verification:
+            confidence = self.model.compute_confidence(
+                sample_hidden,
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                num_reqs, n_spec
             )
 
     def _generate_draft(

@@ -2241,7 +2241,7 @@ class VllmConfig:
                 unsupported.append("EAGLE3 with pipeline parallelism")
 
             if (
-                speculative_config.use_adaptive_verification
+                speculative_config.enable_adaptive_verification
                 and self.lora_config is not None
             ):
                 # The per-token LoRA mapping is built from CPU placeholder boundaries,
@@ -2249,7 +2249,7 @@ class VllmConfig:
                 unsupported.append("adaptive verification with LoRA")
 
             if (
-                speculative_config.use_adaptive_verification
+                speculative_config.enable_adaptive_verification
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
                 # Cost curves and confidences currently only exist on the last PP rank;

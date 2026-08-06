@@ -242,8 +242,9 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def compute_confidence(
         self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
     ) -> torch.Tensor:
+        """Per-position acceptance probability for each drafted token."""
         assert self.model.confidence_head is not None
-        return self.model.confidence_head(head_hidden, markov_embed)
+        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}

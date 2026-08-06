@@ -897,7 +897,7 @@ class SamplingParams(
         # cu_num_logits; cu_num_generated_tokens is only read host-side after
         # the logprobs D2H, so it could ride along on that copy.
         if (
-            speculative_config.use_adaptive_verification
+            speculative_config.enable_adaptive_verification
             and self.num_logprobs is not None
         ):
             raise ValueError(

@@ -620,6 +620,9 @@ class FlashInferMetadata:
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     kv_cache_spec: AttentionSpec
     reorder_batch_threshold: int = 1
+    # The wrappers are planned from qo_indptr_cpu, so the CPU query offsets have to be
+    # the ones the kernel runs on.
+    _supports_device_cpu_query_lens_mismatch: ClassVar[bool] = False
 
     def __init__(
         self,

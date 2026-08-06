@@ -75,6 +75,7 @@ from vllm.v1.worker.gpu.async_utils import (
 )
 from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
+    get_device_cpu_query_lens_mismatch_support,
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
@@ -514,13 +515,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_cg_support = attn_cg_support.narrow(
             *self.model_state.get_additional_cg_support()
         )
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.use_adaptive_verification
-            # The checkpoint may lack a confidence head (the speculator clears
-            # its flag at load time).
-            and getattr(self.speculator, "use_adaptive_verification", False)
-        ):
+        # The speculator clears the flag at load time when the checkpoint has
+        # no confidence head, so it holds the effective value.
+        if getattr(self.speculator, "enable_adaptive_verification", False):
+            supported, backend = get_device_cpu_query_lens_mismatch_support(
+                self.attn_groups, self.vllm_config
+            )
+            if not supported:
+                raise ValueError(
+                    "Adaptive verification trims verification requests on device, which"
+                    f" the {backend} attention backend does not support. support. Pass "
+                    "enable_adaptive_verification=false in the speculative config, or "
+                    "use a backend that does."
+                )
             self.adaptive_verification = AdaptiveVerificationManager(
                 self.req_states,
                 self.input_buffers.query_start_loc,
@@ -559,7 +566,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
-            varlen_decode=self.adaptive_verification is not None,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,

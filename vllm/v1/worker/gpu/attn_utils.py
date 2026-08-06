@@ -180,6 +180,26 @@ def init_attn_backend(
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
+def get_device_cpu_query_lens_mismatch_support(
+    attn_groups: list[list[AttentionGroup]],
+    vllm_config: VllmConfig,
+) -> tuple[bool, str | None]:
+    """Whether every backend tolerates a device/CPU query length mismatch.
+    See AttentionMetadataBuilder.supports_device_cpu_query_lens_mismatch() for details.
+
+    Returns the aggregate answer and, when it is False, the first backend that does not.
+    """
+    for groups in attn_groups:
+        for group in groups:
+            builder = group.get_metadata_builder(0)
+            if not builder.supports_device_cpu_query_lens_mismatch(
+                vllm_config,
+                group.kv_cache_spec,
+            ):
+                return False, group.backend.__name__
+    return True, None
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
 ):

@@ -1375,7 +1375,6 @@ class CompilationConfig:
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
-        varlen_decode: bool = False,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1449,26 +1448,6 @@ class CompilationConfig:
                 f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
                 f" with spec-decode for attention backend "
                 f"{min_cg_attn_backend} (support: {min_cg_support})"
-            )
-            if self.splitting_ops_contain_attention():
-                msg += "; setting cudagraph_mode=PIECEWISE"
-                cudagraph_mode = CUDAGraphMode.PIECEWISE
-            else:
-                msg += "; setting cudagraph_mode=NONE"
-                cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(msg)
-
-        # Adaptive verification trims the draft budget per request, so decode graphs
-        # are varlen and need a backend that handles arbitrary query lengths.
-        if (
-            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and varlen_decode
-            and min_cg_support != AttentionCGSupport.ALWAYS
-        ):
-            msg = (
-                f"CUDAGraphMode.{cudagraph_mode.name} is not supported with "
-                f"varlen decode for attention backend {min_cg_attn_backend} "
-                f"(support: {min_cg_support})"
             )
             if self.splitting_ops_contain_attention():
                 msg += "; setting cudagraph_mode=PIECEWISE"

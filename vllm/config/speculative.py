@@ -237,12 +237,8 @@ class SpeculativeConfig:
     Mutually exclusive with synthetic_acceptance_rates."""
 
     enable_adaptive_verification: bool = True
-    """Whether to adaptively size the draft-verification budget from
-    per-request confidence. Only applies to method="dspark"."""
-
-    @property
-    def use_adaptive_verification(self) -> bool:
-        return self.method == "dspark" and self.enable_adaptive_verification
+    """Whether to adaptively size the draft-verification budget from per-request
+    confidence. Currently only supported for method="dspark"."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1122,6 +1118,12 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        # Only DSpark produces the per-request confidences the adaptive budget
+        # needs, so resolve the flag once here instead of re-deriving it.
+        if self.method != "dspark":
+            self.enable_adaptive_verification = False
+
         return self
 
     def _validate_suffix_decoding(self):
