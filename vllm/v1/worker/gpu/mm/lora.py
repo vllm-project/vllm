@@ -78,7 +78,7 @@ def set_active_mm_loras(
     if (
         mm_mapping is None
         or not mm_mapping.connector
-        or not hasattr(model, "get_num_mm_connector_tokens")
+        and all(count is not None for count in connector_token_counts)
     ):
         return
 
