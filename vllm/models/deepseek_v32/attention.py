@@ -385,7 +385,7 @@ class DeepseekV32Attention(MLAAttention):
             assert prepare_hisparse_for_batch is not None
             prepare_hisparse_for_batch(attn_metadata)
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             has_indexer = True
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
@@ -470,7 +470,7 @@ class DeepseekV32Attention(MLAAttention):
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -492,7 +492,7 @@ class DeepseekV32Attention(MLAAttention):
             quantize_mqa=self._fp8_query,
         )
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             sparse_attn_indexer(
                 q_c,
                 self.indexer.k_cache.prefix,

@@ -46,6 +46,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
@@ -1523,6 +1524,34 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+@pytest.mark.parametrize(
+    "layer_type,dcp_size,expected_width",
+    [
+        ("mla", 1, 64),
+        ("mla", 2, 32),
+        # Mamba state is replicated, not DCP-sharded, and its width is the
+        # resident state block count rather than cdiv(max_len, block_size).
+        ("mamba", 2, 3),
+    ],
+)
+def test_uniform_type_spec_block_table_width_matches_layer_spec(
+    layer_type, dcp_size, expected_width
+):
+    # The runner sizes the block table from the group spec while the metadata
+    # builders are constructed from the per-layer spec, so the aggregate must
+    # report the same width as the layers it wraps.
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    layer_spec = new_mla_spec() if layer_type == "mla" else new_mamba_spec()
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=layer_spec.block_size,
+        kv_cache_specs={"layer1": layer_spec, "layer2": layer_spec},
+    )
+
+    assert layer_spec.max_num_blocks_per_req(vllm_config, 1024) == expected_width
+    assert uniform_spec.max_num_blocks_per_req(vllm_config, 1024) == expected_width
+
+
 def test_merge_kv_cache_spec():
     same_layer_specs = [
         new_kv_cache_spec(num_kv_heads=32),
@@ -2432,6 +2461,65 @@ def _grouping_config():
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
     )
+
+
+def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
+    block_size = 544
+    full_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        # FullAttentionSpec stores both K and V, so this produces a
+        # 544 * 1 * (512 + 512) * 2 = 1,114,112-byte page.
+        head_size=512,
+        dtype=torch.bfloat16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((557056,),),
+        dtypes=(torch.bfloat16,),
+        mamba_cache_mode="align",
+    )
+    hidden_spec = HiddenStateCacheSpec(
+        block_size=block_size,
+        num_kv_heads=3,
+        head_size=1024,
+        dtype=torch.bfloat16,
+    )
+    assert full_spec.page_size_bytes == mamba_spec.page_size_bytes
+
+    groups = get_kv_cache_groups(
+        _grouping_config(),
+        {
+            "model.full_attn": full_spec,
+            "model.mamba": mamba_spec,
+            "cache_only_layers.0": hidden_spec,
+        },
+    )
+
+    hidden_group = next(
+        group
+        for group in groups
+        if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+    )
+    assert hidden_group.kv_cache_spec.block_size == 136
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=True,
+            prefix_match_unit=None,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=object(),
+    )
+    assert kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    ) == (544, 136)
 
 
 def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():

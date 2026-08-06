@@ -23,7 +23,10 @@ from vllm import _custom_ops as ops
 from vllm.config import HiSparseConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import MLACommonBaseImpl
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLAPrefillMetadata,
+    _masked_mha_workspace_fits,
+    _topk_mask_shape,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
@@ -950,6 +953,38 @@ def test_hisparse_mha_uses_shared_staging_plan(monkeypatch):
     assert all(observed is metadata for observed in observed_metadata)
     for block_table in observed_block_tables:
         torch.testing.assert_close(block_table, staged_block_table)
+
+
+@pytest.mark.parametrize(
+    ("max_query_len", "expected"),
+    [(32768, True), (33024, False)],
+)
+def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expected):
+    """A 32K prefill needs the default workspace exactly; shrinking it would
+    push a supported request onto MQA."""
+    assert (
+        _masked_mha_workspace_fits(
+            batch_size=1,
+            max_query_len=max_query_len,
+            max_context_chunk_seq_len=0,
+            workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
+        )
+        is expected
+    )
+
+
+def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
+    """Request count and context chunk length are independent multipliers."""
+    base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
+    exact = math.prod(_topk_mask_shape(2, 2048, 2048))
+
+    assert _masked_mha_workspace_fits(**base, workspace_numel=exact)
+    assert not _masked_mha_workspace_fits(
+        **{**base, "batch_size": 3}, workspace_numel=exact
+    )
+    assert not _masked_mha_workspace_fits(
+        **{**base, "max_context_chunk_seq_len": 4096}, workspace_numel=exact
+    )
 
 
 PREFILL_BATCH_SPECS = {
@@ -2509,13 +2544,17 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
 
 
 def test_hisparse_dense_mha_chunked_context_stages_host_cache(monkeypatch):
-    """Dense sparse-MLA prefill must not pass host KV to GPU gather ops."""
+    """Dense sparse-MLA chunks must gather from the staged GPU block table."""
 
     class GatherCalled(Exception):
         pass
 
     impl = object.__new__(FlashMLASparseImpl)
     impl.kv_cache_dtype = "auto"
+    impl.kv_b_proj = SimpleNamespace(
+        weight=torch.empty(0, dtype=torch.bfloat16),
+        params_dtype=torch.bfloat16,
+    )
 
     source_cache = torch.empty(4, 2, 8)
     staged_cache = torch.empty(3, 2, 8)
@@ -2540,13 +2579,17 @@ def test_hisparse_dense_mha_chunked_context_stages_host_cache(monkeypatch):
 
     monkeypatch.setattr(ops, "gather_and_maybe_dequant_cache", gather_and_stop)
 
-    chunked_context = SimpleNamespace(
-        seq_tot=[1],
-        workspace=torch.empty(1, 8),
+    chunk = SimpleNamespace(
+        num_context_tokens=1,
+        request_slice=slice(1, 2),
         cu_seq_lens=torch.tensor([0, 1], dtype=torch.int32),
         token_to_seq=torch.tensor([0], dtype=torch.int32),
-        chunk_total_token=[1],
         starts=torch.tensor([0], dtype=torch.int32),
+        num_requests=1,
+    )
+    chunked_context = SimpleNamespace(
+        workspace=torch.empty(1, 8),
+        chunks=[chunk],
     )
     metadata = SimpleNamespace(
         num_decodes=1,
@@ -2572,7 +2615,7 @@ def test_hisparse_dense_mha_chunked_context_stages_host_cache(monkeypatch):
     assert stage_calls[0][1] is block_table
     torch.testing.assert_close(stage_calls[0][2], seq_lens[1:])
     assert gathered["src_cache"] is staged_cache
-    assert gathered["block_table"] is staged_block_table
+    torch.testing.assert_close(gathered["block_table"], staged_block_table[1:2])
 
 
 def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():

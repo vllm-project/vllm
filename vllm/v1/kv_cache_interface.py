@@ -899,6 +899,20 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         )
         return max_num_pages * self.page_size_bytes
 
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # Metadata builders are constructed from the per-layer spec, so the base
+        # cdiv(max_len, block_size) would drop its DCP sharding and size the
+        # block table wider than those builders expect.
+        widths = {
+            spec.max_num_blocks_per_req(vllm_config, max_len)
+            for spec in self.kv_cache_specs.values()
+        }
+        assert len(widths) == 1, (
+            "All layers in the same KV cache group must need the same number "
+            f"of block table entries, got {sorted(widths)}."
+        )
+        return next(iter(widths))
+
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
         """

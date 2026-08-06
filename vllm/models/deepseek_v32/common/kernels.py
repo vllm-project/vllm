@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
@@ -149,9 +152,13 @@ def _fused_norm_rope_kernel(
     TOPK_BLOCK_SIZE: tl.constexpr,
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
+    USE_PDL: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     if pid == 3:
         if not HAS_INDEXER:
             # Shared layer: reuse the previous indexer layer's top-k; do not
@@ -488,6 +495,7 @@ def fused_norm_rope(
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
+    use_pdl = current_platform.is_arch_support_pdl()
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
         # Q RMS norm
@@ -548,6 +556,8 @@ def fused_norm_rope(
         TOPK_BLOCK_SIZE=1024,
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
+        USE_PDL=use_pdl,
+        launch_pdl=use_pdl,
     )
     return q_c_out
 
@@ -601,10 +611,14 @@ def _fused_q_kernel(
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     QUANTIZE_MQA: tl.constexpr,
+    USE_PDL: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
     head_idx = tl.program_id(2)
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
 
     if pid == 2:
         # ql_nope quantize + pack into the front of mqa_q_fp8. On the bf16
@@ -792,10 +806,12 @@ def fused_q(
     ``(ql_nope, q_pe)`` tuple the backend expects.
     """
     assert positions.ndim == 1
+    assert positions.dtype == torch.int64
     assert q_pe.ndim == 3
     assert q_pe_cos_sin_cache.ndim == 2
     assert ql_nope.ndim == 3
     assert ql_nope.shape[:2] == q_pe.shape[:2]
+    assert q_scale.dtype == torch.float32 and q_scale.numel() == 1
 
     num_tokens = positions.shape[0]
     num_q_heads = q_pe.shape[1]
@@ -813,6 +829,23 @@ def fused_q(
     assert index_weights is not None
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
+    # fused_q is shared with the ROCm path, and the CuTeDSL module imports
+    # cutlass at module scope, so only reach for it on CUDA.
+    cutedsl_kernel: Callable[..., None] | None = None
+    if current_platform.is_cuda():
+        from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import (
+            fused_q_cutedsl,
+            is_fused_q_cutedsl_supported,
+        )
+
+        if is_fused_q_cutedsl_supported(
+            q_pe,
+            index_q,
+            ql_nope,
+            has_indexer=has_indexer,
+            quantize_mqa=quantize_mqa,
+        ):
+            cutedsl_kernel = fused_q_cutedsl
     grid_heads = max(mqa_grid_heads, num_index_q_heads)
     if quantize_mqa:
         # fp8 path: pack [ql_nope; q_pe] into a single fp8 tensor.
@@ -834,6 +867,27 @@ def fused_q(
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+    if cutedsl_kernel is not None:
+        cutedsl_kernel(
+            positions,
+            q_pe,
+            q_pe_cos_sin_cache,
+            ql_nope,
+            q_scale,
+            mqa_q,
+            index_q,
+            index_q_cos_sin_cache,
+            index_weights,
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            index_q_fp8,
+            index_weights_out,
+            has_indexer=has_indexer,
+            index_rope_interleave=index_rope_interleave,
+        )
+        return index_q_fp8, index_weights_out, mqa_q
+
+    use_pdl = current_platform.is_arch_support_pdl()
     _fused_q_kernel[(3, num_tokens, grid_heads)](
         positions,
         q_pe,
@@ -875,6 +929,8 @@ def fused_q(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
+        USE_PDL=use_pdl,
+        launch_pdl=use_pdl,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
