@@ -451,7 +451,18 @@ class SingleTypeKVCacheManager(ABC):
         # Token boundaries whose reachable tail must be retained under sparse
         # retention: the replay boundary (``num_prompt - 1``, capped by
         # ``get_computed_blocks``) and any detected shared-prefix junction.
-        reachable_boundaries = [request.num_prompt_tokens - 1]
+        replay_boundary = request.num_prompt_tokens - 1
+        if self.use_eagle:
+            aligned = (
+                replay_boundary // self.scheduler_block_size * self.scheduler_block_size
+            )
+            # Eagle matches one block past the boundary and drops it back, so
+            # the boundary is only reachable when that lookahead block fits in
+            # the prompt, so back off one unit to a state that is reachable.
+            if aligned + self.block_size > request.num_prompt_tokens:
+                aligned = max(aligned - self.scheduler_block_size, 0)
+            replay_boundary = aligned
+        reachable_boundaries = [replay_boundary]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
 
@@ -1715,6 +1726,12 @@ class MambaManager(SingleTypeKVCacheManager):
         latest_prompt_hash_boundary = (
             request.num_prompt_tokens // hash_block_size
         ) * hash_block_size
+        if self.use_eagle:
+            # Eagle groups match one hash unit past the candidate and drop it,
+            # so register the tail one unit lower.
+            latest_prompt_hash_boundary = max(
+                latest_prompt_hash_boundary - hash_block_size, 0
+            )
         if num_tokens != latest_prompt_hash_boundary:
             return None
 
