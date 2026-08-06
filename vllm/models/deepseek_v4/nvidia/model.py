@@ -825,7 +825,7 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
-    use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
     return (
         parallel_config.pipeline_parallel_size == 1
         and parallel_config.enable_expert_parallel
