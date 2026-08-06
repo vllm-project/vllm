@@ -276,7 +276,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         w13_qweight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // bit8_pack_factor,
                 dtype=torch.uint8,
             ),
@@ -301,7 +301,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         w13_scales = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // group_size,
                 dtype=params_dtype,
             ),
@@ -326,7 +326,9 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w13_qzeros = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition // bit8_pack_factor,
+                    self.moe.w13_num_shards
+                    * intermediate_size_per_partition
+                    // bit8_pack_factor,
                     hidden_size // group_size,
                     dtype=torch.uint8,
                 ),
