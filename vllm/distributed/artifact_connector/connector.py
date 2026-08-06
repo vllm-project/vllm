@@ -117,8 +117,7 @@ class ArtifactSchedulerConnector:
             if sampling_params is not None
             else 0
         )
-        if prompt_start < 0 or prompt_start >= request.num_prompt_tokens:
-            raise ValueError("routed_experts_prompt_start is outside the prompt")
+        assert 0 <= prompt_start < request.num_prompt_tokens
         self._states[request.request_id] = _RequestState(
             self._resume_emit_cursors.pop(request.request_id, prompt_start),
         )
