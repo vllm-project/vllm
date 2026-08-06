@@ -82,6 +82,9 @@ class WorkerSentinel:
             input_batch = model_runner.input_batch
             cached_req_ids = list(input_batch.req_id_to_index)
             for req_id in cached_req_ids:
+                # Resume keeps CachedRequestState: the MRV1 resumed-request
+                # path (scheduled_cached_reqs.resumed_req_ids) indexes
+                # model_runner.requests[req_id] directly.
                 if not resume:
                     model_runner.requests.pop(req_id, None)
                     model_runner.num_prompt_logprobs.pop(req_id, None)

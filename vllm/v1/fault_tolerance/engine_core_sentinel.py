@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 
@@ -15,6 +15,7 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     EngineCoreOutputs,
@@ -86,21 +87,20 @@ class EngineCoreSentinel:
         )
 
         engine = self.engine
+        scheduler = cast(Scheduler, engine.scheduler)
         ft_config = self.parallel_config.fault_tolerance_config
         self._clear_contaminated_blocks()
 
         if ft_config.resume_requests_after_recovery:
             timestamp = time.monotonic()
-            while engine.scheduler.running:
-                request = engine.scheduler.running.pop()
-                engine.scheduler._preempt_request(
-                    request, timestamp, drop_stale_output=True
-                )
-            engine.scheduler.prev_step_scheduled_req_ids.clear()
+            while scheduler.running:
+                request = scheduler.running.pop()
+                scheduler._preempt_request(request, timestamp)
+                request.num_in_flight_tokens = 0
+                request.num_stale_output_tokens = 0
+            scheduler.prev_step_scheduled_req_ids.clear()
         else:
-            aborted = engine.scheduler.finish_requests(
-                None, RequestStatus.FINISHED_ABORTED
-            )
+            aborted = scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
             engine._send_abort_outputs(aborted)
 
         if engine.batch_queue is not None:
@@ -124,11 +124,11 @@ class EngineCoreSentinel:
     def _clear_contaminated_blocks(self) -> None:
         """Evict KV blocks possibly contaminated by the failed step."""
 
-        engine = self.engine
-        kv_cache_manager = engine.scheduler.kv_cache_manager
+        scheduler = cast(Scheduler, self.engine.scheduler)
+        kv_cache_manager = scheduler.kv_cache_manager
         dirty_block_ids: set[int] = set()
 
-        for request in engine.scheduler.running:
+        for request in scheduler.running:
             num_written = request.num_in_flight_tokens
             if num_written <= 0:
                 continue
@@ -141,7 +141,7 @@ class EngineCoreSentinel:
                     continue
                 blk_start = start // mgr.block_size
                 blk_end = end // mgr.block_size
-                for blk in blocks[blk_start:blk_end + 1]:
+                for blk in blocks[blk_start : blk_end + 1]:
                     if not blk.is_null:
                         dirty_block_ids.add(blk.block_id)
 
