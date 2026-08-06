@@ -4,6 +4,7 @@
 import glob
 import json
 import os
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -68,7 +69,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_embed = getattr(draft_inner, "embed_tokens", None)
     # Last PP stage only has PPMissingLayer for target embed; load real weights.
     if isinstance(target_embed, PPMissingLayer):
-        target_embed = _load_target_embed_tokens_for_pp(vllm_config)
+        target_embed = _load_target_embed_tokens_for_pp(vllm_config, target_model)
     if target_embed is not None and _should_share(
         draft_model, "has_own_embed_tokens", draft_embed, target_embed
     ):
@@ -88,7 +89,27 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     return draft_model
 
 
-def _load_target_embed_tokens_for_pp(vllm_config: VllmConfig) -> nn.Module:
+def _checkpoint_to_param_names(
+    names: Iterable[str], target_model: nn.Module
+) -> dict[str, str]:
+    """Map checkpoint tensor names to the parameter names they load into.
+
+    Keyed by parameter name so a caller that recognises a parameter can still
+    read the tensor under its original name. Checkpoints do not have to use
+    vLLM's naming -- DeepSeek-V4 stores the embedding as ``embed.weight`` -- and
+    the model's own ``hf_to_vllm_mapper`` is the translation it applies at load
+    time, so searching for a parameter name without it finds nothing.
+    """
+    identity = {name: name for name in names}
+    mapper = getattr(target_model, "hf_to_vllm_mapper", None)
+    if mapper is None:
+        return identity
+    return mapper.apply_dict(identity)
+
+
+def _load_target_embed_tokens_for_pp(
+    vllm_config: VllmConfig, target_model: nn.Module
+) -> nn.Module:
     """Load target embed_tokens on a non-first PP stage for the DSpark drafter."""
     from vllm.model_executor.layers.vocab_parallel_embedding import (
         VocabParallelEmbedding,
@@ -115,32 +136,34 @@ def _load_target_embed_tokens_for_pp(vllm_config: VllmConfig) -> nn.Module:
             ignore_patterns=load_config.ignore_patterns,
         )
 
+    def find_embed(names: Iterable[str]) -> str | None:
+        by_param = _checkpoint_to_param_names(names, target_model)
+        for param_name, ckpt_name in by_param.items():
+            if param_name.endswith("embed_tokens.weight"):
+                return ckpt_name
+        return None
+
     key = None
     shard_path = None
     index_path = os.path.join(model_dir, SAFE_WEIGHTS_INDEX_NAME)
     if os.path.isfile(index_path):
         with open(index_path) as f:
             weight_map = json.load(f)["weight_map"]
-        for name, shard in weight_map.items():
-            if name.endswith("embed_tokens.weight"):
-                key = name
-                shard_path = os.path.join(model_dir, shard)
-                break
+        key = find_embed(weight_map)
+        if key is not None:
+            shard_path = os.path.join(model_dir, weight_map[key])
     else:
         for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
             with safe_open(path, framework="pt") as f:
-                for name in f.keys():  # noqa: SIM118
-                    if name.endswith("embed_tokens.weight"):
-                        key = name
-                        shard_path = path
-                        break
+                key = find_embed(f.keys())
             if key is not None:
+                shard_path = path
                 break
     if key is None:
         raise RuntimeError(
             "DSpark under pipeline parallelism needs the target's embed_tokens "
-            f"on the last stage, but no *embed_tokens.weight was found in "
-            f"{model_dir}"
+            f"on the last stage, but no weight mapping to *embed_tokens.weight "
+            f"was found in {model_dir}"
         )
 
     with torch.device(current_platform.current_device()):
