@@ -1621,7 +1621,7 @@ class EngineCoreProc(EngineCore):
             dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
             vllm_version=VLLM_VERSION,
             world_size=self.vllm_config.parallel_config.world_size,
-            data_parallel_size=parallel_config.data_parallel_size,
+            data_parallel_size=parallel_config.data_parallel_size_global,
             kv_cache_size_tokens=self.vllm_config.cache_config.kv_cache_size_tokens,
             kv_cache_max_concurrency=(
                 self.vllm_config.cache_config.kv_cache_max_concurrency

@@ -402,6 +402,7 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.data_parallel_size_local == 1
     assert parallel_config.data_parallel_rank == 0
     assert parallel_config.data_parallel_index == 1
+    assert parallel_config.data_parallel_size_global == 2
     assert parallel_config.nnodes == 1
     assert parallel_config.node_rank == 0
     assert parallel_config.world_size == 8

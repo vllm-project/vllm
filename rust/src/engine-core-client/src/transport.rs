@@ -493,7 +493,7 @@ async fn wait_for_input_registrations(
         ready_responses.insert(actual_id, ready_response);
     }
 
-    Ok(expected_engines
+    let engines = expected_engines
         .into_iter()
         .map(|engine_id| {
             let ready_response = ready_responses
@@ -504,7 +504,54 @@ async fn wait_for_input_registrations(
                 ready_response,
             }
         })
-        .collect())
+        .collect::<Vec<_>>();
+    validate_ready_responses(&engines)?;
+    Ok(engines)
+}
+
+fn validate_ready_responses(engines: &[ConnectedEngine]) -> Result<()> {
+    let Some(first_engine) = engines.first() else {
+        return Ok(());
+    };
+    let data_parallel_size = first_engine.ready_response.data_parallel_size;
+
+    for engine in engines {
+        let ready = &engine.ready_response;
+        if ready.data_parallel_size != data_parallel_size {
+            bail_unexpected_handshake_message!(
+                "engine id {:?} reported data_parallel_size {}, expected {}",
+                engine.engine_id,
+                ready.data_parallel_size,
+                data_parallel_size
+            );
+        }
+        if u64::from(ready.data_parallel_rank) >= data_parallel_size {
+            bail_unexpected_handshake_message!(
+                "engine id {:?} reported data_parallel_rank {} outside data_parallel_size {}",
+                engine.engine_id,
+                ready.data_parallel_rank,
+                data_parallel_size
+            );
+        }
+        if data_parallel_size > 1 {
+            let Some(engine_index) = engine.engine_id.engine_index() else {
+                bail_unexpected_handshake_message!(
+                    "engine id {:?} does not encode a Python-compatible engine index",
+                    engine.engine_id
+                );
+            };
+            if engine_index != ready.data_parallel_rank {
+                bail_unexpected_handshake_message!(
+                    "engine id {:?} encodes engine index {}, but reported data_parallel_rank {}",
+                    engine.engine_id,
+                    engine_index,
+                    ready.data_parallel_rank
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Send an encoded message to the engine through the input socket.
@@ -585,7 +632,22 @@ pub async fn run_output_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::bind_local_sockets;
+    use super::{ConnectedEngine, EngineId, bind_local_sockets, validate_ready_responses};
+    use crate::mock_engine::default_ready_response;
+
+    fn connected_engine(
+        engine_index: u32,
+        data_parallel_rank: u32,
+        data_parallel_size: u64,
+    ) -> ConnectedEngine {
+        let mut ready_response = default_ready_response();
+        ready_response.data_parallel_rank = data_parallel_rank;
+        ready_response.data_parallel_size = data_parallel_size;
+        ConnectedEngine {
+            engine_id: EngineId::from_engine_index(engine_index),
+            ready_response,
+        }
+    }
 
     #[tokio::test]
     async fn bind_local_sockets_resolves_zero_port_bindings() {
@@ -595,5 +657,44 @@ mod tests {
         assert!(input_address.starts_with("tcp://127.0.0.1:"));
         assert!(output_address.starts_with("tcp://127.0.0.1:"));
         assert_ne!(input_address, output_address);
+    }
+
+    #[test]
+    fn ready_responses_accept_consistent_data_parallel_topology() {
+        let engines = [connected_engine(0, 0, 2), connected_engine(1, 1, 2)];
+        validate_ready_responses(&engines).expect("valid ready responses");
+    }
+
+    #[test]
+    fn ready_responses_reject_inconsistent_data_parallel_size() {
+        let engines = [connected_engine(0, 0, 2), connected_engine(1, 1, 3)];
+        let error = validate_ready_responses(&engines).expect_err("inconsistent DP sizes");
+        expect_test::expect![["unexpected startup handshake message: engine id EngineId(0100) reported data_parallel_size 3, expected 2"]]
+            .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn ready_responses_reject_rank_outside_data_parallel_size() {
+        let engines = [connected_engine(2, 2, 2)];
+        let error = validate_ready_responses(&engines).expect_err("out-of-range DP rank");
+        expect_test::expect![["unexpected startup handshake message: engine id EngineId(0200) reported data_parallel_rank 2 outside data_parallel_size 2"]]
+            .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn ready_responses_reject_engine_index_rank_mismatch() {
+        let engines = [connected_engine(1, 0, 2)];
+        let error = validate_ready_responses(&engines).expect_err("engine index mismatch");
+        expect_test::expect![["unexpected startup handshake message: engine id EngineId(0100) encodes engine index 1, but reported data_parallel_rank 0"]]
+            .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn ready_responses_reject_opaque_identity_for_data_parallel_engine() {
+        let mut engine = connected_engine(0, 0, 2);
+        engine.engine_id = EngineId::from(b"engine");
+        let error = validate_ready_responses(&[engine]).expect_err("opaque engine identity");
+        expect_test::expect![["unexpected startup handshake message: engine id EngineId(656e67696e65) does not encode a Python-compatible engine index"]]
+            .assert_eq(&error.to_string());
     }
 }

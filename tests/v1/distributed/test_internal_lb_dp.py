@@ -17,6 +17,7 @@ from tests.v1.utils import check_request_balancing
 from vllm.platforms import current_platform
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
+DENSE_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 # Number of data parallel ranks for multi-node internal LB testing
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
@@ -393,6 +394,32 @@ def default_server_args():
     ]
 
 
+@pytest.fixture(scope="module")
+def dense_dp_server(default_server_args):
+    server_args = [
+        *default_server_args,
+        "--data-parallel-size",
+        str(DP_SIZE),
+        "--data-parallel-size-local",
+        str(DP_SIZE),
+        "--tensor-parallel-size",
+        str(TP_SIZE),
+    ]
+    with RemoteOpenAIServer(
+        DENSE_MODEL_NAME,
+        server_args,
+        env_dict={
+            "VLLM_SERVER_DEV_MODE": "1",
+            **ROCM_ENV_OVERRIDES,
+            current_platform.device_control_env_var: ",".join(
+                str(current_platform.device_id_to_physical_device_id(i))
+                for i in range(DP_SIZE * TP_SIZE)
+            ),
+        },
+    ) as remote_server:
+        yield remote_server
+
+
 @pytest.fixture(scope="module", params=[1, 4])
 def server_manager(request, default_server_args):
     api_server_count = request.param
@@ -448,6 +475,18 @@ def _get_parallel_config(server: RemoteOpenAIServer):
 
     vllm_config = response.json()["vllm_config"]
     return vllm_config["parallel_config"]
+
+
+def test_dense_dp_world_size(dense_dp_server: RemoteOpenAIServer):
+    response = requests.get(dense_dp_server.url_for("get_world_size"))
+    response.raise_for_status()
+    assert response.json() == {"world_size": TP_SIZE * DP_SIZE}
+
+    response = requests.get(
+        dense_dp_server.url_for("get_world_size"), params={"include_dp": "false"}
+    )
+    response.raise_for_status()
+    assert response.json() == {"world_size": TP_SIZE}
 
 
 def test_multinode_dp_server_info(server_manager):
