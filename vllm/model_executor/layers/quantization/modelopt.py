@@ -1987,6 +1987,10 @@ class KFp8StaticTensor(QuantKeyScheme):
             # Transposed here rather than in the kernel: ModelOpt maps each
             # fp8 key to exactly one kernel, so the layout is key-determined.
             layer.weight = Parameter(weight.t(), requires_grad=False)
+            # The plain Parameter drops ModelWeightParameter's dim attributes;
+            # restore them for the transposed layout, which Humming reads.
+            layer.weight.input_dim = 0
+            layer.weight.output_dim = 1
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         elif role is ACT:
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)

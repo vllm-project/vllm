@@ -120,6 +120,17 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
 
 
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
+    """Humming reads weight.input_dim/output_dim. Swapping the
+    ModelWeightParameter for a plain Parameter drops them, so the per-tensor
+    FP8 scheme must restore them for the transposed [in, out] layout.
+    """
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization.modelopt import (
+        SCHEME_FOR,
+        CkptCtx,
+        FormatScheme,
+    )
+
     layer = torch.nn.Module()
     layer.register_parameter(
         "weight", torch.nn.Parameter(torch.empty(3, 2), requires_grad=False)
@@ -130,15 +141,21 @@ def test_modelopt_fp8_updates_weight_dims_after_transpose():
     layer.register_parameter(
         "input_scale", torch.nn.Parameter(torch.ones(1), requires_grad=False)
     )
+    layer.logical_widths = [3]
 
-    method = ModelOptFp8LinearMethod.__new__(ModelOptFp8LinearMethod)
-    method.fp8_linear = Mock()
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.spec = QuantSpec(weight=kFp8StaticTensorSym, activation=kFp8StaticTensorSym)
+    method.ctx = CkptCtx()
+    method.fmt = FormatScheme()
+    method.wkey = SCHEME_FOR[kFp8StaticTensorSym]
+    method.akey = SCHEME_FOR[kFp8StaticTensorSym]
+    method.kernel = Mock()
     method.process_weights_after_loading(layer)
 
     assert layer.weight.shape == (2, 3)
     assert layer.weight.input_dim == 0
     assert layer.weight.output_dim == 1
-    method.fp8_linear.process_weights_after_loading.assert_called_once_with(layer)
+    method.kernel.process_weights_after_loading.assert_called_once_with(layer)
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
