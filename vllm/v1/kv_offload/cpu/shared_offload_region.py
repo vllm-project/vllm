@@ -51,7 +51,7 @@ def _get_populate_write_fn(
 ) -> Callable[[mmap.mmap, int, int], None]:
     """Select the pre-faulting method once for this mmap."""
     try:
-        mmap_obj.madvise(_MADV_POPULATE_WRITE, 0, mmap.PAGESIZE)
+        _madvise_populate_write(mmap_obj, 0, mmap.PAGESIZE)
     except OSError as e:
         if e.errno != errno.EINVAL:
             raise
