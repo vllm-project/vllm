@@ -58,9 +58,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    mxfp8_e4m3_quantize,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -92,40 +89,6 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-
-def _requant_block_fp8_to_mxfp8(
-    w: torch.Tensor,
-    w_scale: torch.Tensor,
-    block: int = 128,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Re-quantize [block,block]-scale FP8 MoE weights to MXFP8 [1,32].
-
-    SM100's flashinfer TRT-LLM MoE kernel only applies the SwiGLU clamp for
-    MXFP8 ([1,32]); for [128,128] "DeepSeek" FP8 the clamp is hard-gated off.
-    Converting to the finer [1,32] granularity makes the clamp the model was
-    trained with actually apply, at negligible accuracy cost ([1,32] scales
-    are finer than the source [128,128]).
-
-    Args:
-        w: (E, N, K) float8_e4m3fn weights.
-        w_scale: (E, N // block, K // block) float32 block scales.
-        block: block size the input scales were quantized with.
-
-    Returns:
-        (w_mxfp8 (E, N, K) float8_e4m3fn, w_mxfp8_scale (E, N, K // 32) uint8).
-    """
-    num_experts, n, k = w.shape
-    out_w = torch.empty_like(w)
-    out_scale = torch.empty(num_experts, n, k // 32, dtype=torch.uint8, device=w.device)
-    for i in range(num_experts):
-        # Dequantize this expert to bf16 by expanding its [block,block] scale.
-        s = w_scale[i].repeat_interleave(block, dim=0).repeat_interleave(block, dim=1)
-        w_bf16 = (w[i].to(torch.float32) * s).to(torch.bfloat16)
-        w_q, w_s = mxfp8_e4m3_quantize(w_bf16, is_sf_swizzled_layout=False)
-        out_w[i] = w_q
-        out_scale[i] = w_s
-    return out_w, out_scale
 
 
 class Fp8Config(QuantizationConfig):
@@ -762,20 +725,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13, w13_scale = process_fp8_weight_tensor_strategy_moe(
                 w13, w13_scale, shard_size, layer.local_num_experts
             )
-
-        # On SM100, the flashinfer TRT-LLM MoE kernel only applies the SwiGLU
-        # clamp for MXFP8 ([1,32]); a [128,128] checkpoint silently drops it.
-        # Re-quantize so a model that declares swiglu_limit actually gets its
-        # clamp. H100/H200 select a different backend and are unaffected.
-        if (
-            self.block_quant
-            and self.weight_block_size == [128, 128]
-            and getattr(layer, "swiglu_limit", None) is not None
-            and current_platform.is_device_capability_family(100)
-        ):
-            w13, w13_scale = _requant_block_fp8_to_mxfp8(w13, w13_scale)
-            w2, w2_scale = _requant_block_fp8_to_mxfp8(w2, w2_scale)
-            self.weight_block_size = [1, 32]
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
