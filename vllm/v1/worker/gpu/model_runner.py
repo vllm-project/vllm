@@ -60,7 +60,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, MambaSpec
-from vllm.v1.kv_offload.sparse.hisparse_store import HiSparseOffloadWorker
+from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseOffloadWorker
 from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.block_table import get_block_table_width

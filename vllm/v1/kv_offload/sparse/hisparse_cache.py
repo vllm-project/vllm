@@ -222,7 +222,7 @@ def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
     )
 
 
-def release_pinned_state(layers: list[HiSparseOffloadRuntime]) -> None:
+def release_pinned_state(runtimes: list[HiSparseOffloadRuntime]) -> None:
     """Synchronize, unregister host KV pools, and drop global state."""
     global _CURRENT_INDEX_GROUP
 
@@ -263,8 +263,8 @@ def release_pinned_state(layers: list[HiSparseOffloadRuntime]) -> None:
                 time.perf_counter() - release_start,
             )
 
-    for layer in layers:
-        layer._host_cache = None
+    for runtime in runtimes:
+        runtime._host_cache = None
     _get_group_plan.cache_clear()
     _get_copy_stream.cache_clear()
     _HOST_WRITE_EVENTS.clear()
@@ -344,7 +344,7 @@ def _has_hisparse_ops() -> bool:
 
 
 class _GroupPlan:
-    """CUDA-graph-safe swap plan replayed by index-sharing layers."""
+    """CUDA-graph-safe swap plan replayed by index-sharing runtimes."""
 
     def __init__(self, device: torch.device, max_rows: int, top_k: int) -> None:
         self.hot_indices = torch.full(
@@ -376,7 +376,7 @@ def _get_copy_stream(device: torch.device) -> torch.Stream:
 
 
 class HiSparseOffloadRuntime:
-    """Store-owned host/hot data plane for one sparse MLA KV layer."""
+    """Per-cache host/hot data plane and GPU replacement state."""
 
     def __init__(
         self,
@@ -419,7 +419,7 @@ class HiSparseOffloadRuntime:
         self.hot: PagedCacheView | None = None
         self.hot_block_table: torch.Tensor | None = None
         # Per-request LRU state; released in join_group for index-sharing
-        # "shared" layers, which replay their leader's plan and never resolve
+        # followers, which replay their leader's plan and never resolve
         # the LRU themselves.
         self.device_global_indices: torch.Tensor | None = torch.full(
             (max_num_reqs, self.region_stride),
@@ -435,13 +435,13 @@ class HiSparseOffloadRuntime:
             max_num_reqs, 1
         ).contiguous()
         # In-kernel hit/miss counters (telemetry). stats_row_bytes converts
-        # misses to gathered bytes; plan-once wiring adds each shared
-        # layer's row bytes to its leader (the shared layers re-gather the
+        # misses to gathered bytes; plan-once wiring adds each follower's
+        # row bytes to its leader (the followers re-gather the
         # leader's misses), so the leader's counter covers the whole group.
         self._swap_stats = torch.zeros(2, dtype=torch.uint64, device=self.device)
         self.stats_row_bytes = row_bytes
         self._plan = _get_group_plan(self.device, max_num_reqs, config.top_k)
-        self.group_shared: list[HiSparseOffloadRuntime] = []
+        self.followers: list[HiSparseOffloadRuntime] = []
         self.leader: HiSparseOffloadRuntime | None = None
         self._prefetch_event: torch.Event | None = None
         self._copy_stream = _get_copy_stream(self.device)
@@ -454,7 +454,7 @@ class HiSparseOffloadRuntime:
     def join_group(self, leader: HiSparseOffloadRuntime) -> None:
         self.leader = leader
         self._plan = leader._plan
-        leader.group_shared.append(self)
+        leader.followers.append(self)
         leader.stats_row_bytes += self.stats_row_bytes
         self.device_global_indices = None
         self.lru_slots = None
@@ -485,7 +485,7 @@ class HiSparseOffloadRuntime:
         block_size: int,
         block_table: torch.Tensor,
     ) -> None:
-        """Bind this layer's strided view into the shared GPU HMA slab."""
+        """Bind this runtime's strided view into the shared GPU HMA slab."""
         storage_block_size = self.storage_block_size or block_size
         self.hot = PagedCacheView.bind(
             raw_tensor,
@@ -501,7 +501,7 @@ class HiSparseOffloadRuntime:
     def bind_source_cache(self, kv_cache: torch.Tensor) -> None:
         if kv_cache.dtype != self.kv_dtype or kv_cache.shape[-1] != self.row_width:
             raise ValueError(
-                "HiSparse layer store bound to a KV cache with mismatched "
+                "HiSparse offload runtime bound to a KV cache with mismatched "
                 f"layout: expected ({self.row_width}, {self.kv_dtype}), got "
                 f"({kv_cache.shape[-1]}, {kv_cache.dtype})."
             )
@@ -548,7 +548,7 @@ class HiSparseOffloadRuntime:
         kv_cache: torch.Tensor,
         plan: HiSparsePrefillStagingPlan,
     ) -> torch.Tensor:
-        """Gather one layer's host cache using a shared staging plan."""
+        """Gather this runtime's host cache using a shared staging plan."""
         if kv_cache.shape[1] != plan.block_size:
             raise ValueError(
                 f"HiSparse staging block size {plan.block_size} does not match "
@@ -694,7 +694,7 @@ class HiSparseOffloadRuntime:
             self.row_value_bytes or 0,
         )
 
-        if produce_plan and self.group_shared:
+        if produce_plan and self.followers:
             self._prefetch_group(num_tokens)
 
         if not return_valid_counts:
@@ -717,14 +717,14 @@ class HiSparseOffloadRuntime:
         compute = torch.accelerator.current_stream(self.device)
         self._copy_stream.wait_stream(compute)
         with self._copy_stream:
-            for shared in self.group_shared:
-                if shared._host_cache is None:
-                    shared._prefetch_event = None
+            for follower in self.followers:
+                if follower._host_cache is None:
+                    follower._prefetch_event = None
                     continue
-                shared._gather_plan_into(num_tokens)
-                if shared._prefetch_event is None:
-                    shared._prefetch_event = torch.Event()
-                shared._prefetch_event.record(self._copy_stream)
+                follower._gather_plan_into(num_tokens)
+                if follower._prefetch_event is None:
+                    follower._prefetch_event = torch.Event()
+                follower._prefetch_event.record(self._copy_stream)
 
     def apply_plan(
         self,
@@ -733,7 +733,7 @@ class HiSparseOffloadRuntime:
         num_tokens: int,
         return_valid_counts: bool = False,
     ) -> HiSparseTopKResult:
-        """Replay the leader's swap plan for an index-sharing layer."""
+        """Replay the leader's swap plan for an index-sharing follower."""
         n = num_tokens
         assert self.leader is not None
         assert self.hot is not None and self.hot.block_size == block_size
@@ -759,13 +759,13 @@ class HiSparseOffloadRuntime:
 class HiSparseCacheHandle:
     """Attention-facing handle for resident KV and sparse offload state."""
 
-    def __init__(self, offload: HiSparseOffloadRuntime) -> None:
+    def __init__(self, runtime: HiSparseOffloadRuntime) -> None:
         self.view: PagedCacheView | None = None
         self.block_table: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None
         self.compressed_slot_mapping: torch.Tensor | None = None
         self.logical_block_size = 0
-        self.offload = offload
+        self.runtime = runtime
         self.fully_resident = False
         self.decode_batch = False
 
@@ -780,11 +780,11 @@ class HiSparseCacheHandle:
         block_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        storage_block_size = self.offload.storage_block_size or block_size
+        storage_block_size = self.runtime.storage_block_size or block_size
         self.view = PagedCacheView.bind(
             raw_tensor,
-            dtype=self.offload.kv_dtype,
-            row_width=self.offload.row_width,
+            dtype=self.runtime.kv_dtype,
+            row_width=self.runtime.row_width,
             byte_offset=byte_offset,
             block_stride=block_stride,
             num_blocks=num_blocks,
@@ -792,7 +792,7 @@ class HiSparseCacheHandle:
         )
         self.block_table = block_table
         self.slot_mapping = slot_mapping
-        if self.offload.storage_block_size is not None:
+        if self.runtime.storage_block_size is not None:
             self.compressed_slot_mapping = torch.empty_like(slot_mapping)
         self.logical_block_size = block_size
 
@@ -825,7 +825,7 @@ class HiSparseCacheHandle:
         host_slots = slot_mapping.flatten()
         num_rows = min(kv_c_normed.shape[0], host_slots.numel())
         if not mirror_to_host:
-            num_rows = min(num_rows, self.offload.max_num_reqs)
+            num_rows = min(num_rows, self.runtime.max_num_reqs)
         if num_rows == 0:
             return
         resident_slots = self.slot_mapping[:num_rows]
@@ -837,12 +837,12 @@ class HiSparseCacheHandle:
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
         )
-        if mirror_to_host or self.offload.eager_host_mirror:
-            self.offload.backup_rows(
+        if mirror_to_host or self.runtime.eager_host_mirror:
+            self.runtime.backup_rows(
                 self.view.cache,
                 resident_slots,
                 host_slots[:num_rows]
-                .to(device=self.offload.device, dtype=torch.int64)
+                .to(device=self.runtime.device, dtype=torch.int64)
                 .contiguous(),
             )
 
@@ -873,13 +873,13 @@ class HiSparseCacheHandle:
                 indices, valid_counts = converted
                 return self.view.attention_cache, indices, valid_counts
             return self.view.attention_cache, converted
-        if self.offload.leader is not None:
-            return self.offload.apply_plan(
+        if self.runtime.leader is not None:
+            return self.runtime.apply_plan(
                 block_size=block_size,
                 num_tokens=num_tokens,
                 return_valid_counts=return_valid_counts,
             )
-        return self.offload.swap_in(
+        return self.runtime.swap_in(
             resident=self,
             request_state_indices=request_state_indices,
             req_id_per_token=req_id_per_token[:num_tokens],
@@ -887,11 +887,11 @@ class HiSparseCacheHandle:
             topk_indices=topk_indices,
             block_size=block_size,
             return_valid_counts=return_valid_counts,
-            produce_plan=bool(self.offload.group_shared),
+            produce_plan=bool(self.runtime.followers),
         )
 
 
-def create_hisparse_layer(
+def create_hisparse_cache_handle(
     vllm_config: VllmConfig,
     model_top_k: int,
     *,
@@ -913,7 +913,7 @@ def create_hisparse_layer(
             current_platform.device_type, torch.accelerator.current_device_index()
         )
 
-    offload = HiSparseOffloadRuntime(
+    runtime = HiSparseOffloadRuntime(
         config=config,
         max_num_reqs=max_num_reqs,
         row_width=row_width,
@@ -922,9 +922,9 @@ def create_hisparse_layer(
         storage_block_size=storage_block_size,
         row_value_bytes=row_value_bytes,
     )
-    offload.join_index_group(index_group_scope, is_index_group_leader)
+    runtime.join_index_group(index_group_scope, is_index_group_leader)
     kv_transfer_config = vllm_config.kv_transfer_config
-    offload.eager_host_mirror = bool(
+    runtime.eager_host_mirror = bool(
         kv_transfer_config is not None and kv_transfer_config.is_kv_producer
     )
     logger.info_once(
@@ -937,4 +937,4 @@ def create_hisparse_layer(
         config.host_pool_gib,
         max_num_reqs,
     )
-    return HiSparseCacheHandle(offload)
+    return HiSparseCacheHandle(runtime)

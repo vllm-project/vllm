@@ -35,7 +35,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-from vllm.v1.kv_offload.sparse.hisparse_layer import (
+from vllm.v1.kv_offload.sparse.hisparse_cache import (
     compress_hisparse_slot_mapping,
     get_indexer_source,
 )
@@ -411,13 +411,13 @@ class DeepseekCompressor(nn.Module):
         source_k_cache_metadata = k_cache_metadata
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
-        hisparse_layer = getattr(k_cache_layer, "hisparse_layer", None)
-        if hisparse_layer is not None:
-            assert hisparse_layer.view is not None
-            kv_cache = hisparse_layer.view.cache
+        hisparse_cache = getattr(k_cache_layer, "hisparse_cache", None)
+        if hisparse_cache is not None:
+            assert hisparse_cache.view is not None
+            kv_cache = hisparse_cache.view.cache
             num_kv_slots = source_k_cache_metadata.slot_mapping.numel()
             k_cache_metadata = SimpleNamespace(
-                slot_mapping=hisparse_layer.get_compressed_slot_mapping(
+                slot_mapping=hisparse_cache.get_compressed_slot_mapping(
                     positions[:num_kv_slots], self.compress_ratio
                 )
             )
@@ -493,8 +493,8 @@ class DeepseekCompressor(nn.Module):
             **extra_kwargs,
         )
 
-        if hisparse_layer is not None and not hisparse_layer.decode_batch:
-            hisparse_layer.offload.backup_rows(
+        if hisparse_cache is not None and not hisparse_cache.decode_batch:
+            hisparse_cache.runtime.backup_rows(
                 kv_cache,
                 k_cache_metadata.slot_mapping,
                 source_k_cache_metadata.slot_mapping,

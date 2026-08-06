@@ -64,9 +64,9 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
-from vllm.v1.kv_offload.sparse.hisparse_layer import (
+from vllm.v1.kv_offload.sparse.hisparse_cache import (
     HiSparseCacheHandle,
-    create_hisparse_layer,
+    create_hisparse_cache_handle,
 )
 
 logger = init_logger(__name__)
@@ -336,7 +336,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if prefix:
             compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])
-        self.hisparse_layer: HiSparseCacheHandle | None = None
+        self.hisparse_cache: HiSparseCacheHandle | None = None
         if (
             vllm_config.attention_config.hisparse_config is not None
             and self.compress_ratio == 4
@@ -350,7 +350,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 raise ValueError(
                     "DeepSeek V4 HiSparse requires the fp8_ds_mla cache layout."
                 )
-            self.hisparse_layer = create_hisparse_layer(
+            self.hisparse_cache = create_hisparse_cache_handle(
                 vllm_config,
                 config.index_topk,
                 index_group_scope=(
@@ -364,7 +364,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 storage_block_size=cache_config.block_size // self.compress_ratio,
                 row_value_bytes=576,
             )
-            assert self.hisparse_layer is not None
+            assert self.hisparse_cache is not None
 
         # Create the compressor for layers with compress_ratio > 1; after the
         # attention setup above so its KV-cache prefix (self.prefix) is set.
@@ -382,9 +382,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
     def prepare_hisparse_for_batch(self, attn_metadata: Any | None) -> None:
-        if self.hisparse_layer is None or attn_metadata is None:
+        if self.hisparse_cache is None or attn_metadata is None:
             return
-        self.hisparse_layer.decode_batch = (
+        self.hisparse_cache.decode_batch = (
             attn_metadata.max_query_len == 1
             and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
         )
@@ -514,7 +514,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        if self.hisparse_layer is not None:
+        if self.hisparse_cache is not None:
             layer_metadata = (
                 attn_metadata.get(self.prefix)
                 if isinstance(attn_metadata, dict)

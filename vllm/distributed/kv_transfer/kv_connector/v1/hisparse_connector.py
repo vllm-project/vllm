@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.hisparse_residency import HiSparseManager
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.kv_offload.sparse.hisparse_store import HiSparseOffloadWorker
+    from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseOffloadWorker
     from vllm.v1.request import Request
 
 

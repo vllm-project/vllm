@@ -35,7 +35,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.kv_offload.sparse.hisparse_layer import get_indexer_source
+from vllm.v1.kv_offload.sparse.hisparse_cache import get_indexer_source
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)

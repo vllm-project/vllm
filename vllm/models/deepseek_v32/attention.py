@@ -33,7 +33,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.kv_offload.sparse.hisparse_layer import get_indexer_source
+from vllm.v1.kv_offload.sparse.hisparse_cache import get_indexer_source
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -377,8 +377,8 @@ class DeepseekV32Attention(MLAAttention):
             if self.indexer is not None
             else None
         )
-        hisparse_layer = getattr(self.impl, "hisparse_layer", None)
-        if hisparse_layer is not None:
+        hisparse_cache = getattr(self.impl, "hisparse_cache", None)
+        if hisparse_cache is not None:
             prepare_hisparse_for_batch = getattr(
                 self.impl, "prepare_hisparse_for_batch", None
             )
@@ -411,7 +411,7 @@ class DeepseekV32Attention(MLAAttention):
             mla_slot = None
             indexer_slot = None
         else:
-            mla_kv_cache = None if hisparse_layer is not None else self.kv_cache
+            mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
 
         q_c = fused_norm_rope(
@@ -438,10 +438,10 @@ class DeepseekV32Attention(MLAAttention):
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
-            write_kv_output=hisparse_layer is not None,
+            write_kv_output=hisparse_cache is not None,
         )
 
-        if hisparse_layer is not None and mla_slot is not None:
+        if hisparse_cache is not None and mla_slot is not None:
             do_kv_cache_update = getattr(self.impl, "do_kv_cache_update", None)
             assert do_kv_cache_update is not None
             do_kv_cache_update(

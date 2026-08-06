@@ -117,11 +117,11 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        hisparse_cache = self._hisparse_decode_cache(
+        hisparse_resolution = self._hisparse_decode_cache(
             kv_c_and_k_pe_cache, topk_indices, attn_metadata
         )
-        if hisparse_cache is not None:
-            kv_c_and_k_pe_cache, topk_indices_physical = hisparse_cache
+        if hisparse_resolution is not None:
+            kv_c_and_k_pe_cache, topk_indices_physical = hisparse_resolution
         else:
             topk_indices_physical = cast(
                 torch.Tensor,

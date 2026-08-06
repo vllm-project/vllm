@@ -39,7 +39,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-from vllm.v1.kv_offload.sparse.hisparse_layer import ResolvedHiSparseConfig
+from vllm.v1.kv_offload.sparse.hisparse_cache import ResolvedHiSparseConfig
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 

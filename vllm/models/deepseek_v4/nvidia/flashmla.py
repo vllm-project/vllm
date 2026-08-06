@@ -171,12 +171,12 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                if self.hisparse_layer is not None:
-                    layer_store = self.hisparse_layer
+                if self.hisparse_cache is not None:
+                    hisparse_cache = self.hisparse_cache
                     assert attn_metadata.batch_to_request_state is not None
                     kv_cache, global_indices, topk_lens = cast(
                         tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-                        layer_store.resolve_topk(
+                        hisparse_cache.resolve_topk(
                             attn_metadata.req_id_per_token[:num_decode_tokens],
                             block_table=attn_metadata.block_table[:num_decodes],
                             topk_indices=self.topk_indices_buffer[:num_decode_tokens],
@@ -328,9 +328,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     chunk_start:chunk_end
                 ]
                 cache = compressed_k_cache
-                if self.hisparse_layer is not None:
+                if self.hisparse_cache is not None:
                     cache, block_table = (
-                        self.hisparse_layer.offload.stage_prefill_cache(
+                        self.hisparse_cache.runtime.stage_prefill_cache(
                             compressed_k_cache,
                             block_table,
                             seq_lens[chunk_start:chunk_end] // self.compress_ratio,

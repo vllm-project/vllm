@@ -9,10 +9,11 @@ There are three different jobs:
 1. The normal KV cache system manages GPU block pools and tables.
 2. `HiSparseManager` manages logical host blocks, source-prefix identity, and
    host/GPU residency transitions.
-3. `HiSparseConnector` carries residency work between scheduler and worker; its
-   worker runtime owns the host bytes, small GPU hot buffer, and data movement.
+3. `HiSparseConnector` carries residency work between scheduler and worker;
+   `HiSparseOffloadWorker` coordinates transfers, while per-cache
+   `HiSparseOffloadRuntime` objects own host/hot views and GPU replacement state.
 
-The worker runtime does **not** allocate or free logical blocks. HMA provides the
+Neither worker-side object allocates or frees logical blocks. HMA provides the
 GPU allocation shared by the resident and hot groups; it does not manage CPU
 memory or KV identity.
 
@@ -36,15 +37,17 @@ configured, `MultiConnector` composes it with `HiSparseConnector`.
 | Resident block tables | normal KV cache manager | tells attention where resident pages are |
 | Residency transitions | `HiSparseManager` | plans spill-before-free transactions |
 | Logical host block allocation | `HiSparseManager` | owns the separate CPU block pool and its lifecycle |
-| Pinned host tensor and bytes | `HiSparseOffloadWorker` | worker-side backing for spilled pages |
-| Hot GPU block contents | `HiSparseOffloadWorker` | fills cache-manager-provided hot leases |
-| Hot row map and LRU | `HiSparseOffloadLayer` | resolves hits and chooses victims on GPU |
+| Pinned host-pool lifecycle | `HiSparseOffloadWorker` | worker-wide backing and teardown |
+| Per-cache host view and hot contents | `HiSparseOffloadRuntime` | binds host/hot storage and fills cache-manager-provided hot leases |
+| Hot row map and LRU | `HiSparseOffloadRuntime` | resolves hits and chooses victims on GPU |
+| Resident-cache route | `HiSparseCacheHandle` | exposes resident or host/hot resolution to attention |
 | Sparse attention | attention backend | consumes a device cache and physical row IDs |
 | HMA | allocator | provides GPU capacity; owns no KV meaning |
 
 The key distinction is logical allocation versus contents. `HiSparseManager`
-owns host block IDs and their request/prefix associations. The worker runtime
-owns the corresponding bytes. The normal cache manager sees only device pools.
+owns host block IDs and their request/prefix associations. The offload worker
+and its per-cache runtimes own the corresponding bytes. The normal cache manager
+sees only device pools.
 The source group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
@@ -72,23 +75,26 @@ only then lets the cache manager release the source leases.
 
 ## Resident device pages
 
-Resident pages are intentionally outside the worker runtime.
+Resident pages are intentionally outside `HiSparseOffloadRuntime`.
 
 KV-cache initialization binds cache-manager allocations to the attention-facing
-`HiSparseLayer` before constructing `HiSparseOffloadWorker`. That same layer
-retains the resident group ID needed by a transfer plan. There is no second
-resident object or store registration wrapper.
+`HiSparseCacheHandle` before constructing `HiSparseOffloadWorker`. That same
+handle's runtime retains the resident source index needed by a transfer plan.
+There is no second resident object or registration wrapper.
 
 ```text
 KV cache setup
    │
-   ├─ bind resident allocation ──► HiSparseLayer
+   ├─ bind resident allocation ──► HiSparseCacheHandle
    │                               cache + block table + slot mapping
    │
-   └─ construct offload worker ──► HiSparseOffloadLayer
-                                   host + hot + GPU LRU
+   ├─ bind host/hot allocation ──► HiSparseOffloadRuntime
+   │                               host + hot + GPU LRU
+   │
+   └─ register cache handles ────► HiSparseOffloadWorker
+                                   step-level transfers
 
-HiSparseOffloadWorker registers the same HiSparseLayer objects directly
+HiSparseOffloadWorker registers the same HiSparseCacheHandle objects directly
 ```
 
 Attention construction links each layer to the most recent layer that actually
@@ -97,12 +103,12 @@ memory profiling. Cache binding only attaches storage; it does not infer
 semantic groups from the physical packed-tensor order. The construction cursor
 is discarded with the worker's pinned state.
 
-For a fully resident batch, `HiSparseLayer` uses the normal paged resident
+For a fully resident batch, `HiSparseCacheHandle` uses the normal paged resident
 cache directly. For a hybrid batch, the fused HiSparse kernel checks resident
 pages first, then hot rows, then pinned host memory. No CPU decision is added
 to the decode path. The resolver consumes the existing graph-stable request
-mapping from attention metadata; neither the worker nor individual layers keep
-a duplicate mapping.
+mapping from attention metadata; neither the worker nor individual cache
+handles keep a duplicate mapping.
 
 ## Spill transaction
 
@@ -146,7 +152,7 @@ choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 
 The abstraction does not require another platform to use this GPU LRU. A
 platform-specific worker may implement its own host/hot policy behind the same
-command, output, and layer-resolution boundaries.
+command, output, and cache-resolution boundaries.
 
 ## Main classes
 
@@ -156,9 +162,9 @@ command, output, and layer-resolution boundaries.
 | `HiSparseConnector` | `KVConnectorBase_V1`, `SupportsHMA` | scheduler/worker metadata and lifecycle boundary |
 | `HiSparseResidentManager` | `SingleTypeKVCacheManager` | normal block-pool bookkeeping with host-backed holes |
 | `PagedCacheView` | immutable data object | shared resident/hot HMA tensor binding |
-| `HiSparseOffloadWorker` | connector-owned worker component | host/hot ownership and step-level transfers |
-| `HiSparseOffloadLayer` | plain worker-owned component | per-layer host/hot tensors, GPU LRU, fused resolution |
-| `HiSparseLayer` | plain attention component | resident view, route, and direct worker registration |
+| `HiSparseOffloadWorker` | connector-owned worker component | worker-wide transfer scheduling and host-pool lifecycle |
+| `HiSparseOffloadRuntime` | plain worker-owned component | per-cache host/hot tensors, GPU LRU, and fused resolution |
+| `HiSparseCacheHandle` | plain attention component | resident view, route, and direct worker registration |
 | `SparseKVOffloadCommand` | dataclass | opaque scheduler-to-worker work |
 
 ## Performance invariants

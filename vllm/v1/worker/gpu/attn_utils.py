@@ -31,11 +31,11 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_offload.sparse.hisparse_layer import (
+from vllm.v1.kv_offload.sparse.hisparse_cache import (
     allocate_pinned_host_pool,
     check_hisparse_host_memory,
 )
-from vllm.v1.kv_offload.sparse.hisparse_store import (
+from vllm.v1.kv_offload.sparse.hisparse_worker import (
     HiSparseOffloadWorker,
     init_hisparse_worker,
 )
