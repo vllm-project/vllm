@@ -27,6 +27,8 @@ OSCAR_PRESETS: dict[str, dict] = {
     "oscar_int2": {"key_quant_bits": 2, "value_quant_bits": 2},
 }
 
+DEFAULT_OSCAR_PRESET = "oscar_int2"
+
 # Environment knobs (defaults match the OSCAR README serving recipe); see
 # vllm/envs.py for the registered VLLM_OSCAR_* variables.
 
@@ -128,6 +130,18 @@ class OscarConfig:
         return s + (s % 2)
 
     # ----- constructors ----------------------------------------------------
+    @staticmethod
+    def resolve_cache_dtype(cache_dtype: str) -> str:
+        """Map a non-OSCAR dtype string onto the OSCAR preset it stands for.
+
+        Callers inside the OSCAR backend may receive ``"auto"`` for a layer the
+        engine considers unquantized; within an OSCAR attention group that
+        still denotes the OSCAR slot layout.
+        """
+        if cache_dtype in OSCAR_PRESETS:
+            return cache_dtype
+        return DEFAULT_OSCAR_PRESET
+
     @staticmethod
     def from_cache_dtype(cache_dtype: str, head_dim: int) -> OscarConfig:
         """Create a config from a named preset plus environment knobs."""

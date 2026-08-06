@@ -92,7 +92,14 @@ class OscarAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "oscar_int2",
     ) -> tuple[int, ...]:
-        cfg = OscarConfig.from_cache_dtype(cache_dtype_str, head_size)
+        # The engine passes "auto" for layers whose spec reports no KV
+        # quantization. Only OSCAR-quantized layers reach this backend —
+        # boundary-skip layers are given kv_cache_dtype="auto" in
+        # Attention.__init__, so they select a native backend and form their
+        # own attention group — hence "auto" here still means the OSCAR slot.
+        cfg = OscarConfig.from_cache_dtype(
+            OscarConfig.resolve_cache_dtype(cache_dtype_str), head_size
+        )
         return (num_blocks, block_size, num_kv_heads, cfg.slot_size_aligned)
 
     @classmethod
