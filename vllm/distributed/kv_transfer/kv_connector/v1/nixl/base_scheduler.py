@@ -61,9 +61,6 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
-        self._transfer_group_ids = kv_cache_config.transfer_group_ids
-        assert self._transfer_group_ids
-        transfer_groups = kv_cache_config.transfer_groups
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -88,7 +85,7 @@ class NixlBaseConnectorScheduler:
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in transfer_groups
+                for g in kv_cache_config.transfer_groups
             )
         )
         self._has_mamba = kv_cache_config.has_mamba_layers
@@ -126,7 +123,7 @@ class NixlBaseConnectorScheduler:
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
-            for g in transfer_groups
+            for g in kv_cache_config.transfer_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
@@ -141,7 +138,7 @@ class NixlBaseConnectorScheduler:
             g.kv_cache_spec.num_speculative_blocks
             if isinstance(g.kv_cache_spec, MambaSpec)
             else None
-            for g in transfer_groups
+            for g in kv_cache_config.transfer_groups
         ]
         # Only "all" mode keeps a state per block position; the other modes
         # keep a single running state in the last non-speculative slot.
@@ -252,15 +249,9 @@ class NixlBaseConnectorScheduler:
         for per-step partial lists (host-buffer save), where the SSM strip
         does not apply.
         """
-        if hasattr(self, "kv_cache_config") and len(block_ids) == len(
-            self.kv_cache_config.kv_cache_groups
-        ):
+        if len(block_ids) == len(self.kv_cache_config.kv_cache_groups):
             block_ids = self.kv_cache_config.select_transfer_block_ids(block_ids)
-        num_transfer_groups = (
-            len(self._transfer_group_ids)
-            if hasattr(self, "_transfer_group_ids")
-            else len(block_ids)
-        )
+        num_transfer_groups = len(self.kv_cache_config.transfer_groups)
         assert len(block_ids) in (0, num_transfer_groups), (
             "Number of transferable KV cache groups must match"
         )

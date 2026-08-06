@@ -1235,9 +1235,6 @@ class MooncakeStoreWorker:
             )
         )
         self.cache_config = vllm_config.cache_config
-        self._hisparse_enabled = (
-            vllm_config.attention_config.hisparse_config is not None
-        )
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -1492,7 +1489,7 @@ class MooncakeStoreWorker:
         existing stride-based logic in register_kv_caches() produces
         the correct single-segment result (block_len = page_size * num_layers).
         """
-        if getattr(self, "_hisparse_enabled", False):
+        if self._kv_cache_config.hisparse_host_num_blocks is not None:
             raise ValueError(
                 "HiSparse host-resident KV is incompatible with "
                 "enable_cross_layers_blocks. Disable it for HiSparse."
@@ -1518,71 +1515,132 @@ class MooncakeStoreWorker:
             assert isinstance(v, torch.Tensor | list)
             return v if isinstance(v, torch.Tensor) else v[0]
 
-        assert self.cache_config.num_gpu_blocks is not None
-        self.num_blocks = self.cache_config.num_gpu_blocks
+        tensor_configs = {
+            layer_name: tensor_config
+            for tensor_config in self._kv_cache_config.kv_cache_tensors
+            for layer_name in tensor_config.shared_by
+        }
+        registered_buffers: dict[int, int] = {}
+        num_host_segments = 0
+        num_device_segments = 0
 
-        seen_ptrs: set[int] = set()
-        addrs: list[int] = []
-        block_lens: list[int] = []
-        mem_kinds: list[str] = []
+        cross_layer_cache = kv_caches.get("__cross_layer__")
+        if cross_layer_cache is not None and (
+            len(kv_caches) != 1 or len(self._kv_cache_groups) != 1
+        ):
+            raise ValueError("Cross-layer KV registration requires one cache group.")
 
-        for value in kv_caches.values():
-            cache = _repr_tensor(value)
-            cache_storage = cache.untyped_storage()
-            if cache.device.type == "cpu":
-                base_addr = cache.data_ptr()
-                region_len = cache.nbytes
+        for group, db in zip(self._kv_cache_groups, self.token_dbs, strict=True):
+            if cross_layer_cache is not None:
+                group_caches = [("__cross_layer__", cross_layer_cache)]
             else:
-                base_addr = cache_storage.data_ptr()
-                region_len = cache_storage.nbytes()
-            if base_addr in seen_ptrs:
-                continue
-            seen_ptrs.add(base_addr)
-            mem_kind = "host" if cache.device.type == "cpu" else "device"
+                missing_layers = [
+                    layer_name
+                    for layer_name in group.layer_names
+                    if layer_name not in kv_caches
+                ]
+                if missing_layers:
+                    raise ValueError(
+                        f"Missing transferable KV caches for layers: {missing_layers}"
+                    )
+                group_caches = [
+                    (layer_name, kv_caches[layer_name])
+                    for layer_name in group.layer_names
+                ]
 
-            ret = self.store.register_buffer(base_addr, region_len)
-            if ret != 0:
-                raise RuntimeError(
-                    f"Mooncake register_buffer failed for addr {base_addr:#x} "
-                    f"len {region_len} ({mem_kind}): {ret}"
-                )
+            seen_group_ptrs: set[int] = set()
+            addrs: list[int] = []
+            block_lens: list[int] = []
+            for layer_name, value in group_caches:
+                cache = _repr_tensor(value)
+                cache_storage = cache.untyped_storage()
+                if cache.device.type == "cpu":
+                    base_addr = cache.data_ptr()
+                    region_len = cache.nbytes
+                else:
+                    base_addr = cache_storage.data_ptr()
+                    region_len = cache_storage.nbytes()
+                if base_addr in seen_group_ptrs:
+                    continue
+                seen_group_ptrs.add(base_addr)
+                is_host = cache.device.type == "cpu"
 
-            # Detect layout via stride: a dim whose byte-stride exceeds
-            # page_size_bytes is an outer segment dim (e.g. the K/V dim of
-            # FlashAttn's (2, num_blocks, ...)). FlashInfer/MLA's blocks-
-            # outermost layout has no such dim and yields a single segment.
-            el = cache.element_size()
-            page_size_bytes = region_len // self.num_blocks
-            outer_dims = [
-                d for d in range(cache.ndim) if cache.stride(d) * el > page_size_bytes
-            ]
-            if not outer_dims:
-                # Blocks-first layout (FlashInfer / MLA): one segment.
-                addrs.append(base_addr)
-                block_lens.append(page_size_bytes)
-                mem_kinds.append(mem_kind)
-            else:
-                # K/V-first layout (FlashAttn / ROCm): split segments.
-                seg_stride = cache.stride(outer_dims[0]) * el
-                for idx in range(cache.shape[outer_dims[0]]):
-                    addrs.append(base_addr + idx * seg_stride)
-                    block_lens.append(seg_stride // self.num_blocks)
-                    mem_kinds.append(mem_kind)
+                tensor_config = tensor_configs.get(layer_name)
+                if tensor_config is not None and tensor_config.host_resident:
+                    num_blocks = self._kv_cache_config.hisparse_host_num_blocks
+                    assert num_blocks is not None
+                else:
+                    block_pool_id = (
+                        tensor_config.block_pool_id
+                        if tensor_config is not None
+                        else group.block_pool_id
+                    )
+                    assert block_pool_id is not None
+                    num_blocks = self._kv_cache_config.num_blocks_by_pool[block_pool_id]
+                if region_len % num_blocks != 0:
+                    raise ValueError(
+                        f"KV cache region for {layer_name} has size {region_len}, "
+                        f"which is not divisible by its {num_blocks} blocks."
+                    )
 
-        num_host = sum(1 for kind in mem_kinds if kind == "host")
-        logger.info(
-            "Registered KV caches: num_groups=%d, num_segments=%d "
-            "(host=%d, device=%d), num_blocks=%d",
-            len(self.token_dbs),
-            len(addrs),
-            num_host,
-            len(addrs) - num_host,
-            self.num_blocks,
-        )
+                registered_len = registered_buffers.get(base_addr)
+                if registered_len is None:
+                    ret = self.store.register_buffer(base_addr, region_len)
+                    if ret != 0:
+                        mem_kind = "host" if is_host else "device"
+                        raise RuntimeError(
+                            "Mooncake register_buffer failed for addr "
+                            f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
+                        )
+                    registered_buffers[base_addr] = region_len
+                elif registered_len != region_len:
+                    raise ValueError(
+                        f"KV cache views at {base_addr:#x} expose inconsistent "
+                        f"region sizes: {registered_len} and {region_len}."
+                    )
 
-        for db in self.token_dbs:
+                # Detect layout via stride: a dim whose byte-stride exceeds
+                # page_size_bytes is an outer segment dim (e.g. the K/V dim of
+                # FlashAttn's (2, num_blocks, ...)). FlashInfer/MLA's blocks-
+                # outermost layout has no such dim and yields a single segment.
+                element_size = cache.element_size()
+                page_size_bytes = region_len // num_blocks
+                outer_dims = [
+                    dim
+                    for dim in range(cache.ndim)
+                    if cache.stride(dim) * element_size > page_size_bytes
+                ]
+                if not outer_dims:
+                    segments = [(base_addr, page_size_bytes)]
+                else:
+                    seg_stride = cache.stride(outer_dims[0]) * element_size
+                    if seg_stride % num_blocks != 0:
+                        raise ValueError(
+                            f"KV cache segment stride for {layer_name} is "
+                            f"{seg_stride}, which is not divisible by its "
+                            f"{num_blocks} blocks."
+                        )
+                    segments = [
+                        (base_addr + idx * seg_stride, seg_stride // num_blocks)
+                        for idx in range(cache.shape[outer_dims[0]])
+                    ]
+                addrs.extend(addr for addr, _ in segments)
+                block_lens.extend(block_len for _, block_len in segments)
+                if is_host:
+                    num_host_segments += len(segments)
+                else:
+                    num_device_segments += len(segments)
+
             db.set_kv_caches_base_addr(addrs)
             db.set_block_len(block_lens)
+
+        logger.info(
+            "Registered KV caches: num_groups=%d, num_segments=%d (host=%d, device=%d)",
+            len(self.token_dbs),
+            num_host_segments + num_device_segments,
+            num_host_segments,
+            num_device_segments,
+        )
 
         # Start transfer threads
         if self.kv_role in ["kv_producer", "kv_both"]:
