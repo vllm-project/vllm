@@ -867,6 +867,35 @@ def test_deep_ep_v2_moe_cudagraph(
     weight_format: str,
     workspace_init,
 ):
+    _launch_deep_ep_v2_case(
+        m=m,
+        n=n,
+        k=k,
+        num_experts=num_experts,
+        topk=topk,
+        world_dp_size=world_dp_size,
+        moe_backend=moe_backend,
+        activation=activation,
+        use_cudagraph=use_cudagraph,
+        tokens_per_rank=tokens_per_rank,
+        weight_format=weight_format,
+    )
+
+
+def _launch_deep_ep_v2_case(
+    *,
+    m: int,
+    n: int,
+    k: int,
+    num_experts: int,
+    topk: int,
+    world_dp_size: tuple[int, int],
+    moe_backend: str,
+    activation: MoEActivation,
+    use_cudagraph: bool,
+    tokens_per_rank: tuple[int, ...],
+    weight_format: str,
+) -> None:
     set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(
@@ -892,4 +921,22 @@ def test_deep_ep_v2_moe_cudagraph(
         use_cudagraph,
         tokens_per_rank,
         weight_format,
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@requires_deep_ep_v2
+def test_deep_ep_v2_humming_dsv4_expert_topology(workspace_init):
+    _launch_deep_ep_v2_case(
+        m=8,
+        n=2048,
+        k=4096,
+        num_experts=256,
+        topk=6,
+        world_dp_size=(2, 2),
+        moe_backend="humming",
+        activation=MoEActivation.SILU,
+        use_cudagraph=False,
+        tokens_per_rank=(8, 0),
+        weight_format="mxfp4",
     )
