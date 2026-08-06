@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -18,9 +19,6 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
-# KV context each profiling request pretends to carry, so the profiled step reads
-# a realistic amount of cache rather than attending over nothing.
-_PROFILE_CONTEXT_LEN = 8192
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -42,21 +40,18 @@ def _assign_draft_token_budget(
     continuously along steps with a request.
 
     `capacities` enters holding each request's scheduled draft count (which bounds its
-    eligible slots) and leaves holding the admitted count.
+    eligible slots) and leaves holding the admitted count. The caller only calls this
+    when `draft_budget < capacities.sum()`, so every winner is a real draft slot.
     """
     survival = confidence_probs[idx_mapping].cumprod(dim=1)
     steps = torch.arange(num_steps, device=survival.device)
-    valid = steps[None, :] < capacities[:, None]
-    survival = survival.masked_fill(~valid, -float("inf"))
-    order = survival.flatten().argsort(descending=True, stable=True)
-    # Invalid slots score -inf and sort last, so the valid ones occupy exactly the first
-    # valid.sum() ranks; everything between the budget and there is a real draft that
-    # missed the cut. Decrementing keeps this sync-free.
-    ranks = torch.arange(order.shape[0], device=survival.device)
-    rejected = (ranks >= draft_budget) & (ranks < valid.sum())
-    capacities.scatter_add_(
-        0, order // num_steps, torch.where(rejected, -1, 0).to(capacities.dtype)
-    )
+    # Out-of-range slots score -inf so they never outrank a real draft.
+    out_of_range = steps[None, :] >= capacities[:, None]
+    survival = survival.masked_fill(out_of_range, -float("inf"))
+    flat = survival.flatten()
+    winners = flat.topk(draft_budget).indices
+    admitted = torch.zeros_like(flat, dtype=torch.bool).index_fill_(0, winners, True)
+    torch.sum(admitted.view_as(survival), dim=1, dtype=capacities.dtype, out=capacities)
 
 
 _assign_draft_token_budget_compiled = torch.compile(
@@ -188,7 +183,7 @@ class AdaptiveVerificationManager:
             for _ in range(_PROFILE_REPLAYS):
                 yield {
                     "num_tokens": num_tokens,
-                    "context_len": _PROFILE_CONTEXT_LEN,
+                    "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
                 }
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
@@ -380,7 +375,7 @@ class AdaptiveVerificationManager:
             capacities.zero_()
         else:
             async_copy_to_gpu(scheduled_drafts, out=capacities)
-            if draft_budget != int(scheduled_drafts.sum()):
+            if draft_budget < int(scheduled_drafts.sum()):
                 _assign_draft_token_budget_compiled(
                     self._confidence_probs,
                     idx_mapping,
