@@ -190,19 +190,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     "store_threshold is not supported for TieringOffloadingSpec"
                 )
 
-            # Create scheduler-side SharedOffloadRegion (rank=None) so the
-            # primary tier can eagerly create a memoryview over _base.
-            scheduler_mmap = SharedOffloadRegion(
-                engine_id=self._engine_id,
-                num_blocks=self.num_blocks,
-                rank=None,
-                kv_bytes_per_block=self.kv_bytes_per_chunk,
-                cpu_page_size=self.cpu_page_size_per_worker,
-            )
-            self._scheduler_mmap = scheduler_mmap
-
-            # Create primary tier (CPU-based)
+            scheduler_mmap: SharedOffloadRegion | None = None
+            primary_tier: CPUPrimaryTierOffloadingManager | None = None
+            secondary_tiers = []
             try:
+                # Create scheduler-side SharedOffloadRegion (rank=None) so the
+                # primary tier can eagerly create a memoryview over _base.
+                scheduler_mmap = SharedOffloadRegion(
+                    engine_id=self._engine_id,
+                    num_blocks=self.num_blocks,
+                    rank=None,
+                    kv_bytes_per_block=self.kv_bytes_per_chunk,
+                    cpu_page_size=self.cpu_page_size_per_worker,
+                )
+                self._scheduler_mmap = scheduler_mmap
+
+                # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
                     num_blocks=self.num_blocks,
                     cache_policy=self.eviction_policy,
@@ -210,22 +213,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     enable_events=self.kv_events_config.enable_kv_cache_events,
                     mmap_region=scheduler_mmap,
                 )
-            except Exception:
-                try:
-                    scheduler_mmap.cleanup()
-                except Exception:
-                    logger.exception(
-                        "Failed to clean up scheduler mmap after primary tier "
-                        "initialization failure"
-                    )
-                self._scheduler_mmap = None
-                raise
 
-            # Create secondary tiers
-            primary_kv_view = primary_tier.get_kv_memoryview()
-            secondary_tiers = []
-            for i, tier_config in enumerate(self.secondary_tier_configs):
-                try:
+                # Create secondary tiers
+                primary_kv_view = primary_tier.get_kv_memoryview()
+                for i, tier_config in enumerate(self.secondary_tier_configs):
                     tier = SecondaryTierFactory.create_secondary_tier(
                         tier_config, primary_kv_view, self
                     )
@@ -235,20 +226,26 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         i,
                         tier.tier_type,
                     )
-                except Exception as e:
-                    logger.error(
-                        "Failed to create secondary tier from config index %i: %s",
-                        i,
-                        e,
-                    )
-                    for tier in reversed(secondary_tiers):
-                        try:
-                            tier.shutdown()
-                        except Exception:
-                            logger.exception(
-                                "Failed to shut down secondary tier during "
-                                "initialization cleanup"
-                            )
+
+                # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
+                # get_worker(). Secondary tier transfers are handled by the
+                # secondary tier managers and need no additional workers here.
+                tiering_manager = TieringOffloadingManager(
+                    primary_tier=primary_tier,
+                    secondary_tiers=secondary_tiers,
+                )
+                self._manager = tiering_manager
+            except Exception:
+                logger.exception("Failed to initialize tiering offloading manager")
+                for tier in reversed(secondary_tiers):
+                    try:
+                        tier.shutdown()
+                    except Exception:
+                        logger.exception(
+                            "Failed to shut down secondary tier during "
+                            "initialization cleanup"
+                        )
+                if primary_tier is not None:
                     try:
                         primary_tier.shutdown()
                     except Exception:
@@ -256,17 +253,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                             "Failed to shut down primary tier during "
                             "initialization cleanup"
                         )
-                    self._scheduler_mmap = None
-                    raise
-
-            # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
-            # get_worker(). Secondary tier transfers are handled by the
-            # secondary tier managers and need no additional workers here.
-            tiering_manager = TieringOffloadingManager(
-                primary_tier=primary_tier,
-                secondary_tiers=secondary_tiers,
-            )
-            self._manager = tiering_manager
+                elif scheduler_mmap is not None:
+                    try:
+                        scheduler_mmap.cleanup()
+                    except Exception:
+                        logger.exception(
+                            "Failed to clean up scheduler mmap during "
+                            "initialization cleanup"
+                        )
+                self._scheduler_mmap = None
+                raise
 
             logger.info(
                 "Created TieringOffloadingManager with primary tier "
