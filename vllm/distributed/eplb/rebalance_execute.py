@@ -14,9 +14,8 @@ import torch
 from torch.distributed import ProcessGroup, all_gather
 
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
-from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent, device_stream
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -176,7 +175,7 @@ def move_to_buffer(
     new_indices: np.ndarray,
     expert_weights: Sequence[torch.Tensor],
     expert_weights_buffers: Sequence[torch.Tensor],
-    stream: torch.cuda.Stream | torch.xpu.Stream | None,
+    stream: torch.Stream | None,
     ep_rank: int,
     communicator: EplbCommunicator,
     layer_idx: int = 0,
@@ -264,15 +263,9 @@ def move_to_buffer(
             expert = new_local_expert_ids[dst]
             src_local = expert_to_src_map.get(expert, -1)
             if src_local != -1:
-                if current_platform.is_cuda_alike():
-                    with torch.cuda.stream(stream):
-                        for w, b in zip(expert_weights, expert_weights_buffers):
-                            b[dst].copy_(w[src_local], non_blocking=True)
-                elif current_platform.is_xpu():
-                    with torch.xpu.stream(stream):
-                        for w, b in zip(expert_weights, expert_weights_buffers):
-                            b[dst].copy_(w[src_local], non_blocking=True)
-
+                with device_stream(stream):
+                    for w, b in zip(expert_weights, expert_weights_buffers):
+                        b[dst].copy_(w[src_local], non_blocking=True)
     communicator.set_transfer_context(old_indices, layer_idx)
 
     # 2. Post sends
@@ -438,7 +431,7 @@ def transfer_layer(
     ep_group: ProcessGroup,
     communicator: EplbCommunicator,
     is_profile: bool = False,
-    stream: torch.cuda.Stream | torch.xpu.Stream | None = None,
+    stream: torch.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
     layer_idx: int = 0,
 ) -> TransferMetadata:

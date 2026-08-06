@@ -11,9 +11,8 @@ import torch
 
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
-from .eplb_utils import CpuGpuEvent
+from .eplb_utils import CpuGpuEvent, device_stream
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -33,11 +32,7 @@ def start_async_worker(
     def thread_target() -> None:
         assert device_index is not None
         torch.accelerator.set_device_index(device_index)
-        # cuda_stream = torch.cuda.Stream(device=device_index)
-        if current_platform.is_cuda_alike():
-            stream = torch.cuda.Stream(device=device_index)
-        elif current_platform.is_xpu():
-            stream = torch.xpu.Stream(device=device_index)
+        stream = torch.Stream(device=torch.accelerator.current_accelerator())
         try:
             transfer_run_periodically(
                 state=state,
@@ -56,18 +51,14 @@ def run_rebalance_experts(
     model_state: "EplbModelState",
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
-    stream: torch.cuda.Stream | torch.xpu.Stream,
+    stream: torch.Stream,
 ) -> torch.Tensor:
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
 
     # Move the global expert load window to CPU for computation.
-    if current_platform.is_cuda_alike():
-        with torch.cuda.stream(stream):
-            global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
-    elif current_platform.is_xpu():
-        with torch.xpu.stream(stream):
-            global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
+    with device_stream(stream):
+        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
     # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,
@@ -84,7 +75,7 @@ def run_rebalance_experts(
 
 def transfer_run_periodically(
     state: "EplbState",
-    stream: torch.cuda.Stream | torch.xpu.Stream,
+    stream: torch.Stream,
     is_profile: bool = False,
 ) -> None:
     while True:
@@ -103,16 +94,8 @@ def transfer_run_periodically(
 
             # Snapshot the physical_to_logical_map (synchronized with
             # rearrange_event) and copy it to CPU
-            if current_platform.is_cuda_alike():
-                with torch.cuda.stream(stream):
-                    physical_to_logical_map_cpu = (
-                        model_state.physical_to_logical_map.cpu()
-                    )
-            elif current_platform.is_xpu():
-                with torch.xpu.stream(stream):
-                    physical_to_logical_map_cpu = (
-                        model_state.physical_to_logical_map.cpu()
-                    )
+            with device_stream(stream):
+                physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
             new_physical_to_logical_map = run_rebalance_experts(
                 model_state, state, physical_to_logical_map_cpu, stream
@@ -157,10 +140,7 @@ def transfer_run_periodically(
 
                 # Wait until all writes to expert_buffer have finished before making the
                 # AsyncEplbLayerResult visible to the main thread.
-                if current_platform.is_cuda_alike():
-                    stream.synchronize()
-                elif current_platform.is_xpu():
-                    torch.xpu.synchronize()
+                stream.synchronize()
 
                 # This event guarantees that expert_buffer will not be overwritten by
                 # subsequent iterations of this loop until the main thread has consumed

@@ -288,14 +288,10 @@ class EplbState:
         newly started EP ranks may not have physical experts
         mapped yet.
         """
-        if self.device.type == "cuda":
+        if self.device.type in ("cuda", "xpu"):
             self.device_index = self.device.index
-            if self.device_index is None and torch.cuda.is_available():
+            if self.device_index is None and torch.accelerator.is_available():
                 self.device_index = torch.accelerator.current_device_index()
-        elif self.device.type == "xpu":
-            self.device_index = self.device.index
-            if self.device_index is None and torch.xpu.is_available():
-                self.device_index = torch.xpu.current_device()
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -747,14 +743,9 @@ class EplbState:
         is_main_rank = ep_rank == 0
         if is_main_rank:
             if not self.is_async or is_profile:
-                if self.device.type == "cuda":
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    start_event.record()
-                elif self.device.type == "xpu":
-                    start_event = torch.xpu.Event(enable_timing=True)
-                    end_event = torch.xpu.Event(enable_timing=True)
-                    start_event.record()
+                start_event = torch.Event(enable_timing=True)
+                end_event = torch.Event(enable_timing=True)
+                start_event.record()
             logger.info(
                 "Rearranging experts %s %s...",
                 "(async mode)" if self.is_async else "sync mode",

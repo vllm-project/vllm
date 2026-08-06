@@ -987,7 +987,7 @@ class ParallelConfig:
             if current_platform.is_xpu():
                 # On XPU, use the device-native XCCL P2P backend.
                 self.eplb_config.communicator = "torch_xccl"
-            if is_nixl_available():
+            elif is_nixl_available():
                 self.eplb_config.communicator = "nixl"
             elif self.enable_elastic_ep:
                 self.eplb_config.communicator = "pynccl"
