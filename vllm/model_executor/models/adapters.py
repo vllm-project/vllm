@@ -175,6 +175,11 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             params_dict = dict(self.named_parameters())
+            # Use model-owned remapping only for the probe membership check
+            # (e.g. Gemma4 model.language_model.* -> language_model.model.*)
+            # so the "" / "model." scan can early-exit. Forwarded names stay
+            # unmapped to avoid double-applying the mapper in the parent loader.
+            hf_to_vllm_mapper = getattr(self, "hf_to_vllm_mapper", None)
 
             # We support loading from both `*ForCausalLM` and `*Model`
             candidate_prefixes = ["", "model."]
@@ -185,11 +190,18 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
                 # Clone because the iterator may reuse the tensor buffer
                 seen_weights.append((name, loaded_weight.clone()))
 
+                lookup_name = name
+                if hf_to_vllm_mapper is not None:
+                    mapped = hf_to_vllm_mapper._map_name(name)
+                    if mapped is None:
+                        continue
+                    lookup_name = mapped
+
                 try:
                     target_prefix = next(
                         prefix
                         for prefix in candidate_prefixes
-                        if prefix + name in params_dict
+                        if prefix + lookup_name in params_dict
                     )
                     break
                 except StopIteration:
@@ -261,6 +273,29 @@ def as_embedding_model(cls: _T) -> _T:
     return ModelForEmbedding  # type: ignore
 
 
+def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
+    """Resolve the label count for a sequence classification head.
+
+    ``PretrainedConfig.num_labels`` is derived from ``id2label``, which always
+    carries a default of two entries. Composite configs (such as multimodal
+    checkpoints) declare their label space on the top-level config, so reading
+    ``num_labels`` from ``get_text_config()`` silently returns that default and
+    builds a score head of the wrong size.
+
+    Prefer the top-level config whenever it declares a label space of its own,
+    mirroring the ``classifier_from_token`` / ``method`` lookups in
+    ``as_seq_cls_model``.
+    """
+    if text_config is hf_config:
+        return hf_config.num_labels
+
+    from transformers import PretrainedConfig
+
+    if hf_config.num_labels != PretrainedConfig().num_labels:
+        return hf_config.num_labels
+    return text_config.num_labels
+
+
 def as_seq_cls_model(cls: _T) -> _T:
     """
     Subclass an existing vLLM model to support classify and score tasks.
@@ -320,7 +355,7 @@ def as_seq_cls_model(cls: _T) -> _T:
 
             self.score = ReplicatedLinear(
                 model_config.get_hidden_size(),
-                text_config.num_labels,
+                _resolve_num_labels(hf_config, text_config),
                 bias=False,
                 params_dtype=model_config.head_dtype,
                 quant_config=quant_config,

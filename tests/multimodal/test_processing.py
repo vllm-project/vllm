@@ -1097,3 +1097,63 @@ def test_apply_matches_no_match_exits_quickly():
     # Should complete in < 100ms (was taking seconds before the fix)
     assert elapsed < 0.1, f"_apply_matches took {elapsed:.2f}s, expected < 0.1s"
     assert "".join(result) == long_prompt
+
+
+def test_iter_token_matches_rejects_negative_start_idx():
+    with pytest.raises(ValueError, match="non-negative"):
+        list(iter_token_matches([1, 2, 3], [2], start_idx=-1))
+
+
+def test_find_mm_placeholders_avoids_quadratic_false_prefixes():
+    """
+    Test that placeholder scanning stays linear under adversarial candidates.
+
+    The fast-forward scan must not rescan the prompt tail per position when
+    one candidate's first token never occurs (forcing a full search) while
+    another's occurs at every position (forcing single-step advances).
+    """
+    prompt = [1] * 30_000
+    mm_prompt_updates = {
+        "absent": [[PromptReplacement("absent", [0], [999, 0]).resolve(0)]],
+        "frequent_false_prefix": [
+            [PromptReplacement("frequent_false_prefix", [0], [1, 2]).resolve(0)]
+        ],
+    }
+
+    start = time.perf_counter()
+    result = find_mm_placeholders(prompt, mm_prompt_updates, tokenizer=None)
+    elapsed = time.perf_counter() - start
+
+    assert result == {}
+    assert elapsed < 0.5, f"find_mm_placeholders took {elapsed:.2f}s, expected < 0.5s"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # Empty prompt: the scan loop is never entered
+        [],
+        # Non-empty prompt: the scan runs but never finds the first item,
+        # so the second item must stay unresolved
+        [1, 2, 3, 4, 5],
+    ],
+)
+def test_find_mm_placeholders_resolves_content_lazily(prompt):
+    """
+    Test that content of items the scan never reaches is not resolved.
+
+    With `tokenizer=None`, resolving string content raises; the scan must
+    return no placeholders instead of raising on the second item.
+    """
+    result = find_mm_placeholders(
+        prompt,
+        {
+            "image": [
+                [PromptReplacement("image", [0], [999]).resolve(0)],
+                [PromptReplacement("image", [0], "never reached").resolve(1)],
+            ]
+        },
+        tokenizer=None,
+    )
+
+    assert result == {}
