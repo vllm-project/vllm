@@ -104,7 +104,10 @@ class NixlBaseConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
+        # req -> (request, local_block_ids, local_hit_tokens, total_tokens);
+        # the token window aligns kernel blocks when P/D logical block
+        # sizes differ; (0, 0) = unknown.
+        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds, int, int]] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
@@ -441,12 +444,19 @@ class NixlBaseConnectorScheduler:
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, block_ids) in self._reqs_need_recv.items():
+        for req_id, (
+            req,
+            block_ids,
+            hit_tokens,
+            total_tokens,
+        ) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req_to_recv(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
+                num_local_computed_tokens=hit_tokens,
+                num_total_tokens=total_tokens,
             )
 
         if self.use_host_buffer:

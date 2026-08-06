@@ -514,6 +514,7 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._is_hma_required = is_hma_required
+    sched._local_hit_tokens = {}
 
     if heartbeat:
         sched._heartbeat_by_engine = {}

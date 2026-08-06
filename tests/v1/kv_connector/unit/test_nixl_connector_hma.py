@@ -455,62 +455,106 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "local_physical_per_logical,remote_physical_per_logical,"
-    "remote_fa_blocks,local_fa_blocks,ssm_blocks,"
-    "correct_remote_fa,correct_local_fa",
+    "hit_tokens,total_tokens,"
+    "remote_fa_blocks,local_fa_blocks,"
+    "expected_remote_fa,expected_local_fa",
     [
-        # 10 kernel blocks of data (640 tokens).
+        # Kernel block = 64 tokens throughout. 640 tokens of data.
         # remote physical_per_logical=10 → 1 logical → 10 kernel [0..9]
         # local  physical_per_logical=6  → 2 logical → 12 kernel [0..11]
-        # 1st local logical block cached → suffix [6..11]
-        # Correct: transfer only uncached suffix tokens (384-639)
-        #   = remote [6,7,8,9] → local [6,7,8,9].
-        # Actual (front-trim): remote[:6]=[0..5] → local [6..11]. Wrong.
+        # 1st local logical block (384 tokens) cached → suffix [6..11].
+        # Transfer only the uncached suffix (tokens 384-639):
+        #   remote [6,7,8,9] → local [6,7,8,9].
         pytest.param(
             6,
             10,
-            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            384,
+            640,
+            list(range(10)),
             [6, 7, 8, 9, 10, 11],
-            [42],
             [6, 7, 8, 9],
             [6, 7, 8, 9],
-            id="local6_remote10_fail",
+            id="local6_remote10_hit",
         ),
-        # 15 kernel blocks of data (960 tokens).
+        # 960 tokens of data.
         # remote physical_per_logical=6  → 3 logical → 18 kernel [0..17]
         # local  physical_per_logical=10 → 2 logical → 20 kernel [0..19]
-        # 1st local logical block cached → suffix [10..19]
-        # Correct: transfer only uncached suffix tokens (640-959)
-        #   = remote [10,11,12,13,14] → local [10,11,12,13,14].
-        # Actual (front-trim): remote[:10]=[0..9] → local [10..19]. Wrong.
+        # 1st local logical block (640 tokens) cached → suffix [10..19].
+        # Transfer only tokens 640-959: remote [10..14] → local [10..14].
         pytest.param(
             10,
             6,
+            640,
+            960,
             list(range(18)),
             list(range(10, 20)),
-            [42],
             [10, 11, 12, 13, 14],
             [10, 11, 12, 13, 14],
-            id="local10_remote6_fail",
+            id="local10_remote6_hit",
+        ),
+        # No hit: the window starts at 0 and is capped to the actual data
+        # (640 tokens = 10 kernel blocks), not to list lengths.
+        pytest.param(
+            6,
+            10,
+            0,
+            640,
+            list(range(10)),
+            list(range(12)),
+            list(range(10)),
+            list(range(10)),
+            id="no_hit_data_cap",
+        ),
+        # Equal ppl with a hit but num_local >= num_remote (extra local
+        # allocation for the recomputed last token): the equal-ppl end-trim
+        # branch does not apply, and the legacy front-trim would silently
+        # pair remote prefix blocks with local suffix slots. 1280 tokens,
+        # 640 cached locally.
+        pytest.param(
+            10,
+            10,
+            640,
+            1280,
+            list(range(20)),
+            list(range(10, 30)),
+            list(range(10, 20)),
+            list(range(10, 20)),
+            id="equal_ppl_hit_extra_local_alloc",
+        ),
+        # Equal ppl with a hit and num_local < num_remote: the window
+        # takes precedence over the legacy end-trim and produces the same
+        # pairing when both sides allocated for the same token count.
+        pytest.param(
+            10,
+            10,
+            640,
+            1280,
+            list(range(20)),
+            list(range(10, 20)),
+            list(range(10, 20)),
+            list(range(10, 20)),
+            id="equal_ppl_hit_window_matches_end_trim",
         ),
     ],
 )
-def test_mismatched_physical_per_logical_fails_with_prefix_caching(
+def test_apply_prefix_caching_hetero_ppl_token_window(
     local_physical_per_logical,
     remote_physical_per_logical,
+    hit_tokens,
+    total_tokens,
     remote_fa_blocks,
     local_fa_blocks,
-    ssm_blocks,
-    correct_remote_fa,
-    correct_local_fa,
+    expected_remote_fa,
+    expected_local_fa,
 ):
-    """Demonstrate that _apply_prefix_caching front-trims ([:N])
-    in the Mamba hybrid path, which fails when prefix caching produces
-    suffix-only local blocks.
+    """FA kernel blocks are paired by token offset when the request's token
+    window is known, so a local prefix hit transfers only the uncached
+    suffix even when P and D logical block sizes differ.
 
-    Prefix caching operates at logical block granularity. When a logical
+    Prefix caching operates at logical block granularity: when a logical
     block is cached locally, the decode side only allocates kernel blocks
-    for the uncached suffix. The front-trim pairs remote prefix blocks
-    with local suffix slots — a silent data corruption.
+    for the uncached suffix, so the local list starts at the hit boundary
+    while the remote list starts at token 0.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -518,6 +562,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker.block_size = 64  # kernel block size
     worker.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=True,
@@ -527,6 +572,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
         type(g.kv_cache_spec) for g in worker.kv_cache_config.kv_cache_groups
     )
 
+    ssm_blocks = [42]
     local_block_ids = (local_fa_blocks, ssm_blocks)
     remote_block_ids = (remote_fa_blocks, ssm_blocks)
 
@@ -535,16 +581,106 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
         remote_block_ids,
         local_physical_per_logical,
         remote_physical_per_logical,
+        num_local_computed_tokens=hit_tokens,
+        num_total_tokens=total_tokens,
     )
 
-    assert (
-        aligned_remote[0] != correct_remote_fa or aligned_local[0] != correct_local_fa
-    ), (
-        f"Prefix caching with mismatched physical_per_logical should not "
-        f"produce correct transfer ids: "
-        f"remote={aligned_remote[0]}, local={aligned_local[0]}, "
-        f"correct_remote={correct_remote_fa}, correct_local={correct_local_fa}"
+    assert aligned_remote[0] == expected_remote_fa, (
+        f"Expected remote {expected_remote_fa}, got {aligned_remote[0]}"
     )
+    assert aligned_local[0] == expected_local_fa, (
+        f"Expected local {expected_local_fa}, got {aligned_local[0]}"
+    )
+    # SSM slots pair positionally and are untouched by the FA window.
+    assert aligned_local[1] == ssm_blocks and aligned_remote[1] == ssm_blocks
+
+
+@pytest.mark.cpu_test
+def test_hetero_ppl_kernel_window_math():
+    """Window math: start at the kernel-aligned hit, span exactly the data;
+    lists that cannot cover the window or misaligned hits fail loudly
+    rather than silently shrinking the transfer."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.block_size = 64
+
+    # 640 data tokens, 384 cached: remote [6, 10), local [0, 4).
+    assert worker._hetero_ppl_kernel_window(6, 10, 384, 640) == (6, 4)
+    # Data cap: last remote logical block is rounding padding.
+    assert worker._hetero_ppl_kernel_window(12, 12, 0, 640) == (0, 10)
+    # Hit >= total: nothing to transfer.
+    assert worker._hetero_ppl_kernel_window(10, 10, 640, 640) == (10, 0)
+    # Remote list shorter than the data claims: the scheduler accounted
+    # for tokens the transfer would skip, so fail instead of clamping.
+    with pytest.raises(AssertionError, match="not covered"):
+        worker._hetero_ppl_kernel_window(10, 8, 0, 640)
+    # Same for a local list shorter than the data.
+    with pytest.raises(AssertionError, match="not covered"):
+        worker._hetero_ppl_kernel_window(8, 10, 0, 640)
+    # Hit must be kernel-block aligned.
+    with pytest.raises(AssertionError, match="kernel-block aligned"):
+        worker._hetero_ppl_kernel_window(10, 10, 100, 640)
+
+
+@pytest.mark.cpu_test
+def test_apply_prefix_caching_rank_sliced_empty_groups():
+    """Per-rank ReadSpecs zero out groups a source rank doesn't serve
+    (replicated MLA is read from one rank while SSM reads span all ranks);
+    the token window must skip such groups, not assert coverage."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = 96
+    worker.block_size = 64
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
+        ([], [7]),
+        ([], [3]),
+        96,
+        24,
+        num_local_computed_tokens=0,
+        num_total_tokens=960,
+    )
+    assert aligned_local == [[], [7]]
+    assert aligned_remote == [[], [3]]
+
+
+@pytest.mark.cpu_test
+def test_apply_prefix_caching_sw_group_skips_token_window():
+    """Sliding-window group lists are window-clipped and do not start at
+    token 0, so they must not take the token-offset pairing; they keep the
+    legacy end-trim."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = 10
+    worker.block_size = 64
+    worker._group_spec_types = (SlidingWindowSpec, MambaSpec)
+
+    # Token window (0, 640) would select remote [0, 10); the SW group must
+    # instead end-trim to the local count.
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
+        ([20, 21, 22, 23, 24], [42]),
+        (list(range(10)), [42]),
+        10,
+        10,
+        num_local_computed_tokens=0,
+        num_total_tokens=640,
+    )
+    assert aligned_local[0] == [20, 21, 22, 23, 24]
+    assert aligned_remote[0] == [5, 6, 7, 8, 9]
 
 
 @pytest.mark.parametrize("model_name, sw_size", [("google/gemma-3-1b-it", 512)])

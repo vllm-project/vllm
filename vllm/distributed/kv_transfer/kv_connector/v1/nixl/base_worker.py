@@ -48,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
     _is_attention_spec,
+    _is_full_attention_spec,
     _is_ssm_spec,
     compute_tp_mapping,
 )
@@ -67,6 +68,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -89,6 +91,11 @@ logger = init_logger(__name__)
 
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
+
+    # Whether the transfer path pairs FA kernel blocks by token offset when
+    # P/D logical block sizes differ (pull READ path only), enabling prefix
+    # caching with heterogeneous physical_blocks_per_logical.
+    _supports_hetero_ppl_prefix_caching = False
 
     def _compute_desc_ids(
         self,
@@ -1729,13 +1736,48 @@ class NixlBaseConnectorWorker:
             != self._physical_blocks_per_logical_kv_block
             and self.vllm_config.cache_config.enable_prefix_caching
         ):
-            raise RuntimeError(
+            # Supported on the pull path: FA transfers pair kernel blocks by
+            # token offset (_apply_prefix_caching), so P and D only need the
+            # same kernel block size, and SSM state positions must align.
+            base_err = (
                 "Prefix caching with heterogeneous physical_blocks_per_logical "
-                "is not supported for Mamba hybrid models. "
-                f"Local: {self._physical_blocks_per_logical_kv_block}, "
-                f"Remote: {remote_physical_per_logical}. "
-                "Disable prefix caching with --no-enable-prefix-caching."
+                f"(local: {self._physical_blocks_per_logical_kv_block}, "
+                f"remote: {remote_physical_per_logical}) "
             )
+            if not self._supports_hetero_ppl_prefix_caching or self.use_host_buffer:
+                raise RuntimeError(
+                    base_err + "is only supported by the pull-mode NIXL "
+                    "connector without a host buffer. Disable prefix caching "
+                    "with --no-enable-prefix-caching."
+                )
+            if block_size_ratio != 1:
+                raise RuntimeError(
+                    base_err + "requires matching kernel block sizes. "
+                    f"Local: {self.block_size}, "
+                    f"remote: {nixl_agent_meta.block_size}."
+                )
+            if any(
+                _is_attention_spec(t) and not _is_full_attention_spec(t)
+                for t in self._group_spec_types
+            ):
+                # SW group block lists are window-clipped and don't start at
+                # token 0, which the offset pairing assumes.
+                raise RuntimeError(
+                    base_err + "is not supported with sliding-window attention groups."
+                )
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
+                # "all" keeps local positional state slots at
+                # mamba_block_size (== logical block size) granularity,
+                # which differs between P and D here, so position-wise slot
+                # pairing would mismatch. Only the puller's own mode
+                # matters: a positional remote tail-pairs correctly onto a
+                # single-state local slot (its last slot is the running
+                # state), so the remote mode needs no validation.
+                raise RuntimeError(
+                    base_err + "requires a single-state local mamba cache "
+                    "mode ('align' or 'none'); 'all' keeps positional "
+                    "state slots."
+                )
 
         if block_size_ratio != 1:
             # Heterogeneous block sizes transfer at remote-block granularity;
@@ -2096,8 +2138,8 @@ class NixlBaseConnectorWorker:
             # transfer clipped. The latter happens either at remote-block
             # granularity (block_size_ratio > 1) or at kernel-block
             # granularity, when equal kernel pages meet differing logical
-            # block sizes and _apply_prefix_caching front-trims to the
-            # minimum count (hybrid heterogeneous TP).
+            # block sizes and _apply_prefix_caching pairs an offset window
+            # (or legacy-front-trims to the minimum count).
             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
@@ -2106,16 +2148,33 @@ class NixlBaseConnectorWorker:
                 remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             )
-            if block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl:
+            windowed = (
+                self._has_mamba and meta.num_total_tokens > 0 and block_size_ratio == 1
+            )
+            if (
+                block_size_ratio > 1
+                or self.enable_permute_local_kv
+                or hetero_ppl
+                or windowed
+            ):
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue
                     # Number of remote-sized sub-blocks the transfer covered;
                     # everything past this was clipped and must be zeroed.
-                    covered_sub_blocks = min(
-                        len(local_group) * block_size_ratio,
-                        len(meta.remote.block_ids[g]),
-                    )
+                    # Must mirror the pairing in _apply_prefix_caching.
+                    if windowed and _is_full_attention_spec(self._group_spec_types[g]):
+                        _, covered_sub_blocks = self._hetero_ppl_kernel_window(
+                            len(local_group),
+                            len(meta.remote.block_ids[g]),
+                            meta.num_local_computed_tokens,
+                            meta.num_total_tokens,
+                        )
+                    else:
+                        covered_sub_blocks = min(
+                            len(local_group) * block_size_ratio,
+                            len(meta.remote.block_ids[g]),
+                        )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (local_group, covered_sub_blocks)
                     )
@@ -2395,12 +2454,48 @@ class NixlBaseConnectorWorker:
                 )
         return physical_block_ids
 
+    def _hetero_ppl_kernel_window(
+        self,
+        num_local_blocks: int,
+        num_remote_blocks: int,
+        num_local_computed_tokens: int,
+        num_total_tokens: int,
+    ) -> tuple[int, int]:
+        """Kernel-block window for a full-attention group when P/D logical
+        block sizes differ but the kernel block size matches (enforced at
+        handshake).
+
+        Local blocks start at the logical-block-aligned local prefix hit;
+        remote blocks start at token 0. Returns (start, count): remote
+        kernel blocks [start, start+count) pair 1:1 with local kernel
+        blocks [0, count). Both lists must cover the window: silently
+        transferring less than the scheduler accounted for would leave
+        holes in the KV cache.
+        """
+        assert num_local_computed_tokens % self.block_size == 0, (
+            f"Local prefix hit ({num_local_computed_tokens}) must be "
+            f"kernel-block aligned (kernel block size {self.block_size})"
+        )
+        start = num_local_computed_tokens // self.block_size
+        count = max(cdiv(num_total_tokens, self.block_size) - start, 0)
+        assert count == 0 or (
+            num_local_blocks >= count and num_remote_blocks >= start + count
+        ), (
+            f"Transfer window [{start}, {start + count}) not covered by "
+            f"block lists (local={num_local_blocks}, "
+            f"remote={num_remote_blocks})"
+        )
+        return start, count
+
     def _apply_prefix_caching(
         self,
         decode_block_ids: BlockIds,
         prefill_block_ids: BlockIds,
         decode_physical_per_logical: int,
         prefill_physical_per_logical: int,
+        num_local_computed_tokens: int = 0,
+        num_total_tokens: int = 0,
+        block_size_ratio: int = 1,
     ) -> tuple[BlockIds, BlockIds]:
         """Trim block ID lists so only the uncomputed suffix is transferred.
 
@@ -2416,9 +2511,14 @@ class NixlBaseConnectorWorker:
         For non-Mamba models: end-trim ``prefill`` to match ``decode`` count, so
         already-cached prefix blocks are skipped in the transfer.
 
-        For Mamba hybrid: SSM groups pair state slots by position and FA
-        groups end-trim to the uncomputed suffix when physical-per-logical
-        matches.
+        For Mamba hybrid: full-attention groups pair kernel blocks by token
+        offset when the request's token window is known
+        (num_total_tokens > 0), which supports partial local prefix hits
+        with heterogeneous P/D logical block sizes. Sliding-window groups
+        and legacy metadata keep the older heuristics: end-trim prefill on an
+        equal-ppl partial hit, else front-trim both to the minimum count
+        (which only handles kernel block count discrepancies from logical
+        block rounding in heterogeneous TP).
         """
         # Partial prefix cache hit: just transfer uncomputed blocks.
         # Skip mamba groups — their blocks represent full state (conv+ssm),
@@ -2449,6 +2549,11 @@ class NixlBaseConnectorWorker:
             for i, prefill_group in enumerate(prefill_block_ids):
                 num_decode_blocks = len(decode_block_ids[i])
                 num_prefill_blocks = len(prefill_group)
+                if num_decode_blocks == 0 and num_prefill_blocks == 0:
+                    # Per-rank ReadSpecs zero out groups this source rank
+                    # doesn't serve (e.g. the replicated MLA group is read
+                    # from a single rank while SSM reads span all ranks).
+                    continue
                 if _is_ssm_spec(self._group_spec_types[i]):
                     if num_decode_blocks == num_prefill_blocks:
                         continue
@@ -2469,18 +2574,40 @@ class NixlBaseConnectorWorker:
                     else:
                         decode_block_ids[i] = decode_block_ids[i][:num_blocks]
                 elif (
+                    num_total_tokens > 0
+                    and block_size_ratio == 1
+                    and _is_full_attention_spec(self._group_spec_types[i])
+                ):
+                    # Pair kernel blocks by token offset: decode blocks start
+                    # at the local prefix hit, prefill blocks at token 0.
+                    # Full attention only: SW group lists are window-clipped
+                    # and do not start at token 0. Handles heterogeneous
+                    # logical block sizes, and subsumes the end-trim below —
+                    # which mispairs whenever P and D allocated for
+                    # different token counts (turn-2 readback).
+                    start, count = self._hetero_ppl_kernel_window(
+                        num_decode_blocks,
+                        num_prefill_blocks,
+                        num_local_computed_tokens,
+                        num_total_tokens,
+                    )
+                    decode_block_ids[i] = decode_block_ids[i][:count]
+                    prefill_block_ids[i] = prefill_group[start : start + count]
+                elif (
                     decode_physical_per_logical == prefill_physical_per_logical
                     and num_decode_blocks < num_prefill_blocks
                 ):
-                    # Partial prefix cache hit for FA group.
+                    # Partial prefix cache hit for FA group (legacy metadata
+                    # without a token window, or non-full-attention group).
                     prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
                 else:
-                    # TODO Handle prefix caching with different block_sizes
-                    # Allocation rounding legitimately leaves up to
-                    # ppl - 1 trailing dead kernel blocks per side (plus one
-                    # extra decode block for the recomputed final token), so
-                    # the counts may differ by up to the sum of the two
-                    # ratios; anything larger indicates mismatched lists.
+                    # Legacy front-trim (no token window in metadata): only
+                    # correct with no local prefix hit. Allocation rounding
+                    # legitimately leaves up to ppl - 1 trailing dead kernel
+                    # blocks per side (plus one extra decode block for the
+                    # recomputed final token), so the counts may differ by up
+                    # to the sum of the two ratios; anything larger indicates
+                    # mismatched lists.
                     max_padding = (
                         decode_physical_per_logical + prefill_physical_per_logical
                     )

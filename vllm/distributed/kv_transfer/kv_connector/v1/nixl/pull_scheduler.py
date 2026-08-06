@@ -30,6 +30,11 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Block-aligned local prefix hit per request, recorded in
+        # get_num_new_matched_tokens and consumed in
+        # update_state_after_alloc. The worker needs it to align
+        # kernel-block windows when P and D logical block sizes differ.
+        self._local_hit_tokens: dict[str, int] = {}
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -56,6 +61,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             num_computed_tokens,
             params,
         )
+        if params:
+            self._local_hit_tokens[request.request_id] = num_computed_tokens
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
@@ -119,6 +126,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             num_external_tokens,
             params,
         )
+        local_hit_tokens = self._local_hit_tokens.pop(request.request_id, 0)
 
         if not params:
             return
@@ -164,6 +172,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     self._reqs_need_recv[request.request_id] = (
                         request,
                         local_block_ids,
+                        local_hit_tokens,
+                        local_hit_tokens + num_external_tokens,
                     )
 
                 else:
@@ -197,6 +207,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             request.status,
             params,
         )
+        # Requests aborted before allocation never consumed their stash.
+        self._local_hit_tokens.pop(request.request_id, None)
         if not params:
             return False, None
 
@@ -216,7 +228,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], 0, 0)
             params["do_remote_prefill"] = False
             return False, None
 

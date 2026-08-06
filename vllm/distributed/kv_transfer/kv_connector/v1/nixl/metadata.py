@@ -219,6 +219,13 @@ class ReqMeta:
     remote_block_size: int | None = None
     # Remote producer pipeline-parallel size (push mode, D side).
     pp_size: int = 1
+    # Pull-mode token window: tokens [0, num_local_computed_tokens) are
+    # already cached locally (logical-block aligned local prefix hit);
+    # tokens [num_local_computed_tokens, num_total_tokens) are loaded
+    # from the remote. The worker uses these to align kernel-block
+    # windows when P and D logical block sizes differ. 0 = unknown.
+    num_local_computed_tokens: int = 0
+    num_total_tokens: int = 0
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -272,8 +279,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        num_local_computed_tokens: int = 0,
+        num_total_tokens: int = 0,
     ):
         req = self._add_new_req(local_block_ids, kv_transfer_params)
+        req.num_local_computed_tokens = num_local_computed_tokens
+        req.num_total_tokens = num_total_tokens
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
             engine_id=kv_transfer_params["remote_engine_id"],
