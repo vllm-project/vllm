@@ -101,6 +101,14 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     MINIMAX_M3_SPARSE = (
         "vllm.models.minimax_m3.common.sparse_attention.MiniMaxM3SparseBackend"
     )
+    CUTLASS_MSA = (
+        "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
+        "MiniMaxM3SparseCutlassBackend"
+    )
+    TRITON_MSA = (
+        "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
+        "MiniMaxM3SparseTritonBackend"
+    )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
     # HPC Attention Backend:
@@ -114,6 +122,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "RocmAiterUnifiedAttentionBackend"
     )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
+    CPU_MLA = "vllm.v1.attention.backends.mla.cpu_mla.CPUMLABackend"
     TURBOQUANT = "vllm.v1.attention.backends.turboquant_attn.TurboQuantAttentionBackend"
     OSCAR = "vllm.v1.attention.backends.oscar_attn.OscarAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
