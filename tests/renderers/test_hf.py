@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from transformers.utils.chat_template_utils import _compile_jinja_template
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -77,6 +78,66 @@ TEST_MESSAGES = [
     {"role": "user", "content": "What is the capital of"},
 ]
 ASSISTANT_MESSAGE_TO_CONTINUE = {"role": "assistant", "content": "The capital of"}
+
+_VULNERABLE_GEMMA4_SCAN_TEMPLATE = """\
+{%- set loop_messages = messages -%}
+{%- for message in loop_messages -%}
+    {%- if message['role'] != 'tool' -%}
+        {%- if message.get('tool_calls') -%}
+                {%- set ns_tool_scan = namespace(stopped=false) -%}
+                {%- for k in range(loop.index0 + 1, loop_messages | length) -%}
+                    {%- if ns_tool_scan.stopped -%}
+                    {%- elif loop_messages[k]['role'] != 'tool' -%}
+                        {%- set ns_tool_scan.stopped = true -%}
+                    {%- else -%}
+                        {{- loop_messages[k]['content'] -}}
+                    {%- endif -%}
+                {%- endfor -%}
+        {%- endif -%}
+        {%- set next_nt = namespace(role=None, found=false) -%}
+        {%- for j in range(loop.index0 + 1, loop_messages | length) -%}
+            {%- if not next_nt.found -%}
+                {%- if loop_messages[j]['role'] != 'tool' -%}
+                    {%- set next_nt.role = loop_messages[j]['role'] -%}
+                    {%- set next_nt.found = true -%}
+                {%- endif -%}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- endif -%}
+{%- endfor -%}
+"""
+
+
+class _CountingRange:
+    def __init__(self) -> None:
+        self.yields = 0
+
+    def __call__(self, *args):
+        for value in range(*args):
+            self.yields += 1
+            yield value
+
+
+def _alternating_tool_messages(pair_count: int) -> list[dict]:
+    messages: list[dict[str, object]] = [{"role": "user", "content": "start"}]
+    for index in range(pair_count):
+        call_id = f"call_{index}"
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "function": {"name": "lookup", "arguments": {}},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": call_id, "content": "ok"},
+            ]
+        )
+    return messages
 
 
 def test_load_chat_template():
@@ -322,6 +383,53 @@ def test_resolve_chat_template_resolves_name():
 
     assert result == jinja_content
     tokenizer.get_chat_template.assert_called_once_with("tool_use", tools=None)
+
+
+def test_resolve_default_gemma4_template_stops_suffix_scans():
+    from unittest.mock import MagicMock
+
+    tokenizer = MagicMock()
+    tokenizer.get_chat_template.return_value = _VULNERABLE_GEMMA4_SCAN_TEMPLATE
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "gemma4"
+
+    resolved = resolve_chat_template(
+        tokenizer,
+        chat_template=None,
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        model_config=model_config,
+    )
+
+    messages = _alternating_tool_messages(128)
+    original_output = _compile_jinja_template(_VULNERABLE_GEMMA4_SCAN_TEMPLATE).render(
+        messages=messages,
+    )
+    counting_range = _CountingRange()
+    resolved_output = _compile_jinja_template(resolved).render(
+        messages=messages,
+        range=counting_range,
+    )
+
+    assert resolved_output == original_output
+    assert counting_range.yields <= 3 * len(messages)
+
+
+def test_resolve_explicit_gemma4_template_is_not_rewritten():
+    from unittest.mock import MagicMock
+
+    tokenizer = MagicMock()
+    tokenizer.get_chat_template.return_value = _VULNERABLE_GEMMA4_SCAN_TEMPLATE
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "gemma4"
+
+    resolved = resolve_chat_template(
+        tokenizer,
+        chat_template="custom",
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        model_config=model_config,
+    )
+
+    assert resolved == _VULNERABLE_GEMMA4_SCAN_TEMPLATE
 
 
 def test_resolve_chat_template_kwargs_with_template_name():

@@ -272,11 +272,9 @@
                 {%- endfor -%}
             {%- elif message.get('tool_calls') -%}
                 {#- OpenAI Chat Completions: forward-scan consecutive role:tool messages -#}
-                {%- set ns_tool_scan = namespace(stopped=false) -%}
                 {%- for k in range(loop.index0 + 1, loop_messages | length) -%}
-                    {%- if ns_tool_scan.stopped -%}
-                    {%- elif loop_messages[k]['role'] != 'tool' -%}
-                        {%- set ns_tool_scan.stopped = true -%}
+                    {%- if loop_messages[k]['role'] != 'tool' -%}
+                        {%- break -%}
                     {%- else -%}
                         {%- set follow = loop_messages[k] -%}
                         {#- Resolve tool_call_id to function name -#}
@@ -348,11 +346,10 @@
         {#- Forward-scan: find next non-tool message role for continuation detection -#}
         {%- set next_nt = namespace(role=None, found=false) -%}
         {%- for j in range(loop.index0 + 1, loop_messages | length) -%}
-            {%- if not next_nt.found -%}
-                {%- if loop_messages[j]['role'] != 'tool' -%}
-                    {%- set next_nt.role = loop_messages[j]['role'] -%}
-                    {%- set next_nt.found = true -%}
-                {%- endif -%}
+            {%- if loop_messages[j]['role'] != 'tool' -%}
+                {%- set next_nt.role = loop_messages[j]['role'] -%}
+                {%- set next_nt.found = true -%}
+                {%- break -%}
             {%- endif -%}
         {%- endfor -%}
 

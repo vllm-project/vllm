@@ -98,6 +98,37 @@ _TOKENIZE_OVERRIDE_WARNING: Final[str] = (
     "Overriding `tokenize=False` to `True` because `prompt_embeds` "
     "post-processing requires tokenized IDs."
 )
+_GEMMA4_TOOL_RESPONSE_SCAN_BLOCK: Final[str] = """\
+                {%- set ns_tool_scan = namespace(stopped=false) -%}
+                {%- for k in range(loop.index0 + 1, loop_messages | length) -%}
+                    {%- if ns_tool_scan.stopped -%}
+                    {%- elif loop_messages[k]['role'] != 'tool' -%}
+                        {%- set ns_tool_scan.stopped = true -%}
+                    {%- else -%}"""
+_GEMMA4_TOOL_RESPONSE_SCAN_LINEAR_BLOCK: Final[str] = """\
+                {%- for k in range(loop.index0 + 1, loop_messages | length) -%}
+                    {%- if loop_messages[k]['role'] != 'tool' -%}
+                        {%- break -%}
+                    {%- else -%}"""
+_GEMMA4_NEXT_NON_TOOL_SCAN_BLOCK: Final[str] = """\
+        {%- set next_nt = namespace(role=None, found=false) -%}
+        {%- for j in range(loop.index0 + 1, loop_messages | length) -%}
+            {%- if not next_nt.found -%}
+                {%- if loop_messages[j]['role'] != 'tool' -%}
+                    {%- set next_nt.role = loop_messages[j]['role'] -%}
+                    {%- set next_nt.found = true -%}
+                {%- endif -%}
+            {%- endif -%}
+        {%- endfor -%}"""
+_GEMMA4_NEXT_NON_TOOL_SCAN_LINEAR_BLOCK: Final[str] = """\
+        {%- set next_nt = namespace(role=None, found=false) -%}
+        {%- for j in range(loop.index0 + 1, loop_messages | length) -%}
+            {%- if loop_messages[j]['role'] != 'tool' -%}
+                {%- set next_nt.role = loop_messages[j]['role'] -%}
+                {%- set next_nt.found = true -%}
+                {%- break -%}
+            {%- endif -%}
+        {%- endfor -%}"""
 
 
 def _ensure_prompt_embeds_placeholder_token(tokenizer: HfTokenizer) -> int:
@@ -254,6 +285,42 @@ def _try_get_processor_chat_template(
     return None
 
 
+@lru_cache
+def _linearize_gemma4_default_chat_template(chat_template: str) -> str:
+    """Remove redundant suffix iterations from known Gemma4 default templates."""
+    if (
+        _GEMMA4_TOOL_RESPONSE_SCAN_BLOCK not in chat_template
+        or _GEMMA4_NEXT_NON_TOOL_SCAN_BLOCK not in chat_template
+    ):
+        return chat_template
+
+    return chat_template.replace(
+        _GEMMA4_TOOL_RESPONSE_SCAN_BLOCK,
+        _GEMMA4_TOOL_RESPONSE_SCAN_LINEAR_BLOCK,
+        1,
+    ).replace(
+        _GEMMA4_NEXT_NON_TOOL_SCAN_BLOCK,
+        _GEMMA4_NEXT_NON_TOOL_SCAN_LINEAR_BLOCK,
+        1,
+    )
+
+
+def _maybe_linearize_default_gemma4_chat_template(
+    *,
+    model_config: ModelConfig,
+    requested_chat_template: str | None,
+    resolved_chat_template: str | None,
+) -> str | None:
+    if requested_chat_template is not None or resolved_chat_template is None:
+        return resolved_chat_template
+
+    model_type = getattr(model_config.hf_config, "model_type", "")
+    if not isinstance(model_type, str) or not model_type.startswith("gemma4"):
+        return resolved_chat_template
+
+    return _linearize_gemma4_default_chat_template(resolved_chat_template)
+
+
 def resolve_chat_template(
     tokenizer: HfTokenizer,
     chat_template: str | None,
@@ -261,6 +328,8 @@ def resolve_chat_template(
     *,
     model_config: ModelConfig,
 ) -> str | None:
+    requested_chat_template = chat_template
+
     # 1st priority: The given chat template
     if chat_template is not None:
         # Resolve template names (e.g. "tool_use") to actual Jinja content
@@ -274,11 +343,20 @@ def resolve_chat_template(
             trust_remote_code=model_config.trust_remote_code,
         )
         if chat_template is not None:
-            return chat_template
+            return _maybe_linearize_default_gemma4_chat_template(
+                model_config=model_config,
+                requested_chat_template=requested_chat_template,
+                resolved_chat_template=chat_template,
+            )
 
     # 3rd priority: AutoTokenizer chat template
     try:
-        return tokenizer.get_chat_template(chat_template, tools=tools)
+        resolved_chat_template = tokenizer.get_chat_template(chat_template, tools=tools)
+        return _maybe_linearize_default_gemma4_chat_template(
+            model_config=model_config,
+            requested_chat_template=requested_chat_template,
+            resolved_chat_template=resolved_chat_template,
+        )
     except Exception:
         logger.debug(
             "Failed to load AutoTokenizer chat template for %s",
@@ -303,7 +381,11 @@ def resolve_chat_template(
             "There is no chat template fallback for %s", tokenizer.name_or_path
         )
 
-    return chat_template
+    return _maybe_linearize_default_gemma4_chat_template(
+        model_config=model_config,
+        requested_chat_template=requested_chat_template,
+        resolved_chat_template=chat_template,
+    )
 
 
 def _is_var_access(node: jinja2.nodes.Node, varname: str) -> bool:
