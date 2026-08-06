@@ -259,6 +259,7 @@ class DeepseekV32Attention(MLAAttention):
         self.topk_indices_buffer = topk_indices_buffer
 
         self.skip_topk = False
+        self._dense_mha_metadata_layer_name = "" if is_mtp_layer else self.layer_name
 
         if self.require_fp8_kv_cache:
             assert is_quantized_kv_cache(self.kv_cache_dtype), (
@@ -470,7 +471,7 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=True,
                 use_pcp=False,
-                dense_mha_metadata_layer_name="",
+                dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
                 use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
