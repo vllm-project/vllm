@@ -31,8 +31,7 @@ impl ControlServiceImpl {
         pb::ParallelismInfo {
             tensor_parallel_size: ready.tensor_parallel_size,
             pipeline_parallel_size: ready.pipeline_parallel_size,
-            data_parallel_size: self.state.configured_data_parallel_size().min(u32::MAX as usize)
-                as u32,
+            data_parallel_size: ready.data_parallel_size.min(u64::from(u32::MAX)) as u32,
             data_parallel_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
         }
@@ -58,7 +57,6 @@ impl pb::control_server::Control for ControlServiceImpl {
             total_kv_blocks: self.state.engine_core_client().total_num_gpu_blocks(),
             max_running_requests: ready.max_num_seqs,
             max_batched_tokens: ready.max_num_batched_tokens,
-            supports_explicit_data_parallel_rank: true,
         }))
     }
 

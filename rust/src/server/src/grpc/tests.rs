@@ -1508,7 +1508,6 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(server.total_kv_blocks, DEFAULT_MOCK_NUM_GPU_BLOCKS);
     assert_eq!(server.max_running_requests, 256);
     assert_eq!(server.max_batched_tokens, 8_192);
-    assert!(server.supports_explicit_data_parallel_rank);
     let parallelism = server.parallelism.expect("parallelism metadata");
     assert_eq!(parallelism.tensor_parallel_size, 1);
     assert_eq!(parallelism.pipeline_parallel_size, 1);
@@ -1580,9 +1579,10 @@ async fn control_aggregates_multi_engine_capacity() {
         Llm::new(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
-    let state =
-        AppState::new(vec!["test-model".to_string()], chat).with_configured_data_parallel_size(4);
-    let service = ControlServiceImpl::new(Arc::new(state));
+    let service = ControlServiceImpl::new(Arc::new(AppState::new(
+        vec!["test-model".to_string()],
+        chat,
+    )));
 
     let server = pb::control_server::Control::get_server_info(
         &service,
@@ -1593,7 +1593,6 @@ async fn control_aggregates_multi_engine_capacity() {
     .into_inner();
     assert_eq!(server.max_model_len, 4_096);
     assert_eq!(server.total_kv_blocks, 30);
-    assert_eq!(server.parallelism.unwrap().data_parallel_size, 4);
 
     drop(engine_tasks);
 }
