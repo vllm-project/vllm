@@ -1667,6 +1667,7 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
@@ -1674,6 +1675,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )

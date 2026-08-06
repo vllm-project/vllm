@@ -6,7 +6,16 @@ only get the `eos_token_id` from the tokenizer as defined by
 `BaseRenderer.get_eos_token_id`.
 """
 
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
+
+from transformers import PretrainedConfig
+
+from vllm.config import model as model_module
+from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
+from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import try_get_generation_config
 
 
@@ -30,3 +39,67 @@ def test_get_blip2_eos_token():
     generation_config = try_get_generation_config(model_name, trust_remote_code=False)
     assert generation_config is not None
     assert generation_config.eos_token_id == 50118
+
+
+def test_generation_config_fallback_forwards_code_revision():
+    with (
+        patch.object(
+            config_module.GenerationConfig,
+            "from_pretrained",
+            side_effect=OSError,
+        ),
+        patch.object(
+            config_module,
+            "get_config",
+            return_value=PretrainedConfig(),
+        ) as get_config,
+    ):
+        generation_config = try_get_generation_config(
+            "org/model",
+            trust_remote_code=True,
+            revision="model-pin",
+            code_revision="code-pin",
+        )
+
+    assert generation_config is not None
+    get_config.assert_called_once_with(
+        "org/model",
+        trust_remote_code=True,
+        revision="model-pin",
+        code_revision="code-pin",
+        config_format="auto",
+        token=None,
+    )
+
+
+def test_model_config_generation_load_forwards_code_revision():
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            generation_config="auto",
+            hf_config_path=None,
+            model="org/model",
+            trust_remote_code=True,
+            revision="model-pin",
+            code_revision="code-pin",
+            config_format="auto",
+            hf_token=None,
+        ),
+    )
+
+    with patch.object(
+        model_module,
+        "try_get_generation_config",
+        return_value=None,
+    ) as get_generation_config:
+        result = ModelConfig.try_get_generation_config(model_config)
+
+    assert result == {}
+    get_generation_config.assert_called_once_with(
+        "org/model",
+        trust_remote_code=True,
+        revision="model-pin",
+        code_revision="code-pin",
+        config_format="auto",
+        hf_token=None,
+    )
