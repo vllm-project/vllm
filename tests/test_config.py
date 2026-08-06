@@ -430,6 +430,17 @@ def test_draft_model_enables_async_scheduling_by_default():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_dflash_max_num_new_slots_for_drafting():
+    speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=8,
+    )
+    speculative_config.method = "dflash"
+    speculative_config.parallel_drafting = True
+
+    assert speculative_config.max_num_new_slots_for_drafting == 8
+
+
 @dataclass
 class _TestConfigFields:
     a: int

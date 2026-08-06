@@ -1408,6 +1408,9 @@ class SpeculativeConfig:
         if self.parallel_drafting:
             # For parallel drafting, we need one new slot per 'masked' token
             slots_per_req = self.num_speculative_tokens - 1
+            if self.use_dflash():
+                # DFlash adds a bonus query before the masked tokens.
+                slots_per_req += 1
         if self.uses_draft_model():
             # For draft model-based speculation, we need one new slot per request
             # Since we do not slice the draft tokens
