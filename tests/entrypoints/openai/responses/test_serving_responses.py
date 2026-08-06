@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
@@ -53,6 +54,19 @@ from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
 from vllm.sampling_params import SamplingParams
+
+
+class _CountingFunctionCallList(list[ResponseFunctionToolCall]):
+    def __init__(self, calls: list[ResponseFunctionToolCall]):
+        super().__init__(calls)
+        self.reverse_calls = 0
+
+    def __copy__(self):
+        return self
+
+    def __reversed__(self):
+        self.reverse_calls += 1
+        return super().__reversed__()
 
 
 class MockConversationContext(ConversationContext):
@@ -153,6 +167,89 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
         "code_interpreter",
         "web_search_preview",
     }
+
+
+def test_harmony_function_call_outputs_do_not_reverse_scan_per_item() -> None:
+    previous_outputs = _CountingFunctionCallList([])
+    prev_response = MagicMock()
+    prev_response.id = "resp_prev"
+    prev_response.output = previous_outputs
+    serving = MagicMock(spec=OpenAIServingResponses)
+    serving.msg_store = {"resp_prev": []}
+    request = ResponsesRequest(
+        model="test-model",
+        input=[
+            {
+                "type": "function_call",
+                "id": f"fc_{index}",
+                "call_id": f"call_{index}",
+                "name": f"function_{index}",
+                "arguments": "{}",
+            }
+            for index in range(32)
+        ]
+        + [
+            {
+                "type": "function_call_output",
+                "call_id": "call_0",
+                "output": "ok",
+            }
+            for _ in range(32)
+        ],
+    )
+
+    messages = OpenAIServingResponses._construct_input_messages_with_harmony(
+        serving, request, prev_response
+    )
+
+    assert len(messages) == 64
+    assert messages[-1].author.name == "functions.function_0"
+    assert previous_outputs.reverse_calls <= 1
+
+
+def test_harmony_function_call_index_keeps_latest_prior_call() -> None:
+    earlier = ResponseFunctionToolCall(
+        id="fc_old",
+        call_id="call_test",
+        name="old_function",
+        arguments="{}",
+        type="function_call",
+    )
+    later = ResponseFunctionToolCall(
+        id="fc_new",
+        call_id="call_test",
+        name="new_function",
+        arguments="{}",
+        type="function_call",
+    )
+    reasoning = ResponseReasoningItem(
+        id="rs_test",
+        type="reasoning",
+        content=[],
+        summary=[],
+        status=None,
+    )
+    prev_response = MagicMock()
+    prev_response.id = "resp_prev"
+    prev_response.output = [earlier, reasoning, later]
+    serving = MagicMock(spec=OpenAIServingResponses)
+    serving.msg_store = {"resp_prev": []}
+    request = ResponsesRequest(
+        model="test-model",
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_test",
+                "output": "ok",
+            }
+        ],
+    )
+
+    messages = OpenAIServingResponses._construct_input_messages_with_harmony(
+        serving, request, prev_response
+    )
+
+    assert messages[-1].author.name == "functions.new_function"
 
 
 @pytest.mark.skip_global_cleanup

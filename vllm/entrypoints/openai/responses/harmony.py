@@ -9,6 +9,7 @@ Handles two directions:
 """
 
 import json
+from collections.abc import Mapping
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -147,12 +148,13 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
 
 def response_input_to_harmony(
     response_msg: ResponseInputOutputItem,
-    prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
+    function_calls_by_id: Mapping[str, ResponseFunctionToolCall],
 ) -> Message | None:
     """Convert a single ResponseInputOutputItem into a Harmony Message.
 
     Returns None for reasoning items with empty or absent content so
-    the caller can skip them.
+    the caller can skip them. Function-call outputs resolve against the
+    latest prior function call keyed by call_id.
     """
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
@@ -175,14 +177,7 @@ def response_input_to_harmony(
             msg = msg.with_channel("final")
     elif response_msg["type"] == "function_call_output":
         call_id = response_msg["call_id"]
-        call_response: ResponseFunctionToolCall | None = None
-        for prev_response in reversed(prev_responses):
-            if (
-                isinstance(prev_response, ResponseFunctionToolCall)
-                and prev_response.call_id == call_id
-            ):
-                call_response = prev_response
-                break
+        call_response = function_calls_by_id.get(call_id)
         if call_response is None:
             raise ValueError(f"No call message found for {call_id}")
         msg = Message.from_author_and_content(

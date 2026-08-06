@@ -6,7 +6,6 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
-from copy import copy
 from http import HTTPStatus
 from typing import Any, Final
 
@@ -1203,21 +1202,23 @@ class OpenAIServingResponses(GenerateBaseServing):
             if request_input or not request.previous_input_messages:
                 messages.append(get_user_message(request_input))
         else:
-            if prev_response is not None:
-                prev_outputs = copy(prev_response.output)
-            else:
-                prev_outputs = []
+            function_calls_by_id = {
+                output.call_id: output
+                for output in (
+                    prev_response.output if prev_response is not None else []
+                )
+                if isinstance(output, ResponseFunctionToolCall)
+            }
             for response_msg in request_input:
-                new_msg = response_input_to_harmony(response_msg, prev_outputs)
+                new_msg = response_input_to_harmony(response_msg, function_calls_by_id)
                 if new_msg is not None:
                     messages.append(new_msg)
 
-                # User passes in a tool call request and its output. We need
-                # to add the tool call request to prev_outputs so that
-                # response_input_to_harmony can find the tool call request when
-                # parsing the tool call output.
+                # Keep the latest prior tool call keyed by call_id so output
+                # conversion stays linear and duplicate IDs keep last-wins
+                # semantics.
                 if isinstance(response_msg, ResponseFunctionToolCall):
-                    prev_outputs.append(response_msg)
+                    function_calls_by_id[response_msg.call_id] = response_msg
         return messages
 
     async def _run_background_request_stream(
