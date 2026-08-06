@@ -167,9 +167,7 @@ class ServingTokens(GenerateBaseServing):
         elif features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
-                modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
-                ]
+                modality: [p.to_placeholder_range() for p in ranges]
                 for modality, ranges in features.mm_placeholders.items()
             }
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, Literal, TypeAlias
 
+import torch
 from pydantic import (
     BaseModel,
     Field,
@@ -22,6 +23,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
 from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -38,9 +40,31 @@ class PlaceholderRangeInfo(BaseModel):
     length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add ``is_embed: list[bool] | None`` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Positions within the range that receive multimodal embeddings."""
+
+    @model_validator(mode="after")
+    def _validate_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed length must match placeholder length")
+        return self
+
+    @classmethod
+    def from_placeholder_range(cls, value: PlaceholderRange) -> "PlaceholderRangeInfo":
+        is_embed = value.is_embed.tolist() if value.is_embed is not None else None
+        return cls(offset=value.offset, length=value.length, is_embed=is_embed)
+
+    def to_placeholder_range(self) -> PlaceholderRange:
+        is_embed = (
+            torch.tensor(self.is_embed, dtype=torch.bool)
+            if self.is_embed is not None
+            else None
+        )
+        return PlaceholderRange(
+            offset=self.offset,
+            length=self.length,
+            is_embed=is_embed,
+        )
 
 
 class MultiModalFeatures(BaseModel):

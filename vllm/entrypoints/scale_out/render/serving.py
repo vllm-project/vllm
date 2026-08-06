@@ -225,9 +225,7 @@ class ServingRender(BaseServing):
         raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
 
         mm_placeholders = {
-            modality: [
-                PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
-            ]
+            modality: [PlaceholderRangeInfo.from_placeholder_range(p) for p in ranges]
             for modality, ranges in raw_placeholders.items()
         }
 
