@@ -407,6 +407,29 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.world_size == 8
 
 
+def test_draft_model_enables_async_scheduling_by_default():
+    parallel_config = ParallelConfig(distributed_executor_backend="uni")
+    model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
+    speculative_config = SpeculativeConfig(
+        method="draft_model",
+        model="Qwen/Qwen3-0.6B",
+        num_speculative_tokens=3,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+    cfg = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
+    )
+
+    assert cfg.scheduler_config.async_scheduling is True
+
+
 @dataclass
 class _TestConfigFields:
     a: int
