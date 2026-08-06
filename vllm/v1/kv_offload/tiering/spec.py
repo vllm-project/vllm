@@ -9,11 +9,21 @@ and configurable secondary tiers (e.g., Storage, Network).
 Configuration via kv_connector_extra_config:
   - cpu_bytes_to_use: (required) Bytes to allocate for CPU primary tier
   - block_size: (optional) Block size for offloaded blocks (default: GPU block size)
-  - eviction_policy: (optional) Primary tier eviction policy: "lru" or
-    "arc" (default: "lru")
+  - eviction_policy: (optional) Primary tier eviction policy: built-in "lru"/
+    "arc", or the name of a policy registered via CachePolicyFactory, or an
+    out-of-tree CachePolicy class name paired with cache_policy_module_path
+    (default: "lru")
+  - cache_policy_module_path: (optional) Python import path to load
+    eviction_policy from when it names an out-of-tree CachePolicy not
+    registered via CachePolicyFactory
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
-      - type: (required) Type of secondary tier (e.g., "example", "storage", "network")
+      - type: (required) Type of secondary tier (e.g., "example", "fs",
+        "p2p", "obj"), or the class name of an out-of-tree
+        SecondaryTierManager paired with module_path.
+      - module_path: (optional) Python import path to load 'type' from
+        when it names an out-of-tree SecondaryTierManager not registered
+        via SecondaryTierFactory.register_tier()
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
 
@@ -26,6 +36,18 @@ Example configuration:
         {
             "type": "example",
             "custom_param": 67
+        }
+    ]
+}
+
+Example out-of-tree tier configuration:
+{
+    "cpu_bytes_to_use": 10737418240,
+    "secondary_tiers": [
+        {
+            "type": "MyCustomTier",
+            "module_path": "my_package.my_module",
+            "custom_param": "value"
         }
     ]
 }
@@ -177,7 +199,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Create primary tier (CPU-based)
             primary_tier = CPUPrimaryTierOffloadingManager(
                 num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                cache_policy=self.eviction_policy,
+                cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 mmap_region=scheduler_mmap,
             )
@@ -228,11 +251,21 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return self._manager
 
     @override
+    def _uses_shared_region(self) -> bool:
+        # Tiering always allocates on the shared region (every platform), so the
+        # replicated-layout gate must not be narrowed by the CPU spec's
+        # CUDA-alike check.
+        return True
+
+    @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        # Fold the global physical device index into the replica-local
-        # [0, world_size) slot range.
         world_size = self.config.parallel.world_size
-        rank = torch.accelerator.current_device_index() % world_size
+        if self.replicated_layout:
+            rank = 0
+        else:
+            # Fold the global physical device index into the replica-local
+            # [0, world_size) slot range.
+            rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_blocks=self.num_blocks,

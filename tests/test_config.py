@@ -382,6 +382,54 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=8,
+        data_parallel_size=2,
+        data_parallel_size_local=1,
+        data_parallel_rank=1,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+
+    parallel_config.reconfigure_for_independent_dp_rank()
+
+    assert parallel_config.data_parallel_size == 1
+    assert parallel_config.data_parallel_size_local == 1
+    assert parallel_config.data_parallel_rank == 0
+    assert parallel_config.data_parallel_index == 1
+    assert parallel_config.nnodes == 1
+    assert parallel_config.node_rank == 0
+    assert parallel_config.world_size == 8
+
+
+def test_draft_model_enables_async_scheduling_by_default():
+    parallel_config = ParallelConfig(distributed_executor_backend="uni")
+    model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
+    speculative_config = SpeculativeConfig(
+        method="draft_model",
+        model="Qwen/Qwen3-0.6B",
+        num_speculative_tokens=3,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+    cfg = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
+    )
+
+    assert cfg.scheduler_config.async_scheduling is True
+
+
 @dataclass
 class _TestConfigFields:
     a: int
@@ -1235,6 +1283,26 @@ def test_vllm_config_defaults_are_none():
                 assert getattr(config.compilation_config, k) is None
 
 
+def test_validate_mamba_align_subblock_prefill():
+    """Align mode permits configured prefill chunks smaller than a block."""
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=11392,
+            mamba_cache_mode="align",
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8192,
+            long_prefill_token_threshold=4096,
+            disable_chunked_mm_input=False,
+        ),
+    )
+
+    VllmConfig.validate_block_size(config)
+
+
 @pytest.mark.parametrize(
     ("model_id", "compilation_config", "optimization_level"),
     [
@@ -1558,20 +1626,31 @@ def test_fault_tolerance_requires_single_api_server():
 
 
 def test_renderer_num_workers_with_mm_cache():
-    """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
-    since neither cache type is thread-safe."""
+    """Disallow renderer_num_workers > 1 with the mm processor cache only for
+    pooling models, whose preprocessing runs on the renderer workers."""
     mm_model = "Qwen/Qwen2-VL-2B-Instruct"
 
-    # Should raise: multi-worker + cache enabled (default cache_gb=4)
+    # Should raise: pooling + multi-worker + cache enabled (default cache_gb=4)
     with pytest.raises(ValueError, match="renderer-num-workers"):
-        ModelConfig(mm_model, renderer_num_workers=4)
+        ModelConfig(mm_model, runner="pooling", renderer_num_workers=4)
 
-    # Should raise: multi-worker + explicit cache size
+    # Should raise: pooling + multi-worker + explicit cache size
     with pytest.raises(ValueError, match="renderer-num-workers"):
-        ModelConfig(mm_model, renderer_num_workers=2, mm_processor_cache_gb=1.0)
+        ModelConfig(
+            mm_model,
+            runner="pooling",
+            renderer_num_workers=2,
+            mm_processor_cache_gb=1.0,
+        )
 
-    # Should pass: multi-worker + cache disabled
-    config = ModelConfig(mm_model, renderer_num_workers=4, mm_processor_cache_gb=0)
+    # Should pass: pooling + multi-worker + cache disabled
+    config = ModelConfig(
+        mm_model, runner="pooling", renderer_num_workers=4, mm_processor_cache_gb=0
+    )
+    assert config.renderer_num_workers == 4
+
+    # Should pass: generate models preprocess on the dedicated mm executor
+    config = ModelConfig(mm_model, renderer_num_workers=4)
     assert config.renderer_num_workers == 4
 
     # Should pass: single worker + cache enabled (default)
