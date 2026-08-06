@@ -222,10 +222,11 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     )
 
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    # 1-based: block 0 is the reserved null block and the save skips it.
     save_req = ReqMeta(
         req_id="r0",
         token_len_chunk=64,
-        block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
+        block_ids=([1, 2, 3, 4], [1, 2, 3, 4]),
         block_hashes=hs,
         can_save=True,
     )
@@ -427,10 +428,10 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=20,
-        partial_tail_offloads=[(1, mamba_cow_block, 12)],
+        boundary_state_offloads=[(1, 1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    send._maybe_offload_boundary_states(req)
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -498,7 +499,7 @@ def test_offload_syncs_event_before_put():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        partial_tail_offloads=[(1, 7, 12)],
+        boundary_state_offloads=[(1, 1, 7, 12)],
     )
     req.current_event = event
     send.add_stored_request("r1")
@@ -575,10 +576,10 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        partial_tail_offloads=[(1, mamba_cow_block, 12)],
+        boundary_state_offloads=[(1, 1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_partial_tail(req)
+    send._maybe_offload_boundary_states(req)
 
     # FA (block 4): full blocks ending at 4, 8 and 12, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under

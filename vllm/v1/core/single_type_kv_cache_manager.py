@@ -115,13 +115,14 @@ class SingleTypeKVCacheManager(ABC):
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
         self._pending_cow_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
-        # Partial-tail offload hand-off for external KV connectors: when a
-        # producer registers its last-prompt-boundary partial tail and the
-        # durable boundary block is not on the append-only request block table
-        # (mamba "align" CoW target), record the request, group, block, and
-        # exact token boundary so a connector can offload it under the right
-        # hash. Populated only by mamba "align".
-        self._pending_partial_tail_offloads: list[
+        # Boundary-state offload hand-off for external KV connectors. A mamba
+        # "align" block table is not append-only (interior states are
+        # nulled/freed and speculative blocks relocate in place), so a
+        # connector cannot resolve its state blocks positionally. Record
+        # (request, group, block, exact token boundary) for each committed
+        # boundary state so a connector can offload the right block under the
+        # right hash. Populated only by mamba "align".
+        self._pending_boundary_state_offloads: list[
             tuple[str, int, KVCacheBlock, int]
         ] = []
 
@@ -387,19 +388,19 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_cow_copies = []
         return pending_copies
 
-    def take_pending_partial_tail_offloads(
+    def take_pending_boundary_state_offloads(
         self,
     ) -> list[tuple[str, int, KVCacheBlock, int]]:
-        """Drain producer partial-tail hand-offs.
+        """Drain producer boundary-state hand-offs.
 
         Entries are ``(req_id, group_id, block, boundary_tokens)``.
 
-        Only mamba "align" populates this. The block lives off the request
-        block table, so the caller must pin it until the connector has read
-        it — nothing else keeps it alive once the CoW retention is released.
+        Only mamba "align" populates this. The blocks are not kept alive by
+        the request block table for the whole request, so a caller that reads
+        them asynchronously must pin them first.
         """
-        pending = self._pending_partial_tail_offloads
-        self._pending_partial_tail_offloads = []
+        pending = self._pending_boundary_state_offloads
+        self._pending_boundary_state_offloads = []
         return pending
 
     def _apply_cow(
@@ -1273,7 +1274,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). On the next step's CoW the boundary state moves
             # into a private cow_block; we record that block for connector
-            # offload (see _pending_partial_tail_offloads).
+            # offload (see _pending_boundary_state_offloads).
             self._producer_partial_tail_reqs: dict[str, int] = {}
 
     @classmethod
@@ -1629,7 +1630,7 @@ class MambaManager(SingleTypeKVCacheManager):
                             # This CoW preserved a producer's own boundary
                             # state in cow_block; hand it to the connector for
                             # partial-tail offload once the copy has run.
-                            self._pending_partial_tail_offloads.append(
+                            self._pending_boundary_state_offloads.append(
                                 (
                                     request_id,
                                     self.kv_cache_group_id,
@@ -1655,11 +1656,14 @@ class MambaManager(SingleTypeKVCacheManager):
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
-            # A hand-off whose request died in this same scheduling pass must
-            # not reach the connector: its unpin hook (free) has already run.
-            self._pending_partial_tail_offloads = [
+            # An offer is only guaranteed to hold committed bytes until the end
+            # of the pass that made it. This request's blocks are going back to
+            # the pool now, so drop its not-yet-offered hand-offs rather than
+            # let a connector claim a block another request may already have
+            # been handed.
+            self._pending_boundary_state_offloads = [
                 entry
-                for entry in self._pending_partial_tail_offloads
+                for entry in self._pending_boundary_state_offloads
                 if entry[0] != request_id
             ]
         return super().pop_blocks_for_free(request_id)
@@ -1686,9 +1690,9 @@ class MambaManager(SingleTypeKVCacheManager):
             if partial_hash is not None:
                 self.cached_blocks_this_step.add(partial_hash)
         if num_cached_blocks_after > num_cached_blocks_before:
-            for block in self.req_to_blocks[request.request_id][
-                num_cached_blocks_before:num_cached_blocks_after
-            ]:
+            blocks = self.req_to_blocks[request.request_id]
+            for idx in range(num_cached_blocks_before, num_cached_blocks_after):
+                block = blocks[idx]
                 # Skip null blocks (align-mode skipped states) and blocks that
                 # were not cached this step — with sparse retention
                 # (reachable_block_mask) the intermediate state snapshots carry
@@ -1696,6 +1700,29 @@ class MambaManager(SingleTypeKVCacheManager):
                 if block.is_null or block.block_hash is None:
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
+                if self.mamba_cache_mode == "align":
+                    # Hand the committed boundary state to a producer-side KV
+                    # connector, which cannot resolve align-mode state blocks
+                    # positionally. Emission follows the retention mask via the
+                    # blocks super().cache_blocks actually hashed: all
+                    # materialized boundaries under dense (default) retention,
+                    # sparse checkpoints otherwise. Skipped positions hold the
+                    # null block and are filtered above, which is also what
+                    # keeps unreachable eagle/speculative tails out.
+                    #
+                    # Every boundary is offered. Which ones are worth storing is
+                    # the connector's call: only it knows how far its own save
+                    # window reaches, and on a resumed prefill that window ends
+                    # past `num_prompt_tokens` (the replayed output tokens are
+                    # re-prefilled and saved for every other group too).
+                    self._pending_boundary_state_offloads.append(
+                        (
+                            request.request_id,
+                            self.kv_cache_group_id,
+                            block,
+                            (idx + 1) * self.block_size,
+                        )
+                    )
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()

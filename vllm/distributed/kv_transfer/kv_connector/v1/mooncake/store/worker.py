@@ -18,7 +18,7 @@ import socket
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
@@ -46,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     ChunkedTokenDatabase,
     KeyMetadata,
     MooncakeStoreConnectorMetadata,
+    MooncakeStoreWorkerMetadata,
     PoolKey,
     ReqMeta,
 )
@@ -522,6 +523,40 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # batch resumes here, so pressure-skipped or failed ranges are retried.
         self._saved_offset: dict[str, int] = {}
 
+        # Core boundary-state hand-offs handed to this thread but not yet
+        # dequeued, and the highest id ever handed to it. Each pins a GPU state
+        # block in the core until the watermark below reaches it.
+        self._pending_handoffs: set[int] = set()
+        self._max_seen_handoff = 0
+
+    def note_pending_handoffs(self, handoff_ids: Iterable[int]) -> None:
+        """Register hand-offs being enqueued. Must run before ``add_request``."""
+        with self.done_task_lock:
+            for handoff_id in handoff_ids:
+                self._pending_handoffs.add(handoff_id)
+                self._max_seen_handoff = max(self._max_seen_handoff, handoff_id)
+
+    def handoff_watermark(self) -> int | None:
+        """Highest id whose hand-off — and every earlier one — is terminal.
+
+        A hand-off is terminal once its request is dequeued here, whatever the
+        outcome: dedup/no-put, a successful put, or a dropped batch (pressure
+        skip, cancelled request, failed exists/put). The core may then reuse the
+        block, so the id must not be reported before that. Returns ``None`` only
+        when this rank has never received a hand-off.
+        """
+        with self.done_task_lock:
+            if self._pending_handoffs:
+                return min(self._pending_handoffs) - 1
+            return self._max_seen_handoff or None
+
+    def _complete_handoffs(self, req_meta: ReqMeta) -> None:
+        if not req_meta.boundary_state_offloads:
+            return
+        with self.done_task_lock:
+            for entry in req_meta.boundary_state_offloads:
+                self._pending_handoffs.discard(entry[0])
+
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
@@ -563,48 +598,76 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
-    def _maybe_offload_partial_tail(self, req_meta: ReqMeta) -> bool:
-        """Offload the request's sub-block partial tail (its last prompt hash
-        boundary) so a later request can hit the sub-block prefix.
+    def _boundary_snapshot_puts(
+        self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
+    ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
+        """Puts for committed mamba "align" boundary-state snapshots.
 
-        Covers every block from the normal save's lcm floor to the boundary:
-        the normal save floors to ``lcm_block_size``, so a smaller-block
-        group's full blocks in that gap are never persisted elsewhere, and
-        the consumer's lookup needs every group at every probed boundary.
-        Full blocks are keyed by their block-end hash, the partial boundary
-        block by the boundary sub-hash; the mamba "align" boundary block is
-        the core-provided CoW block. All keys are deduped against the store.
+        These are block-aligned boundaries, i.e. exactly what the normal save
+        would key — but ``store_mask`` masks mamba groups out of it entirely, so
+        this is their *only* writer. The exclusion is not an optimization: the
+        normal save resolves a chunk's address as
+        ``req_meta.block_ids[g][start // block_size]``, and ``block_ids`` is the
+        connector's append-only mirror of the core's per-group table. An
+        align-mode table is mutated in place (a superseded state block is freed
+        and nulled; speculative blocks relocate), and the connector is never
+        told, so a stale mirror entry is indistinguishable from a live one — a
+        retry of a failed or pressure-skipped chunk would read a block that now
+        belongs to another request.
 
-        Returns:
-            True when no put is needed or every put succeeds, False otherwise.
+        Each entry's handed-off block *is* the boundary state and is pinned by
+        the core, so it is uploaded under its boundary-end hash key and never
+        resolved positionally.
         """
-        if not self.coord.enable_partial_hash_hits or not req_meta.block_hashes:
-            return True
-        partial_tail_offloads = req_meta.partial_tail_offloads
-        if not partial_tail_offloads:
-            return True
         hash_block_size = self.coord.hash_block_size
-        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
+        for group_id, block_id, boundary in entries:
+            if boundary == 0 or block_id == NULL_BLOCK_ID:
+                continue
+            hash_idx = boundary // hash_block_size - 1
+            if hash_idx >= len(req_meta.block_hashes):
+                continue
+            db = self.token_databases[group_id]
+            # Distribute across ranks by the same rule as normal chunks.
+            put_step = self.group_put_steps[group_id]
+            put_step_rank = (self.tp_rank + group_id) % put_step
+            if (boundary // db.block_size - 1) % put_step != put_step_rank:
+                continue
+            addr, size = db.prepare_value_for_block(block_id)
+            puts.append(
+                (db.key_for(req_meta.block_hashes[hash_idx]), addr, size, db.metadata)
+            )
+        return puts
+
+    def _sub_block_tail_puts(
+        self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
+    ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
+        """Puts for the request's sub-block partial tail (its last prompt hash
+        boundary), so a later request can hit the sub-block prefix.
+
+        Covers every group's blocks from the normal save's lcm floor to the
+        boundary: the normal save floors to ``lcm_block_size``, so a
+        smaller-block group's full blocks in that gap are never persisted
+        elsewhere, and the consumer's lookup needs every group at every probed
+        boundary. Full blocks are keyed by their block-end hash and the partial
+        boundary block by the boundary sub-hash; a mamba "align" group
+        contributes only its boundary block, from the core-provided CoW block.
+        """
+        boundaries = {boundary for _, _, boundary in entries}
         if len(boundaries) != 1:
             raise ValueError(
-                "Partial-tail offloads for one request must share a boundary"
+                "Sub-block partial-tail offloads for one request must share a boundary"
             )
         boundary = boundaries.pop()
-        if boundary == 0:
-            return True
-        if boundary // hash_block_size - 1 >= len(req_meta.block_hashes):
-            return True
-        mamba_offloads = {
-            group_id: block_id for group_id, block_id, _ in partial_tail_offloads
-        }
+        hash_block_size = self.coord.hash_block_size
+        if boundary == 0 or boundary // hash_block_size - 1 >= len(
+            req_meta.block_hashes
+        ):
+            return []
 
-        keys: list[str] = []
-        addrs: list[list[int]] = []
-        sizes: list[list[int]] = []
-        group_ids: list[str] | None = (
-            [] if self.enable_group_semantics and self.supports_group_ids else None
-        )
+        mamba_offloads = {group_id: block_id for group_id, block_id, _ in entries}
         saved = self._saved_offset.get(req_meta.req_id, 0)
+        puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
         for g_idx, db in enumerate(self.token_databases):
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
@@ -620,16 +683,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     continue
                 valid_end = min((block_idx + 1) * db.block_size, boundary)
                 key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
-                if (
-                    g_idx in mamba_offloads
-                    and valid_end == boundary
-                    and boundary % db.block_size != 0
-                ):
-                    block_id = mamba_offloads[g_idx]
-                else:
-                    if block_idx >= len(group_blocks):
+                if g_idx in mamba_offloads:
+                    if valid_end != boundary:
+                        # Interior align-mode state positions are null or
+                        # stale (the block table is not append-only) and never
+                        # valid gap content; only the boundary block is
+                        # persisted, from the core-provided hand-off.
                         continue
+                    block_id = mamba_offloads[g_idx]
+                elif block_idx < len(group_blocks):
                     block_id = group_blocks[block_idx]
+                else:
+                    continue
                 if block_id == NULL_BLOCK_ID:
                     logger.debug(
                         "Skipping unavailable partial-tail source block "
@@ -640,20 +705,58 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     continue
                 addr, size = db.prepare_value_for_block(block_id)
-                key = db.key_for(key_hash)
-                keys.append(key)
-                addrs.append(addr)
-                sizes.append(size)
-                if group_ids is not None:
-                    group_ids.append(
-                        _make_mooncake_group_id(
-                            db.metadata,
-                            key.rsplit("@", 1)[-1],
-                        )
-                    )
+                puts.append((db.key_for(key_hash), addr, size, db.metadata))
+        return puts
 
-        if not keys:
+    def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
+        """Persist connector-pinned mamba "align" boundary states handed off
+        for this request, deduped against the store.
+
+        This is every mamba key the connector writes — ``store_mask`` excludes
+        mamba groups from the positional normal save, aligned boundaries
+        included (see :meth:`_boundary_snapshot_puts`).
+
+        The two entry kinds are keyed and sourced differently, so they are
+        prepared separately and put in one batch:
+
+        - block-aligned for its group: a committed boundary-state snapshot,
+          the handed-off block itself;
+        - not block-aligned: the sub-block CoW partial tail, which also has to
+          cover the other groups' blocks in the normal save's lcm gap.
+
+        Returns:
+            True when no put is needed or every put succeeds, False otherwise.
+        """
+        offloads = req_meta.boundary_state_offloads
+        if not offloads or not req_meta.block_hashes:
             return True
+
+        snapshots: list[tuple[int, int, int]] = []
+        sub_block: list[tuple[int, int, int]] = []
+        for _handoff_id, group_id, block_id, boundary in offloads:
+            entry = (group_id, block_id, boundary)
+            if boundary % self.token_databases[group_id].block_size == 0:
+                snapshots.append(entry)
+            else:
+                sub_block.append(entry)
+
+        puts = self._boundary_snapshot_puts(req_meta, snapshots)
+        if sub_block and self.coord.enable_partial_hash_hits:
+            puts.extend(self._sub_block_tail_puts(req_meta, sub_block))
+
+        if not puts:
+            return True
+        keys = [key for key, _, _, _ in puts]
+        addrs = [addr for _, addr, _, _ in puts]
+        sizes = [size for _, _, size, _ in puts]
+        group_ids: list[str] | None = (
+            [
+                _make_mooncake_group_id(metadata, key.rsplit("@", 1)[-1])
+                for key, _, _, metadata in puts
+            ]
+            if self.enable_group_semantics and self.supports_group_ids
+            else None
+        )
         exists_start = time.perf_counter()
         try:
             exists = self.store.batch_is_exist(keys)
@@ -666,7 +769,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 num_failed_keys=len(keys),
             )
             logger.error(
-                "Failed to check partial-tail keys for request %s: %s",
+                "Failed to check boundary-state keys for request %s: %s",
                 req_meta.req_id,
                 e,
             )
@@ -702,7 +805,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 num_failed_keys=len(keys),
             )
             logger.error(
-                "Failed to put partial-tail keys for request %s: %s",
+                "Failed to put boundary-state keys for request %s: %s",
                 req_meta.req_id,
                 e,
             )
@@ -720,7 +823,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if failed:
             failed_codes = {res[i] for i in failed}
             logger.warning(
-                "Partial-tail put failed for request %s: %d/%d keys failed (codes=%s)",
+                "Boundary-state put failed for request %s: %d/%d keys failed "
+                "(codes=%s)",
                 req_meta.req_id,
                 len(failed),
                 len(keys),
@@ -733,7 +837,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if self._clear_store_pressure():
             logger.info(
                 "Mooncake CPU/disk offloading pressure cleared after a "
-                "successful partial-tail batch"
+                "successful boundary-state batch"
             )
         return True
 
@@ -747,12 +851,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
         current_event = req_meta.current_event
 
         if req_id not in self.stored_requests:
+            # Cancelled (finished/preempted) before its turn: its hand-offs are
+            # terminal, so let the scheduler connector release their refs.
+            self._complete_handoffs(req_meta)
             self.request_queue.task_done()
             return
 
-        # Decrement the in-flight counter and signal task_done() in `finally`
-        # so the scheduler can release the GPU blocks it pinned for this
-        # request (via `delay_free_blocks`) even when the store path raises.
+        # Complete the hand-offs, decrement the in-flight counter and signal
+        # task_done() in `finally` so the scheduler connector can release its
+        # handed-off state refs and the scheduler can release the request blocks
+        # it retained via `delay_free_blocks` even when the store path raises.
         try:
             if self._should_skip_request(req_id):
                 logger.debug(
@@ -762,10 +870,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
                 return
 
-            # Offload the sub-block partial tail (independent of the normal
-            # block-aligned save, which may be skipped this step).
-            if req_meta.partial_tail_offloads is not None and not (
-                self._maybe_offload_partial_tail(req_meta)
+            # Offload the handed-off mamba boundary states (independent of the
+            # normal positional save, which may be skipped this step).
+            if req_meta.boundary_state_offloads is not None and not (
+                self._maybe_offload_boundary_states(req_meta)
             ):
                 return
 
@@ -792,6 +900,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 # Rotate the stride phase per group to balance load across ranks.
                 put_step = self.group_put_steps[g_idx]
                 put_step_rank = (self.tp_rank + g_idx) % put_step
+                group_blocks = block_ids_per_group[g_idx]
                 for start, end, block_hash in db.process_tokens(
                     token_len,
                     req_meta.block_hashes,
@@ -800,6 +909,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     put_step=put_step,
                     put_step_rank=put_step_rank,
                 ):
+                    # A chunk backed by a null (or missing) block holds no
+                    # committed KV for this group; persisting it would poison
+                    # the key with reserved-block bytes.
+                    block_idx = start // db.block_size
+                    if (
+                        block_idx >= len(group_blocks)
+                        or group_blocks[block_idx] == NULL_BLOCK_ID
+                    ):
+                        continue
                     starts.append(start)
                     ends.append(end)
                     keys.append(db.key_for(block_hash))
@@ -985,6 +1103,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.update_kv_event(stored_events)
         finally:
             self.dec_stored_request(req_id)
+            self._complete_handoffs(req_meta)
             self.request_queue.task_done()
 
 
@@ -1670,6 +1789,12 @@ class MooncakeStoreWorker:
                     continue
                 request.current_event = current_event
                 assert self.kv_send_thread is not None
+                if request.boundary_state_offloads:
+                    # Registered before enqueueing so the send thread cannot
+                    # report these ids done before they are known to be pending.
+                    self.kv_send_thread.note_pending_handoffs(
+                        entry[0] for entry in request.boundary_state_offloads
+                    )
                 self.kv_send_thread.add_stored_request(request.req_id)
                 self.kv_send_thread.add_request(request)
 
@@ -1698,6 +1823,21 @@ class MooncakeStoreWorker:
         for recv_thread in self.kv_recv_threads:
             block_ids |= recv_thread.get_and_clear_block_ids_with_load_errors()
         return block_ids
+
+    def build_connector_worker_meta(self) -> MooncakeStoreWorkerMetadata | None:
+        """Report how far this rank's boundary-state hand-offs have drained.
+
+        Once this rank has received a hand-off, zero is reported while its first
+        hand-off is still pending. This ensures cross-rank aggregation includes
+        lagging ranks. Deployments without mamba "align" hand-offs report no
+        metadata.
+        """
+        if self.kv_send_thread is None:
+            return None
+        watermark = self.kv_send_thread.handoff_watermark()
+        if watermark is None:
+            return None
+        return MooncakeStoreWorkerMetadata(boundary_handoff_watermark=watermark)
 
     def _record_kv_connector_operation(
         self,

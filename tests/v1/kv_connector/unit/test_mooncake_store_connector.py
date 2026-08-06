@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     MooncakeStoreConnectorMetadata,
+    MooncakeStoreWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -88,6 +89,10 @@ def test_scheduler_role_initializes_store_scheduler_only():
     mock_worker.assert_not_called()
     assert connector.connector_scheduler is mock_scheduler.return_value
     assert connector.connector_worker is None
+    block_pool = MagicMock()
+
+    connector.bind_gpu_block_pool(block_pool)
+    mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
 def test_worker_methods_delegate_to_store_worker():
@@ -291,6 +296,44 @@ def test_update_connector_output_and_take_events():
     assert connector._kv_cache_events is kv_events
     assert list(connector.take_events()) == [event]
     assert connector._kv_cache_events is None
+
+
+def test_boundary_handoff_watermark_aggregates_across_ranks():
+    """A hand-off may only be unpinned once *every* rank has finished sending
+    it, so per-rank watermarks aggregate with ``min``."""
+    rank0 = MooncakeStoreWorkerMetadata(boundary_handoff_watermark=7)
+    rank1 = MooncakeStoreWorkerMetadata(boundary_handoff_watermark=4)
+
+    assert rank0.aggregate(rank1).boundary_handoff_watermark == 4
+    assert rank1.aggregate(rank0).boundary_handoff_watermark == 4
+
+
+def test_update_connector_output_forwards_handoff_watermark():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ),
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+                boundary_handoff_watermark=11
+            )
+        )
+    )
+
+    connector.connector_scheduler.update_boundary_handoff_watermark.assert_called_once_with(
+        11
+    )
 
 
 # ============================================================
