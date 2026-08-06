@@ -5,9 +5,9 @@ from collections.abc import Iterable
 import torch
 from transformers import AutoProcessor
 
+from vllm.models.qwen3_5 import Qwen3_5MoeForConditionalGeneration
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from .qwen3_5 import Qwen3_5MoeForConditionalGeneration
 from .qwen3_vl import (
     Qwen3VLDummyInputsBuilder,
     Qwen3VLMultiModalProcessor,

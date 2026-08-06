@@ -10,6 +10,7 @@ from torch import nn
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
@@ -1619,6 +1620,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return
 
 
+@eager_break_during_capture
 def qwen_gdn_attention_core(
     qkv_or_qkvz: torch.Tensor,
     b_or_ba: torch.Tensor,

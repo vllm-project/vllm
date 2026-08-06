@@ -1223,7 +1223,7 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # For model classes don't carry @support_torch_compile —
+        # For model classes that don't carry @support_torch_compile —
         # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
         # it unless the user has explicitly opted out via the env var.
         if (
@@ -1232,15 +1232,24 @@ class VllmConfig:
             and any(
                 a
                 in (
+                    "ColQwen3_5",
                     "DeepseekV4ForCausalLM",
                     "DeepSeekV4MTPModel",
                     "InklingForCausalLM",
                     "InklingForConditionalGeneration",
+                    "InternS2PreviewForConditionalGeneration",
+                    "MiniCPMV4_6ForConditionalGeneration",
                     "KimiK3ForConditionalGeneration",
                     "KimiK3MTPModel",
                     "KimiLinearForCausalLM",
                     "MiniMaxM3SparseForCausalLM",
                     "MiniMaxM3SparseForConditionalGeneration",
+                    "Qwen3_5ForCausalLM",
+                    "Qwen3_5ForConditionalGeneration",
+                    "Qwen3_5MoeForCausalLM",
+                    "Qwen3_5MoeForConditionalGeneration",
+                    "Qwen3_5MTP",
+                    "Qwen3_5MoeMTP",
                 )
                 for a in self.model_config.architectures
             )
