@@ -1469,62 +1469,129 @@ class EagleModelMixin:
                 out.append(layer_idx + 1)
         return tuple(out)
 
-    def _flush_pending_aux_send(self) -> None:
-        handles = getattr(self, "_aux_send_handles", None)
-        if handles:
-            for handle in handles:
-                handle.wait()
-        self._aux_send_handles = None
-        self._aux_send_tensors = None
+    def _total_num_layers(self) -> int:
+        num_layers = getattr(getattr(self, "config", None), "num_hidden_layers", None)
+        if num_layers is None:
+            raise RuntimeError(
+                "aux-over-PP transport needs config.num_hidden_layers on the model"
+            )
+        return num_layers
 
-    def send_local_aux_to_last(self, aux_hidden_states: list[torch.Tensor]) -> None:
-        """Async-send this stage's local aux taps to the last PP rank.
+    def _num_local_taps_on_rank(self, rank: int, pp_world_size: int) -> int:
+        """How many taps stage ``rank`` produces itself, without loading it."""
+        from vllm.distributed.utils import get_pp_indices
 
-        Must not wait before the IntermediateTensors HS handoff: waiting on
-        last-1 would deadlock against last still blocked on the HS recv.
+        start, end = get_pp_indices(self._total_num_layers(), rank, pp_world_size)
+        return len(
+            self.local_aux_tap_ids(
+                start, end, tuple(self.aux_hidden_state_layers), rank == 0
+            )
+        )
+
+    def _reap_finished_aux_sends(self, max_in_flight: int) -> None:
+        """Release completed send buffers, bounding how many stay pinned.
+
+        A stage runs ahead of the last rank by up to ``pp_size`` microbatches,
+        so a send is not necessarily consumed by the next forward. Waiting
+        unconditionally would stall the pipeline; instead drop whatever has
+        completed and only block once more than a pipeline's worth is queued.
         """
+        pending = getattr(self, "_aux_sends_in_flight", None)
+        if not pending:
+            return
+        pending = [(h, t) for h, t in pending if not h.is_completed()]
+        while len(pending) > max_in_flight:
+            handle, _ = pending.pop(0)
+            handle.wait()
+        self._aux_sends_in_flight = pending
+
+    def pack_local_aux_for_last(
+        self, aux_hidden_states: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Hand this stage's own aux taps to the last PP rank.
+
+        Stages at least two hops away send straight to the last rank: their
+        ``(rank, last)`` pair carries no other traffic, so nothing can be
+        mismatched against the hidden-state handoff, and the send is
+        metadata-free (a tensor-dict send would block in ``send_object`` and
+        deadlock the pipeline).
+
+        The stage immediately before the last one has no such free pair -- its
+        hidden-state handoff already uses it -- so its taps ride along in the
+        ``IntermediateTensors`` it is about to send. That is one hop for
+        tensors the last rank needs anyway, so nothing is relayed and no
+        upstream tap is re-sent.
+        """
+        import torch.distributed as dist
+
         from vllm.distributed.parallel_state import get_pp_group
 
-        self._flush_pending_aux_send()
         pp = get_pp_group()
         if pp.world_size == 1 or pp.is_last_rank or not aux_hidden_states:
-            return
-        tensor_dict = {
-            f"{self.AUX_HIDDEN_STATE_KEY}{i}": t.contiguous()
-            for i, t in enumerate(aux_hidden_states)
-        }
-        # dst is rank-in-group, not the global rank from pp.last_rank.
-        handles = pp.isend_tensor_dict(tensor_dict, dst=pp.world_size - 1)
-        self._aux_send_handles = handles
-        self._aux_send_tensors = list(tensor_dict.values())
+            return {}
 
-    def recv_remote_aux_from_producers(self) -> list[torch.Tensor]:
-        """Last-rank recv of local taps from every earlier producer stage."""
+        last = pp.world_size - 1
+        if pp.rank_in_group == last - 1:
+            return {
+                f"{self.AUX_HIDDEN_STATE_KEY}{i}": t
+                for i, t in enumerate(aux_hidden_states)
+            }
+
+        self._reap_finished_aux_sends(pp.world_size)
+        in_flight = list(getattr(self, "_aux_sends_in_flight", None) or [])
+        for tensor in aux_hidden_states:
+            tensor = tensor.contiguous()
+            handle = dist.isend(
+                tensor, dst=pp.ranks[last], group=pp.device_group
+            )
+            if tensor.is_cuda:
+                tensor.record_stream(torch.cuda.current_stream(tensor.device))
+            in_flight.append((handle, tensor))
+        self._aux_sends_in_flight = in_flight
+        return {}
+
+    def recv_remote_aux_from_producers(
+        self,
+        reference: torch.Tensor,
+        intermediate_tensors: "IntermediateTensors | None",
+    ) -> list[torch.Tensor]:
+        """Collect earlier stages' aux taps on the last rank, in tap order.
+
+        ``reference`` supplies shape/dtype/device: aux taps are hidden states,
+        so they match the hidden states this rank just received. Knowing the
+        shape is what lets the direct legs skip the blocking metadata exchange.
+        """
+        import torch.distributed as dist
+
         from vllm.distributed.parallel_state import get_pp_group
-        from vllm.distributed.utils import get_pp_indices
 
         pp = get_pp_group()
         if not pp.is_last_rank or pp.world_size == 1:
             return []
-        num_layers = getattr(getattr(self, "config", None), "num_hidden_layers", None)
-        if num_layers is None:
-            num_layers = getattr(self, "end_layer", None)
-        if num_layers is None:
-            raise RuntimeError(
-                "recv_remote_aux_from_producers needs config.num_hidden_layers "
-                "or end_layer on the model"
-            )
+
+        last = pp.world_size - 1
         out: list[torch.Tensor] = []
-        aux_ids = tuple(self.aux_hidden_state_layers)
-        for rank in range(pp.world_size - 1):
-            start, end = get_pp_indices(num_layers, rank, pp.world_size)
-            n = len(self.local_aux_tap_ids(start, end, aux_ids, rank == 0))
-            if n == 0:
-                continue
-            payload = pp.recv_tensor_dict(src=rank)
-            assert payload is not None
-            for i in range(n):
-                out.append(payload[f"{self.AUX_HIDDEN_STATE_KEY}{i}"])
+        handles = []
+        for rank in range(last - 1):
+            for _ in range(self._num_local_taps_on_rank(rank, pp.world_size)):
+                buffer = torch.empty_like(reference)
+                handles.append(
+                    dist.irecv(buffer, src=pp.ranks[rank], group=pp.device_group)
+                )
+                out.append(buffer)
+        for handle in handles:
+            handle.wait()
+
+        for i in range(self._num_local_taps_on_rank(last - 1, pp.world_size)):
+            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
+            if intermediate_tensors is not None and key in intermediate_tensors.tensors:
+                out.append(intermediate_tensors[key])
+            else:
+                # Profiling and warmup synthesise their inputs with
+                # make_empty_intermediate_tensors, which knows nothing about
+                # aux slots, so the adjacent stage's taps are absent. Only the
+                # shape matters on those runs; a real step always carries them.
+                out.append(torch.zeros_like(reference))
         return out
 
 

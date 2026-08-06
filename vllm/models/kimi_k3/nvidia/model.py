@@ -1121,10 +1121,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             residual = intermediate_tensors["residual"]
         assert hidden_states is not None
 
-        # Remote taps arrive only on the last rank (direct-to-last).
+        # Earlier stages' taps arrive only on the last rank.
         remote_aux: list[torch.Tensor] = []
         if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
-            remote_aux = self.recv_remote_aux_from_producers()
+            remote_aux = self.recv_remote_aux_from_producers(
+                hidden_states, intermediate_tensors
+            )
 
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank and self.start_layer in self.aux_hidden_state_layers:
@@ -1189,10 +1191,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            self.send_local_aux_to_last(aux_hidden_states)
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            tensors.update(self.pack_local_aux_for_last(aux_hidden_states))
+            return IntermediateTensors(tensors)
 
         if self.use_attn_res:
             assert prefix_sum is not None
