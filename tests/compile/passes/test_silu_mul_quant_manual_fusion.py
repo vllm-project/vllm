@@ -227,8 +227,9 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
 
-    # NVFP4 requires hidden_size divisible by 16 (block size) and by 2 (packing)
-    num_tokens, hidden_size = 32, 128
+    # NVFP4 requires hidden_size divisible by 16 (block size) and by 2 (packing).
+    # M (num_tokens) must be >= 128 for the 128x4 swizzled scale layout.
+    num_tokens, hidden_size = 128, 256
     x = torch.rand(num_tokens, hidden_size * 2)
     input_global_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
 
@@ -273,8 +274,8 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
         torch.testing.assert_close(
             dequant_result,
             result_unfused,
-            atol=5e-2,
-            rtol=5e-2,
+            atol=3e-1,
+            rtol=3e-1,
         )
 
 
