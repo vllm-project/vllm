@@ -27,8 +27,8 @@ START_THINK = "<think>"
 END_THINK = "</think>"
 
 
-@ReasoningParserManager.register_module("telechat")
-class TeleChatReasoningParser(ReasoningParser):
+@ReasoningParserManager.register_module("telechat4")
+class TeleChat4ReasoningParser(ReasoningParser):
     """Reasoning parser for TeleChat models.
 
     NOTE: the chat template injects the ``<think>`` / ``</think>`` markers into
@@ -47,7 +47,7 @@ class TeleChatReasoningParser(ReasoningParser):
         super().__init__(tokenizer, *args, **kwargs)
         if not self.model_tokenizer:
             raise ValueError(
-                "TeleChatReasoningParser requires a valid tokenizer."
+                "TeleChat4ReasoningParser requires a valid tokenizer."
             )
 
         # Per-request flag, refreshed in ``adjust_request``. When the caller
@@ -64,12 +64,12 @@ class TeleChatReasoningParser(ReasoningParser):
 
         if start_id is None:
             raise RuntimeError(
-                f"TeleChatReasoningParser: '{self.start_token}' not found "
+                f"TeleChat4ReasoningParser: '{self.start_token}' not found "
                 "in tokenizer vocabulary."
             )
         if end_id is None:
             raise RuntimeError(
-                f"TeleChatReasoningParser: '{self.end_token}' not found "
+                f"TeleChat4ReasoningParser: '{self.end_token}' not found "
                 "in tokenizer vocabulary."
             )
 
@@ -88,6 +88,7 @@ class TeleChatReasoningParser(ReasoningParser):
         We refresh the flag on every request so a shared parser instance can
         never leak state between requests.
         """
+        request.skip_special_tokens = False
         enabled = True
         kwargs = getattr(request, "chat_template_kwargs", None)
         if isinstance(kwargs, dict):

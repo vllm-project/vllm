@@ -10,22 +10,26 @@ projection.
 
 The mHC math is identical to DeepSeek-V4's, so instead of private kernels this
 implementation reuses the shared, platform-dispatched ops from
-``vllm.model_executor.layers.mhc`` (``mhc_pre``) and a local wrapper around
-``mhc_post`` that enforces C-contiguity for the tilelang kernel.
+``vllm.model_executor.layers.mhc`` (``mhc_pre`` / ``mhc_post``).
+A local custom op (``telechat4_transpose_contiguous``) ensures the transposed
+``comb_mix`` is C-contiguous for the tilelang ``mhc_post`` kernel in a way that
+``torch.compile`` cannot elide.
 Checkpoint-to-op parameter mapping:
 
     fn       <- {attn,ffn}_hc.mapping_weight  (fp32, (n^2 + 2n, n*C))
     hc_scale <- [alpha_pre, alpha_post, alpha_res]  (fp32, (3,))
     hc_base  <- {attn,ffn}_hc.bias            (fp32, (n^2 + 2n,))
 
-Both DSA (``model_type=deepseek_v32`` with ``index_topk``) and non-DSA
-(``model_type=deepseek_v3``) variants are supported. DSA detection is
-based on ``hasattr(config, "index_topk")``.
+Both DSA (``model_type=deepseek_v32`` with ``index_topk`` and
+``index_n_heads``) and non-DSA (``model_type=deepseek_v3``) variants are
+supported. DSA detection requires both ``index_topk`` and ``index_n_heads``
+to be present in the config.
 """
 
 from collections.abc import Iterable
 from itertools import islice
 from typing import Optional
+import os
 
 import torch
 from torch import nn
@@ -53,59 +57,69 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm.model_executor.layers.mhc import MHCPreOp
+from vllm.model_executor.layers.mhc import MHCPostOp, MHCPreOp
+from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.logger import init_logger
+logger = init_logger(__name__)
+
+
+if os.getenv("USE_FLAGOS") == "1":
+    import flag_gems
+    FLAG_GEMS_CONFIG = [
+        "arange_start",
+        "pow_scalar",
+        "rand_like",
+        "argmax",
+        "softmax",
+        "softmax_out",
+        "cumsum_out",
+        "moe_align_block_size",
+        "invoke_fused_moe_triton_kernel",
+        "topk_softmax",
+        "grouped_topk",
+        "moe_sum",
+    ]
+    flag_gems.only_enable(record=False, include=FLAG_GEMS_CONFIG)
+    logger.info("telechat4: Flaggems is enabled.")
+
+# comb_mix must be transposed and C-contiguous for the mhc_post tilelang
+# kernel (requires strides[-1] == 1).  Wrapping transpose+contiguous in a
+# custom op prevents torch.compile from eliding the .contiguous() call,
+# which it would otherwise do since the downstream MHCPostOp is opaque.
+
+def _telechat4_transpose_contiguous(x: torch.Tensor) -> torch.Tensor:
+    """Transpose last two dims and enforce C-contiguity."""
+    return x.transpose(-1, -2).contiguous()
+
+
+def _telechat4_transpose_contiguous_fake(x: torch.Tensor) -> torch.Tensor:
+    """Abstract impl for torch.compile / meta tracing."""
+    shape = list(x.shape)
+    shape[-1], shape[-2] = shape[-2], shape[-1]
+    return torch.empty(shape, dtype=x.dtype, device=x.device)
+
+
+direct_register_custom_op(
+    op_name="telechat4_transpose_contiguous",
+    op_func=_telechat4_transpose_contiguous,
+    mutates_args=[],
+    fake_impl=_telechat4_transpose_contiguous_fake,
+)
+
+
+def _telechat4_ensure_contiguous(x: torch.Tensor) -> torch.Tensor:
+    """Dispatch to the registered custom op (opaque to torch.compile)."""
+    return torch.ops.vllm.telechat4_transpose_contiguous(x)
+
 
 # ============================== mHC adapter ==============================
-
-
-@torch.library.custom_op(
-    "telechat4::mhc_post_contiguous",
-    mutates_args=(),
-)
-def _mhc_post_contiguous(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    post_layer_mix: torch.Tensor,
-    comb_res_mix: torch.Tensor,
-) -> torch.Tensor:
-    """mhc_post wrapper that enforces C-contiguity on the transposed input.
-
-    The tilelang mhc_post kernel requires ``strides[-1] == 1`` for every
-    tensor input.  ``comb_res_mix`` arrives as a transposed view
-    (``strides[2] != 1``) produced by :meth:`Telechat4MHC.forward`.
-    Only this tensor needs ``.contiguous()``; the others are already
-    C-contiguous.  Wrapping the call inside a ``torch.library.custom_op``
-    makes the body opaque to ``torch.compile`` so the contiguity
-    enforcement cannot be elided.
-
-    Note: the transpose cannot be moved to weight-loading time because the
-    Sinkhorn-Knopp normalization inside ``mhc_pre`` is not commutative with
-    transpose (the first iteration uses row-wise softmax), so
-    ``Sinkhorn(A.T) != Sinkhorn(A).T``.
-    """
-    return torch.ops.vllm.mhc_post_tilelang(
-        x,
-        residual,
-        post_layer_mix,
-        comb_res_mix.contiguous(),
-    )
-
-
-@_mhc_post_contiguous.register_fake
-def _mhc_post_contiguous_fake(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    post_layer_mix: torch.Tensor,
-    comb_res_mix: torch.Tensor,
-) -> torch.Tensor:
-    return torch.empty_like(residual)
 
 
 class Telechat4MHC(nn.Module):
     """mHC (Manifold-constrained Hyper-Connections) wrapper.
 
-    Delegates computation to MHCPreOp and a local custom op wrapper around
-    mhc_post, which dispatch to optimized TileLang/Triton/PyTorch kernels.
+    Delegates computation to MHCPreOp and MHCPostOp, which dispatch to
+    optimized TileLang/Triton/PyTorch kernels.
 
     API:
       - forward(hidden_states) -> (aggregated, h_res, h_post)
@@ -126,40 +140,25 @@ class Telechat4MHC(nn.Module):
         self.h_res_clamp_max = getattr(
             config, "mhc_h_res_clamp_max", None)
 
-        out_features = self.n * self.n + 2 * self.n
-        self.mapping_proj = nn.Linear(
-            self.n * self.hidden_size, out_features, bias=False)
-        init_alpha = getattr(config, "mhc_init_gating_factor", 0.01)
-        self.alpha_pre = nn.Parameter(torch.full((1,), init_alpha))
-        self.alpha_post = nn.Parameter(torch.full((1,), init_alpha))
-        self.alpha_res = nn.Parameter(torch.full((1,), init_alpha))
-        self.bias = nn.Parameter(torch.zeros(out_features))
+        hc_dim = self.n * self.hidden_size
+        mix_hc = self.n * self.n + 2 * self.n
 
-        # fp32 op operands, filled by finalize() after weight loading.
-        self.register_buffer(
-            "fn",
-            torch.zeros(out_features, self.n * self.hidden_size),
-            persistent=False,
-        )
-        self.register_buffer("hc_scale", torch.zeros(3), persistent=False)
-        self.register_buffer(
-            "hc_base", torch.zeros(out_features), persistent=False),
+        # Weights stored as float32 to preserve full precision from
+        # checkpoint.  If these were created as the default dtype
+        # (bfloat16), vLLM would truncate float32 checkpoint weights to
+        # bfloat16 during loading, causing precision loss.
+        self.hc_fn = nn.Parameter(
+            torch.empty(mix_hc, hc_dim, dtype=torch.float32))
+        self.hc_scale = nn.Parameter(
+            torch.full((3,),
+                       getattr(config, "mhc_init_gating_factor", 0.01),
+                       dtype=torch.float32))
+        self.hc_base = nn.Parameter(
+            torch.zeros(mix_hc, dtype=torch.float32))
 
         # MHC ops (stateless -- weights are passed as tensor args)
         self.mhc_pre = MHCPreOp()
-
-    @torch.no_grad()
-    def finalize(self) -> None:
-        """Build the fp32 op operands from the loaded parameters."""
-        self.fn = self.mapping_proj.weight.detach().to(
-            torch.float32).contiguous()
-        self.hc_scale = (
-            torch.cat([self.alpha_pre, self.alpha_post, self.alpha_res])
-            .detach()
-            .to(torch.float32)
-            .contiguous()
-        )
-        self.hc_base = self.bias.detach().to(torch.float32).contiguous()
+        self.mhc_post = MHCPostOp()
 
     def forward(
         self, hidden_states: torch.Tensor
@@ -183,7 +182,7 @@ class Telechat4MHC(nn.Module):
         # MHCPreOp: compute mix weights and aggregated input.
         post_mix, comb_mix, layer_input = self.mhc_pre(
             residual=residual,
-            fn=self.fn,
+            fn=self.hc_fn,
             hc_scale=self.hc_scale,
             hc_base=self.hc_base,
             rms_eps=self.norm_eps,
@@ -191,14 +190,11 @@ class Telechat4MHC(nn.Module):
             hc_sinkhorn_eps=self.norm_eps,
             hc_post_mult_value=self.post_mult_value,
             sinkhorn_repeat=self.sinkhorn_iterations,
+            # clamp_min=self.h_res_clamp_min,
+            # clamp_max=self.h_res_clamp_max,
         )
-        # Transpose to match the mhc_post kernel's comb_res_mix layout.
-        # The .contiguous() is deferred to _mhc_post_contiguous (inside the
-        # custom op) so torch.compile cannot elide it.
-        if self.h_res_clamp_min is not None:
-            comb_mix = comb_mix.clamp(
-                min=self.h_res_clamp_min, max=self.h_res_clamp_max)
-        comb_mix = comb_mix.transpose(-1, -2)
+        # Transpose and ensure C-contiguity via custom op (see comment above).
+        comb_mix = _telechat4_ensure_contiguous(comb_mix)
         # layer_input: [nt, C], comb_mix: [nt, n, n], post_mix: [nt, n, 1]
         return layer_input, comb_mix, post_mix
 
@@ -228,12 +224,8 @@ class Telechat4MHC(nn.Module):
         # All inputs are already flattened: reshape to [nt, n, C] for mhc_post
         residual = original_residual.reshape(-1, n, C)
 
-        # h_res arrives as a transposed view (strides[2]!=1).  Route through
-        # _mhc_post_contiguous whose body is opaque to torch.compile so the
-        # .contiguous() calls cannot be elided.
-        new_residual = torch.ops.telechat4.mhc_post_contiguous(
-            x, residual, h_post, h_res,
-        )
+        # h_res (comb_mix) is already C-contiguous from forward().
+        new_residual = self.mhc_post(x, residual, h_post, h_res)
         # new_residual: [nt, n, C], flatten back to [nt, n*C]
         return new_residual.reshape(-1, n * C)
 
@@ -478,7 +470,10 @@ class Telechat4Model(nn.Module):
             }
 
         self.vocab_size = config.vocab_size
-        self.is_v32 = hasattr(config, "index_topk")
+        self.is_v32 = (
+            getattr(config, "index_topk", None) is not None
+            and getattr(config, "index_n_heads", None) is not None
+        )
         if self.is_v32:
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
@@ -489,6 +484,21 @@ class Telechat4Model(nn.Module):
             )
         else:
             topk_indices_buffer = None
+            # Non-DSA checkpoints may carry DSA fields set to ``null`` in
+            # config.json (e.g. ``index_topk: null``).  ``hasattr`` returns
+            # True for attributes whose value is None, so the base class
+            # DeepseekV2MLAAttention — which checks
+            # ``hasattr(config, "index_topk")`` — would falsely detect a DSA
+            # model and crash inside Indexer with NoneType * NoneType.
+            # Delete all stale DSA attributes whose value is None so that
+            # downstream classes see a clean non-DSA config.
+            for _attr in ("index_topk", "index_n_heads", "index_head_dim"):
+                if hasattr(config, _attr) and getattr(config, _attr) is None:
+                    delattr(config, _attr)
+                    logger.info(
+                        "telechat4: non-DSA checkpoint has stale '%s' "
+                        "set to None; deleted to prevent false DSA "
+                        "detection.", _attr)
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -616,14 +626,46 @@ class Telechat4Model(nn.Module):
                                                    torch.Tensor]]) -> set[str]:
         """Load Telechat4 weights.
 
-        1. Global name remapping (k_norm_bias, mapping_weight).
-        2. mHC weights ({attn,ffn}_hc.*) are loaded manually here so that
+        1. Pre-process: merge alpha_{pre,post,res} into hc_scale (float32).
+        2. Name remapping: mapping_weight -> hc_fn, bias -> hc_base.
+        3. mHC weights ({attn,ffn}_hc.*) are loaded manually here so that
            DeepseekV2Model.load_weights' stacked_params_mapping never sees
            them.
-        3. Everything else is delegated to DeepseekV2Model.load_weights
-           (attention / MoE / indexer).
-        4. finalize() every Telechat4MHC to build fp32 op operands.
+        4. Everything else is delegated to DeepseekV2Model.load_weights.
         """
+        weights = list(weights)
+        params_dict = dict(self.named_parameters())
+
+        # 1. Pre-process: merge alpha_{pre,post,res} into hc_scale.
+        # Old checkpoints have separate alpha_pre/post/res (1,) per mHC
+        # module.  Merge them into a single hc_scale [3] tensor in float32
+        # to preserve full precision.
+        alpha_groups: dict[str, dict[int, torch.Tensor]] = {}
+        filtered_weights = []
+        for name, tensor in weights:
+            if name.endswith("alpha_pre"):
+                key = name[:-len("alpha_pre")]
+                alpha_groups.setdefault(key, {})[0] = tensor
+            elif name.endswith("alpha_post"):
+                key = name[:-len("alpha_post")]
+                alpha_groups.setdefault(key, {})[1] = tensor
+            elif name.endswith("alpha_res"):
+                key = name[:-len("alpha_res")]
+                alpha_groups.setdefault(key, {})[2] = tensor
+            else:
+                filtered_weights.append((name, tensor))
+        for prefix, alphas in alpha_groups.items():
+            hc_scale_key = f"{prefix}hc_scale"
+            if hc_scale_key not in params_dict:
+                continue
+            if 0 in alphas and 1 in alphas and 2 in alphas:
+                hc_scale = torch.stack(
+                    [alphas[0].view(()), alphas[1].view(()),
+                     alphas[2].view(())]).to(dtype=torch.float32)
+                filtered_weights.append((hc_scale_key, hc_scale))
+        weights = filtered_weights
+
+        # 2. split mHC weights from the rest, apply name remapping
         processed_weights = []
         hc_weights = []
 
@@ -631,19 +673,13 @@ class Telechat4Model(nn.Module):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            # 1. name remapping
+            # name remapping
             if "indexer.k_norm_bias" in name:
                 name = name.replace("indexer.k_norm_bias",
                                     "indexer.k_norm.bias")
-            if "attn_hc.mapping_weight" in name:
-                name = name.replace("attn_hc.mapping_weight",
-                                    "attn_hc.mapping_proj.weight")
-            if "ffn_hc.mapping_weight" in name:
-                name = name.replace("ffn_hc.mapping_weight",
-                                    "ffn_hc.mapping_proj.weight")
 
-            # Legacy checkpoints may carry split pre/post/res biases; only the
-            # merged `bias` is used.
+            # Legacy checkpoints may carry split pre/post/res biases; only
+            # the merged bias (remapped to hc_base) is used.
             skip_patterns = (
                 "attn_hc.bias_pre", "attn_hc.bias_post", "attn_hc.bias_res",
                 "ffn_hc.bias_pre", "ffn_hc.bias_post", "ffn_hc.bias_res",
@@ -651,7 +687,16 @@ class Telechat4Model(nn.Module):
             if any(p in name for p in skip_patterns):
                 continue
 
-            # 2. split mHC weights from the rest
+            # Remap old parameter names to new float32 parameters.
+            # These are mutually exclusive: a name ending in mapping_weight
+            # is remapped to hc_fn; a name ending in _hc.bias is remapped
+            # to hc_base. Using elif avoids accidental double-remapping.
+            if name.endswith("mapping_weight"):
+                name = name.replace("mapping_weight", "hc_fn")
+            if name.endswith("_hc.bias"):
+                name = name.replace(".bias", ".hc_base")
+
+            # split mHC weights from the rest
             if "attn_hc" in name or "ffn_hc" in name:
                 hc_weights.append((name, loaded_weight))
             else:
@@ -659,7 +704,6 @@ class Telechat4Model(nn.Module):
 
         # 3. manual mHC load
         loaded_params: set[str] = set()
-        params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in hc_weights:
             if name not in params_dict:
@@ -673,11 +717,6 @@ class Telechat4Model(nn.Module):
         # 4. everything else via DeepseekV2Model
         other_loaded = DeepseekV2Model.load_weights(self, processed_weights)
         loaded_params.update(other_loaded)
-
-        # 5. build fp32 op operands
-        for m in self.modules():
-            if isinstance(m, Telechat4MHC):
-                m.finalize()
 
         return loaded_params
 
@@ -706,4 +745,5 @@ class TeleChat4ForCausalLM(DeepseekV2ForCausalLM):
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
-        self.extract_moe_parameters(example_moe)
+        if example_moe is not None:
+            self.extract_moe_parameters(example_moe)

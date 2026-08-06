@@ -560,9 +560,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleChat3ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
     ),
-    "TeleChat4ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat4-29B", trust_remote_code=True
-    ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),

@@ -20,9 +20,9 @@ Example:
 
 
 _REASONING_PARSERS_TO_REGISTER = {
-    "telechat": (
-        "telechat_reasoning_parser",
-        "TeleChatReasoningParser",
+    "telechat4": (
+        "telechat4_reasoning_parser",
+        "TeleChat4ReasoningParser",
     ),
     "deepseek_r1": (  # name
         "deepseek_r1_reasoning_parser",  # filename
