@@ -43,7 +43,6 @@ def set_active_mm_loras(
         # iterate through visual tokens
         for mm_input_id in encoder_input_ids:
             pos_info = mm_features[mm_input_id].mm_position
-            # num_tokens = model.get_num_mm_encoder_tokens(pos_info.get_num_embeds())
 
             tower_tokens, connector_tokens = model.get_mm_lora_token_counts(
                 modality=mm_features[mm_input_id].modality,
@@ -78,7 +77,7 @@ def set_active_mm_loras(
     if (
         mm_mapping is None
         or not mm_mapping.connector
-        and all(count is not None for count in connector_token_counts)
+        or not all(count is not None for count in connector_token_counts)
     ):
         return
 
