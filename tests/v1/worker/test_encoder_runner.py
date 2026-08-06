@@ -186,10 +186,10 @@ def test_gather_preserves_mixed_modalities():
     assert int(is_mm_embed.sum()) == 8
 
 
-def test_encode_mm_inputs_caches_outputs_without_gathering():
+def test_execute_mm_encoder_caches_outputs_without_gathering():
     """An encoder instance encodes and publishes, and must stop there.
 
-    `ModelState.encode_mm_inputs` is the half of `get_mm_embeddings` that an
+    `ModelState.execute_mm_encoder` is the half of `get_mm_embeddings` that an
     EPD encoder instance needs: it runs no language model, so gathering would
     build an `inputs_embeds` nobody reads -- and the gather raises
     `Encoder cache miss` for any scheduled item absent from the local cache,
@@ -200,23 +200,27 @@ def test_encode_mm_inputs_caches_outputs_without_gathering():
     state = MagicMock()
     state.encoder_cache = cache
     embedding = torch.ones(2, HIDDEN)
-    state.encoder_runner.prepare_mm_inputs.return_value = (["hash0"], {"pixels": 1})
+    # (mm_hashes, [(modality, kwargs item), ...]), as prepare_mm_inputs returns.
+    state.encoder_runner.prepare_mm_inputs.return_value = (
+        ["hash0"],
+        [("image", MagicMock())],
+    )
     state.encoder_runner.execute_mm_encoder.return_value = [embedding]
 
-    ModelState.encode_mm_inputs(state, {"req0": [0]})
+    ModelState.execute_mm_encoder(state, {"req0": [0]})
 
     assert cache.encoder_outputs == {"hash0": embedding}
     state.encoder_runner.gather_mm_embeddings.assert_not_called()
 
 
-def test_encode_mm_inputs_is_a_noop_without_scheduled_items():
+def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
     """A step that schedules no encoder input must not touch the encoder."""
     cache = EncoderCache()
     state = MagicMock()
     state.encoder_cache = cache
-    state.encoder_runner.prepare_mm_inputs.return_value = ([], {})
+    state.encoder_runner.prepare_mm_inputs.return_value = ([], [])
 
-    ModelState.encode_mm_inputs(state, {})
+    ModelState.execute_mm_encoder(state, {})
 
     assert not cache.encoder_outputs
     state.encoder_runner.execute_mm_encoder.assert_not_called()

@@ -138,7 +138,9 @@ class ModelState(ABC):
         """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
         return None
 
-    def encode_mm_inputs(self, scheduled_encoder_inputs: dict[str, list[int]]) -> None:
+    def execute_mm_encoder(
+        self, scheduled_encoder_inputs: dict[str, list[int]]
+    ) -> None:
         """Run the multi-modal encoder and cache its outputs by `mm_hash`.
 
         The encode half of `get_mm_embeddings`, without the gather, for callers

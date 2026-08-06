@@ -70,7 +70,7 @@ class DefaultModelState(ModelState):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor:
-        self.encode_mm_inputs(scheduled_encoder_inputs)
+        self.execute_mm_encoder(scheduled_encoder_inputs)
 
         mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
         if self.mm_pruner is not None and mm_embeds:
