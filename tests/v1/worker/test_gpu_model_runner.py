@@ -262,6 +262,14 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
+def test_select_common_block_size_accepts_shared_multiple():
+    backend_a = _make_mock_backend_for_kernel_block_size([1, MultipleOf(16)])
+    backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])
+
+    selected_size = select_common_block_size(16, [backend_a, backend_b])
+    assert selected_size == 16
+
+
 def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
     dist_init,
 ):
