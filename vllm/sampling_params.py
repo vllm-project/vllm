@@ -498,6 +498,8 @@ class SamplingParams(
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
+        else:
+            self.stop_token_ids = list(dict.fromkeys(self.stop_token_ids))
 
         if self.bad_words is None:
             self.bad_words = []
