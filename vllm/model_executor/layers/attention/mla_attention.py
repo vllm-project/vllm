@@ -136,9 +136,8 @@ The chunked prefill approach is as follows:
 W          Workspace rows, i.e. the context rows we may gather at once,
            used to bound the memory usage
 
-The context is scheduled per request rather than per batch column: requests are
-packed in order, splitting the next request on an aligned boundary when needed
-to fill `W`.
+The context is scheduled per request: requests are packed in order, splitting
+the next request on an aligned boundary when needed to fill `W`.
 So a chunk covers a contiguous run of prefills and only ever the tokens and
 context rows of those prefills — attention, up-projection and merging are
 charged only to the requests it covers, and no chunk contains an empty context
@@ -1396,10 +1395,8 @@ class MLACommonPrefillMetadata:
         """One workspace-sized slice of paged context for a run of prefills."""
 
         index: int
-        request_start: int
-        request_end: int
-        token_start: int
-        token_end: int
+        request_slice: slice
+        token_slice: slice
         continuation_token_end: int
         is_continuation: bool
         num_context_tokens: int
@@ -1421,16 +1418,7 @@ class MLACommonPrefillMetadata:
 
         @property
         def num_requests(self) -> int:
-            return self.request_end - self.request_start
-
-        def covers_all_context_tokens(
-            self, chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata"
-        ) -> bool:
-            return (
-                len(chunked_context.chunks) == 1
-                and self.token_start == 0
-                and self.token_end == chunked_context.prefill_tokens_with_context
-            )
+            return self.request_slice.stop - self.request_slice.start
 
     @dataclass
     class ChunkedContextMetadata:
@@ -1438,8 +1426,7 @@ class MLACommonPrefillMetadata:
         workspace: torch.Tensor
         chunks: "list[MLACommonPrefillMetadata.ContextChunk]"
         context_lens_list: list[int]
-        prefill_tokens_with_context: int
-        empty_token_ranges: list[tuple[int, int]]
+        empty_token_slices: list[slice]
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
@@ -1772,12 +1759,10 @@ def build_mla_chunked_context_metadata(
     )
 
     query_start_loc = prefill_query_start_loc_cpu.tolist()
-    requests_with_context = [i for i, length in enumerate(context_lens) if length > 0]
-    prefill_tokens_with_context = query_start_loc[requests_with_context[-1] + 1]
-    empty_token_ranges = [
-        (query_start_loc[i], query_start_loc[i + 1])
-        for i in range(requests_with_context[-1])
-        if context_lens[i] == 0
+    empty_token_slices = [
+        slice(query_start_loc[i], query_start_loc[i + 1])
+        for i, context_len in enumerate(context_lens)
+        if context_len == 0
     ]
 
     use_dcp = dcp_world_size > 1
@@ -1882,10 +1867,10 @@ def build_mla_chunked_context_metadata(
         ]
         chunk = MLACommonPrefillMetadata.ContextChunk(
             index=index,
-            request_start=plan.request_start,
-            request_end=plan.request_end,
-            token_start=query_start_loc[plan.request_start],
-            token_end=query_start_loc[plan.request_end],
+            request_slice=slice(plan.request_start, plan.request_end),
+            token_slice=slice(
+                query_start_loc[plan.request_start], query_start_loc[plan.request_end]
+            ),
             continuation_token_end=query_start_loc[plan.request_start + 1],
             is_continuation=plan.is_continuation,
             num_context_tokens=token_slice.stop - token_slice.start,
@@ -1916,8 +1901,7 @@ def build_mla_chunked_context_metadata(
         workspace=chunked_prefill_workspace,
         chunks=chunks,
         context_lens_list=context_lens,
-        prefill_tokens_with_context=prefill_tokens_with_context,
-        empty_token_ranges=empty_token_ranges,
+        empty_token_slices=empty_token_slices,
     )
 
 
@@ -2375,13 +2359,13 @@ def init_mla_context_partial(
     chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
     attn_output: torch.Tensor,
     attn_softmax_lse: torch.Tensor,
+    num_tokens: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Allocate the running context partial over the prefills with context.
+    """Allocate the running context partial over all prefill tokens.
 
     Laid out like the chunk partials so the final whole-batch merge against the
     suffix partial sees matching head strides.
     """
-    num_tokens = chunked_context.prefill_tokens_with_context
     output = torch.empty(
         (num_tokens, *attn_output.shape[1:]),
         dtype=attn_output.dtype,
@@ -2392,11 +2376,10 @@ def init_mla_context_partial(
         dtype=attn_softmax_lse.dtype,
         device=attn_softmax_lse.device,
     )
-    # No chunk covers a prefill without context, so neutralize the partial of
-    # any such prefill that the covered token range straddles.
-    for token_start, token_end in chunked_context.empty_token_ranges:
-        output[token_start:token_end].zero_()
-        output_lse[:, token_start:token_end].fill_(float("-inf"))
+    # No chunk covers a prefill without context, so neutralize its partial.
+    for token_slice in chunked_context.empty_token_slices:
+        output[token_slice].zero_()
+        output_lse[:, token_slice].fill_(float("-inf"))
     return output, output_lse
 
 
@@ -2412,22 +2395,24 @@ def accumulate_mla_context_chunk(
     Only the first request may be a continuation; its tokens are merged and the
     remaining token range is initialized.
     """
-    init_start = chunk.token_start
+    token_start = chunk.token_slice.start
+    token_end = chunk.token_slice.stop
+    init_start = token_start
     if chunk.is_continuation:
         init_start = chunk.continuation_token_end
-        num_merged = init_start - chunk.token_start
+        num_merged = init_start - token_start
         merge_attn_states(
-            output=output[chunk.token_start : init_start],
-            output_lse=output_lse[:, chunk.token_start : init_start],
-            prefix_output=output[chunk.token_start : init_start],
-            prefix_lse=output_lse[:, chunk.token_start : init_start],
+            output=output[token_start:init_start],
+            output_lse=output_lse[:, token_start:init_start],
+            prefix_output=output[token_start:init_start],
+            prefix_lse=output_lse[:, token_start:init_start],
             suffix_output=attn_output[:num_merged],
             suffix_lse=attn_softmax_lse[:, :num_merged],
         )
-    if init_start < chunk.token_end:
-        written = init_start - chunk.token_start
-        output[init_start : chunk.token_end].copy_(attn_output[written:])
-        output_lse[:, init_start : chunk.token_end].copy_(attn_softmax_lse[:, written:])
+    if init_start < token_end:
+        written = init_start - token_start
+        output[init_start:token_end].copy_(attn_output[written:])
+        output_lse[:, init_start:token_end].copy_(attn_softmax_lse[:, written:])
 
 
 class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
@@ -2522,9 +2507,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output_lse = None
         for chunk in chunked_context.chunks:
             toks = chunk.num_context_tokens
-            block_table = prefill_metadata.block_table[
-                chunk.request_start : chunk.request_end
-            ]
+            block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
@@ -2578,19 +2561,23 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             attn_output, attn_softmax_lse = (
                 prefill_metadata.prefill_backend.run_prefill_context_chunk(
                     chunk=chunk,
-                    q=q[chunk.token_start : chunk.token_end],
+                    q=q[chunk.token_slice],
                     k=k,
                     v=v,
                 )
             )
 
             if output is None:
-                if chunk.covers_all_context_tokens(chunked_context):
-                    # Single chunk over every prefill with context; its partial
-                    # already is the context partial.
+                if (
+                    len(chunked_context.chunks) == 1
+                    and not chunked_context.empty_token_slices
+                ):
                     return attn_output, attn_softmax_lse
                 output, output_lse = init_mla_context_partial(
-                    chunked_context, attn_output, attn_softmax_lse
+                    chunked_context,
+                    attn_output,
+                    attn_softmax_lse,
+                    num_tokens=q.shape[0],
                 )
             accumulate_mla_context_chunk(
                 chunk, attn_output, attn_softmax_lse, output, output_lse
@@ -2629,9 +2616,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
             toks = chunk.num_local_context_tokens
             padded_local_cu_seq_lens = chunk.padded_local_cu_seq_lens
-            block_table = prefill_metadata.block_table[
-                chunk.request_start : chunk.request_end
-            ]
+            block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
@@ -2711,17 +2696,23 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             attn_output, attn_softmax_lse = (
                 prefill_metadata.prefill_backend.run_prefill_context_chunk(
                     chunk=chunk,
-                    q=q[chunk.token_start : chunk.token_end],
+                    q=q[chunk.token_slice],
                     k=k,
                     v=v,
                 )
             )
 
             if output is None:
-                if chunk.covers_all_context_tokens(chunked_context):
+                if (
+                    len(chunked_context.chunks) == 1
+                    and not chunked_context.empty_token_slices
+                ):
                     return attn_output, attn_softmax_lse
                 output, output_lse = init_mla_context_partial(
-                    chunked_context, attn_output, attn_softmax_lse
+                    chunked_context,
+                    attn_output,
+                    attn_softmax_lse,
+                    num_tokens=q.shape[0],
                 )
             accumulate_mla_context_chunk(
                 chunk, attn_output, attn_softmax_lse, output, output_lse
@@ -2807,7 +2798,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 prefix_lse=context_lse,
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
-                prefill_tokens_with_context=prefill_metadata.chunked_context.prefill_tokens_with_context,
             )
         elif output_scale is None:
             # With output_scale set, backend already wrote into `output` in place.

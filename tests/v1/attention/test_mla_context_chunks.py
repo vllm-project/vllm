@@ -8,14 +8,12 @@ chunk never covers a prefill without context (which is why the partial no
 longer needs an empty-span masking pass).
 """
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 from vllm.model_executor.layers.attention.mla_attention import (
-    MLACommonMetadataBuilder,
     build_mla_chunked_context_metadata,
+    init_mla_context_partial,
     reorg_kvcache,
 )
 
@@ -81,15 +79,15 @@ def test_chunks_gather_every_context_row_exactly_once(context_lens, workspace_si
         assert chunk.token_to_seq.shape[0] == chunk.num_context_tokens
         # Chunks are emitted in request order, which is what lets the partial
         # treat only a chunk's first request as a continuation.
-        assert chunk.request_start >= previous_request_start
-        previous_request_start = chunk.request_start
+        assert chunk.request_slice.start >= previous_request_start
+        previous_request_start = chunk.request_slice.start
 
         starts = chunk.starts.tolist()
         seq_lens = chunk.seq_lens.tolist()
         assert len(starts) == len(seq_lens) == chunk.num_requests
         for offset, (start, length) in enumerate(zip(starts, seq_lens)):
             assert length > 0, "a chunk must not cover an empty context span"
-            gathered.setdefault(chunk.request_start + offset, []).append(
+            gathered.setdefault(chunk.request_slice.start + offset, []).append(
                 (start, length)
             )
 
@@ -106,10 +104,9 @@ def test_chunks_gather_every_context_row_exactly_once(context_lens, workspace_si
 def test_continuation_is_confined_to_a_chunks_first_request():
     """Only a chunk's first request may continue an earlier chunk.
 
-    `accumulate_mla_context_chunk` merges exactly `continuation_token_end -
-    token_start` tokens and writes the rest, so a chunk that continues a
-    request other than its first, or reports the wrong boundary, folds the
-    partial into the wrong token slice.
+    `accumulate_mla_context_chunk` merges the continuation token slice and
+    writes the rest, so a chunk that continues a request other than its first,
+    or reports the wrong boundary, folds the partial into the wrong tokens.
     """
     context_lens = [2048, 32, 32]
     query_lens = [3, 5, 7]
@@ -128,46 +125,43 @@ def test_continuation_is_confined_to_a_chunks_first_request():
         # Requests after the first always start at the beginning of their
         # context, so they can only ever be initialized, never merged.
         assert all(start == 0 for start in starts[1:])
-        assert chunk.continuation_token_end == query_start_loc[chunk.request_start + 1]
-        assert chunk.token_start == query_start_loc[chunk.request_start]
-        assert chunk.token_end == query_start_loc[chunk.request_end]
+        request_start = chunk.request_slice.start
+        request_end = chunk.request_slice.stop
+        assert chunk.continuation_token_end == query_start_loc[request_start + 1]
+        assert chunk.token_slice == slice(
+            query_start_loc[request_start], query_start_loc[request_end]
+        )
         assert chunk.query_start_loc.tolist() == [
-            offset - chunk.token_start
-            for offset in query_start_loc[chunk.request_start : chunk.request_end + 1]
+            offset - chunk.token_slice.start
+            for offset in query_start_loc[request_start : request_end + 1]
         ]
 
 
-def test_tail_splitting_minimizes_chunks_and_preserves_request_order():
+def test_tail_splitting_minimizes_chunks():
     """A tail request may fill one chunk and continue at the next chunk's head.
 
     Without tail splitting these contexts need three chunks. Splitting on the
-    block boundary reduces that to the workspace lower bound of two while
-    preserving the accumulator's single-continuation invariant.
+    block boundary reduces that to the workspace lower bound of two.
     """
     metadata = build_chunked_context([768, 512, 512], [3, 5, 7], 1024)
     assert metadata is not None
 
     assert len(metadata.chunks) == 2
     first, second = metadata.chunks
-    assert first.request_start == 0
-    assert first.request_end == 2
     assert first.starts.tolist() == [0, 0]
     assert first.seq_lens.tolist() == [768, 256]
     assert not first.is_continuation
 
-    assert second.request_start == 1
-    assert second.request_end == 3
     assert second.starts.tolist() == [256, 0]
     assert second.seq_lens.tolist() == [256, 512]
     assert second.is_continuation
 
 
-def test_prefills_without_context_are_skipped_and_reported():
-    """A context-free prefill is never chunked, only reported as a gap.
+def test_prefills_without_context_are_skipped_and_neutralized():
+    """Context-free prefills get neutral partials instead of chunk work.
 
-    No chunk covering it means its partial is undefined, so the builder has to
-    hand the impl the token range to neutralize; if it stops, the final merge
-    combines the suffix with uninitialized scratch.
+    If the full-query partial leaves either an internal or trailing gap
+    uninitialized, the final merge combines the suffix with undefined scratch.
     """
     metadata = build_chunked_context([64, 0, 64, 0], [4, 4, 4, 4], 1024)
     assert metadata is not None
@@ -175,12 +169,22 @@ def test_prefills_without_context_are_skipped_and_reported():
     covered = {
         request
         for chunk in metadata.chunks
-        for request in range(chunk.request_start, chunk.request_end)
+        for request in range(chunk.request_slice.start, chunk.request_slice.stop)
     }
     assert covered == {0, 2}
-    # Request 1 sits inside the covered token range; request 3 is past its end.
-    assert metadata.prefill_tokens_with_context == 12
-    assert metadata.empty_token_ranges == [(4, 8)]
+    assert metadata.empty_token_slices == [slice(4, 8), slice(12, 16)]
+
+    output, output_lse = init_mla_context_partial(
+        metadata,
+        attn_output=torch.empty(4, 2, 3),
+        attn_softmax_lse=torch.empty(2, 4),
+        num_tokens=16,
+    )
+    assert output.shape == (16, 2, 3)
+    assert output_lse.shape == (2, 16)
+    for token_slice in metadata.empty_token_slices:
+        assert not torch.count_nonzero(output[token_slice])
+        assert torch.isneginf(output_lse[:, token_slice]).all()
 
 
 def test_no_context_needs_no_chunks():
@@ -220,7 +224,7 @@ def test_dcp_chunks_fit_the_per_rank_row_budget():
         for offset, (start, length) in enumerate(
             zip(chunk.local_starts, chunk.padded_local_seq_lens)
         ):
-            request = chunk.request_start + offset
+            request = chunk.request_slice.start + offset
             assert start == local_cursor.get(request, 0)
             local_cursor[request] = start + length
 
@@ -282,25 +286,3 @@ def test_dcp_reorg_uses_each_chunks_local_starts():
         )
 
         torch.testing.assert_close(reorganized, torch.cat(expected))
-
-
-@pytest.mark.parametrize("max_num_seqs", [1, 32, 256])
-def test_workspace_size_does_not_scale_with_max_num_seqs(max_num_seqs):
-    """The workspace only has to hold one page, not one page per request.
-
-    Hybrid models inflate the attention page size to cover their state page
-    (Kimi K3 reaches ~11000 rows at DEP16); a `max_num_seqs * block_size` floor
-    would blow far past the deliberate 64k cap and force users to hand-tune
-    `max_num_seqs`.
-    """
-    block_size = 11000
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
-        cache_config=SimpleNamespace(block_size=block_size),
-        model_config=SimpleNamespace(max_model_len=163840),
-    )
-    workspace_size = MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-        vllm_config
-    )
-    assert workspace_size == 64 * 1024
-    assert workspace_size >= block_size

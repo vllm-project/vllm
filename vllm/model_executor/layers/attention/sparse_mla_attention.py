@@ -718,7 +718,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
         for chunk in chunked_context.chunks:
             toks = chunk.num_context_tokens
-            requests = slice(chunk.request_start, chunk.request_end)
+            requests = chunk.request_slice
             ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
@@ -747,7 +747,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 )
                 key_starts = None
             attn_out, lse = self._run_masked_mha(
-                q=q[chunk.token_start : chunk.token_end],
+                q=q[chunk.token_slice],
                 k=k,
                 v=v,
                 cu_seqlens_q=chunk.query_start_loc,
@@ -764,10 +764,16 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             )
 
             if output is None:
-                if chunk.covers_all_context_tokens(chunked_context):
+                if (
+                    len(chunked_context.chunks) == 1
+                    and not chunked_context.empty_token_slices
+                ):
                     return attn_out, lse
                 output, output_lse = init_mla_context_partial(
-                    chunked_context, attn_out, lse
+                    chunked_context,
+                    attn_out,
+                    lse,
+                    num_tokens=q.shape[0],
                 )
             accumulate_mla_context_chunk(chunk, attn_out, lse, output, output_lse)
 
@@ -880,5 +886,4 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             prefix_lse=context_lse,
             suffix_output=suffix_output[..., : self.v_head_dim],
             suffix_lse=suffix_lse,
-            prefill_tokens_with_context=chunked_context.prefill_tokens_with_context,
         )
