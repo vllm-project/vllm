@@ -25,6 +25,12 @@ def _build_rejection_sample_inputs(
     temperature: float,
     num_trials: int,
 ) -> dict:
+    """Build rejection_sample kwargs from a fixed target and draft distribution.
+
+    target_logits_1d must already have temperature applied (the sampler applies
+    sampling params before verification), whereas draft_logits_1d must not:
+    rejection_sample divides the draft logits by the temperature on load.
+    """
     device = target_logits_1d.device
     vocab_size = target_logits_1d.shape[0]
     K = num_speculative_steps
@@ -35,7 +41,10 @@ def _build_rejection_sample_inputs(
         draft_logits_1d.view(1, 1, vocab_size).expand(num_trials, K, -1).contiguous()
     )
 
-    draft_probs = torch.softmax(draft_logits_1d, dim=0)
+    scaled_draft_logits_1d = draft_logits_1d.float()
+    if temperature > 0:
+        scaled_draft_logits_1d = scaled_draft_logits_1d / temperature
+    draft_probs = torch.softmax(scaled_draft_logits_1d, dim=0)
     draft_tokens = torch.multinomial(
         draft_probs.expand(num_trials, -1), K, replacement=True
     )
@@ -138,7 +147,10 @@ def _assert_distribution_match(
         (3, 1.0),
     ],
 )
-def test_stochastic_rejection_sample(num_speculative_steps: int, temperature: float):
+@pytest.mark.parametrize("draft_logits_dtype", [torch.float32, torch.bfloat16])
+def test_stochastic_rejection_sample(
+    num_speculative_steps: int, temperature: float, draft_logits_dtype: torch.dtype
+):
     """
     Verify that rejection sampling produces the target distribution.
     This is done by simulating many independent trials of speculative
@@ -146,6 +158,9 @@ def test_stochastic_rejection_sample(num_speculative_steps: int, temperature: fl
     run rejection sample on all of the trials (requests), and verify
     that the sampled tokens at every position follow the target
     distribution p(x).
+
+    Parametrized over the draft-logits dtype: storing them in the draft head's
+    dtype must not bias the output distribution.
     """
 
     torch.manual_seed(42)
@@ -153,11 +168,12 @@ def test_stochastic_rejection_sample(num_speculative_steps: int, temperature: fl
     num_trials = 10 * VOCAB_SIZE
 
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
-    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32).to(
+        draft_logits_dtype
+    )
 
     if temperature > 0:
         target_logits_1d /= temperature
-        draft_logits_1d /= temperature
 
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
@@ -251,7 +267,6 @@ def test_synthetic_rejection_sample(
 
     if temperature > 0:
         target_logits_1d /= temperature
-        draft_logits_1d /= temperature
 
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
@@ -282,6 +297,47 @@ def test_synthetic_rejection_sample(
         )
 
 
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_all_nan_target_logits_in_range(temperature: float):
+    """Regression test for NaN breaking tl.argmax index bounds.
+
+    An all-NaN target logits row makes every per-block local max NaN.
+    tl.argmax over such a block returns an index into the padded region
+    (>= num_blocks), causing an OOB read of the local-argmax tensors in
+    _compute_global_target_argmax (greedy) and _insert_resampled_kernel
+    (stochastic). The vocab size below gives a non-power-of-2 block count
+    (3 blocks of 8192, padded to 4) so the padded region exists. Post-fix,
+    NaN is mapped to -inf, so the kernels must complete without error and
+    emit in-range token ids.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    num_trials = 4
+    K = 1
+    vocab_size = 20000  # 3 vocab blocks of 8192, padded to 4
+
+    target_logits_1d = torch.full(
+        (vocab_size,), float("nan"), device=device, dtype=torch.float32
+    )
+    draft_logits_1d = torch.randn(vocab_size, device=device, dtype=torch.float32)
+
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+
+    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=K)
+
+    assert ((num_sampled >= 1) & (num_sampled <= K + 1)).all()
+    steps = torch.arange(K + 1, device=device).unsqueeze(0)
+    valid = steps < num_sampled.unsqueeze(1)
+    assert (sampled[valid] >= 0).all()
+    assert (sampled[valid] < vocab_size).all()
+
+
 def test_placeholder_draft_token_rejected():
     """A placeholder draft id (-1) must be rejected without reading the logit
     tensors out of bounds, for any sampling method.
@@ -293,7 +349,7 @@ def test_placeholder_draft_token_rejected():
     temperature = 0.6
 
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device) / temperature
-    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device) / temperature
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device)
 
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
@@ -342,7 +398,6 @@ def test_block_verification_rejection_sample(
 
     if temperature > 0:
         target_logits_1d /= temperature
-        draft_logits_1d /= temperature
 
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
