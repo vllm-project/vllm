@@ -1512,9 +1512,11 @@ class Gemma4ForConditionalGeneration(
 
         # Strip padding per-batch element: only keep valid (non-padding)
         # tokens.
+        # Boolean-mask indexing needs the selected count on the host.
         per_audio = []
-        for enc, mask in zip(audio_features, audio_mask, strict=True):
-            per_audio.append(enc[mask])  # [num_real, hidden_size]
+        with gpu_sync_allowed():
+            for enc, mask in zip(audio_features, audio_mask, strict=True):
+                per_audio.append(enc[mask])  # [num_real, hidden_size]
 
         return per_audio
 

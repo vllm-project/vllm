@@ -1017,10 +1017,12 @@ def _run_mamba_prefix_cache_mrv2(
                 f"V2 align preprocess copy: expected={expected}, "
                 f"actual={actual}, {cur_step_action=}"
             )
-            for temporal, bt, src_state in snapshots:
-                torch.testing.assert_close(
-                    temporal_block(temporal, bt, expected[1]), src_state
-                )
+            # Comparing device tensors for the assertion is a deliberate D2H.
+            with gpu_sync_allowed():
+                for temporal, bt, src_state in snapshots:
+                    torch.testing.assert_close(
+                        temporal_block(temporal, bt, expected[1]), src_state
+                    )
         return ret
 
     def wrapped_postprocess_state(
@@ -1051,10 +1053,12 @@ def _run_mamba_prefix_cache_mrv2(
         ret = original_postprocess_state(
             self, idx_mapping, num_sampled, num_computed_tokens
         )
-        for temporal, bt, src_state in snapshots:
-            torch.testing.assert_close(
-                temporal_block(temporal, bt, expected[1]), src_state
-            )
+        # Comparing device tensors for the assertion is a deliberate D2H.
+        with gpu_sync_allowed():
+            for temporal, bt, src_state in snapshots:
+                torch.testing.assert_close(
+                    temporal_block(temporal, bt, expected[1]), src_state
+                )
         return ret
 
     def wrapped_execute_model(

@@ -5715,7 +5715,10 @@ class GPUModelRunner(
                 return {req_id: 0 for req_id in self.input_batch.req_ids}
 
             num_nans_in_logits = {}
-            num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
+            # Reporting per-request NaN counts requires them on the host; this
+            # path is opt-in diagnostics, so the D2H is intended.
+            with gpu_sync_allowed():
+                num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
             for req_id in self.input_batch.req_ids:
                 req_index = self.input_batch.req_id_to_index[req_id]
                 num_nans_in_logits[req_id] = (
