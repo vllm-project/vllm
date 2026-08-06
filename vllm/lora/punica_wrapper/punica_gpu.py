@@ -11,7 +11,7 @@ from typing import final
 
 import torch
 
-from vllm.lora.layers import LoRAMapping
+from vllm.lora.layers import LoRAMapping, LoRARouteMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
@@ -74,14 +74,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
     def update_metadata(
         self,
-        mapping: LoRAMapping,
+        mapping: LoRAMapping | LoRARouteMapping,
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
         **kwargs,
     ):
-        self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+        super().update_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import math
+from typing import TypeAlias
 
 import msgspec
 
@@ -71,3 +72,95 @@ class LoRARequest(
         identified by their names across engines.
         """
         return hash(self.lora_name)
+
+
+class LoRARoutingRequest(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    array_like=True,
+):  # type: ignore[call-arg]
+    """Internal request for fixed-weight routed mixtures of LoRA adapters."""
+
+    routing_name: str
+    routing_int_id: int
+    lora_requests: tuple[LoRARequest, ...]
+    lora_weights: tuple[float, ...]
+    routing_strategy: str = "fixed"
+
+    def __post_init__(self):
+        self.lora_requests = tuple(self.lora_requests)
+        self.lora_weights = tuple(self.lora_weights)
+
+        if self.routing_int_id < 1:
+            raise ValueError(f"id must be > 0, got {self.routing_int_id}")
+        if not self.routing_name:
+            raise ValueError("routing_name cannot be empty")
+        if self.routing_strategy != "fixed":
+            raise ValueError(
+                "Only fixed-weight routed LoRA requests are supported for now."
+            )
+        if not self.lora_requests:
+            raise ValueError("lora_requests cannot be empty")
+        if len(self.lora_requests) != len(self.lora_weights):
+            raise ValueError("lora_requests and lora_weights must have the same length")
+
+        lora_ids = [request.lora_int_id for request in self.lora_requests]
+        if len(lora_ids) != len(set(lora_ids)):
+            raise ValueError("lora_requests cannot contain duplicate lora_int_id")
+
+        if any(not math.isfinite(weight) for weight in self.lora_weights):
+            raise ValueError("lora_weights must be finite")
+        if any(weight < 0 for weight in self.lora_weights):
+            raise ValueError("lora_weights must be non-negative")
+        if sum(self.lora_weights) <= 0:
+            raise ValueError("At least one lora weight must be positive")
+
+    @property
+    def adapter_id(self):
+        return self.routing_int_id
+
+    @property
+    def name(self):
+        return self.routing_name
+
+    @property
+    def lora_name(self):
+        return self.routing_name
+
+    @property
+    def top_k(self):
+        return len(self.lora_requests)
+
+    def __eq__(self, value: object) -> bool:
+        return (
+            isinstance(value, self.__class__)
+            and self.routing_name == value.routing_name
+        )
+
+    def __hash__(self) -> int:
+        return hash(self.routing_name)
+
+
+def is_routed_lora_request(
+    lora_request: LoRARequest | LoRARoutingRequest | None,
+) -> bool:
+    return isinstance(lora_request, LoRARoutingRequest)
+
+
+def iter_lora_requests(
+    lora_request: LoRARequest | LoRARoutingRequest | None,
+) -> tuple[LoRARequest, ...]:
+    if lora_request is None:
+        return ()
+    if isinstance(lora_request, LoRARoutingRequest):
+        return lora_request.lora_requests
+    return (lora_request,)
+
+
+def iter_lora_int_ids(
+    lora_request: LoRARequest | LoRARoutingRequest | None,
+) -> tuple[int, ...]:
+    return tuple(request.lora_int_id for request in iter_lora_requests(lora_request))
+
+
+LoRARequestLike: TypeAlias = LoRARequest | LoRARoutingRequest
