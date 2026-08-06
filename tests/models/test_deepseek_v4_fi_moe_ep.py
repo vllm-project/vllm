@@ -115,7 +115,7 @@ def test_all_mega_backends_get_sequence_parallel_moe(moe_backend):
 def test_backend_selection_rejects_flashinfer_without_device_bootstrap(
     fake_flashinfer, monkeypatch
 ):
-    """Pre-0.6.18 flashinfer lacks BootstrapConfig.device and would rebind
+    """Pre-0.6.17 flashinfer lacks BootstrapConfig.device and would rebind
     workers to the wrong GPU under a remapped CUDA_VISIBLE_DEVICES; selecting
     a fi backend against such a build must fail at config time."""
     import vllm.utils.flashinfer_moe_ep as mod
@@ -133,7 +133,7 @@ def test_backend_selection_rejects_flashinfer_without_device_bootstrap(
 
     monkeypatch.setattr(mod, "_FI_MOE_EP_RUNTIME_AVAILABLE", None)
     fake_flashinfer.BootstrapConfig = _LegacyBootstrapConfig
-    with pytest.raises(ImportError, match="0.6.18"):
+    with pytest.raises(ImportError, match="0.6.17"):
         is_fi_moe_ep_backend("flashinfer_moe_ep_mega_cutedsl")
 
     monkeypatch.setattr(mod, "_FI_MOE_EP_RUNTIME_AVAILABLE", None)
