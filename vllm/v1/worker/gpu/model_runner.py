@@ -140,9 +140,6 @@ from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 
 logger = init_logger(__name__)
 
-_HISPARSE_RESIDENT_GRAPH_VARIANT = 0
-_HISPARSE_HYBRID_GRAPH_VARIANT = 1
-
 
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -553,13 +550,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            decode_graph_variants=(
-                (
-                    _HISPARSE_RESIDENT_GRAPH_VARIANT,
-                    _HISPARSE_HYBRID_GRAPH_VARIANT,
-                )
-                if self.vllm_config.attention_config.hisparse_config is not None
-                else (_HISPARSE_RESIDENT_GRAPH_VARIANT,)
+            capture_hybrid_kv=(
+                self.vllm_config.attention_config.hisparse_config is not None
             ),
         )
         check_attention_cp_compatibility(self.vllm_config)
@@ -827,12 +819,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # NOTE(woosuk): It is TBD whether we keep this API or not.
         return 0
 
-    def _set_hisparse_capture_variant(self, variant: int) -> None:
-        assert self.hisparse_worker is not None
-        self.hisparse_worker.set_fully_resident_batch(
-            variant == _HISPARSE_RESIDENT_GRAPH_VARIANT
-        )
-
     @torch.inference_mode()
     def capture_model(self) -> int:
         if self.is_encoder_only:
@@ -869,8 +855,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                     lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
                     decode_post_forward_hook=None,
-                    graph_variant_capture_hook=(
-                        self._set_hisparse_capture_variant
+                    kv_residency_capture_hook=(
+                        self.hisparse_worker.set_fully_resident_batch
                         if self.hisparse_worker is not None
                         else None
                     ),
@@ -1379,11 +1365,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=(is_profile or skip_compiled),
             num_active_loras=num_active_loras,
-            graph_variant=(
-                _HISPARSE_HYBRID_GRAPH_VARIANT
-                if self.hisparse_worker is not None
-                and not self.hisparse_worker.fully_resident_batch
-                else _HISPARSE_RESIDENT_GRAPH_VARIANT
+            fully_resident_kv=(
+                self.hisparse_worker is None
+                or self.hisparse_worker.fully_resident_batch
             ),
         )
 

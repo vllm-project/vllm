@@ -112,7 +112,7 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     mock_cuda_graph.assert_called_once()
 
 
-def _create_variant_manager(monkeypatch):
+def _create_hybrid_kv_manager(monkeypatch):
     compilation_config = CompilationConfig(
         cudagraph_mode="FULL_AND_PIECEWISE",
         cudagraph_capture_sizes=[4],
@@ -137,34 +137,34 @@ def _create_variant_manager(monkeypatch):
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=1,
-        decode_graph_variants=(0, 1),
+        capture_hybrid_kv=True,
     )
     manager._graphs_captured = True
     return manager
 
 
-def test_decode_graph_variants_dispatch_independently(monkeypatch):
-    manager = _create_variant_manager(monkeypatch)
+def test_kv_residency_cases_dispatch_independently(monkeypatch):
+    manager = _create_hybrid_kv_manager(monkeypatch)
 
-    resident = manager.dispatch(3, 3, 1, num_active_loras=0, graph_variant=0)
-    hybrid = manager.dispatch(3, 3, 1, num_active_loras=0, graph_variant=1)
+    resident = manager.dispatch(3, 3, 1, num_active_loras=0)
+    hybrid = manager.dispatch(3, 3, 1, num_active_loras=0, fully_resident_kv=False)
 
     assert resident.cg_mode == CUDAGraphMode.FULL
-    assert resident.graph_variant == 0
+    assert resident.fully_resident_kv
     assert hybrid.cg_mode == CUDAGraphMode.FULL
-    assert hybrid.graph_variant == 1
+    assert not hybrid.fully_resident_kv
     assert resident.num_tokens == hybrid.num_tokens == 4
 
     unsupported_mixed = manager.dispatch(
-        2, 3, None, num_active_loras=0, graph_variant=1
+        2, 3, None, num_active_loras=0, fully_resident_kv=False
     )
     assert unsupported_mixed.cg_mode == CUDAGraphMode.NONE
-    assert unsupported_mixed.graph_variant == 1
+    assert not unsupported_mixed.fully_resident_kv
 
 
-def test_dp_padding_preserves_local_graph_variant(monkeypatch):
-    manager = _create_variant_manager(monkeypatch)
-    hybrid = manager.dispatch(3, 3, 1, num_active_loras=0, graph_variant=1)
+def test_dp_padding_preserves_local_kv_residency(monkeypatch):
+    manager = _create_hybrid_kv_manager(monkeypatch)
+    hybrid = manager.dispatch(3, 3, 1, num_active_loras=0, fully_resident_kv=False)
 
     monkeypatch.setattr(
         dp_utils,
@@ -184,9 +184,8 @@ def test_dp_padding_preserves_local_graph_variant(monkeypatch):
         uniform_token_count=1,
         dp_size=2,
         dp_rank=0,
-        graph_variant=1,
     )
     assert synced.cg_mode == CUDAGraphMode.FULL
-    assert synced.graph_variant == 1
+    assert not synced.fully_resident_kv
     assert num_tokens_across_dp is not None
     assert num_tokens_across_dp.tolist() == [4, 4]
