@@ -11,7 +11,9 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.registry import (
+    MambaAttentionBackendEnum,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheSpecKind
