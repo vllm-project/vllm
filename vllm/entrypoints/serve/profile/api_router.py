@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Optional
+
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import Response
 
@@ -19,9 +21,12 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.post("/start_profile")
-async def start_profile(raw_request: Request):
+async def start_profile(
+    raw_request: Request,
+    profile_prefix: Optional[str] = None,
+):
     logger.info("Starting profiler...")
-    await engine_client(raw_request).start_profile()
+    await engine_client(raw_request).start_profile(profile_prefix=profile_prefix)
     logger.info("Profiler started.")
     return Response(status_code=200)
 
