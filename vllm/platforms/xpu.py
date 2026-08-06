@@ -301,13 +301,8 @@ class XPUPlatform(Platform):
             )
         else:
             logger.warning_once(
-                "XPU Graph support is experimental and has known limitations: "
-                "(1) only single-GPU execution is supported; "
-                "(2) FLASH_ATTN supports PIECEWISE mode only; use TRITON_ATTN "
-                "for FULL mode; "
-                "(3) XPU Graph may increase device memory usage, "
-                "potentially causing OOM errors or leaving less memory "
-                "for the KV cache and reducing performance."
+                "XPU Graph support is experimental and currently only supports "
+                "single-GPU execution."
             )
 
         # Disable fusion passes not yet supported on XPU.

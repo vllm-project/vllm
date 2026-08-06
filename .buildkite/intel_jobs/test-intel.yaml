@@ -196,3 +196,32 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
         pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8'
+  - label: "XPU Graph"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 32+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+      VLLM_TEST_DEVICE: "xpu"
+    source_file_dependencies:
+      - vllm/compilation/
+      - vllm/platforms/xpu.py
+      - vllm/v1/worker/xpu_model_runner.py
+      - vllm/v1/worker/xpu_worker.py
+      - .buildkite/intel_jobs/test-intel.yaml
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'export VLLM_XPU_ENABLE_XPU_GRAPH=1 &&
+        python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B &&
+        python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-0.6B --kv-cache-dtype fp8 &&
+        python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-CT-AutoRound --max-model-len 4096'
+      # Temporarily disabled (multi-GPU/MXFP8 not yet supported with XPU Graph):
+      # python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP8-CT-AutoRound -tp 2 --max-model-len 4096
