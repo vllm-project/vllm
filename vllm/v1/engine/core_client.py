@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -649,24 +650,8 @@ class MPClient(EngineCoreClient):
             ]
 
             # Wait for ready messages from each engine on the input socket.
-            identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
-            while identities:
-                if not sync_input_socket.poll(
-                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
-                ):
-                    raise TimeoutError(
-                        f"Timed out waiting for engine core processes to "
-                        f"start. This is often caused by slow weight loading "
-                        f"for large models. Waited "
-                        f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
-                        f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
-                        f"timeout, set the environment variable: "
-                        f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
-                    )
-                identity, payload = sync_input_socket.recv_multipart()
-                identities.remove(identity)
-                self._apply_ready_response(payload)
+            self._wait_for_engine_ready(sync_input_socket)
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -733,6 +718,43 @@ class MPClient(EngineCoreClient):
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
+
+    def _wait_for_engine_ready(
+        self,
+        sync_input_socket: zmq.Socket,
+        identities: set[bytes] | None = None,
+        what: str = "engine core processes",
+    ) -> None:
+        """Wait for a ready message from each engine on the input socket.
+
+        In the locally-managed-engines path this runs after
+        ``launch_core_engines`` has already handshaked with every engine (see
+        ``wait_for_engine_startup``), so it normally completes immediately;
+        the timeout below is the operative wait for externally-managed
+        engines (``client_addresses``) and for elastic-EP scale-up, where the
+        engines are started outside this process.
+        """
+        if identities is None:
+            identities = set(self.core_engines)
+        wait_start = time.monotonic()
+        while identities:
+            if not sync_input_socket.poll(
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+            ):
+                raise TimeoutError(
+                    f"Timed out waiting for {what} to start, "
+                    f"after {time.monotonic() - wait_start:.0f}s (limit "
+                    f"{VLLM_ENGINE_READY_TIMEOUT_S}s, configured by "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S). This is often caused by "
+                    f"slow weight loading for large models or cold JIT "
+                    f"kernel compilation (e.g. FlashInfer on new GPU "
+                    f"architectures). To increase the timeout, set the "
+                    f"environment variable: "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
+                )
+            identity, payload = sync_input_socket.recv_multipart()
+            identities.discard(identity)
+            self._apply_ready_response(payload)
 
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
@@ -1660,21 +1682,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         return future
 
     def _wait_for_new_engine_ready(self, new_core_engines: list[bytes]) -> None:
-        new_engine_identities = set(new_core_engines)
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
-        while new_engine_identities:
-            if not sync_input_socket.poll(timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000):
-                raise TimeoutError(
-                    f"Timed out waiting for new engine core processes to "
-                    f"start. Waited "
-                    f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
-                    f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
-                    f"timeout, set the environment variable: "
-                    f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
-                )
-            identity, payload = sync_input_socket.recv_multipart()
-            new_engine_identities.discard(identity)
-            self._apply_ready_response(payload)
+        self._wait_for_engine_ready(
+            sync_input_socket,
+            identities=set(new_core_engines),
+            what="new engine core processes",
+        )
 
     def _setup_elastic_ep_reconfig_bootstrap(self) -> None:
         from vllm.distributed.utils import create_tcp_store
