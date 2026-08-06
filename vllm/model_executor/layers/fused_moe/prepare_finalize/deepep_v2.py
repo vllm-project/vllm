@@ -80,22 +80,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
 
-        # arange(num_local_experts) + rank_expert_offset, cached per device.
-        # Rank-constant, so it is built once rather than per layer per step.
-        self._local_expert_ids: torch.Tensor | None = None
-
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
-
-    def _global_expert_ids(self, num_local: int, device: torch.device) -> torch.Tensor:
-        ids = self._local_expert_ids
-        if ids is None or ids.numel() != num_local or ids.device != device:
-            ids = (
-                torch.arange(num_local, dtype=torch.int64, device=device)
-                + self.rank_expert_offset
-            )
-            self._local_expert_ids = ids
-        return ids
 
     def output_is_reduced(self) -> bool:
         return True
@@ -210,26 +196,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             expert_x, expert_x_scale = recv_x, None
 
-        expert_tokens_meta = None
-        if recv_expert_num_tokens:
-            expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-                recv_expert_num_tokens,
-                device=expert_x.device,
-            )
-
         if recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
             total_tokens = sum(recv_expert_num_tokens)
             if total_tokens > 0:
-                assert expert_tokens_meta is not None
-                recv_topk_idx = torch.repeat_interleave(
-                    self._global_expert_ids(
-                        len(recv_expert_num_tokens), expert_x.device
-                    ),
-                    expert_tokens_meta.expert_num_tokens,
-                    output_size=total_tokens,
+                recv_topk_idx = torch.empty(
+                    total_tokens,
+                    dtype=torch.int64,
+                    device=expert_x.device,
                 )
+                offset = 0
+                for i, count in enumerate(recv_expert_num_tokens):
+                    if count > 0:
+                        recv_topk_idx[offset : offset + count].fill_(
+                            i + self.rank_expert_offset
+                        )
+                        offset += count
             else:
                 recv_topk_idx = torch.empty(
                     0,
@@ -259,6 +242,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
+
+        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+            recv_expert_num_tokens,
+            device=expert_x.device,
+        )
 
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None

@@ -43,7 +43,6 @@ from vllm.v1.attention.backend import (
 
 logger = init_logger(__name__)
 
-# Deprecated: use resolve_kv_cache_layout() instead (RFC #42082).
 KVCacheLayoutType = Literal["LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC"]
 _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 

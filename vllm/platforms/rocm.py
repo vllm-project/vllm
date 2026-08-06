@@ -448,7 +448,6 @@ def flash_attn_triton_available() -> bool:
 def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
-    use_kv_connector: bool = False,
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
@@ -548,7 +547,6 @@ class RocmPlatform(Platform):
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
-            attn_selector_config.use_kv_connector,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
