@@ -215,20 +215,12 @@ class MoRIIOConnector(KVConnectorBase_V1):
             and self.kv_transfer_config.is_kv_consumer
             and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
-            # The per-layer read-completion barrier (wait_for_layer_load) is
-            # skipped when attention is replayed inside a FULL CUDA graph, so
-            # attention can run over in-flight RDMA reads and degrade accuracy
-            # at high concurrency (reproduced on DeepSeek-R1 P/D TP8:TP8,
-            # gsm8k). The requested cudagraph mode is honored; set
-            # cudagraph_mode=PIECEWISE in --compilation-config for the barrier
-            # to fire. See https://github.com/vllm-project/vllm/pull/48534 and
-            # https://github.com/vllm-project/vllm/issues/49643.
+            # warn only; kv-read barrier requires PIECEWISE cudagraph mode
             logger.warning_once(
-                "MoRIIO READ mode is running with %s CUDA graphs; the "
-                "per-layer read-completion barrier cannot fire inside a full "
-                "graph and accuracy may degrade at high concurrency. Set "
-                "cudagraph_mode=PIECEWISE in --compilation-config for "
-                "correctness.",
+                "MoRIIO READ mode is running with %s CUDA graphs: per-layer "
+                "KV-read barrier can't fire inside full graph; accuracy may "
+                "degrade at high concurrency. Set cudagraph_mode=PIECEWISE "
+                "in --compilation-config.",
                 vllm_config.compilation_config.cudagraph_mode.name,
             )
         if role == KVConnectorRole.SCHEDULER:
