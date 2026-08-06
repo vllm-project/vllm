@@ -197,6 +197,8 @@ class SchedulerStats:
 
     kv_cache_usage: float = 0.0
     iteration_details: SchedulerIterationDetails | None = None
+    # Number of model input tokens scheduled in this engine iteration.
+    num_iteration_tokens: int | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None

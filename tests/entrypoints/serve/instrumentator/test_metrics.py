@@ -101,7 +101,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
         "vllm:iteration_tokens_total": [
             (
                 "_sum",
-                num_requests * (num_prompt_tokens + max_tokens),
+                num_requests * (num_prompt_tokens + max_tokens - 1),
             ),
             ("_count", num_requests * max_tokens),
         ],

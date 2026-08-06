@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import Mock
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -34,6 +37,7 @@ def test_scheduler_iteration_details_serialization():
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
             iteration_details=iteration_details,
+            num_iteration_tokens=8,
         )
     )
 
@@ -43,6 +47,7 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+    assert decoded.scheduler_stats.num_iteration_tokens == 8
 
 
 def test_compute_iteration_details_includes_encoder_stats():
@@ -56,6 +61,35 @@ def test_compute_iteration_details_includes_encoder_stats():
 
     assert iteration_details.num_encoder_inputs == 2
     assert iteration_details.num_encoder_output_tokens == 392
+
+
+def test_prometheus_iteration_tokens_use_scheduler_stats():
+    logger = object.__new__(PrometheusStatLogger)
+    logger.gauge_scheduler_running = {0: Mock()}
+    logger.gauge_scheduler_waiting = {0: Mock()}
+    logger.gauge_waiting_by_reason = {
+        "capacity": {0: Mock()},
+        "deferred": {0: Mock()},
+    }
+    logger.gauge_kv_cache_usage = {0: Mock()}
+    logger.counter_prefix_cache_queries = {0: Mock()}
+    logger.counter_prefix_cache_hits = {0: Mock()}
+    logger.histogram_iteration_tokens = {0: Mock()}
+    logger.kv_cache_metrics_enabled = False
+    logger.gauge_lora_info = None
+
+    logger.record(
+        scheduler_stats=SchedulerStats(num_iteration_tokens=7),
+        iteration_stats=None,
+    )
+    logger.histogram_iteration_tokens[0].observe.assert_called_once_with(7)
+
+    logger.record(
+        scheduler_stats=SchedulerStats(num_iteration_tokens=0),
+        iteration_stats=None,
+    )
+    logger.record(scheduler_stats=SchedulerStats(), iteration_stats=None)
+    logger.histogram_iteration_tokens[0].observe.assert_called_once_with(7)
 
 
 def test_prefill_kv_computed_with_cache():
