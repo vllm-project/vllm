@@ -1014,10 +1014,13 @@ def unify_kv_cache_spec_page_size(
     size by increasing the block size of layers with smaller page size. Two
     cases cannot be unified by block size alone and pad their physical page to
     the maximum instead: Mamba layers, whose page size comes from state shapes
-    and is independent of block size; and attention layers whose page does not
-    evenly divide the maximum (the padded page is read through a strided
-    view). Raise NotImplementedError
-    if failed to unify the page size.
+    and is independent of block size; and non-MLA attention layers whose page
+    does not evenly divide the maximum (the padded page is read through a
+    strided view). MLA layers are excluded: their kernels address custom
+    packed page interiors (e.g. the 656-byte fp8_ds_mla layout, the sparse
+    indexer k-cache) rather than the view's block stride, so a padded page
+    would be misread. Raise NotImplementedError if failed to unify the page
+    size.
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
@@ -1051,13 +1054,15 @@ def unify_kv_cache_spec_page_size(
                 ratio = max_page_size // layer_page_size
                 new_block_size = layer_spec.block_size * ratio
                 new_spec = replace(layer_spec, block_size=new_block_size)
-            elif isinstance(layer_spec, AttentionSpec):
+            elif isinstance(layer_spec, AttentionSpec) and not isinstance(
+                layer_spec, MLAAttentionSpec
+            ):
                 new_spec = replace(layer_spec, page_size_padded=max_page_size)
             else:
                 raise NotImplementedError(
                     f"Layer {layer_name}: page size is not divisible by the "
                     "maximum page size and cannot be padded. Padding is only "
-                    "supported for attention layers."
+                    "supported for non-MLA attention layers."
                 )
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
