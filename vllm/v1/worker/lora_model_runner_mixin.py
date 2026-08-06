@@ -4,6 +4,7 @@
 Define LoRA functionality mixin for model runners.
 """
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TypeAlias
 
@@ -28,6 +29,21 @@ logger = init_logger(__name__)
 
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
+    lora_config: LoRAConfig | None
+    get_model: Callable[[], nn.Module]
+
+    def reset_lora_state(self) -> None:
+        """Invalidate LoRA state after base weights are replaced."""
+        if not self.lora_config:
+            return
+
+        from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
+
+        self.lora_manager.remove_all_adapters()
+        for module in self.get_model().modules():
+            if isinstance(module, LogitsProcessorWithLoRA):
+                module.reset_sharded_to_full_mapping()
+
     def load_lora_model(
         self,
         model: nn.Module,
