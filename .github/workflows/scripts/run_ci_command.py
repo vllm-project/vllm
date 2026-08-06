@@ -851,7 +851,14 @@ def run(
     comment_id = event["comment"]["id"]
     actor = event["comment"]["user"]["login"]
 
-    if is_already_handled(github, issue_number, comment_id):
+    try:
+        already_handled = is_already_handled(github, issue_number, comment_id)
+    except ApiError as error:
+        if error.status == 404:
+            print(f"Comment {comment_id} no longer exists.")
+            return
+        raise
+    if already_handled:
         print(f"Comment {comment_id} was already handled.")
         return
     add_reaction_safely(github, comment_id, "eyes")
@@ -912,8 +919,11 @@ def run(
                 github=github,
                 pr=pr,
             )
+        github.add_comment(
+            issue_number,
+            f"✅ {message}\n\n{command_comment_marker(comment_id)}",
+        )
         add_reaction_safely(github, comment_id, "rocket")
-        github.add_comment(issue_number, f"✅ {message}")
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise

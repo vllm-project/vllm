@@ -19,6 +19,7 @@ from run_ci_command import (
     BuildkiteClient,
     HttpTransport,
     authorize,
+    command_comment_marker,
     create_build_payload,
     has_trusted_approval,
     is_active_build,
@@ -76,12 +77,19 @@ class FakeGitHub:
         comments: list[str] | None = None,
         pulls_for_commit: list[dict[str, Any]] | None = None,
         prs: dict[int, dict[str, Any]] | None = None,
+        comment_failures: int = 0,
+        reaction_failures: set[str] | None = None,
+        reaction_list_error: ApiError | None = None,
     ) -> None:
         self.comments = comments or []
+        self.comment_failures = comment_failures
+        self.operations: list[tuple[str, str]] = []
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
         self.reactions: list[str] = []
+        self.reaction_failures = reaction_failures or set()
+        self.reaction_list_error = reaction_list_error
         self.review_decision = review_decision
         self.reviews = reviews or []
         self.pulls_for_commit = pulls_for_commit or []
@@ -115,13 +123,28 @@ class FakeGitHub:
         ]
 
     def list_reactions(self, comment_id: int) -> list[dict[str, Any]]:
-        return []
+        if self.reaction_list_error is not None:
+            raise self.reaction_list_error
+        return [
+            {
+                "content": content,
+                "user": {"login": "github-actions[bot]"},
+            }
+            for content in self.reactions
+        ]
 
     def add_reaction(self, comment_id: int, content: str) -> None:
+        if content in self.reaction_failures:
+            raise ApiError(500, "Reaction failed")
         self.reactions.append(content)
+        self.operations.append(("reaction", content))
 
     def add_comment(self, issue_number: int, body: str) -> None:
+        if self.comment_failures:
+            self.comment_failures -= 1
+            raise ApiError(500, "Comment failed")
         self.comments.append(body)
+        self.operations.append(("comment", body))
 
 
 class FakeBuildkite:
@@ -452,8 +475,60 @@ class RunCiCommandTest(unittest.TestCase):
             "PR #42 /ci run by @reviewer",
         )
         self.assertEqual(github.reactions, ["eyes", "rocket"])
+        self.assertEqual(
+            [operation for operation, _ in github.operations],
+            ["reaction", "comment", "reaction"],
+        )
         self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
+        self.assertIn(command_comment_marker(99), github.comments[0])
+
+    def test_success_comment_marker_handles_rerun_when_rocket_fails(self) -> None:
+        github = FakeGitHub(reaction_failures={"rocket"})
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI), github, buildkite)
+        run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn(command_comment_marker(99), github.comments[0])
+        self.assertEqual(github.reactions, ["eyes"])
+
+    def test_comment_failure_does_not_mark_command_handled(self) -> None:
+        duplicate = {
+            "created_at": "2026-01-01T00:00:00Z",
+            "meta_data": {"github-pr-number": "42"},
+            "number": 123,
+            "pull_request": {"id": 42},
+            "web_url": "https://buildkite.example/builds/123",
+        }
+        github = FakeGitHub(comment_failures=1)
+        buildkite = FakeBuildkite([[], [], [duplicate]])
+
+        with self.assertRaisesRegex(ApiError, "Comment failed"):
+            run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+        self.assertEqual(github.reactions, ["eyes", "confused"])
+        self.assertNotIn("rocket", github.reactions)
+
+        run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn(command_comment_marker(99), github.comments[0])
+        self.assertEqual(github.reactions[-1], "rocket")
+
+    def test_deleted_command_comment_is_a_clean_noop(self) -> None:
+        github = FakeGitHub(
+            reaction_list_error=ApiError(404, "Comment not found"),
+        )
+        buildkite = FakeBuildkite()
+
+        run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+        self.assertEqual(github.operations, [])
+        self.assertEqual(buildkite.list_calls, [])
 
     def test_run_all_sets_buildkite_environment(self) -> None:
         github = FakeGitHub()
