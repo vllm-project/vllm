@@ -28,7 +28,10 @@ import ray
 import torch
 import torch.distributed as dist
 from ray.util.placement_group import placement_group, placement_group_table
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from ray.util.scheduling_strategies import (
+    NodeAffinitySchedulingStrategy,
+    PlacementGroupSchedulingStrategy,
+)
 from rdt_vllm_serve import (
     http_generate,
     launch_vllm_serve,
@@ -58,7 +61,12 @@ RAY_NAMESPACE = "sharded_rdt_qwen235b_example"
 VLLM_PORT = int(os.environ.get("RDT_VLLM_PORT", "8100"))
 VLLM_ENDPOINT = f"http://127.0.0.1:{VLLM_PORT}"
 
-FSDP_WORLD_SIZE = 16
+# 16 trainer ranks (two 8-GPU nodes) is the intended shape. Override to run the
+# same probe on a smaller cluster: FSDP_WORLD_SIZE=8 fits ONE trainer node, which
+# together with the TP8 inference node needs 16 GPUs instead of 24. Per-rank
+# weight memory is the model / FSDP_WORLD_SIZE, so 8 ranks hold ~59GiB each of
+# the ~470GiB bf16 checkpoint — it fits on 80GiB cards, with less headroom.
+FSDP_WORLD_SIZE = int(os.environ.get("FSDP_WORLD_SIZE", "16"))
 INFERENCE_TP_SIZE = 8
 INFERENCE_DP_SIZE = 1
 NUM_INFERENCE_CONSUMERS = INFERENCE_TP_SIZE * INFERENCE_DP_SIZE
@@ -69,7 +77,7 @@ SYNC_ITERS = int(os.environ.get("RDT_SYNC_ITERS", "3"))
 # stage's ranks. Nothing is gathered across stages — each layer's gather runs
 # within the one stage that owns it, and consumers route each pull to an owner
 # (see RdtRouter). NUM_PP_STAGES=1 is the historical gather-to-all layout: one
-# stage of all 16 ranks, every rank holding every layer.
+# stage of every rank, each holding every layer.
 NUM_PP_STAGES = int(os.environ.get("NUM_PP_STAGES", "2"))
 assert FSDP_WORLD_SIZE % NUM_PP_STAGES == 0, (
     f"NUM_PP_STAGES={NUM_PP_STAGES} must divide FSDP_WORLD_SIZE={FSDP_WORLD_SIZE}"
@@ -418,6 +426,23 @@ def main():
         "py_executable": sys.executable,
         "working_dir": os.path.dirname(os.path.abspath(__file__)),
     }
+    # Ray workers are spawned by the raylet and inherit ITS environment, not the
+    # driver's, so the checkpoint location has to be forwarded explicitly: each
+    # trainer rank resolves the snapshot itself under HF_HOME (see
+    # _load_checkpoint) and would otherwise look in ~/.cache/huggingface.
+    forwarded = {
+        k: os.environ[k]
+        for k in (
+            "HF_HOME",
+            "HF_HUB_OFFLINE",
+            "TRANSFORMERS_OFFLINE",
+            "NCCL_CUMEM_ENABLE",
+            "LD_LIBRARY_PATH",
+        )
+        if k in os.environ
+    }
+    if forwarded:
+        runtime_env["env_vars"] = forwarded
     if not ray.is_initialized():
         ray.init(address="auto", runtime_env=runtime_env, namespace=RAY_NAMESPACE)
 
@@ -434,25 +459,49 @@ def main():
         flush=True,
     )
 
-    # 16 single-GPU bundles PACK across exactly two 8-GPU nodes (STRICT_PACK
-    # cannot span nodes). The inference node's 8 GPUs stay free for vllm serve.
-    trainer_pg = placement_group(
-        [{"GPU": 1, "CPU": 1}] * FSDP_WORLD_SIZE, strategy="PACK"
-    )
-    ray.get(trainer_pg.ready())
-    pg_node_id = next(
-        iter(placement_group_table(trainer_pg)["bundles_to_node_id"].values())
-    )
-    fsdp_master_addr = next(
-        n["NodeManagerAddress"] for n in ray.nodes() if n["NodeID"] == pg_node_id
-    )
+    # Trainer placement. ``vllm serve`` runs with the ``mp`` executor (see below),
+    # so its 8 workers are plain local processes on THIS driver's node — the
+    # trainer ranks must therefore land on other nodes, or the two fleets fight
+    # over the same GPUs.
+    #
+    # Default: 16 single-GPU bundles PACK across exactly two 8-GPU nodes
+    # (STRICT_PACK cannot span nodes), leaving the driver's node free. That works
+    # because 16 bundles cannot fit on one node. With FSDP_WORLD_SIZE=8 they can,
+    # and PACK would happily choose the driver's own node — so a 2-node run must
+    # say where the trainers go. RDT_TRAINER_NODE_IP pins them by node affinity
+    # instead (also what rlhf_sharded_rdt_mn.py does).
+    trainer_ip = os.environ.get("RDT_TRAINER_NODE_IP")
+    if trainer_ip:
+        trainer_node_id = next(
+            n["NodeID"]
+            for n in ray.nodes()
+            if n["Alive"] and n["NodeManagerAddress"] == trainer_ip
+        )
+        trainer_sched: object = NodeAffinitySchedulingStrategy(
+            node_id=trainer_node_id, soft=False
+        )
+        fsdp_master_addr = trainer_ip
+        rank_sched = [trainer_sched] * FSDP_WORLD_SIZE
+    else:
+        trainer_pg = placement_group(
+            [{"GPU": 1, "CPU": 1}] * FSDP_WORLD_SIZE, strategy="PACK"
+        )
+        ray.get(trainer_pg.ready())
+        pg_node_id = next(
+            iter(placement_group_table(trainer_pg)["bundles_to_node_id"].values())
+        )
+        fsdp_master_addr = next(
+            n["NodeManagerAddress"] for n in ray.nodes() if n["NodeID"] == pg_node_id
+        )
+        trainer_sched = PlacementGroupSchedulingStrategy(placement_group=trainer_pg)
+        rank_sched = [
+            PlacementGroupSchedulingStrategy(
+                placement_group=trainer_pg, placement_group_bundle_index=rank
+            )
+            for rank in range(FSDP_WORLD_SIZE)
+        ]
 
-    @ray.remote(
-        num_cpus=0,
-        scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=trainer_pg
-        ),
-    )
+    @ray.remote(num_cpus=0, scheduling_strategy=trainer_sched)
     def _free_port():
         return get_open_port()
 
@@ -462,9 +511,8 @@ def main():
     workers = []
     for rank in range(FSDP_WORLD_SIZE):
         h = QwenTrainWorker.options(
-            scheduling_strategy=PlacementGroupSchedulingStrategy(
-                placement_group=trainer_pg, placement_group_bundle_index=rank
-            ),
+            num_gpus=1,
+            scheduling_strategy=rank_sched[rank],
         ).remote(
             local_model_path, rank, FSDP_WORLD_SIZE, fsdp_master_addr, fsdp_master_port
         )

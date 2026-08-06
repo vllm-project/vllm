@@ -170,9 +170,10 @@ class _RDTProducerServer:
         self._cache_event: dict[str, torch.cuda.Event] = {}
 
         self._pack_check = pack_check
-        # [RDT-PACK-DSTS] (consumer_id, ring idx, spec names) ->
-        # (arena data_ptr, destination views). Keyed on the arena pointer so a
-        # ring regrow invalidates rather than writing into a freed buffer.
+        # [RDT-PACK-DSTS] (consumer_id, ring idx, packed layout) ->
+        # (arena data_ptr, destination views). Keyed on the arena pointer too, so
+        # a ring regrow invalidates rather than writing into a freed buffer. See
+        # the serve path for why the layout, not the spec names, is the key.
         self._pack_dsts: dict[tuple, tuple[int, list[torch.Tensor]]] = {}
 
         # profiling counters
@@ -531,6 +532,10 @@ class _RDTProducerServer:
             self._cache_event.clear()
         with self._serve_lock:
             self._serve_rings.clear()
+            # Must go with the rings: these are views INTO them, and the
+            # data_ptr guard that normally invalidates them cannot tell a freed
+            # arena from a new one recycled at the same address.
+            self._pack_dsts.clear()
 
 
 class ShardedRDTTrainerWeightTransferEngine(

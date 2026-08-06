@@ -1444,6 +1444,18 @@ class TestWeightSourceGroupContract:
             ["model.layers.1.a"],
         ]
 
+    def test_groups_normalizes_owned_indices(self):
+        """A trainer engine normalizes ``owned_groups()`` to sorted-unique before
+        walking it, so this must too -- otherwise a source that reports its groups
+        out of order pairs each group with the wrong batch of ``iter_groups()``."""
+        names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
+        source = self._source(names, owned=[2, 1, 2])
+        assert source.groups() == [["model.layers.0.a"], ["model.layers.1.a"]]
+        assert [ns for ns, _ in source.iter_groups()] == [
+            ["model.layers.0.a"],
+            ["model.layers.1.a"],
+        ]
+
     def test_iter_groups_batches_the_stream_per_group(self):
         names = ["embed.w", "model.layers.0.a", "model.layers.0.b", "norm.w"]
         batches = list(self._source(names).iter_groups())
