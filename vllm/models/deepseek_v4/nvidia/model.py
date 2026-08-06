@@ -1185,6 +1185,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     aux_recon, aux_mean = mhc_post_mean_fused(
                         hidden_states, residual, post_mix, res_mix
                     )
+                    if self.use_sequence_parallel:
+                        aux_mean = sp_all_gather(aux_mean)[:full_num_tokens]
                     aux_hidden_states.append(aux_mean)
                 else:
                     aux_recon = mhc_post_tilelang(
@@ -1195,6 +1197,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                     aux_hidden_states.append(aux_hidden_state)
                 final_aux_recon = aux_recon
+        _fused_applied = False
         if layer is not None:
             # Reuse if the last layer was captured as an aux hidden state
             if self.end_layer in self.aux_hidden_state_layers:
@@ -1217,6 +1220,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     self.norm.variance_epsilon,
                     mtp_buffer=self._mtp_hidden_buffer,
                 )
+                if self.use_sequence_parallel:
+                    hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+                _fused_applied = True
                 if len(aux_hidden_states) > 0:
                     return hidden_states, aux_hidden_states
                 return hidden_states
@@ -1237,11 +1243,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # When the fused kernel handled this, the stash is already in
         # _mtp_hidden_buffer and we skip the copy to avoid double-writing.
         num_tokens = hidden_states.shape[0]
-        if self._mtp_hidden_buffer is not None and not _HAS_OPTIMIZED_FUSIONS:
+        if self._mtp_hidden_buffer is not None and not _fused_applied:
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         # Last PP rank: apply hc_head + norm (unless the fused kernel already did)
-        if _HAS_OPTIMIZED_FUSIONS:
+        if _fused_applied:
             # Fused kernel already applied hc_head + norm
             pass
         else:
