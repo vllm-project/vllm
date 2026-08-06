@@ -2426,7 +2426,10 @@ class VllmConfig:
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
         if self.model_config is None:
             return self
-        if self.cache_config.cache_dtype == "nvfp4" and self.model_config.use_mla:
+        if (
+            self.cache_config.cache_dtype.startswith("nvfp4")
+            and self.model_config.use_mla
+        ):
             raise ValueError(
                 "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
                 "Attention) backends. Please use a different --kv-cache-dtype "

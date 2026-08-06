@@ -585,8 +585,7 @@ void reshape_and_cache_flash(
     torch::stable::Tensor& key, torch::stable::Tensor& value,
     torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
     torch::stable::Tensor& slot_mapping, const std::string& kv_cache_dtype,
-    torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale,
-    const std::string& kv_cache_quant_algo);
+    torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale);
 
 void concat_and_cache_mla(torch::stable::Tensor& kv_c,
                           torch::stable::Tensor& k_pe,

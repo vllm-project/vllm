@@ -25,10 +25,10 @@
 
 namespace vllm {
 
+// The cache layout is identical; this only selects the store-time scale search.
 enum class NVFP4KVScaleSearch {
   DEFAULT,
   FOUR_OVER_SIX,
-  FOUR_OVER_SIX_K_ONLY,
 };
 
 // Compute swizzled scale offset for SM100 trtllm-gen MHA kernel.
@@ -50,19 +50,20 @@ __device__ __forceinline__ int swizzle_scale_offset(int t, int s,
 __device__ __forceinline__ float round_to_nearest_e2m1(float x) {
   const float ax = fabsf(x);
   float q;
-  if (ax < 0.25f) {
+  // Match cvt.rn.satfinite.e2m1x2.f32, including ties-to-even boundaries.
+  if (ax <= 0.25f) {
     q = 0.0f;
   } else if (ax < 0.75f) {
     q = 0.5f;
-  } else if (ax < 1.25f) {
+  } else if (ax <= 1.25f) {
     q = 1.0f;
   } else if (ax < 1.75f) {
     q = 1.5f;
-  } else if (ax < 2.5f) {
+  } else if (ax <= 2.5f) {
     q = 2.0f;
   } else if (ax < 3.5f) {
     q = 3.0f;
-  } else if (ax < 5.0f) {
+  } else if (ax <= 5.0f) {
     q = 4.0f;
   } else {
     q = 6.0f;
@@ -253,15 +254,6 @@ __global__ void reshape_and_cache_nvfp4_kernel(
       if constexpr (SCALE_SEARCH == NVFP4KVScaleSearch::FOUR_OVER_SIX) {
         packed = cvt_warp_fp16_to_fp4_4over6<CudaType, THREADS_PER_SF>(
             in_vec, global_scale, sf_out_ptr);
-      } else if constexpr (SCALE_SEARCH ==
-                           NVFP4KVScaleSearch::FOUR_OVER_SIX_K_ONLY) {
-        if (kv == 0) {
-          packed = cvt_warp_fp16_to_fp4_4over6<CudaType, THREADS_PER_SF>(
-              in_vec, global_scale, sf_out_ptr);
-        } else {
-          packed = cvt_warp_fp16_to_fp4<CudaType, THREADS_PER_SF>(
-              in_vec, global_scale, sf_out_ptr);
-        }
       } else {
         packed = cvt_warp_fp16_to_fp4<CudaType, THREADS_PER_SF>(
             in_vec, global_scale, sf_out_ptr);
@@ -320,7 +312,7 @@ void reshape_and_cache_nvfp4_dispatch(
     torch::stable::Tensor& key, torch::stable::Tensor& value,
     torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
     torch::stable::Tensor& slot_mapping, torch::stable::Tensor& k_scale,
-    torch::stable::Tensor& v_scale, const std::string& kv_cache_quant_algo) {
+    torch::stable::Tensor& v_scale, const std::string& kv_cache_dtype) {
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -395,7 +387,7 @@ void reshape_and_cache_nvfp4_dispatch(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       key.scalar_type(), "reshape_and_cache_nvfp4", [&] {
-        if (kv_cache_quant_algo == "default") {
+        if (kv_cache_dtype == "nvfp4") {
           vllm::reshape_and_cache_nvfp4_kernel<
               scalar_t, vllm::NVFP4KVScaleSearch::DEFAULT>
               <<<grid, block, 0, stream>>>(
@@ -409,7 +401,7 @@ void reshape_and_cache_nvfp4_dispatch(
                   data_head_stride, data_block_offset_stride,
                   scale_block_stride, scale_head_stride,
                   scale_block_offset_stride);
-        } else if (kv_cache_quant_algo == "four_over_six") {
+        } else if (kv_cache_dtype == "nvfp4_4over6") {
           vllm::reshape_and_cache_nvfp4_kernel<
               scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX>
               <<<grid, block, 0, stream>>>(
@@ -423,24 +415,9 @@ void reshape_and_cache_nvfp4_dispatch(
                   data_head_stride, data_block_offset_stride,
                   scale_block_stride, scale_head_stride,
                   scale_block_offset_stride);
-        } else if (kv_cache_quant_algo == "four_over_six_k_only") {
-          vllm::reshape_and_cache_nvfp4_kernel<
-              scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX_K_ONLY>
-              <<<grid, block, 0, stream>>>(
-                  key.const_data_ptr<scalar_t>(),
-                  value.const_data_ptr<scalar_t>(),
-                  key_cache.mutable_data_ptr<uint8_t>(),
-                  value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
-                  value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
-                  k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
-                  num_heads, head_size, block_size, data_block_stride,
-                  data_head_stride, data_block_offset_stride,
-                  scale_block_stride, scale_head_stride,
-                  scale_block_offset_stride);
         } else {
           STD_TORCH_CHECK(false,
-                          "Unsupported NVFP4 KV quantization algorithm: ",
-                          kv_cache_quant_algo);
+                          "Unsupported NVFP4 KV cache dtype: ", kv_cache_dtype);
         }
       });
 }

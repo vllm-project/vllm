@@ -801,9 +801,8 @@ void reshape_and_cache_flash(
         value_cache,  // [num_blocks, block_size, num_heads, head_size]
     torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
     const std::string& kv_cache_dtype,
-    torch::stable::Tensor& k_scale,  // [1] or [num_heads]
-    torch::stable::Tensor& v_scale,  // [1] or [num_heads]
-    const std::string& kv_cache_quant_algo) {
+    torch::stable::Tensor& k_scale,    // [1] or [num_heads]
+    torch::stable::Tensor& v_scale) {  // [1] or [num_heads]
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -822,18 +821,17 @@ void reshape_and_cache_flash(
       key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
-  if (kv_cache_dtype == "nvfp4") {
+  if (kv_cache_dtype == "nvfp4" || kv_cache_dtype == "nvfp4_4over6") {
 #if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
     // NVFP4 dispatch is compiled separately for SM100+.
     extern void reshape_and_cache_nvfp4_dispatch(
         torch::stable::Tensor & key, torch::stable::Tensor & value,
         torch::stable::Tensor & key_cache, torch::stable::Tensor & value_cache,
         torch::stable::Tensor & slot_mapping, torch::stable::Tensor & k_scale,
-        torch::stable::Tensor & v_scale,
-        const std::string& kv_cache_quant_algo);
+        torch::stable::Tensor & v_scale, const std::string& kv_cache_dtype);
     reshape_and_cache_nvfp4_dispatch(key, value, key_cache, value_cache,
                                      slot_mapping, k_scale, v_scale,
-                                     kv_cache_quant_algo);
+                                     kv_cache_dtype);
     return;
 #else
     STD_TORCH_CHECK(

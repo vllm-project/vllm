@@ -900,8 +900,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                        Tensor! value_cache,"
       "                        Tensor slot_mapping,"
       "                        str kv_cache_dtype,"
-      "                        Tensor k_scale, Tensor v_scale,"
-      "                        str kv_cache_quant_algo=\"default\") -> ()");
+      "                        Tensor k_scale, Tensor v_scale) -> ()");
 
   // Concat kv_c and k_pe and cache them.
   ops.def(
