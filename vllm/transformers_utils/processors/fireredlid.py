@@ -13,6 +13,7 @@ The Processor wraps the FeatureExtractor and a tokenizer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -37,10 +38,91 @@ else:
 
 logger = init_logger(__name__)
 
+FIREREDLID_EXPECTED_CONTEXT = 7
+FIREREDLID_STATIC_FEATURE_EXTRACTOR_KWARGS = frozenset(
+    {
+        "dim",
+        "left_context",
+        "num_mel_bins",
+        "right_context",
+    }
+)
+FIREREDLID_UNSAFE_FEATURE_EXTRACTOR_KWARGS = frozenset(
+    {
+        "inverse_std_variences",
+        "means",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers (shared with FireRedASR2 processor)
 # ---------------------------------------------------------------------------
+
+
+def _validate_non_negative_int(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}.")
+
+
+def validate_fireredlid_feature_extractor_config(
+    *,
+    dim: int,
+    num_mel_bins: int,
+    left_context: int,
+    right_context: int,
+) -> None:
+    """Validate fixed FireRedLID frontend geometry before preprocessing."""
+    _validate_non_negative_int("dim", dim)
+    _validate_non_negative_int("num_mel_bins", num_mel_bins)
+    _validate_non_negative_int("left_context", left_context)
+    _validate_non_negative_int("right_context", right_context)
+
+    if dim == 0:
+        raise ValueError("dim must be greater than 0.")
+    if num_mel_bins != dim:
+        raise ValueError(
+            "FireRedLID requires num_mel_bins to match dim before fbank "
+            f"extraction, got num_mel_bins={num_mel_bins} and dim={dim}."
+        )
+
+    context = left_context + 1 + right_context
+    if context != FIREREDLID_EXPECTED_CONTEXT:
+        raise ValueError(
+            "FireRedLID requires a fixed seven-frame frontend context window, "
+            f"got left_context={left_context} and right_context={right_context}."
+        )
+
+
+def validate_fireredlid_request_processor_kwargs(
+    kwargs: Mapping[str, object],
+    feature_extractor: object,
+) -> None:
+    """Reject request overrides that change FireRedLID frontend geometry."""
+    unsafe_overrides = sorted(
+        FIREREDLID_UNSAFE_FEATURE_EXTRACTOR_KWARGS & kwargs.keys()
+    )
+    if unsafe_overrides:
+        raise ValueError(
+            "FireRedLID does not allow request-level overrides for static "
+            "feature extractor fields: "
+            f"{', '.join(unsafe_overrides)}."
+        )
+
+    static_overrides = sorted(
+        FIREREDLID_STATIC_FEATURE_EXTRACTOR_KWARGS & kwargs.keys()
+    )
+    changed_overrides = [
+        name
+        for name in static_overrides
+        if kwargs[name] != getattr(feature_extractor, name)
+    ]
+    if changed_overrides:
+        raise ValueError(
+            "FireRedLID does not allow request-level overrides for static "
+            "feature extractor fields: "
+            f"{', '.join(changed_overrides)}."
+        )
 
 
 class CMVN:
@@ -120,6 +202,12 @@ class FireRedLIDFeatureExtractor(SequenceFeatureExtractor):
         right_context=3,
         **kwargs,
     ):
+        validate_fireredlid_feature_extractor_config(
+            dim=dim,
+            num_mel_bins=num_mel_bins,
+            left_context=left_context,
+            right_context=right_context,
+        )
         super().__init__(
             feature_size=feature_size,
             sampling_rate=sampling_rate,
@@ -136,6 +224,8 @@ class FireRedLIDFeatureExtractor(SequenceFeatureExtractor):
         self.frame_shift = frame_shift
         self.dither = dither
         self.sampling_rate = sampling_rate
+        self.left_context = left_context
+        self.right_context = right_context
         self.context = left_context + 1 + right_context
 
     def __call__(

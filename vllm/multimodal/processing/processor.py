@@ -1255,11 +1255,31 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Call the HF processor on the prompt text and
         associated multi-modal data.
         """
+        premerged_kwargs = self._get_premerged_hf_processor_call_kwargs(
+            mm_kwargs,
+            tok_kwargs,
+        )
+        if premerged_kwargs is None:
+            return self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**mm_kwargs),
+                dict(text=prompt, **mm_data),
+                dict(**mm_kwargs, **tok_kwargs),
+            )
+
         return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            premerged_kwargs,
+            merge_mm_kwargs=False,
         )
+
+    def _get_premerged_hf_processor_call_kwargs(
+        self,
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> Mapping[str, object] | None:
+        """Return canonical HF call kwargs that already include deployment config."""
+        return None
 
     def _hf_processor_applies_updates(
         self,

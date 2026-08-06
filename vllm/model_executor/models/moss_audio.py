@@ -158,6 +158,17 @@ def _filter_moss_audio_processor_config(
     }
 
 
+def _filter_moss_audio_request_processor_config(
+    config: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if config is not None and "mel_config" in config:
+        raise ValueError(
+            "MossAudio mel_config cannot be supplied via request mm_processor_kwargs."
+        )
+
+    return _filter_moss_audio_processor_config(config)
+
+
 def _merge_moss_audio_processor_configs(
     *configs: Mapping[str, object] | None,
 ) -> dict[str, object]:
@@ -1313,7 +1324,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         if audios:
             mm_data["audio"] = audios
         mm_kwargs = dict(mm_kwargs)
-        processor_kwargs = _filter_moss_audio_processor_config(mm_kwargs)
+        processor_kwargs = _filter_moss_audio_request_processor_config(mm_kwargs)
         tok_kwargs = {
             key: value
             for key, value in tok_kwargs.items()
@@ -1338,7 +1349,10 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        processor_kwargs = _filter_moss_audio_request_processor_config(
+            hf_processor_mm_kwargs
+        )
+        processor = self.info.get_hf_processor(**processor_kwargs)
         out_mm_data = out_mm_kwargs.get_data()
         audio_data_seqlens = out_mm_data.get("audio_data_seqlens")
         if audio_data_seqlens is None:

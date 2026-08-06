@@ -47,8 +47,10 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_omni_thinker import (
+    WHISPER_FEATURE_EXTRACTOR_GEOMETRY_KEYS,
     Qwen2_5OmniAudioFeatureInputs,
     unpad_and_flat_audio_features,
+    validate_whisper_feature_extractor_overrides,
 )
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
@@ -91,6 +93,7 @@ from vllm.transformers_utils.configs.qwen3_asr import (
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.qwen3_asr import (
     Qwen3ASRProcessor,
+    Qwen3ASRProcessorKwargs,
 )
 
 logger = init_logger(__name__)
@@ -178,15 +181,150 @@ def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     return output_lengths
 
 
+def _processor_kwarg_values_match(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+
+    result = left == right
+    return isinstance(result, bool) and result
+
+
+def _get_effective_pad_to_multiple_of_by_modality(
+    processor: Qwen3ASRProcessor,
+    kwargs: Mapping[str, object],
+) -> dict[str, object]:
+    output_kwargs = processor._merge_kwargs(
+        Qwen3ASRProcessorKwargs,
+        tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+        **dict(kwargs),
+    )
+    return {
+        carrier_name: carrier_kwargs["pad_to_multiple_of"]
+        for carrier_name, carrier_kwargs in output_kwargs.items()
+        if "pad_to_multiple_of" in carrier_kwargs
+    }
+
+
+def _get_effective_audio_pad_to_multiple_of(
+    processor: Qwen3ASRProcessor,
+    kwargs: Mapping[str, object],
+) -> object:
+    return _get_effective_pad_to_multiple_of_by_modality(processor, kwargs).get(
+        "audio_kwargs"
+    )
+
+
+def _copy_processor_kwarg_carrier(carrier: object) -> dict[str, object] | None:
+    if isinstance(carrier, Mapping):
+        return dict(carrier)
+    if isinstance(carrier, Iterable) and not isinstance(carrier, (str, bytes)):
+        return dict(carrier)
+    return None
+
+
+def _get_explicit_pad_to_multiple_of_kwargs(
+    kwargs: Mapping[str, object],
+) -> dict[str, object]:
+    explicit_kwargs: dict[str, object] = {}
+    if "pad_to_multiple_of" in kwargs:
+        explicit_kwargs["pad_to_multiple_of"] = kwargs["pad_to_multiple_of"]
+
+    for carrier_name in (
+        "text_kwargs",
+        "audio_kwargs",
+        "images_kwargs",
+        "videos_kwargs",
+        "common_kwargs",
+    ):
+        carrier = _copy_processor_kwarg_carrier(kwargs.get(carrier_name))
+        if carrier is None or "pad_to_multiple_of" not in carrier:
+            continue
+        explicit_kwargs[carrier_name] = {
+            "pad_to_multiple_of": carrier["pad_to_multiple_of"]
+        }
+
+    return explicit_kwargs
+
+
+def _merge_processor_call_kwargs(
+    mm_kwargs: Mapping[str, object],
+    tok_kwargs: Mapping[str, object],
+) -> dict[str, object]:
+    merged_kwargs = dict(mm_kwargs)
+    for key, value in tok_kwargs.items():
+        if key not in merged_kwargs:
+            merged_kwargs[key] = value
+            continue
+
+        existing_carrier = _copy_processor_kwarg_carrier(merged_kwargs[key])
+        # Qwen3-Omni injects empty text/audio carriers for non-empty audio.
+        if key in ("audio_kwargs", "text_kwargs") and existing_carrier == {}:
+            merged_kwargs[key] = value
+            continue
+
+        raise TypeError(f"dict() got multiple values for keyword argument '{key}'")
+
+    return merged_kwargs
+
+
+def _canonicalize_pad_to_multiple_of_kwargs(
+    kwargs: Mapping[str, object],
+    trusted_pads: Mapping[str, object],
+    request_pads: Mapping[str, object],
+) -> dict[str, object]:
+    canonical_kwargs = dict(kwargs)
+    canonical_kwargs.pop("pad_to_multiple_of", None)
+
+    for carrier_name in (
+        "text_kwargs",
+        "audio_kwargs",
+        "images_kwargs",
+        "videos_kwargs",
+        "common_kwargs",
+    ):
+        carrier = _copy_processor_kwarg_carrier(canonical_kwargs.get(carrier_name))
+        if carrier is None or "pad_to_multiple_of" not in carrier:
+            continue
+        carrier.pop("pad_to_multiple_of")
+        canonical_kwargs[carrier_name] = carrier
+
+    canonical_pads = dict(trusted_pads)
+    canonical_pads.update(request_pads)
+
+    for carrier_name, pad_to_multiple_of in canonical_pads.items():
+        carrier = _copy_processor_kwarg_carrier(canonical_kwargs.get(carrier_name))
+        if carrier is None:
+            carrier = {}
+        carrier["pad_to_multiple_of"] = pad_to_multiple_of
+        canonical_kwargs[carrier_name] = carrier
+
+    return canonical_kwargs
+
+
 class Qwen3ASRProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3ASRConfig).thinker_config
 
     def get_hf_processor(self, **kwargs: object) -> Qwen3ASRProcessor:
+        request_kwargs = dict(kwargs)
+        use_fast = request_kwargs.pop("use_fast", True)
+        if any(
+            name in request_kwargs for name in WHISPER_FEATURE_EXTRACTOR_GEOMETRY_KEYS
+        ):
+            trusted_processor = self.ctx.get_hf_processor(
+                Qwen3ASRProcessor,
+                use_fast=True,
+            )
+            trusted_feature_extractor = trusted_processor.feature_extractor
+            assert isinstance(trusted_feature_extractor, WhisperFeatureExtractor)
+            validate_whisper_feature_extractor_overrides(
+                request_kwargs,
+                trusted_feature_extractor,
+            )
         processor = self.ctx.get_hf_processor(
             Qwen3ASRProcessor,
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
+            use_fast=use_fast,
+            **request_kwargs,
         )
         if not hasattr(processor, "audio_token"):
             processor.audio_token = "<|audio_pad|>"
@@ -277,6 +415,43 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 class Qwen3ASRMultiModalProcessor(
     Qwen3OmniMoeThinkerMultiModalProcessor,
 ):
+    def _get_premerged_hf_processor_call_kwargs(
+        self,
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        hf_processor = self.info.get_hf_processor()
+        trusted_kwargs = self.info.ctx.get_merged_mm_kwargs({})
+        trusted_pads = _get_effective_pad_to_multiple_of_by_modality(
+            hf_processor,
+            trusted_kwargs,
+        )
+        request_kwargs = _merge_processor_call_kwargs(mm_kwargs, tok_kwargs)
+        explicit_request_kwargs = _get_explicit_pad_to_multiple_of_kwargs(
+            request_kwargs
+        )
+        request_pads = _get_effective_pad_to_multiple_of_by_modality(
+            hf_processor,
+            explicit_request_kwargs,
+        )
+        call_kwargs = self.info.ctx.get_merged_mm_kwargs(request_kwargs)
+        canonical_kwargs = _canonicalize_pad_to_multiple_of_kwargs(
+            call_kwargs,
+            trusted_pads,
+            request_pads,
+        )
+        trusted_pad = trusted_pads.get("audio_kwargs")
+        effective_pad = _get_effective_audio_pad_to_multiple_of(
+            hf_processor,
+            canonical_kwargs,
+        )
+        if not _processor_kwarg_values_match(trusted_pad, effective_pad):
+            raise ValueError(
+                "Request-level pad_to_multiple_of cannot override the "
+                "deployment-owned Qwen3-ASR audio processor configuration."
+            )
+        return canonical_kwargs
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

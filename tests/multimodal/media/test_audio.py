@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pybase64 as base64
@@ -10,7 +11,11 @@ import pytest
 import soundfile as sf
 
 from vllm.multimodal.media import AudioMediaIO
-from vllm.multimodal.media.audio import load_audio, load_audio_soundfile
+from vllm.multimodal.media.audio import (
+    load_audio,
+    load_audio_pyav,
+    load_audio_soundfile,
+)
 
 from ...conftest import AudioTestAssets
 
@@ -81,6 +86,141 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
     """Audio exceeding the duration limit must be rejected during decode."""
     with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
         load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
+
+
+def _fake_pyav_container(num_channels: int) -> tuple[Mock, SimpleNamespace]:
+    frame = SimpleNamespace(
+        layout=SimpleNamespace(channels=[object()] * num_channels),
+        to_ndarray=Mock(return_value=np.zeros((num_channels, 1), dtype=np.float32)),
+    )
+    stream = SimpleNamespace(
+        codec_context=SimpleNamespace(channels=num_channels),
+        duration=0,
+        layout=SimpleNamespace(channels=[object()] * num_channels),
+        rate=16000,
+        thread_type=None,
+        time_base=None,
+    )
+    container = Mock()
+    container.__enter__ = Mock(return_value=container)
+    container.__exit__ = Mock(return_value=False)
+    container.decode.return_value = [frame]
+    container.duration = 0
+    container.streams = SimpleNamespace(audio=[stream])
+    return container, stream
+
+
+def _fake_soundfile(num_channels: int) -> Mock:
+    audio_file = Mock()
+    audio_file.__enter__ = Mock(return_value=audio_file)
+    audio_file.__exit__ = Mock(return_value=False)
+    audio_file.channels = num_channels
+    audio_file.frames = 1
+    audio_file.read.return_value = np.zeros((1, num_channels), dtype=np.float32)
+    audio_file.samplerate = 16000
+    return audio_file
+
+
+def test_load_audio_pyav_rejects_excessive_channels_before_decode(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CHANNELS", 8, raising=False)
+    container, stream = _fake_pyav_container(num_channels=64)
+
+    with (
+        patch("vllm.multimodal.media.audio.av.open", return_value=container),
+        pytest.raises(ValueError, match="channel count"),
+    ):
+        load_audio_pyav(BytesIO(b"fake"), sr=None)
+
+    container.decode.assert_not_called()
+    assert stream.thread_type == "AUTO"
+
+
+def test_load_audio_pyav_rejects_excessive_layout_channels_before_decode(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CHANNELS", 8, raising=False)
+    container, stream = _fake_pyav_container(num_channels=64)
+    stream.codec_context.channels = 0
+
+    with (
+        patch("vllm.multimodal.media.audio.av.open", return_value=container),
+        pytest.raises(ValueError, match="channel count"),
+    ):
+        load_audio_pyav(BytesIO(b"fake"), sr=None)
+
+    container.decode.assert_not_called()
+
+
+def test_load_audio_pyav_rejects_excessive_frame_channels_before_array(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CHANNELS", 8, raising=False)
+    container, stream = _fake_pyav_container(num_channels=64)
+    stream.codec_context.channels = 1
+    stream.layout.channels = [object()]
+    frame = container.decode.return_value[0]
+
+    with (
+        patch("vllm.multimodal.media.audio.av.open", return_value=container),
+        pytest.raises(ValueError, match="channel count"),
+    ):
+        load_audio_pyav(BytesIO(b"fake"), sr=None)
+
+    frame.to_ndarray.assert_not_called()
+
+
+def test_load_audio_soundfile_rejects_excessive_channels_before_read(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CHANNELS", 8, raising=False)
+    audio_file = _fake_soundfile(num_channels=64)
+
+    with (
+        patch(
+            "vllm.multimodal.media.audio.soundfile.SoundFile",
+            return_value=audio_file,
+        ),
+        pytest.raises(ValueError, match="channel count"),
+    ):
+        load_audio_soundfile(BytesIO(b"fake"), sr=None)
+
+    audio_file.read.assert_not_called()
+
+
+def test_load_audio_soundfile_allows_common_surround_channels(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CHANNELS", 8, raising=False)
+    audio_file = _fake_soundfile(num_channels=6)
+
+    with patch(
+        "vllm.multimodal.media.audio.soundfile.SoundFile",
+        return_value=audio_file,
+    ):
+        audio, sr = load_audio_soundfile(BytesIO(b"fake"), sr=None)
+
+    audio_file.read.assert_called_once_with(dtype="float32", always_2d=False)
+    assert sr == 16000
+    np.testing.assert_array_equal(audio, np.zeros(1, dtype=np.float32))
+
+
+def test_load_audio_soundfile_channel_limit_disabled(monkeypatch):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CHANNELS", 0, raising=False)
+    audio_file = _fake_soundfile(num_channels=64)
+
+    with patch(
+        "vllm.multimodal.media.audio.soundfile.SoundFile",
+        return_value=audio_file,
+    ):
+        audio, sr = load_audio_soundfile(BytesIO(b"fake"), sr=None)
+
+    audio_file.read.assert_called_once_with(dtype="float32", always_2d=False)
+    assert sr == 16000
+    np.testing.assert_array_equal(audio, np.zeros(1, dtype=np.float32))
 
 
 def test_audio_media_io_from_video(video_assets):

@@ -51,6 +51,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.transformers_utils.processors.fireredlid import (
+    FIREREDLID_STATIC_FEATURE_EXTRACTOR_KWARGS,
+    FIREREDLID_UNSAFE_FEATURE_EXTRACTOR_KWARGS,
+    validate_fireredlid_request_processor_kwargs,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .conformer_encoder import ConformerEncoder
@@ -389,6 +394,28 @@ class FireRedLIDModel(nn.Module):
 class FireRedLIDProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
+
+    def get_hf_processor(self, **kwargs):
+        static_overrides = FIREREDLID_STATIC_FEATURE_EXTRACTOR_KWARGS & kwargs.keys()
+        guarded_overrides = (
+            static_overrides
+            | FIREREDLID_UNSAFE_FEATURE_EXTRACTOR_KWARGS & kwargs.keys()
+        )
+        if guarded_overrides:
+            base_processor = super().get_hf_processor()
+            validate_fireredlid_request_processor_kwargs(
+                kwargs,
+                base_processor.feature_extractor,
+            )
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key not in static_overrides
+            }
+            if not kwargs:
+                return base_processor
+
+        return super().get_hf_processor(**kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}

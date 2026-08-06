@@ -52,8 +52,13 @@ class _MMConfig:
     mm_processor_cache_gb = 1
     mm_hasher_algorithm = "blake3"
 
+    def __init__(self, mm_processor_kwargs=None):
+        self.mm_processor_kwargs = dict(mm_processor_kwargs or {})
+
     def merge_mm_processor_kwargs(self, kwargs):
-        return dict(kwargs)
+        merged = dict(self.mm_processor_kwargs)
+        merged.update(kwargs)
+        return merged
 
     def get_limit_per_prompt(self, modality):
         del modality
@@ -61,14 +66,14 @@ class _MMConfig:
 
 
 class _ModelConfig:
-    def __init__(self):
+    def __init__(self, mm_processor_kwargs=None):
         self.model = "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
         self.revision = None
         self.max_model_len = 4096
         self.encoder_config = {}
         self.dtype = torch.float32
         self.hf_config = MossAudioConfig(language_config=Qwen3Config())
-        self.multimodal_config = _MMConfig()
+        self.multimodal_config = _MMConfig(mm_processor_kwargs)
 
     def get_multimodal_config(self):
         return self.multimodal_config
@@ -78,9 +83,10 @@ class _ModelConfig:
 
 
 class _ProcessingContext:
-    def __init__(self):
-        self.model_config = _ModelConfig()
+    def __init__(self, mm_processor_kwargs=None):
+        self.model_config = _ModelConfig(mm_processor_kwargs)
         self.tokenizer = _Tokenizer()
+        self.last_hf_processor = None
 
     def get_tokenizer(self):
         return self.tokenizer
@@ -95,6 +101,7 @@ class _ProcessingContext:
         return self.get_mm_config().merge_mm_processor_kwargs(kwargs)
 
     def call_hf_processor(self, hf_processor, data, kwargs):
+        self.last_hf_processor = hf_processor
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
         merged_kwargs.setdefault("return_tensors", "pt")
         return hf_processor(**data, **merged_kwargs)
@@ -163,8 +170,8 @@ def _patch_tensor_parallel_for_linear_layers(monkeypatch, tp_size=1, tp_rank=0):
     )
 
 
-def _build_moss_audio_processor(cache=None):
-    ctx = _ProcessingContext()
+def _build_moss_audio_processor(cache=None, mm_processor_kwargs=None):
+    ctx = _ProcessingContext(mm_processor_kwargs)
     info = _TestMossAudioProcessingInfo(ctx)
     return (
         MossAudioMultiModalProcessor(
@@ -289,6 +296,64 @@ def test_moss_audio_multimodal_processor_handles_token_and_cache_paths():
     _assert_mm_inputs_equal(baseline_text, cached_text_miss)
     _assert_mm_inputs_equal(baseline_text, cached_text_hit)
     _assert_mm_inputs_equal(baseline_text, cached_token_hit)
+
+
+@pytest.mark.parametrize("prompt_kind", ["text", "tokens"])
+def test_moss_audio_rejects_request_mel_config(prompt_kind):
+    audio = np.zeros(400, dtype=np.float32)
+    prompt = f"{MOSS_AUDIO_PLACEHOLDER}\nTranscribe this audio."
+
+    processor, ctx = _build_moss_audio_processor()
+    mm_items = processor.info.parse_mm_data({"audio": [audio]})
+    initial_cache_keys = set(processor.info._hf_processor_cache)
+    if prompt_kind == "tokens":
+        prompt = ctx.get_tokenizer().encode(prompt, add_special_tokens=False)
+
+    with pytest.raises(
+        ValueError,
+        match="MossAudio mel_config cannot be supplied via request mm_processor_kwargs",
+    ):
+        processor(
+            prompt,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs={
+                "mel_config": {"mel_dim": 32768, "mel_hop_length": 1}
+            },
+        )
+
+    assert ctx.last_hf_processor is None
+    assert set(processor.info._hf_processor_cache) == initial_cache_keys
+
+
+def test_moss_audio_preserves_deployment_mel_config():
+    audio = np.zeros(160 * 17, dtype=np.float32)
+    prompt = f"{MOSS_AUDIO_PLACEHOLDER}\nTranscribe this audio."
+
+    processor, ctx = _build_moss_audio_processor(
+        mm_processor_kwargs={"mel_config": {"mel_dim": 64}}
+    )
+    mm_items = processor.info.parse_mm_data({"audio": [audio]})
+
+    processed = processor(prompt, mm_items=mm_items, hf_processor_mm_kwargs={})
+
+    assert ctx.last_hf_processor.mel_config["mel_dim"] == 64
+    assert processed["mm_kwargs"].get_data()["audio_data"].shape[1] == 64
+
+
+def test_moss_audio_accepts_request_enable_time_marker():
+    audio = np.zeros(160 * 17, dtype=np.float32)
+    prompt = f"{MOSS_AUDIO_PLACEHOLDER}\nTranscribe this audio."
+
+    processor, ctx = _build_moss_audio_processor()
+    mm_items = processor.info.parse_mm_data({"audio": [audio]})
+
+    processor(
+        prompt,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={"enable_time_marker": True},
+    )
+
+    assert ctx.last_hf_processor.enable_time_marker is True
 
 
 def test_moss_audio_supports_language_model_lora_only():
