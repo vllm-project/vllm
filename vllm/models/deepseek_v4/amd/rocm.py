@@ -465,26 +465,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
         )
 
-    def _use_aiter_tgemm(self, hidden_states: torch.Tensor) -> bool:
-        if not self._tgemm_static_eligible or hidden_states.dtype != torch.bfloat16:
-            return False
-
-        forward_context = get_forward_context()
-        if forward_context.cudagraph_runtime_mode not in (
-            CUDAGraphMode.FULL,
-            CUDAGraphMode.NONE,
-        ):
-            return False
-
-        return torch.cuda.is_current_stream_capturing()
-
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if not self._use_aiter_tgemm(hidden_states):
+        if (
+            not self._tgemm_static_eligible
+            or hidden_states.dtype != torch.bfloat16
+            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
+        ):
             return super().forward(positions, hidden_states, llama_4_scaling)
 
         num_tokens = hidden_states.shape[0]

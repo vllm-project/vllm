@@ -38,37 +38,62 @@ HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
 @pytest.mark.parametrize(
-    ("eligible", "capturing", "runtime_mode", "dtype", "expected"),
+    ("eligible", "runtime_mode", "dtype", "expected_optimized"),
     [
-        (True, True, CUDAGraphMode.NONE, torch.bfloat16, True),
-        (True, True, CUDAGraphMode.FULL, torch.bfloat16, True),
-        (True, True, CUDAGraphMode.PIECEWISE, torch.bfloat16, False),
-        (True, False, CUDAGraphMode.NONE, torch.bfloat16, False),
-        (False, True, CUDAGraphMode.NONE, torch.bfloat16, False),
-        (True, True, CUDAGraphMode.NONE, torch.float32, False),
+        (True, CUDAGraphMode.FULL, torch.bfloat16, True),
+        (True, CUDAGraphMode.NONE, torch.bfloat16, False),
+        (True, CUDAGraphMode.PIECEWISE, torch.bfloat16, False),
+        (False, CUDAGraphMode.FULL, torch.bfloat16, False),
+        (True, CUDAGraphMode.FULL, torch.float32, False),
     ],
 )
-def test_dsv4_aiter_tgemm_is_limited_to_full_graph_capture(
+def test_dsv4_aiter_tgemm_is_limited_to_v1_full_graph_capture(
     monkeypatch,
     eligible: bool,
-    capturing: bool,
     runtime_mode: CUDAGraphMode,
     dtype: torch.dtype,
-    expected: bool,
+    expected_optimized: bool,
 ) -> None:
     from vllm.models.deepseek_v4.amd import rocm
+
+    class BasePath(Exception):
+        pass
+
+    class OptimizedPath(Exception):
+        pass
 
     attention = object.__new__(rocm.DeepseekV4ROCMAiterMLAAttention)
     torch.nn.Module.__init__(attention)
     attention._tgemm_static_eligible = eligible
-    monkeypatch.setattr(
-        rocm,
-        "get_forward_context",
-        lambda: SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
-    )
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
+    attention.padded_heads = 1
+    attention.head_dim = 1
 
-    assert attention._use_aiter_tgemm(torch.empty(0, dtype=dtype)) is expected
+    context_calls = 0
+
+    def get_context():
+        nonlocal context_calls
+        context_calls += 1
+        return SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
+
+    def base_forward(*args, **kwargs):
+        raise BasePath
+
+    def optimized_forward(*args, **kwargs):
+        raise OptimizedPath
+
+    monkeypatch.setattr(rocm, "get_forward_context", get_context)
+    monkeypatch.setattr(rocm.DeepseekV4Attention, "forward", base_forward)
+    attention._forward_aiter_tgemm = optimized_forward
+
+    expected_path = OptimizedPath if expected_optimized else BasePath
+    with pytest.raises(expected_path):
+        attention.forward(
+            torch.empty(0, dtype=torch.int64),
+            torch.empty((1, 1), dtype=dtype),
+        )
+
+    expected_context_calls = int(eligible and dtype == torch.bfloat16)
+    assert context_calls == expected_context_calls
 
 
 def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:
