@@ -173,16 +173,12 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 assert self.topk_indices_buffer is not None
                 if self.hisparse_cache is not None:
                     hisparse_cache = self.hisparse_cache
-                    assert attn_metadata.batch_to_request_state is not None
                     kv_cache, global_indices, topk_lens = cast(
                         tuple[torch.Tensor, torch.Tensor, torch.Tensor],
                         hisparse_cache.resolve_topk(
                             attn_metadata.req_id_per_token[:num_decode_tokens],
                             block_table=attn_metadata.block_table[:num_decodes],
                             topk_indices=self.topk_indices_buffer[:num_decode_tokens],
-                            request_state_indices=(
-                                attn_metadata.batch_to_request_state
-                            ),
                             block_size=block_size,
                             return_valid_counts=True,
                         ),

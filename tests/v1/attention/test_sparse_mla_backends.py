@@ -1514,6 +1514,9 @@ def _make_hisparse_offload_runtime(
         block_size=block_size,
         block_table=block_table,
     )
+    runtime.request_state_indices = torch.arange(
+        max_num_reqs, dtype=torch.int32, device=runtime.device
+    )
     return runtime
 
 
@@ -1562,7 +1565,6 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
     runtime.request_state_indices = torch.tensor([1], dtype=torch.int32, device=device)
 
     runtime.swap_in(
-        request_state_indices=torch.tensor([0], dtype=torch.int32, device=device),
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
         block_table=torch.tensor([[0]], dtype=torch.int32, device=device),
         topk_indices=torch.tensor([[0]], dtype=torch.int32, device=device),
@@ -1613,7 +1615,6 @@ def test_hisparse_resident_rows_bypass_hot_lru():
         req_id_per_token=request_ids,
         block_table=source_table,
         topk_indices=topk,
-        request_state_indices=request_ids,
         block_size=block_size,
         return_valid_counts=False,
     )
@@ -1626,7 +1627,6 @@ def test_hisparse_resident_rows_bypass_hot_lru():
         req_id_per_token=request_ids,
         block_table=source_table,
         topk_indices=topk,
-        request_state_indices=request_ids,
         block_size=block_size,
     )
     torch.accelerator.synchronize()
@@ -1689,7 +1689,6 @@ def test_hisparse_kernel_matches_fallback():
             req_id_per_token=req_ids,
             block_table=block_table,
             topk_indices=topk.clone(),
-            request_state_indices=req_ids,
             block_size=block_size,
             return_valid_counts=True,
         )
@@ -1782,7 +1781,6 @@ def test_hisparse_apply_plan_matches_independent():
         kw = dict(
             req_id_per_token=req_ids,
             block_table=block_table,
-            request_state_indices=req_ids,
             block_size=block_size,
         )
         _, idx_full = producer.swap_in(
@@ -1879,7 +1877,6 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         req_id_per_token=torch.tensor([0], dtype=torch.int32, device=device),
         block_table=torch.arange(8, dtype=torch.int32, device=device).view(1, 8),
         topk_indices=torch.tensor([[0, 1, 2, 3]], dtype=torch.int32, device=device),
-        request_state_indices=torch.tensor([0], dtype=torch.int32, device=device),
         block_size=block_size,
     )
 
@@ -2202,6 +2199,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
         [newest_global, padded_global], dtype=torch.int64, device=device
     )
     request_state_indices = torch.tensor([0, -1], dtype=torch.int32, device=device)
+    cache_handle.runtime.request_state_indices = request_state_indices
 
     kv_c = torch.randn(3, row_width - 2, device=device)
     k_pe = torch.randn(3, 1, 2, device=device)
@@ -2226,7 +2224,6 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
         req_id_per_token=req_ids,
         block_table=block_table,
         topk_indices=topk,
-        request_state_indices=request_state_indices,
         block_size=block_size,
     )
     torch.accelerator.synchronize()
@@ -2239,7 +2236,6 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
         req_id_per_token=req_ids,
         block_table=block_table,
         topk_indices=topk,
-        request_state_indices=request_state_indices,
         block_size=block_size,
     )
     torch.accelerator.synchronize()
@@ -2327,10 +2323,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
         device,
         arange_block_indices=True,
     )
-    common_attn_metadata.batch_to_request_state = torch.arange(
-        batch_spec.batch_size, dtype=torch.int32, device=device
-    )
-
     # Prepopulate every position of every sequence so the forward needs no
     # KV-cache update (the row split itself is what is under test).
     kv_c_contexts = [

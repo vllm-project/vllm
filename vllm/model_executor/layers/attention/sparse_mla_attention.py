@@ -141,15 +141,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=torch.int32,
             device=device,
         )
-        self.batch_to_request_state = (
-            torch.empty(
-                vllm_config.scheduler_config.max_num_seqs,
-                dtype=torch.int32,
-                device=device,
-            )
-            if vllm_config.attention_config.hisparse_config is not None
-            else None
-        )
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         try:
@@ -300,7 +291,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 prefill_query_lens_cpu,
             )
             staging_plan = None
-            if self.batch_to_request_state is not None and chunked_context is not None:
+            if (
+                self.vllm_config.attention_config.hisparse_config is not None
+                and chunked_context is not None
+            ):
                 staging_plan = build_hisparse_prefill_staging_plan(
                     block_table,
                     common_attn_metadata.seq_lens[num_decodes:],
@@ -325,7 +319,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             )
             self._prefill_backend.prepare_metadata(prefill)
 
-        metadata = self.metadata_cls(  # type: ignore[call-arg]
+        return self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
@@ -344,14 +338,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill=prefill,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
-        if self.batch_to_request_state is not None:
-            indices = common_attn_metadata.batch_to_request_state
-            if indices is None or indices.numel() > self.batch_to_request_state.numel():
-                raise ValueError("Invalid V2 request-state indices for HiSparse.")
-            self.batch_to_request_state.fill_(-1)
-            self.batch_to_request_state[: indices.numel()].copy_(indices)
-            metadata.batch_to_request_state = self.batch_to_request_state  # type: ignore[attr-defined]
-        return metadata
 
     @staticmethod
     def _build_prefill_fields(
@@ -639,12 +625,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         assert pure_decode or n == attn_metadata.num_decodes, (
             "HiSparse requires one token per mixed-batch decode request."
         )
-        assert attn_metadata.batch_to_request_state is not None
         return self.hisparse_cache.resolve_topk(
             attn_metadata.req_id_per_token[:n],
             block_table=attn_metadata.block_table,
             topk_indices=topk_indices[:n],
-            request_state_indices=attn_metadata.batch_to_request_state,
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
         )

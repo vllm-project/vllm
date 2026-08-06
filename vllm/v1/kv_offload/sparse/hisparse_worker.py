@@ -92,8 +92,8 @@ class HiSparseOffloadWorker:
         self.leader_runtimes = [
             cache.runtime for cache in cache_handles if cache.runtime.leader is None
         ]
-        self.request_state_indices = torch.arange(
-            max_num_reqs, dtype=torch.int32, device=device
+        self.request_state_indices = torch.full(
+            (max_num_reqs,), -1, dtype=torch.int32, device=device
         )
         for cache in cache_handles:
             cache.runtime.request_state_indices = self.request_state_indices
@@ -114,6 +114,7 @@ class HiSparseOffloadWorker:
             )
         if torch.cuda.is_current_stream_capturing():
             return
+        self.request_state_indices.fill_(-1)
         self.request_state_indices[: indices.numel()].copy_(indices)
 
     def _init_backup_plan(

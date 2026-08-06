@@ -68,7 +68,7 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
     worker.set_request_state_indices(torch.tensor([3, 1], dtype=torch.int32))
 
     assert worker.request_state_indices.data_ptr() == original_ptr
-    assert worker.request_state_indices.tolist() == [3, 1, 2, 3]
+    assert worker.request_state_indices.tolist() == [3, 1, -1, -1]
 
 
 def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatch):

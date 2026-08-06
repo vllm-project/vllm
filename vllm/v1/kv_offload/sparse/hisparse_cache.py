@@ -622,7 +622,6 @@ class HiSparseOffloadRuntime:
         self,
         *,
         resident: HiSparseCacheHandle | None = None,
-        request_state_indices: torch.Tensor | None = None,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
@@ -638,11 +637,7 @@ class HiSparseOffloadRuntime:
             and self.hot.block_size == block_size
             and self.hot_block_table is not None
         )
-        request_state_indices = (
-            self.request_state_indices
-            if self.request_state_indices is not None
-            else request_state_indices
-        )
+        request_state_indices = self.request_state_indices
         assert request_state_indices is not None
 
         relative_indices = topk_indices[:num_tokens].contiguous()
@@ -852,7 +847,6 @@ class HiSparseCacheHandle:
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
         *,
-        request_state_indices: torch.Tensor,
         block_size: int,
         return_valid_counts: bool = False,
     ) -> HiSparseTopKResult:
@@ -881,7 +875,6 @@ class HiSparseCacheHandle:
             )
         return self.runtime.swap_in(
             resident=self,
-            request_state_indices=request_state_indices,
             req_id_per_token=req_id_per_token[:num_tokens],
             block_table=block_table,
             topk_indices=topk_indices,

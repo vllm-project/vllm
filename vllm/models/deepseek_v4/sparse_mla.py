@@ -120,7 +120,6 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
 
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
-    batch_to_request_state: torch.Tensor | None
     block_size: int
     topk_tokens: int
 
@@ -229,7 +228,6 @@ class DeepseekV4FlashMLAMetadataBuilder(
             slot_mapping=slot_mapping,
             block_table=cm.block_table_tensor,
             req_id_per_token=req_id_per_token,
-            batch_to_request_state=cm.batch_to_request_state,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
             c128a_global_decode_topk_indices=c128a_fields.get(
