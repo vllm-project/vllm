@@ -37,6 +37,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.mhc import (
     MHCPostOp,
     MHCPreOp,
+    MHCFusedPostPreOp,
     hc_contract,
     hc_expand,
 )
@@ -389,6 +390,7 @@ class Glm5NextDecoderLayer(nn.Module):
 
             self.mhc_pre_op = MHCPreOp()
             self.mhc_post_op = MHCPostOp()
+            self.mhc_fused_post_pre_op = MHCFusedPostPreOp()
 
     def forward(
         self,
@@ -430,11 +432,10 @@ class Glm5NextDecoderLayer(nn.Module):
             positions=positions,
         )
 
-        x = self.hc_post(x, residual, post, comb)
-
-        residual = x
-        post, comb, x = self.hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base,
+        # Fuse post-attn hc_post + pre-FFN hc_pre (+ RMSNorm) into one kernel.
+        residual, post, comb, x = self.hc_fused_post_pre(
+            x, residual, post, comb,
+            self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base,
             norm_weight=self.post_attention_layernorm.weight.data,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
         )
@@ -482,6 +483,37 @@ class Glm5NextDecoderLayer(nn.Module):
         comb: torch.Tensor,
     ):
         return self.mhc_post_op(x, residual, post, comb)
+
+    def hc_fused_post_pre(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
+    ):
+        return self.mhc_fused_post_pre_op(
+            x=x,
+            residual=residual,
+            post_layer_mix=post,
+            comb_res_mix=comb,
+            fn=hc_fn,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            rms_eps=self.rms_norm_eps,
+            hc_pre_eps=self.hc_eps,
+            hc_sinkhorn_eps=self.hc_eps,
+            hc_post_mult_value=self.mhc_post_mult_value,
+            sinkhorn_repeat=self.mhc_sinkhorn_iterations,
+            n_splits=1,
+            tile_n=1,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+        )
 
 
 class Glm5NextModel(nn.Module):
