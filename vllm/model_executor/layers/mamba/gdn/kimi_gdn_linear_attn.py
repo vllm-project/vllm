@@ -242,7 +242,14 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         k = self.k_proj(hidden_states)[0]
         v = self.v_proj(hidden_states)[0]
 
-        beta = self.b_proj(hidden_states)[0].float().sigmoid()
+        use_xpu_kernel = current_platform.is_xpu() and hasattr(
+            torch.ops._xpu_C, "kda_attention"
+        )
+        beta = self.b_proj(hidden_states)[0].float()
+        # The XPU kernel takes the raw logits and applies the sigmoid itself,
+        # matching how it already handles the gate.
+        if not use_xpu_kernel:
+            beta = beta.sigmoid()
         g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
         beta = beta.unsqueeze(0)
         g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
@@ -255,7 +262,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        if current_platform.is_xpu() and hasattr(torch.ops._xpu_C, "kda_attention"):
+        if use_xpu_kernel:
             torch.ops.vllm.kda_attention_core_xpu(
                 core_attn_out,
                 q,

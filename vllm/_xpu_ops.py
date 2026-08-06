@@ -198,7 +198,7 @@ def _kda_attention_core_xpu_impl(
     k_proj_states: torch.Tensor,
     v_proj_states: torch.Tensor,
     raw_gate: torch.Tensor,
-    beta: torch.Tensor,
+    raw_beta: torch.Tensor,
     layer_name: str,
 ) -> None:
     """Custom op wrapping the XPU SYCL KDA kernel for torch.compile."""
@@ -244,7 +244,7 @@ def _kda_attention_core_xpu_impl(
         k_proj_states,
         v_proj_states,
         raw_gate,
-        beta,
+        raw_beta,
         self.kv_cache[0],
         self.kv_cache[1],
         q_conv_weight,
@@ -273,7 +273,7 @@ def _kda_attention_core_xpu_fake(
     k_proj_states: torch.Tensor,
     v_proj_states: torch.Tensor,
     raw_gate: torch.Tensor,
-    beta: torch.Tensor,
+    raw_beta: torch.Tensor,
     layer_name: str,
 ) -> None:
     return
