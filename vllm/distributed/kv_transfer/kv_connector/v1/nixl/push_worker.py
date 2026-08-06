@@ -141,7 +141,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
-    def shutdown(self):
+    def shutdown(self, drain_timeout: float | None = None) -> None:
         self._push_writer_stop.set()
         # Unblock the writer if it's waiting in the no-active-state branch.
         self._push_writer_wake.set()
@@ -153,7 +153,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 for handle in handles:
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
-        super().shutdown()
+        super().shutdown(drain_timeout)
 
     # --- Engine-main-thread entry point -------------------------------- #
 
@@ -657,12 +657,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+            region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            region_num_blocks=self.dst_region_num_blocks[self.engine_id],
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)

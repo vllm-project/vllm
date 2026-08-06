@@ -11,7 +11,8 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
-from unittest.mock import patch
+from collections import defaultdict
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -96,6 +97,91 @@ class _RecordingNixl:
 
     def remove_remote_agent(self, agent):
         pass
+
+
+@pytest.mark.cpu_test
+def test_local_descriptors_follow_each_region_pool_capacity():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.device_id = 0
+    worker.block_len_per_layer = [16, 16]
+    worker.region_strides = [16, 16]
+    worker.region_num_blocks = [2, 3]
+
+    descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
+
+    assert descriptors[:, 0].tolist() == [100, 116, 1000, 1016, 1032]
+
+
+def test_packed_cache_initializes_descriptor_region_metadata():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+        base_worker as bw,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.tp_rank = 0
+    worker.world_size = 1
+    worker.block_size = 256
+    worker.engine_id = "local-engine"
+    worker.use_mla = True
+    worker.model_config = MagicMock()
+    worker.model_config.get_total_num_kv_heads.return_value = 1
+    worker.attn_backends = []
+    worker._has_mamba = False
+    worker.vllm_config = MagicMock()
+    worker.backend_name = "FLASHMLA_SPARSE_DSV4"
+    worker.num_blocks = 4
+    worker.nixl_memory_type = "VRAM"
+    worker.nixl_backends = None
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.get_reg_descs.side_effect = lambda data, _: data
+    worker.nixl_wrapper.get_xfer_descs.side_effect = lambda data, _: data
+    worker.nixl_wrapper.prep_xfer_dlist.return_value = 7
+    worker.nixl_wrapper.get_agent_metadata.return_value = b"metadata"
+    worker._registered_descs = []
+    worker.dst_num_blocks = {}
+    worker.dst_region_num_blocks = {}
+    worker.src_xfer_handles_by_block_size = {}
+    worker.kv_caches_base_addr = defaultdict(dict)
+    worker._mamba_ssm_size = (0, 0)
+    worker.kv_cache_layout = "NHD"
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.region_strides = []
+    worker.region_group_ids = []
+    worker.region_num_blocks = []
+    worker._region_is_mla = []
+
+    storage = MagicMock()
+    storage.nbytes.return_value = 4096
+    storage.data_ptr.return_value = 0x1000
+    storage.device.index = 0
+    transfer_topology = MagicMock()
+    transfer_topology.cross_layers_blocks = False
+
+    with (
+        patch.object(bw, "TransferTopology", return_value=transfer_topology),
+        patch.object(bw, "compute_nixl_compatibility_hash", return_value="hash"),
+    ):
+        worker._register_packed_kv_cache(storage)
+
+    assert worker.region_strides == [1024]
+    assert worker.region_num_blocks == [4]
+    assert worker._region_is_mla == [True]
+    assert worker.src_xfer_handles_by_block_size[256] == 7
+    assert worker.src_blocks_data[:, 1].tolist() == [1024] * 4
+    worker.nixl_wrapper.get_reg_descs.assert_called_once_with(
+        [(0x1000, 4096, 0, "")], "VRAM"
+    )
+    worker.nixl_wrapper.get_xfer_descs.assert_called_once_with(
+        worker.src_blocks_data, "VRAM"
+    )
 
 
 def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
