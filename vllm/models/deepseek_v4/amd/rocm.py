@@ -7,6 +7,7 @@ from typing import cast
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -482,6 +483,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._forward_aiter_tgemm(hidden_states, positions, output)
         return self._o_proj(output[:, : self.n_local_heads], positions)
 
+    @eager_break_during_capture
     def _forward_aiter_tgemm(
         self,
         hidden_states: torch.Tensor,
