@@ -164,6 +164,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 rank=rank,
                 kv_bytes_per_block=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
+                expected_openers=self.config.parallel.local_world_size,
             )
         try:
             return CPUOffloadingWorker(
