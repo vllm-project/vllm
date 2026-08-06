@@ -6,7 +6,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Any, ClassVar, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 from pydantic import (
@@ -26,6 +26,11 @@ from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
+
+MAX_STOP_STRINGS = 4
+StopParam: TypeAlias = (
+    str | Annotated[list[str], Field(max_length=MAX_STOP_STRINGS)] | None
+)
 
 
 class OpenAIBaseModel(BaseModel):

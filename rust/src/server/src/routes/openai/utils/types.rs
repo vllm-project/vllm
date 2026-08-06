@@ -15,6 +15,7 @@ use vllm_llm::TokenUsage;
 
 /// Default model identifier used when no model is specified.
 pub const UNKNOWN_MODEL_ID: &str = "unknown";
+const MAX_STOP_STRINGS: usize = 4;
 
 // ============================================================================
 // Default value helpers
@@ -54,14 +55,51 @@ impl StringOrArray {
     }
 }
 
-/// Validates stop sequences (non-empty strings)
+/// Validates stop sequences (at most four non-empty strings).
 pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationError> {
-    if stop.as_slice().iter().any(|s| s.is_empty()) {
+    let stop = stop.as_slice();
+    if stop.len() > MAX_STOP_STRINGS {
+        return Err(validator::ValidationError::new(
+            "stop strings must contain at most 4 items",
+        ));
+    }
+    if stop.iter().any(|s| s.is_empty()) {
         return Err(validator::ValidationError::new(
             "stop strings cannot be empty",
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StringOrArray, validate_stop};
+
+    #[test]
+    fn validate_stop_accepts_four_stop_strings() {
+        let stop = StringOrArray::Array(
+            ["one", "two", "three", "four"].into_iter().map(str::to_string).collect(),
+        );
+
+        validate_stop(&stop).expect("four stop strings should be accepted");
+    }
+
+    #[test]
+    fn validate_stop_rejects_more_than_four_stop_strings() {
+        let stop = StringOrArray::Array(
+            ["one", "two", "three", "four", "five"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+
+        let error = validate_stop(&stop).expect_err("five stop strings should be rejected");
+
+        assert_eq!(
+            error.code.as_ref(),
+            "stop strings must contain at most 4 items"
+        );
+    }
 }
 
 // ============================================================================
