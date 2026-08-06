@@ -23,8 +23,6 @@ else:
     tilelang = None  # type: ignore[assignment]
     T = None  # type: ignore[assignment]
 
-ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
-
 
 def _ensure_tilelang_imported() -> None:
     """Bind the `tilelang` and `T` module globals, importing them if needed.
