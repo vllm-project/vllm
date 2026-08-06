@@ -49,6 +49,7 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
+    JobResult,
     ParentManager,
     SecondaryTierManager,
     TransferJob,
@@ -259,13 +260,14 @@ class TieringOffloadingManager(OffloadingManager):
     def _complete_promotion(
         self, job_metadata: JobMetadata, completed_job: JobResult
     ) -> None:
+        transfer_job = job_metadata.transfer_job
         successful_keys = completed_job.successful_keys
         failed_keys: Collection[OffloadKey]
         if completed_job.success:
-            successful_keys = job_metadata.keys
+            successful_keys = transfer_job.keys
             failed_keys = ()
         elif successful_keys:
-            failed_keys_set = set(job_metadata.keys)
+            failed_keys_set = set(transfer_job.keys)
             assert failed_keys_set.issuperset(successful_keys), (
                 f"Finished promotion job_id {completed_job.job_id} "
                 "reported unknown successful keys"
@@ -274,18 +276,18 @@ class TieringOffloadingManager(OffloadingManager):
             failed_keys = failed_keys_set
         else:
             successful_keys = ()
-            failed_keys = job_metadata.keys
+            failed_keys = transfer_job.keys
 
         if successful_keys:
             self.primary_tier.complete_write(
                 successful_keys,
-                job_metadata.req_context,
+                transfer_job.req_context,
                 True,
             )
         if failed_keys:
             self.primary_tier.complete_write(
                 failed_keys,
-                job_metadata.req_context,
+                transfer_job.req_context,
                 False,
             )
 
