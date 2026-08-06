@@ -78,17 +78,20 @@ RUN mkdir neo && \
     cd .. && \
     rm -rf neo
 
-# Install XPU-Manager w/o reinstall libze1/libze-intel-gpu1
+# Install XPU-Manager payloads without registering conflicting libze package
+# dependencies in dpkg.
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends software-properties-common && \
     add-apt-repository -y ppa:kobuk-team/intel-graphics && \
     apt-get update -y && \
-    apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 && \
+    apt-get install -y --no-install-recommends libhwloc15 libpciaccess0 libigsc1 intel-metrics-library && \
     mkdir xpu-m && \
     cd xpu-m && \
     wget https://github.com/intel/xpumanager/releases/download/v2.0.0/libxpum2_2.0.0-238.24.04_amd64.deb && \
     wget https://github.com/intel/xpumanager/releases/download/v2.0.0/xpu-smi_2.0.0-238.24.04_amd64.deb && \
-    dpkg -i --ignore-depends=libze1,libze-intel-gpu1 *.deb && \
+    dpkg-deb -x libxpum2_2.0.0-238.24.04_amd64.deb / && \
+    dpkg-deb -x xpu-smi_2.0.0-238.24.04_amd64.deb / && \
+    ldconfig && \
     cd .. && \
     rm -rf xpu-m && \
     add-apt-repository --remove -y ppa:kobuk-team/intel-graphics && \
