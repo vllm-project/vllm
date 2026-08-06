@@ -33,7 +33,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
-    swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     is_deep_gemm_e8m0_used,
@@ -170,34 +169,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
-
-    def activation(
-        self,
-        activation: MoEActivation,
-        output: torch.Tensor,
-        input: torch.Tensor,
-        **kwargs,
-    ) -> None:
-        activation_config = self.activation_config
-        if (
-            activation == MoEActivation.SILU
-            and activation_config.clamp_limit is not None
-        ):
-            swiglu_limit_func(output, input, activation_config.clamp_limit)
-            return
-
-        # SWIGLUOAI_UNINTERLEAVE routes to the silu_and_mul_with_clamp kernel and
-        # requires a clamp limit. Other activations ignore these parameters.
-        if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            assert activation_config.clamp_limit is not None, (
-                "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
-            )
-
-        super().activation(
-            activation,
-            output,
-            input,
-        )
 
     def workspace_shapes(
         self,

@@ -101,10 +101,13 @@ class ExpertTokensMetadata:
 
     expert_num_tokens: torch.Tensor
     expert_num_tokens_cpu: torch.Tensor | None
+    num_valid_tokens: torch.Tensor | None = None
 
     @staticmethod
     def make_from_list(
-        expert_num_tokens_list: list[int], device: str
+        expert_num_tokens_list: list[int],
+        device: str,
+        num_valid_tokens: torch.Tensor | None = None,
     ) -> "ExpertTokensMetadata":
         expert_num_tokens_cpu = torch.tensor(
             expert_num_tokens_list, device="cpu", dtype=torch.int32
@@ -112,6 +115,7 @@ class ExpertTokensMetadata:
         return ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens_cpu.to(device, non_blocking=True),
             expert_num_tokens_cpu=expert_num_tokens_cpu,
+            num_valid_tokens=num_valid_tokens,
         )
 
 
@@ -891,6 +895,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         *,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
+        valid_token_counts: torch.Tensor | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
@@ -899,6 +904,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
+            valid_token_counts=valid_token_counts,
         )
 
     @abstractmethod

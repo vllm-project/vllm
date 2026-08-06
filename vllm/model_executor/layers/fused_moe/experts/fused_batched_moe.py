@@ -5,7 +5,10 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation_masked_supported,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -19,7 +22,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
-    swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -837,7 +839,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
+        supported = activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
@@ -847,6 +849,10 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU_TANH_NO_MUL,
             MoEActivation.RELU2_NO_MUL,
         ]
+        return supported and (
+            current_platform.is_xpu()
+            or apply_moe_activation_masked_supported(activation)
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -855,20 +861,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
-
-    def activation(
-        self,
-        activation: MoEActivation,
-        output: torch.Tensor,
-        input: torch.Tensor,
-        **kwargs,
-    ) -> None:
-        gemm1_clamp_limit = self.quant_config.gemm1_clamp_limit
-        if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
-            swiglu_limit_func(output, input, float(gemm1_clamp_limit))
-            return
-
-        super().activation(activation, output, input)
 
     def workspace_shapes(
         self,
@@ -996,11 +988,19 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         intermediate_cache2.fill_(0)
 
         # TODO (bnell): use triton utility from batched deep gemm.
-        self.activation(
-            activation,
-            intermediate_cache2.view(-1, activation_out_dim),
-            intermediate_cache1.view(-1, N),
-        )
+        if current_platform.is_xpu():
+            self.activation(
+                activation,
+                intermediate_cache2.view(-1, activation_out_dim),
+                intermediate_cache1.view(-1, N),
+            )
+        else:
+            self.activation(
+                activation,
+                intermediate_cache2,
+                intermediate_cache1,
+                valid_token_counts=expert_num_tokens,
+            )
 
         qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
             intermediate_cache2,
