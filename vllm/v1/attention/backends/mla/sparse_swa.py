@@ -682,6 +682,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         metadata.tile_sched_swaonly = tile_sched[_LAYER_TYPE_SWAONLY]
         metadata.tile_sched_c4a = tile_sched[_LAYER_TYPE_C4A]
         metadata.tile_sched_c128a = tile_sched[_LAYER_TYPE_C128A]
+        metadata.flashinfer_sparse_index_cache.clear()
 
     def build_tile_scheduler(
         self, num_decode_tokens: int
