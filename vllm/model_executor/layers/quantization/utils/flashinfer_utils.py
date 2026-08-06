@@ -372,70 +372,54 @@ def _shuffle_mxfp8_moe_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Preprocess MXFP8 weights and scales for the FlashInfer TRT-LLM kernel.
 
-    Following flashinfer/tests/moe/test_trtllm_gen_fused_moe.py:
-      1. reorder_rows_for_gated_act_gemm  (interleave gate/up rows)
-      2. shuffle_matrix_a                 (weight data layout shuffle)
-      3. shuffle_matrix_sf_a              (scale factor layout shuffle)
+    All three transforms (gate/up row reorder, ``shuffle_matrix_a`` weight
+    shuffle, ``shuffle_matrix_sf_a`` scale shuffle) are fixed row/index
+    permutations that depend only on the per-expert matrix shape, so the
+    permutation is computed once and applied to every expert in a single
+    gather instead of once per expert. ``block_scale_interleave`` accepts a
+    batched ``(E, M, K)`` scale tensor directly. Output is bit-identical to
+    the per-expert loop but ~20x faster (a 288-expert MoE otherwise costs
+    seconds per layer at load).
     """
-    from flashinfer import (
-        reorder_rows_for_gated_act_gemm,
-        shuffle_matrix_a,
-        shuffle_matrix_sf_a,
+    from flashinfer.fused_moe.core import (
+        get_reorder_rows_for_gated_act_gemm_row_indices,
     )
+    from flashinfer.quantization.fp4_quantization import block_scale_interleave
+    from flashinfer.utils import get_shuffle_matrix_a_row_indices
 
     epilogue_tile_m = 128
-    num_experts = w13.shape[0]
-    intermediate_size = w13.shape[1] // 2
-    hidden_size = w13.shape[2]
 
-    w13_interleaved: list[torch.Tensor] = []
-    w13_scale_interleaved: list[torch.Tensor] = []
-    for i in range(num_experts):
-        if is_gated:
-            w13_interleaved.append(
-                reorder_rows_for_gated_act_gemm(
-                    w13[i].reshape(2 * intermediate_size, -1)
-                )
-            )
-            w13_scale_interleaved.append(
-                reorder_rows_for_gated_act_gemm(
-                    w13_scale[i].reshape(2 * intermediate_size, -1)
-                )
-            )
-        else:
-            w13_interleaved.append(w13[i])
-            w13_scale_interleaved.append(w13_scale[i])
+    w13_u = w13.view(torch.uint8)
+    w2_u = w2.view(torch.uint8)
 
-    w13_shuffled: list[torch.Tensor] = []
-    w2_shuffled: list[torch.Tensor] = []
-    w13_scale_shuffled: list[torch.Tensor] = []
-    w2_scale_shuffled: list[torch.Tensor] = []
-    for i in range(num_experts):
-        w13_shuffled.append(
-            shuffle_matrix_a(w13_interleaved[i].view(torch.uint8), epilogue_tile_m)
+    # 1. Interleave gate/up rows (gated activation GEMM layout).
+    if is_gated:
+        gate_idx = get_reorder_rows_for_gated_act_gemm_row_indices(
+            w13_u[0].reshape(w13_u.shape[1], -1)
         )
-        w2_shuffled.append(shuffle_matrix_a(w2[i].view(torch.uint8), epilogue_tile_m))
-        w13_scale_shuffled.append(
-            shuffle_matrix_sf_a(
-                w13_scale_interleaved[i]
-                .view(torch.uint8)
-                .reshape(2 * intermediate_size, -1),
-                epilogue_tile_m,
-            )
-        )
-        w2_scale_shuffled.append(
-            shuffle_matrix_sf_a(
-                w2_scale[i].view(torch.uint8).reshape(hidden_size, -1),
-                epilogue_tile_m,
-            )
-        )
+        w13_u = w13_u[:, gate_idx]
+        w13_scale = w13_scale[:, gate_idx]
 
-    w13_out = torch.stack(w13_shuffled).view(torch.float8_e4m3fn)
-    w2_out = torch.stack(w2_shuffled).view(torch.float8_e4m3fn)
-    w13_scale_out = torch.stack(w13_scale_shuffled).reshape(w13_scale.shape)
-    w2_scale_out = torch.stack(w2_scale_shuffled).reshape(w2_scale.shape)
+    def shuffle_weights(t: torch.Tensor) -> torch.Tensor:
+        # Row permutation depends only on (M, epilogue_tile_m).
+        idx = get_shuffle_matrix_a_row_indices(t[0], epilogue_tile_m).to(t.device)
+        return t[:, idx].view(torch.float8_e4m3fn)
 
-    return w13_out, w2_out, w13_scale_out, w2_scale_out
+    def shuffle_scales(s: torch.Tensor) -> torch.Tensor:
+        # shuffle_matrix_sf_a == row-gather (same indices as the weight shuffle)
+        # followed by the 128x4 block-scale interleave, which is batch-capable.
+        idx = get_shuffle_matrix_a_row_indices(
+            s[0].view(torch.uint8).reshape(s.shape[1], -1), epilogue_tile_m
+        ).to(s.device)
+        interleaved = block_scale_interleave(s[:, idx])
+        return interleaved.reshape(s.shape)
+
+    return (
+        shuffle_weights(w13_u),
+        shuffle_weights(w2_u),
+        shuffle_scales(w13_scale),
+        shuffle_scales(w2_scale),
+    )
 
 
 def prepare_fp8_moe_layer_for_fi(
