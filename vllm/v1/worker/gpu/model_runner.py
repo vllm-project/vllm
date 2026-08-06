@@ -72,6 +72,7 @@ from vllm.v1.outputs import (
     RoutedExpertsTensors,
     make_empty_encoder_model_runner_output,
 )
+from vllm.v1.utils import compute_iteration_details
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -290,6 +291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
         self.sparse_mla_offload_manager: SparseMLAOffloadManager | None = None
+        self._sparse_mla_tp_fence_token: torch.Tensor | None = None
         self._sparse_mla_kv_caches_dict: dict[str, torch.Tensor] | None = None
         self._sparse_mla_indexer_layer_names: tuple[str, ...] = ()
         self._sparse_mla_shutdown_started = False
@@ -580,6 +582,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         plan = self.kv_cache_config.sparse_mla_offload_plan
+        if plan is not None and getattr(
+            self.vllm_config, "num_speculative_tokens", None
+        ) not in (
+            None,
+            0,
+        ):
+            raise ValueError("sparse MLA offload does not support speculation")
         physical_kv_cache_config = self.kv_cache_config
         physical_attn_groups = self.attn_groups
         if plan is not None:
@@ -627,6 +636,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         initialization_error = None
         try:
+            fence_token = manager._local_buffers["tp_fence_token"]
+            if (
+                fence_token.shape != (1,)
+                or fence_token.dtype != torch.int32
+                or fence_token.device != tp_group.device
+                or not fence_token.is_contiguous()
+            ):
+                raise RuntimeError("invalid sparse MLA TP fence token")
+            self._sparse_mla_tp_fence_token = fence_token
+            missing_layers = []
+            for name in plan.main_layer_names:
+                layer = self.compilation_config.static_forward_context.get(name)
+                if layer is None:
+                    missing_layers.append(name)
+                    continue
+                layer._sparse_mla_offload_view = manager.layer_view(name)
+            if missing_layers and tp_group.device.type == "cuda":
+                raise RuntimeError("missing sparse MLA Attention layers")
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
         except Exception as error:
             initialization_error = _failure(
@@ -1331,6 +1358,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        sparse_mla_decode_step = (
+            self.sparse_mla_offload_manager is not None
+            and not dummy_run
+            and scheduler_output.total_num_scheduled_tokens > 0
+            and isinstance(scheduler_output, SchedulerOutput)
+        )
+        if sparse_mla_decode_step:
+            iteration = compute_iteration_details(scheduler_output)
+            if (
+                iteration.num_ctx_requests != 0
+                or iteration.num_generation_requests <= 0
+                or scheduler_output.scheduled_new_reqs
+                or scheduler_output.scheduled_spec_decode_tokens
+                or any(
+                    count != 1
+                    for count in scheduler_output.num_scheduled_tokens.values()
+                )
+            ):
+                raise ValueError(
+                    "sparse MLA offload supports only real non-MTP pure Decode"
+                )
+
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1540,7 +1589,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
+            if sparse_mla_decode_step:
+                if not isinstance(attn_metadata, dict):
+                    raise RuntimeError("missing sparse MLA attention metadata")
+                tail_start = input_batch.num_tokens
+                tail_end = input_batch.num_tokens_after_padding
+                for metadata in attn_metadata.values():
+                    req_id_per_token = getattr(metadata, "req_id_per_token", None)
+                    if req_id_per_token is not None:
+                        req_id_per_token[tail_start:tail_end].fill_(-1)
             self.kv_connector.pre_forward(scheduler_output)
+            if sparse_mla_decode_step:
+                fence_token = self._sparse_mla_tp_fence_token
+                if fence_token is None:
+                    raise RuntimeError("missing sparse MLA TP fence token")
+                get_tp_group().broadcast(fence_token, src=0)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
@@ -1562,6 +1625,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
+                if sparse_mla_decode_step:
+                    fence_token = self._sparse_mla_tp_fence_token
+                    if fence_token is None:
+                        raise RuntimeError("missing sparse MLA TP fence token")
+                    get_tp_group().broadcast(fence_token, src=0)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
                     # cudagraph, chosen inside run_pw_graph). cg_mode is only
@@ -1834,6 +1902,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self._sparse_mla_graphs_released = True
 
     def _unbind_sparse_mla_borrowers(self) -> None:
+        self._sparse_mla_tp_fence_token = None
+        manager = self.sparse_mla_offload_manager
+        assert manager is not None
+        for name in manager._plan.main_layer_names:
+            layer = self.compilation_config.static_forward_context.get(name)
+            if layer is not None:
+                layer._sparse_mla_offload_view = None
         step = self._sparse_mla_borrower_step
         if step == 0:
             self.kv_connector = NO_OP_KV_CONNECTOR

@@ -207,7 +207,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import lcm
-from typing import ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
 import numpy as np
 import torch
@@ -302,6 +302,9 @@ from vllm.v1.kv_cache_interface import (
     MLAKVCacheRole,
     get_kv_quant_mode,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.sparse_mla_offload import SparseMLALayerView
 
 logger = init_logger(__name__)
 
@@ -422,6 +425,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self._sparse_mla_offload_view: SparseMLALayerView | None = None
         self.indexer = indexer
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
         self.num_kv_heads = 1
@@ -940,10 +944,78 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         assert self.dcp_manager.query_gather is not None
                         mqa_q = self.dcp_manager.query_gather(mqa_q)
 
-            # call decode attn
-            if not self.impl.is_sparse:
-                assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
+            layer_view = self._sparse_mla_offload_view
+            if layer_view is None:
+                if not self.impl.is_sparse:
+                    assert attn_metadata.decode is not None
+                attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                    mqa_q, kv_cache, attn_metadata, self
+                )
+            else:
+                if not self.impl.is_sparse or layer_view.layer_name != self.layer_name:
+                    raise RuntimeError("invalid sparse MLA offload layer view")
+                if num_mqa_tokens != num_actual_toks:
+                    raise RuntimeError("sparse MLA offload requires pure Decode")
+                if (
+                    k_c_normed.dtype != torch.bfloat16
+                    or k_pe.dtype != torch.bfloat16
+                    or k_c_normed.ndim != 2
+                    or k_c_normed.shape[1] != 512
+                    or k_pe.ndim != 3
+                    or k_pe.shape[1:] != (1, 64)
+                ):
+                    raise RuntimeError("invalid sparse MLA offload Main input")
+                current_main_kv = torch.cat((k_c_normed, k_pe.squeeze(1)), dim=-1)
+                if (
+                    current_main_kv.shape != (num_actual_toks, 576)
+                    or current_main_kv.dtype != torch.bfloat16
+                    or not current_main_kv.is_contiguous()
+                ):
+                    raise RuntimeError("invalid sparse MLA offload Main")
+
+                topk_buffer = getattr(self.impl, "topk_indices_buffer", None)
+                if topk_buffer is None:
+                    raise RuntimeError("missing sparse MLA offload Top-K buffer")
+                buffers = layer_view.local_buffers
+                row_capacity = (
+                    buffers["request_active"].shape[0]
+                    if "request_active" in buffers
+                    else topk_buffer.shape[0]
+                )
+                if topk_buffer.shape[0] < row_capacity:
+                    raise RuntimeError("sparse MLA offload Top-K capacity is too small")
+                topk_indices = topk_buffer[:row_capacity]
+                if topk_indices.ndim == 2:
+                    topk_indices = topk_indices.unsqueeze(1)
+                if (
+                    topk_indices.ndim != 3
+                    or topk_indices.shape[1] != 1
+                    or topk_indices.dtype != torch.int32
+                    or topk_indices.device != current_main_kv.device
+                    or not topk_indices.is_contiguous()
+                ):
+                    raise RuntimeError("invalid sparse MLA offload Top-K view")
+
+                from vllm.v1.attention.ops.flashmla import (
+                    sparse_mla_cache_plan,
+                    sparse_mla_offload_attention,
+                )
+
+                cache_plan_dep = sparse_mla_cache_plan(
+                    current_main_kv, topk_indices, self.layer_name
+                )
+                sparse_query = (
+                    torch.cat(mqa_q, dim=-1) if isinstance(mqa_q, tuple) else mqa_q
+                )
+                attn_out = mqa_ql_nope
+                sparse_mla_offload_attention(
+                    sparse_query,
+                    current_main_kv,
+                    attn_out,
+                    self.layer_name,
+                    cache_plan_dep,
+                )
+                lse = None
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:

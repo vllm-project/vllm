@@ -8,7 +8,7 @@ import tempfile
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 import torch
@@ -1846,3 +1846,304 @@ def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
         torch.equal(manager._local_buffers[name], value)
         for name, value in buffers_before_rejection.items()
     )
+
+
+def _make_c6_attention(mqa_inputs):
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
+    def forward_mqa(query, kv_cache, metadata, layer):
+        mqa_inputs.append((query, kv_cache, metadata, layer))
+        return torch.full((2, 1, 1), 7, dtype=torch.float32), None
+
+    attention = MLAAttention.__new__(MLAAttention)
+    attention.impl = SimpleNamespace(
+        dcp_world_size=1, is_sparse=False, forward_mqa=forward_mqa
+    )
+    attention.kv_cache_dtype = "auto"
+    attention.use_pcp = False
+    attention.qk_nope_head_dim = attention.qk_rope_head_dim = 1
+    attention.q_pad_num_heads = None
+    attention.is_aiter_triton_fp4_bmm_enabled = False
+    attention.is_aiter_triton_fp8_bmm_enabled = False
+    attention.W_UK_T = torch.ones((1, 1, 1), dtype=torch.float32)
+    attention.W_UK_T_dcp_qrep = None
+    attention.num_heads = attention.v_head_dim = 1
+    attention._v_up_proj = lambda attn_out, out: out.copy_(attn_out.squeeze(-1))
+    attention.layer_name = "main.0"
+    attention._sparse_mla_offload_view = None
+    metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        num_decodes=2,
+        num_prefills=0,
+        num_decode_tokens=2,
+        decode=SimpleNamespace(),
+    )
+    return attention, metadata, torch.empty((2, 1), dtype=torch.float32)
+
+
+def _make_c6_layer_view(layer_name="main.0"):
+    from vllm.v1.worker.gpu.sparse_mla_offload import SparseMLALayerView
+
+    return SparseMLALayerView(
+        layer_name=layer_name,
+        layer_index=0,
+        is_host_writer=True,
+        main_host_kv=torch.arange(2 * 576, dtype=torch.bfloat16).view(2, 576),
+        main_host_kv_uva=None,
+        local_buffers=MappingProxyType({}),
+        side_stream=None,
+        fork_ready_events=(),
+        miss_ready_events=(),
+    )
+
+
+def test_sparse_mla_backend_routes_main_host_and_indexer_device(monkeypatch):
+    import vllm.v1.attention.ops.flashmla as flashmla
+
+    mqa_inputs: list[tuple] = []
+    attention, metadata, output = _make_c6_attention(mqa_inputs)
+    assert (
+        attention.forward_impl(
+            torch.ones((2, 1, 2)),
+            torch.zeros((2, 1)),
+            torch.zeros((2, 1, 1)),
+            torch.zeros((1,)),
+            metadata,
+            output,
+        )
+        is output
+    )
+    assert torch.equal(output, torch.full((2, 1), 7, dtype=torch.float32))
+
+    topk = torch.tensor([[[3, 4]], [[5, 6]], [[7, 8]]], dtype=torch.int32)
+    dependency = torch.empty(0)
+    c3_calls: list[tuple] = []
+
+    def cache_plan(main, indices, layer_name):
+        c3_calls.append(("plan", main, indices, layer_name))
+        return dependency
+
+    def offload_attention(query, main, out, layer_name, dep):
+        c3_calls.append(("attention", query, main, out, layer_name, dep))
+        out.fill_(11)
+
+    monkeypatch.setattr(flashmla, "sparse_mla_cache_plan", cache_plan)
+    monkeypatch.setattr(flashmla, "sparse_mla_offload_attention", offload_attention)
+    attention.impl.is_sparse = True
+    attention.impl.topk_indices_buffer = topk
+    attention._sparse_mla_offload_view = _make_c6_layer_view()
+    output.zero_()
+    result = attention.forward_impl(
+        torch.ones((2, 1, 2)),
+        torch.ones((2, 512), dtype=torch.bfloat16),
+        torch.full((2, 1, 64), 2, dtype=torch.bfloat16),
+        torch.zeros((1,)),
+        metadata,
+        output,
+    )
+
+    assert result is output
+    assert [call[0] for call in c3_calls] == ["plan", "attention"]
+    _, main, indices, layer_name = c3_calls[0]
+    assert main.shape == (2, 576) and main.dtype is torch.bfloat16
+    assert torch.equal(main[:, :512], torch.ones((2, 512), dtype=torch.bfloat16))
+    assert torch.equal(main[:, 512:], torch.full((2, 64), 2, dtype=torch.bfloat16))
+    assert indices.shape == (3, 1, 2) and indices.dtype is torch.int32
+    assert indices.is_contiguous() and indices.data_ptr() == topk.data_ptr()
+    assert layer_name == "main.0" and c3_calls[1][2] is main
+    assert c3_calls[1][-1] is dependency
+    assert torch.equal(output, torch.full((2, 1), 11, dtype=torch.float32))
+
+    c3_call_count = len(c3_calls)
+    with pytest.raises(RuntimeError, match="sparse MLA offload Main"):
+        attention.forward_impl(
+            torch.ones((2, 1, 2)),
+            torch.ones((2, 512), dtype=torch.bfloat16),
+            torch.ones((2, 1, 64), dtype=torch.float32),
+            torch.zeros((1,)),
+            metadata,
+            output,
+        )
+    assert len(c3_calls) == c3_call_count
+
+    attention._sparse_mla_offload_view = _make_c6_layer_view("other")
+    with pytest.raises(RuntimeError, match="sparse MLA offload"):
+        attention.forward_impl(
+            torch.ones((2, 1, 2)),
+            torch.ones((2, 512), dtype=torch.bfloat16),
+            torch.ones((2, 1, 64), dtype=torch.bfloat16),
+            torch.zeros((1,)),
+            metadata,
+            output,
+        )
+    assert len(mqa_inputs) == 1
+
+
+def _make_c6_full_decode_seed(monkeypatch):
+    import vllm.v1.worker.gpu.model_runner as model_runner_module
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+
+    events: list[tuple] = []
+    req_id_per_token = torch.tensor([7, 8, 9], dtype=torch.int32)
+    fence_token = torch.zeros(1, dtype=torch.int32)
+    manager = SimpleNamespace(
+        _local_buffers={"tp_fence_token": fence_token},
+        _prepare_decode_batch=lambda *args: events.append(("publish",)),
+    )
+    manager.layer_view = lambda name: SimpleNamespace(
+        local_buffers=manager._local_buffers
+    )
+    runner = model_runner_module.GPUModelRunner.__new__(
+        model_runner_module.GPUModelRunner
+    )
+    runner.sparse_mla_offload_manager = manager
+    runner._sparse_mla_tp_fence_token = fence_token
+    runner.execute_model_state = None
+    runner.update_pp_decode_requests = lambda: None
+    runner.finish_requests = runner.free_states = runner.add_requests = (
+        lambda output: None
+    )
+    runner.update_requests = lambda output: None
+    runner.block_tables = SimpleNamespace(
+        apply_staged_writes=lambda: None,
+        blocks_per_kv_block=[1],
+        num_blocks=SimpleNamespace(gpu=torch.ones((1, 1), dtype=torch.int32)),
+    )
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens=SimpleNamespace(gpu=torch.ones(1, dtype=torch.int32))
+    )
+    runner.dp_size = runner.dp_rank = 1
+    runner.lora_config = None
+    runner.is_encoder_decoder = runner.supports_mm_inputs = False
+    runner.is_first_pp_rank = runner.is_last_pp_rank = True
+    runner.use_aux_hidden_state_outputs = False
+    runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+    runner.attn_groups = []
+    runner.model_config = SimpleNamespace()
+    runner.eplb = SimpleNamespace(prepare_forward=lambda *args: None)
+    runner.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    input_batch = SimpleNamespace(
+        req_ids=["decode"],
+        idx_mapping=torch.zeros(1, dtype=torch.int32),
+        num_reqs_after_padding=1,
+        num_tokens=1,
+        num_tokens_after_padding=3,
+        input_ids=torch.zeros(3, dtype=torch.int64),
+        positions=torch.arange(3),
+        is_padding=torch.tensor([False, True, True]),
+        num_draft_tokens=0,
+    )
+    runner.prepare_inputs = lambda output, desc: input_batch
+    runner.prepare_attn = lambda batch: (
+        (torch.zeros(1, dtype=torch.int64),),
+        torch.zeros(1),
+    )
+    runner.model_state = SimpleNamespace(
+        preprocess_state=lambda *args: None,
+        prepare_attn=lambda *args: {
+            "main.0": SimpleNamespace(req_id_per_token=req_id_per_token)
+        },
+        prepare_inputs=lambda *args: {},
+    )
+    runner.kv_connector = SimpleNamespace(
+        pre_forward=lambda output: events.append(("pre_forward",))
+    )
+
+    def run_fullgraph(desc):
+        events.append(("target", tuple(req_id_per_token.tolist())))
+        return torch.zeros((3, 1))
+
+    runner.cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=["decode"],
+            resumed_req_ids=set(),
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[],
+            num_computed_tokens=[],
+            num_output_tokens=[1],
+        ),
+        num_scheduled_tokens={"decode": 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    tp_group = SimpleNamespace(
+        broadcast=lambda token, src: events.append(("broadcast", token, src))
+    )
+    monkeypatch.setattr(model_runner_module, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(
+        model_runner_module,
+        "dispatch_cg_and_sync_dp",
+        lambda *args, **kwargs: (
+            BatchExecutionDescriptor(CUDAGraphMode.FULL, 3, 1),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        model_runner_module, "build_slot_mappings_by_layer", lambda *args: {}
+    )
+    return runner, scheduler_output, tp_group, events, req_id_per_token, fence_token
+
+
+def test_gpu_model_runner_v2_sparse_mla_full_decode_fence_and_tail(monkeypatch):
+    runner, scheduler_output, _, events, req_ids, fence_token = (
+        _make_c6_full_decode_seed(monkeypatch)
+    )
+
+    runner.execute_model(scheduler_output)
+
+    assert [event[0] for event in events] == [
+        "publish",
+        "pre_forward",
+        "broadcast",
+        "target",
+    ]
+    assert events[2][1] is fence_token and events[2][2] == 0
+    assert events[3][1] == (7, -1, -1)
+    assert tuple(req_ids.tolist()) == (7, -1, -1)
+
+    rejected_runner, rejected_output, _, rejected_events, _, _ = (
+        _make_c6_full_decode_seed(monkeypatch)
+    )
+    mutations = []
+    rejected_runner.update_pp_decode_requests = lambda: mutations.append("update_pp")
+    rejected_runner.finish_requests = lambda output: mutations.append("finish")
+    rejected_runner.free_states = lambda output: mutations.append("free")
+    rejected_runner.add_requests = lambda output: mutations.append("add")
+    rejected_runner.update_requests = lambda output: mutations.append("update")
+    rejected_runner.block_tables.apply_staged_writes = lambda: mutations.append(
+        "blocks"
+    )
+    rejected_output = replace(
+        rejected_output,
+        scheduled_cached_reqs=replace(
+            rejected_output.scheduled_cached_reqs, num_output_tokens=[0]
+        ),
+    )
+    with pytest.raises(ValueError, match="only real non-MTP pure Decode"):
+        rejected_runner.execute_model(rejected_output)
+    assert mutations == []
+    assert rejected_events == []
+
+
+def test_gpu_model_runner_v2_sparse_mla_broadcast_failure_stops_target(monkeypatch):
+    runner, scheduler_output, tp_group, events, _, _ = _make_c6_full_decode_seed(
+        monkeypatch
+    )
+    tp_group.broadcast = lambda token, src: (_ for _ in ()).throw(
+        RuntimeError("fence failed")
+    )
+
+    with pytest.raises(RuntimeError, match="fence failed"):
+        runner.execute_model(scheduler_output)
+
+    assert events == [("publish",), ("pre_forward",)]
+    assert runner.execute_model_state is None

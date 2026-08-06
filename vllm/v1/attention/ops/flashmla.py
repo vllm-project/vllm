@@ -168,7 +168,12 @@ def _get_sparse_mla_offload_context(layer_name: LayerNameType):
 
     name = _resolve_layer_name(layer_name)
     context = get_forward_context()
-    layer_view = context.no_compile_layers.get(name)
+    layer = context.no_compile_layers.get(name)
+    layer_view = (
+        layer
+        if isinstance(layer, SparseMLALayerView)
+        else getattr(layer, "_sparse_mla_offload_view", None)
+    )
     if not isinstance(layer_view, SparseMLALayerView):
         raise RuntimeError(f"missing sparse MLA offload view for {name!r}")
     if not isinstance(context.attn_metadata, dict):
