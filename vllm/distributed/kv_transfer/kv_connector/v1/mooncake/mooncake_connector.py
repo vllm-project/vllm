@@ -622,9 +622,6 @@ class MooncakeConnectorScheduler:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_config = kv_cache_config
-        self._transfer_group_ids = kv_cache_config.transfer_group_ids
-        assert self._transfer_group_ids
-        transfer_groups = kv_cache_config.transfer_groups
 
         assert vllm_config.kv_transfer_config
         self.is_kv_producer: bool = (
@@ -639,13 +636,14 @@ class MooncakeConnectorScheduler:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in transfer_groups
+                for g in kv_cache_config.transfer_groups
             )
         )
         # GDN is represented as a MambaSpec in vLLM. This Mooncake MambaSpec
         # path is currently tested with GDN; Mamba2 is not validated yet.
         self._has_mamba = any(
-            isinstance(group.kv_cache_spec, MambaSpec) for group in transfer_groups
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in kv_cache_config.transfer_groups
         )
 
         # Requests that need to start recv/send.
@@ -662,7 +660,7 @@ class MooncakeConnectorScheduler:
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
-            for g in transfer_groups
+            for g in kv_cache_config.transfer_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to
         # conservatively account for boundary overlap.
@@ -678,11 +676,10 @@ class MooncakeConnectorScheduler:
         """Clip per-group block IDs to sliding window size."""
         if len(block_ids) == 0:
             return []
-        if len(block_ids) == len(self._transfer_group_ids):
+        if len(block_ids) == len(self.kv_cache_config.transfer_group_ids):
             selected = list(block_ids)
         else:
-            assert len(block_ids) == len(self.kv_cache_config.kv_cache_groups)
-            selected = [block_ids[i] for i in self._transfer_group_ids]
+            selected = list(self.kv_cache_config.select_transfer_block_ids(block_ids))
         if len(selected) == 0 or not self._is_hma_required:
             return selected
         return [

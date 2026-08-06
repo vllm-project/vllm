@@ -103,8 +103,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         unsupported: list[str] = []
         cache_block_size = vllm_config.cache_config.block_size
-        transfer_groups = kv_cache_config.transfer_groups
-        for g_idx, g in enumerate(transfer_groups):
+        for g_idx, g in enumerate(kv_cache_config.transfer_groups):
             spec = g.kv_cache_spec
             if isinstance(spec, CrossAttentionSpec):
                 unsupported.append(f"group {g_idx}: CrossAttentionSpec")
@@ -117,7 +116,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
         dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(transfer_groups) > 1 and pcp * dcp > 1:
+        if len(kv_cache_config.transfer_groups) > 1 and pcp * dcp > 1:
             unsupported.append(
                 f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
             )

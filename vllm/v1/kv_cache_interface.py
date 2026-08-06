@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
+from functools import cached_property
 from math import prod
 from typing import TYPE_CHECKING
 
@@ -24,7 +26,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # KV cache quantization mode
@@ -1076,7 +1077,7 @@ class KVCacheConfig:
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
-    @property
+    @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""
         return tuple(
@@ -1085,12 +1086,23 @@ class KVCacheConfig:
             if group.enable_kv_transfer
         )
 
-    @property
+    @cached_property
     def transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
         """Cache groups that participate in external KV transfer."""
         return tuple(
             self.kv_cache_groups[group_id] for group_id in self.transfer_group_ids
         )
+
+    def select_transfer_block_ids(
+        self, block_ids: Sequence[list[int]]
+    ) -> tuple[list[int], ...]:
+        """Select block IDs for externally transferable cache groups."""
+        if len(block_ids) != len(self.kv_cache_groups):
+            raise ValueError(
+                f"Expected {len(self.kv_cache_groups)} KV cache groups, "
+                f"got {len(block_ids)}."
+            )
+        return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
 
     def __post_init__(self) -> None:
         if not self.num_blocks_by_pool:

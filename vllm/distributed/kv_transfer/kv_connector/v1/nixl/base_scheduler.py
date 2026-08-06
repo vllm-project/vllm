@@ -257,7 +257,7 @@ class NixlBaseConnectorScheduler:
         if hasattr(self, "kv_cache_config") and len(block_ids) == len(
             self.kv_cache_config.kv_cache_groups
         ):
-            block_ids = tuple(block_ids[i] for i in self._transfer_group_ids)
+            block_ids = self.kv_cache_config.select_transfer_block_ids(block_ids)
         num_transfer_groups = (
             len(self._transfer_group_ids)
             if hasattr(self, "_transfer_group_ids")
