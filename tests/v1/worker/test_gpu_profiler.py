@@ -421,6 +421,10 @@ class TestProtonConfig:
             )
 
 
+@pytest.mark.skipif(
+    torch.version.hip is not None,
+    reason="Proton profiling tests require an NVIDIA Triton runtime.",
+)
 @pytest.mark.usefixtures("nvidia_platform")
 class TestProtonProfilerWrapper:
     def test_passes_config_and_global_rank_name_to_proton(self, tmp_path):
