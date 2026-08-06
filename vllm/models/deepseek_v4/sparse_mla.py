@@ -21,7 +21,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    sparse_short_extend_tiering,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # Pad C128A topk width to this alignment. 128 covers both h_q=64 (B_TOPK=64) and
@@ -255,6 +258,9 @@ class DeepseekV4FlashMLAMetadataBuilder(
             split_decodes_and_prefills(
                 cm,
                 decode_threshold=self.reorder_batch_threshold or 1,
+                # Must match SWA and the indexer -- see
+                # sparse_short_extend_tiering().
+                treat_short_extends_as_decodes=sparse_short_extend_tiering(cm),
             )
         )
 
@@ -265,13 +271,13 @@ class DeepseekV4FlashMLAMetadataBuilder(
         assert cm.positions is not None, (
             "positions is required for C128A metadata build"
         )
-        active_topk_width = min(
-            max(
-                triton.next_power_of_2(max(cm.max_seq_len // self.compress_ratio, 1)),
-                _C128A_TOPK_ALIGNMENT,
-            ),
-            self.c128a_max_compressed,
-        )
+        # FULL-cudagraph decode kernels bake this layout's row stride at
+        # capture time (capture builds with max_seq_len = max_model_len), so
+        # the stride must not depend on the batch. A narrower runtime layout
+        # makes the captured kernels read decode rows r >= 1 from stale bytes:
+        # in a mixed batch, prefill row 0 is written at exactly the offset the
+        # captured kernel reads as decode row 1.
+        active_topk_width = self.c128a_max_compressed
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
