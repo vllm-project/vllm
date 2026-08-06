@@ -104,6 +104,17 @@ def test_should_ignore_layer_rejects_partially_matched_fused_layer():
         should_ignore_layer(layer_name, patterns, fused_mapping)
 
 
+def test_should_ignore_layer_returns_false_when_no_fused_pattern_matches():
+    layer_name = "model.layers.0.self_attn.qkv_proj"
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    assert find_matching_patterns(layer_name, [], fused_mapping) == [
+        set(),
+        set(),
+    ]
+    assert not should_ignore_layer(layer_name, [], fused_mapping)
+
+
 @pytest.mark.parametrize(
     "patterns",
     [

@@ -81,6 +81,11 @@ def test_args_accepts_dict_form():
     assert args.moe == QuantSpec(weight=None, activation=kMxfp8Dynamic)
 
 
+def test_targets_reject_non_string_keys():
+    with pytest.raises(ValueError, match="targets keys must be strings"):
+        QuantizationConfigArgs.model_validate({"targets": {123: "mxfp8"}})
+
+
 # ---- resolve_quantization_config -----------------------------------------
 
 

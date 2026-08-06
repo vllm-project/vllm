@@ -146,6 +146,10 @@ class QuantizationConfigArgs:
         if not isinstance(v, dict):
             raise TypeError(f"targets must be a dict, got {type(v).__name__}")
         for pattern, shorthand in v.items():
+            if not isinstance(pattern, str):
+                raise ValueError(
+                    f"targets keys must be strings, got {type(pattern).__name__}"
+                )
             if not isinstance(shorthand, str) or shorthand not in _ONLINE_SHORTHANDS:
                 raise ValueError(
                     f"targets[{pattern}] = {shorthand} is not a valid "
