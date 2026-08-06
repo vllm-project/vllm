@@ -87,6 +87,8 @@ class EngineCoreSentinel:
 
         engine = self.engine
         ft_config = self.parallel_config.fault_tolerance_config
+        self._clear_contaminated_blocks()
+
         if ft_config.resume_requests_after_recovery:
             timestamp = time.monotonic()
             while engine.scheduler.running:
@@ -118,6 +120,33 @@ class EngineCoreSentinel:
             exc_info=exc,
         )
         self._push_status()
+
+    def _clear_contaminated_blocks(self) -> None:
+        """Evict KV blocks possibly contaminated by the failed step."""
+
+        engine = self.engine
+        kv_cache_manager = engine.scheduler.kv_cache_manager
+        dirty_block_ids: set[int] = set()
+
+        for request in engine.scheduler.running:
+            num_written = request.num_in_flight_tokens
+            if num_written <= 0:
+                continue
+            start = max(request.num_computed_tokens - num_written, 0)
+            end = request.num_computed_tokens - 1
+
+            for mgr in kv_cache_manager.coordinator.single_type_managers:
+                blocks = mgr.req_to_blocks.get(request.request_id)
+                if not blocks:
+                    continue
+                blk_start = start // mgr.block_size
+                blk_end = end // mgr.block_size
+                for blk in blocks[blk_start:blk_end + 1]:
+                    if not blk.is_null:
+                        dirty_block_ids.add(blk.block_id)
+
+        if dirty_block_ids:
+            kv_cache_manager.evict_blocks(dirty_block_ids)
 
     def _push_status(self):
         """Push current health to the client so it can refresh its cache."""
