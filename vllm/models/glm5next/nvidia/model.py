@@ -397,7 +397,14 @@ class Glm5NextDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        post: torch.Tensor | None = None,
+        comb: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         # 70B or MTP layers: KDA + MoE without HC.
         if not self.mhc or self.is_mtp_layer:
             residual = hidden_states
@@ -412,20 +419,29 @@ class Glm5NextDecoderLayer(nn.Module):
             )
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states
-            return hidden_states, residual
+            return hidden_states, residual, None, None
 
-        # mHC start
+        # mHC start. `post`/`comb` carry the previous layer's deferred
+        # hc_post inputs (its ffn-pre outputs); when present, fuse that
+        # hc_post with this layer's attn hc_pre into one kernel (inter-layer
+        # fusion). Layer 0 has no incoming state -> standalone hc_pre.
         x = hidden_states
-        if self.layer_idx == 0:
-            x = hc_expand(x, self.n)
-
-        # Self Attention
-        residual = x
-        post, comb, x = self.hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base,
-            norm_weight=self.input_layernorm.weight.data,
-            norm_eps=self.input_layernorm.variance_epsilon,
-        )
+        if post is None:
+            if self.layer_idx == 0:
+                x = hc_expand(x, self.n)
+            residual = x
+            post, comb, x = self.hc_pre(
+                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base,
+                norm_weight=self.input_layernorm.weight.data,
+                norm_eps=self.input_layernorm.variance_epsilon,
+            )
+        else:
+            residual, post, comb, x = self.hc_fused_post_pre(
+                x, residual, post, comb,
+                self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base,
+                norm_weight=self.input_layernorm.weight.data,
+                norm_eps=self.input_layernorm.variance_epsilon,
+            )
 
         x = self.self_attn(
             hidden_states=x,
@@ -443,13 +459,15 @@ class Glm5NextDecoderLayer(nn.Module):
         # Fully Connected
         x = self.mlp(x)
 
-        x = self.hc_post(x, residual, post, comb)
-
-        # mHC end
+        # mHC end. The last mHC layer materializes its final hc_post (nothing
+        # to fuse with) then contracts; every other layer defers its hc_post to
+        # the next layer's fused pre, returning the state.
         if self.layer_idx == self.num_hidden_layers - 1:
+            x = self.hc_post(x, residual, post, comb)
             x = hc_contract(x, self.n)
+            return x, None, None, None
 
-        return x, None
+        return x, residual, post, comb
 
     def hc_pre(
         self,
@@ -622,20 +640,28 @@ class Glm5NextModel(nn.Module):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
+            post = None
+            comb = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+            # post/comb (deferred mHC hc_post state) are not propagated across
+            # PP ranks; the receiving rank's first mHC layer uses standalone pre.
+            post = None
+            comb = None
 
         for i, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual, post, comb = layer(
+                positions, hidden_states, residual, post, comb
+            )
 
         if not get_pp_group().is_last_rank:
-            # PP: intermediate tensor may be 3D [T, n, H] (after hc_expand)
-            # or 2D [T, H] (before hc_expand). Layers handle both correctly
-            # since hc_expand only runs at layer 0 (first PP rank) and
-            # hc_contract at the last layer (last PP rank). residual is None on
-            # the mHC path (those layers are already reduced).
+            # PP is gated off for GLM5Next (no make_empty_intermediate_tensors),
+            # so this branch is not exercised. post/comb are the deferred
+            # hc_post state of this rank's last mHC layer; a future PP path
+            # would need to propagate them, but for now they are dropped (the
+            # receiving rank's first layer would fall back to standalone pre).
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
