@@ -238,6 +238,52 @@ def test_add_eager_creates_alternating_graph_eager_graph(cuda_capture_stream):
     assert counter["eager_calls"] == 2  # only the in-capture invocation
 
 
+def test_bucketed_eager_selects_runtime_target(cuda_capture_stream):
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    x = torch.zeros(4, device="cuda")
+    calls = []
+
+    def eager_step(bucket: int):
+        calls.append(bucket)
+
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        x.add_(1.0)
+        cap.add_bucketed_eager(eager_step, (1, 16))
+        x.add_(1.0)
+
+    assert calls == [1, 16]
+    assert cap.num_graphs == 2
+    assert cap.num_eager_breaks == 1
+    assert cap.num_bucketed_eager_breaks == 1
+    assert cap.has_runtime_buckets
+
+    cap.set_runtime_bucket_target(16)
+    cap.replay()
+    assert calls == [1, 16, 16]
+
+
+@pytest.mark.parametrize(
+    ("seq_len", "expected"),
+    [
+        (1, 1),
+        (64, 1),
+        (65, 16),
+        (4096, 16),
+        (4097, 48),
+        (16384, 48),
+        (16385, 64),
+        (65536, 64),
+        (65537, 128),
+    ],
+)
+def test_rocm_aiter_mla_split_bucket(seq_len, expected):
+    from vllm.v1.worker.gpu_model_runner import _rocm_aiter_mla_split_bucket
+
+    assert _rocm_aiter_mla_split_bucket(seq_len) == expected
+
+
 # ---------------------------------------------------------------------------
 # Capture vs eager numerical equivalence
 # ---------------------------------------------------------------------------

@@ -256,6 +256,20 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
+def _rocm_aiter_mla_split_bucket(seq_len: int) -> int:
+    if seq_len <= 0:
+        raise ValueError(f"sequence length must be positive, got {seq_len}")
+    if seq_len <= 64:
+        return 1
+    if seq_len <= 4096:
+        return 16
+    if seq_len <= 16384:
+        return 48
+    if seq_len <= 65536:
+        return 64
+    return 128
+
+
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -4416,6 +4430,18 @@ class GPUModelRunner(
                 self.model_config,
                 num_tokens_unpadded,
                 ubatch_slices_padded,
+            )
+        if (
+            current_platform.is_rocm()
+            and cudagraph_mode == CUDAGraphMode.FULL
+            and isinstance(self.model, BreakableCUDAGraphWrapper)
+            and num_reqs == 1
+            and max_num_scheduled_tokens == 1
+            and not use_spec_decode
+        ):
+            seq_len = int(self.optimistic_seq_lens_cpu[0].item())
+            self.model.set_runtime_bucket_target(
+                _rocm_aiter_mla_split_bucket(seq_len)
             )
         with (
             set_forward_context(

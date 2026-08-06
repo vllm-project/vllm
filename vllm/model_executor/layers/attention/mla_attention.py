@@ -200,7 +200,10 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphCapture,
+    eager_break_during_capture,
+)
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -1188,6 +1191,53 @@ direct_register_custom_op(
 )
 
 
+_ROCM_AITER_MLA_SPLIT_BUCKETS = (1, 16, 48, 64, 128)
+
+
+def _run_unified_mla_attention_with_output(
+    q: torch.Tensor,
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+    output_scale: torch.Tensor | None = None,
+    output_block_scale: torch.Tensor | None = None,
+    quant_group_size: int | None = None,
+    quant_scale_ue8m0: bool | None = None,
+    quant_col_major: bool | None = None,
+    quant_tma_aligned: bool | None = None,
+    q_dcp_replicated: torch.Tensor | None = None,
+    min_kv_seq_len_override: int | None = None,
+) -> None:
+    layer_name = _resolve_layer_name(layer_name)
+    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+    decode = getattr(attn_metadata, "decode", None)
+    previous_hint = None
+    if min_kv_seq_len_override is not None:
+        assert decode is not None
+        previous_hint = decode.min_kv_seq_len
+        decode.min_kv_seq_len = min_kv_seq_len_override
+    try:
+        layer.forward_impl(
+            q,
+            kv_c_normed,
+            k_pe,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+            quant_group_size=quant_group_size,
+            quant_scale_ue8m0=quant_scale_ue8m0,
+            quant_col_major=quant_col_major,
+            quant_tma_aligned=quant_tma_aligned,
+            q_dcp_replicated=q_dcp_replicated,
+        )
+    finally:
+        if previous_hint is not None:
+            decode.min_kv_seq_len = previous_hint
+
+
 @eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
@@ -1205,21 +1255,54 @@ def unified_mla_attention_with_output(
     quant_tma_aligned: bool | None = None,
     q_dcp_replicated: torch.Tensor | None = None,
 ) -> None:
-    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
-    # that ensures torch.compile preserves ordering between KV cache update and
-    # attention forward.
     del kv_cache_dummy_dep
-    layer_name = _resolve_layer_name(layer_name)
-    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
-    layer.forward_impl(
+    capture = BreakableCUDAGraphCapture.current()
+    if capture is not None and capture.is_capturing and current_platform.is_rocm():
+        resolved_layer_name = _resolve_layer_name(layer_name)
+        attn_metadata, layer, kv_cache, _ = get_attention_context(resolved_layer_name)
+        decode = getattr(attn_metadata, "decode", None)
+        impl = getattr(layer, "impl", None)
+        if (
+            decode is not None
+            and getattr(decode, "use_gluon_decode", False)
+            and getattr(decode, "max_qo_len", None) == 1
+            and getattr(impl, "num_heads", None) == 12
+            and kv_cache.dtype == torch.bfloat16
+            and q.shape[0] == 1
+            and decode.paged_kv_indptr is not None
+            and decode.paged_kv_indptr.numel() == 2
+        ):
+
+            def run_bucket(split_count: int) -> None:
+                _run_unified_mla_attention_with_output(
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    output,
+                    resolved_layer_name,
+                    output_scale,
+                    output_block_scale,
+                    quant_group_size=quant_group_size,
+                    quant_scale_ue8m0=quant_scale_ue8m0,
+                    quant_col_major=quant_col_major,
+                    quant_tma_aligned=quant_tma_aligned,
+                    q_dcp_replicated=q_dcp_replicated,
+                    min_kv_seq_len_override=(
+                        1 if split_count == 1 else split_count * 64
+                    ),
+                )
+
+            capture.add_bucketed_eager(run_bucket, _ROCM_AITER_MLA_SPLIT_BUCKETS)
+            return
+
+    _run_unified_mla_attention_with_output(
         q,
         kv_c_normed,
         k_pe,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
+        output,
+        layer_name,
+        output_scale,
+        output_block_scale,
         quant_group_size=quant_group_size,
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
