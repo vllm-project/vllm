@@ -41,6 +41,8 @@ def _cpu_config(
         pytest.param("float32", "float32", id="explicit-fp32"),
         pytest.param("bfloat16", "bfloat16", id="explicit-bf16"),
         pytest.param("auto", "bfloat16", id="explicit-auto-model-bf16"),
+        pytest.param("float16", "float16", id="explicit-fp16"),
+        pytest.param("auto", "float16", id="auto-model-fp16"),
     ],
 )
 def test_cpu_amx_gdn_preserves_resolved_state_dtype(
@@ -61,15 +63,17 @@ def test_cpu_amx_gdn_preserves_resolved_state_dtype(
     assert cache_config.mamba_ssm_cache_dtype == resolved_dtype
 
 
-def test_cpu_amx_normalizes_model_selected_bf16_for_unsupported_backend(
+@pytest.mark.parametrize("resolved_dtype", ["bfloat16", "float16"])
+def test_cpu_amx_normalizes_model_selected_reduced_dtype_for_unsupported_backend(
     monkeypatch: pytest.MonkeyPatch,
+    resolved_dtype: str,
 ) -> None:
     monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: True)
     cache_config = CacheConfig(mamba_ssm_cache_dtype="auto")
     config = _cpu_config(
         cache_config,
         model_type="nemotron_h",
-        resolved_dtype="bfloat16",
+        resolved_dtype=resolved_dtype,
         layer_types=("mamba",),
     )
 
@@ -78,15 +82,17 @@ def test_cpu_amx_normalizes_model_selected_bf16_for_unsupported_backend(
     assert cache_config.mamba_ssm_cache_dtype == "float32"
 
 
-def test_cpu_amx_rejects_bf16_for_unsupported_mamba_backend(
+@pytest.mark.parametrize("requested_dtype", ["bfloat16", "float16"])
+def test_cpu_amx_rejects_reduced_dtype_for_unsupported_mamba_backend(
     monkeypatch: pytest.MonkeyPatch,
+    requested_dtype: str,
 ) -> None:
     monkeypatch.setattr("torch.cpu._is_amx_tile_supported", lambda: True)
-    cache_config = CacheConfig(mamba_ssm_cache_dtype="bfloat16")
+    cache_config = CacheConfig(mamba_ssm_cache_dtype=requested_dtype)
     config = _cpu_config(
         cache_config,
         model_type="nemotron_h",
-        resolved_dtype="bfloat16",
+        resolved_dtype=requested_dtype,
         layer_types=("mamba",),
     )
 

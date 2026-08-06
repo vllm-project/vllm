@@ -518,6 +518,7 @@ def test_prefix_cache_retention_interval_from_deprecated_env(
         ("auto", "auto", False),
         ("float32", "float32", True),
         ("bfloat16", "bfloat16", True),
+        ("float16", "float16", True),
     ],
 )
 def test_mamba_ssm_cache_dtype_provenance(

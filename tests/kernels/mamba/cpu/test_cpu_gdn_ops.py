@@ -194,7 +194,7 @@ def test_fused_gdn_gating_cpu(
 @pytest.mark.parametrize("batch_size", [1, 3])
 @pytest.mark.parametrize("num_heads", [(2, 4)])
 @pytest.mark.parametrize("head_dims", [(32, 32), (64, 32)])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16, torch.float16])
 @torch.inference_mode()
 def test_fused_sigmoid_gating_delta_rule_update_cpu(
     batch_size: int,
@@ -292,7 +292,7 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu_rejects_padded_inner_state()
 @pytest.mark.parametrize("seq_lens", PREFILL_SEQ_LENS)
 @pytest.mark.parametrize("num_heads", [(2, 4)])
 @pytest.mark.parametrize("head_dims", [(64, 64)])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16, torch.float16])
 @torch.inference_mode()
 def test_chunk_gated_delta_rule_cpu(
     seq_lens: list[int],
@@ -370,7 +370,7 @@ TWO_CALL_SPLITS = [
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @pytest.mark.parametrize("num_heads", [(2, 4)])
 @pytest.mark.parametrize("head_dims", [(64, 64)])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16, torch.float16])
 @torch.inference_mode()
 def test_chunk_gated_delta_rule_cpu_two_call_split(
     total_tokens: int,
@@ -576,7 +576,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec_cpu_rejects_invalid_metadat
         _run_spec_gdn_validation(spec_state_indices, cu_seqlens)
 
 
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16, torch.float16])
 @torch.inference_mode()
 def test_fused_sigmoid_gating_delta_rule_update_spec_cpu(
     state_dtype: torch.dtype,
@@ -661,11 +661,13 @@ def test_spec_gdn_cpu_rejects_padded_inner_state() -> None:
 
 @torch.inference_mode()
 def test_spec_gdn_cpu_rejects_unsupported_state_dtype() -> None:
-    with pytest.raises(RuntimeError, match="state dtype must be float32 or bfloat16"):
+    with pytest.raises(
+        RuntimeError, match="state dtype must be float16, bfloat16, or float32"
+    ):
         _run_spec_gdn_validation(
             spec_state_indices=torch.zeros(2, 2, dtype=torch.int32),
             cu_seqlens=torch.tensor([0, 2, 4], dtype=torch.int32),
-            state_dtype=torch.float16,
+            state_dtype=torch.float64,
         )
 
 
@@ -676,7 +678,9 @@ def test_gdn_cpu_rejects_unsupported_state_dtype() -> None:
         num_heads=(2, 4),
         head_dims=(32, 32),
     )
-    with pytest.raises(RuntimeError, match="state dtype must be float32 or bfloat16"):
+    with pytest.raises(
+        RuntimeError, match="state dtype must be float16, bfloat16, or float32"
+    ):
         ops.fused_sigmoid_gating_delta_rule_update_cpu(
             A_log=A_log,
             dt_bias=dt_bias,
@@ -685,7 +689,7 @@ def test_gdn_cpu_rejects_unsupported_state_dtype() -> None:
             v=v,
             a=a,
             b=b,
-            initial_state_source=torch.zeros(1, 4, 32, 32, dtype=torch.float16),
+            initial_state_source=torch.zeros(1, 4, 32, 32, dtype=torch.float64),
             initial_state_indices=torch.zeros(1, dtype=torch.int32),
             cu_seqlens=torch.tensor([0, 1], dtype=torch.int32),
             use_qk_l2norm_in_kernel=True,

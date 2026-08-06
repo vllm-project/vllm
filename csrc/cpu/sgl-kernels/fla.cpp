@@ -2216,7 +2216,7 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_inter(
 //   value: [B, T, Hv, Dv]
 //   g: [B, T, Hv] FP32
 //   beta: [B, T, Hv]
-//   initial_state: [num_seqs, Hv, Dv, D] FP32 or BF16 persisted state
+//   initial_state: [num_seqs, Hv, Dv, D] FP16, BF16, or FP32 persisted state
 //   cu_seqlens: [num_seqs + 1] INT32
 //
 std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
@@ -2257,8 +2257,10 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
               "chunk_gated_delta_rule_cpu: initial_state shape mismatch, got ", initial_state.sizes());
   TORCH_CHECK(
       initial_state.scalar_type() == at::kFloat ||
-          initial_state.scalar_type() == at::kBFloat16,
-      "chunk_gated_delta_rule_cpu: initial_state dtype must be float32 or bfloat16");
+          initial_state.scalar_type() == at::kBFloat16 ||
+          initial_state.scalar_type() == at::kHalf,
+      "chunk_gated_delta_rule_cpu: initial_state dtype must be float16, "
+      "bfloat16, or float32");
   CHECK_CPU(initial_state);
   // initial_state may be a pooled/paged buffer with padding between slots
   // (e.g. mamba cache-align mode), so only the per-slot (Hv, Dv, D) layout
@@ -2302,7 +2304,9 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
   auto output_and_state =
       initial_state.scalar_type() == at::kFloat
           ? launch_inter(float{})
-          : launch_inter(at::BFloat16{});
+          : initial_state.scalar_type() == at::kBFloat16
+              ? launch_inter(at::BFloat16{})
+              : launch_inter(at::Half{});
   auto [output, final_state] = output_and_state;
 
   return std::make_tuple(output, final_state);
@@ -2316,7 +2320,7 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
 // a: [batch_size, v_num_heads]
 // b: [batch_size, v_num_heads]
 // initial_state_source:[num_tokens, v_num_heads, head_dim, v_head_dim]
-//   FP32 or BF16 persisted state; recurrent arithmetic remains FP32.
+//   FP16, BF16, or FP32 persisted state; recurrent arithmetic remains FP32.
 // initial_state_indices: [batch_size]
 // cu_seqlens: [batch_size + 1]
 at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
@@ -2351,9 +2355,10 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
   CHECK_INPUT_SHAPE_DTYPE<true>(cu_seqlens, {batch_size + 1}, at::kInt);
   TORCH_CHECK(
       initial_state_source.scalar_type() == at::kFloat ||
-          initial_state_source.scalar_type() == at::kBFloat16,
+          initial_state_source.scalar_type() == at::kBFloat16 ||
+          initial_state_source.scalar_type() == at::kHalf,
       "fused_sigmoid_gating_delta_rule_update_cpu: initial_state dtype must "
-      "be float32 or bfloat16");
+      "be float16, bfloat16, or float32");
   TORCH_CHECK(
       initial_state_source.sizes() ==
           at::IntArrayRef(
@@ -2430,11 +2435,13 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
     launch(float());
   } else if (initial_state_source.scalar_type() == at::kBFloat16) {
     launch(at::BFloat16());
+  } else if (initial_state_source.scalar_type() == at::kHalf) {
+    launch(at::Half());
   } else {
     TORCH_CHECK(
         false,
         "fused_sigmoid_gating_delta_rule_update_cpu: initial_state dtype must "
-        "be float32 or bfloat16");
+        "be float16, bfloat16, or float32");
   }
   return core_attn_out;
 }
@@ -2442,7 +2449,7 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
 // Speculative-decode update (multi-token, multi-slot rollback).
 // q: [T, HK, EK]  k: [T, HK, EK]  v: [T, HV, EV]
 // a: [T, HV]  b: [T, HV]
-// initial_state_source: [N_slots, HV, EK, EV] FP32 or BF16 persisted state
+// initial_state_source: [N_slots, HV, EK, EV] FP16, BF16, or FP32 persisted state
 // (updated in place; recurrent arithmetic remains FP32)
 // spec_state_indices: [batch, S] INT32 (S = num_spec + 1)
 // num_accepted_tokens: [batch] INT32
@@ -2514,9 +2521,10 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
   TORCH_CHECK(A_log.sizes() == at::IntArrayRef({v_num_heads}));
   TORCH_CHECK(
       initial_state_source.scalar_type() == at::kFloat ||
-          initial_state_source.scalar_type() == at::kBFloat16,
+          initial_state_source.scalar_type() == at::kBFloat16 ||
+          initial_state_source.scalar_type() == at::kHalf,
       "fused_sigmoid_gating_delta_rule_update_spec_cpu: initial_state dtype "
-      "must be float32 or bfloat16");
+      "must be float16, bfloat16, or float32");
   TORCH_CHECK(
       initial_state_source.sizes() ==
           at::IntArrayRef(
@@ -2586,11 +2594,13 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
     launch(float());
   } else if (initial_state_source.scalar_type() == at::kBFloat16) {
     launch(at::BFloat16());
+  } else if (initial_state_source.scalar_type() == at::kHalf) {
+    launch(at::Half());
   } else {
     TORCH_CHECK(
         false,
         "fused_sigmoid_gating_delta_rule_update_spec_cpu: initial_state "
-        "dtype must be float32 or bfloat16");
+        "dtype must be float16, bfloat16, or float32");
   }
   return o;
 }
