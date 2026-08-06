@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -38,19 +37,16 @@ HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
 @pytest.mark.parametrize(
-    ("eligible", "runtime_mode", "dtype", "expected_optimized"),
+    ("eligible", "dtype", "expected_optimized"),
     [
-        (True, CUDAGraphMode.FULL, torch.bfloat16, True),
-        (True, CUDAGraphMode.NONE, torch.bfloat16, False),
-        (True, CUDAGraphMode.PIECEWISE, torch.bfloat16, False),
-        (False, CUDAGraphMode.FULL, torch.bfloat16, False),
-        (True, CUDAGraphMode.FULL, torch.float32, False),
+        (True, torch.bfloat16, True),
+        (False, torch.bfloat16, False),
+        (True, torch.float32, False),
     ],
 )
-def test_dsv4_aiter_tgemm_is_limited_to_v1_full_graph_capture(
+def test_dsv4_aiter_tgemm_routing_uses_static_eligibility_and_input_dtype(
     monkeypatch,
     eligible: bool,
-    runtime_mode: CUDAGraphMode,
     dtype: torch.dtype,
     expected_optimized: bool,
 ) -> None:
@@ -68,20 +64,17 @@ def test_dsv4_aiter_tgemm_is_limited_to_v1_full_graph_capture(
     attention.padded_heads = 1
     attention.head_dim = 1
 
-    context_calls = 0
-
-    def get_context():
-        nonlocal context_calls
-        context_calls += 1
-        return SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
-
     def base_forward(*args, **kwargs):
         raise BasePath
 
     def optimized_forward(*args, **kwargs):
         raise OptimizedPath
 
-    monkeypatch.setattr(rocm, "get_forward_context", get_context)
+    monkeypatch.setattr(
+        rocm,
+        "get_forward_context",
+        lambda: pytest.fail("tgemm routing should not inspect forward context"),
+    )
     monkeypatch.setattr(rocm.DeepseekV4Attention, "forward", base_forward)
     attention._forward_aiter_tgemm = optimized_forward
 
@@ -91,9 +84,6 @@ def test_dsv4_aiter_tgemm_is_limited_to_v1_full_graph_capture(
             torch.empty(0, dtype=torch.int64),
             torch.empty((1, 1), dtype=dtype),
         )
-
-    expected_context_calls = int(eligible and dtype == torch.bfloat16)
-    assert context_calls == expected_context_calls
 
 
 def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:

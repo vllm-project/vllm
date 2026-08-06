@@ -7,7 +7,6 @@ from typing import cast
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import CUDAGraphMode
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -471,11 +470,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if (
-            not self._tgemm_static_eligible
-            or hidden_states.dtype != torch.bfloat16
-            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
-        ):
+        if not self._tgemm_static_eligible or hidden_states.dtype != torch.bfloat16:
             return super().forward(positions, hidden_states, llama_4_scaling)
 
         num_tokens = hidden_states.shape[0]
