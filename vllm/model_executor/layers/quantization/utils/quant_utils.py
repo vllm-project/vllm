@@ -11,6 +11,7 @@ import numpy
 import torch
 from torch import fx
 
+from vllm.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -38,8 +39,6 @@ def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tens
     it would as part of the whole weight.
     """
     if is_sharded:
-        from vllm.distributed.parallel_state import get_tp_group
-
         torch.distributed.all_reduce(
             amax,
             op=torch.distributed.ReduceOp.MAX,
@@ -55,8 +54,6 @@ def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Ten
     experts, so no reduction is needed.
     """
     if moe_tp_size > 1:
-        from vllm.distributed.parallel_state import get_ep_group
-
         torch.distributed.all_reduce(
             amax,
             op=torch.distributed.ReduceOp.MAX,
