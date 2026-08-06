@@ -17,7 +17,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
 from vllm.v1.serial_utils import UtilityResult
 
 # Type for pause_generation mode parameter.
@@ -211,6 +211,8 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    new_sampling_mask: SamplingMaskLists | None = None
 
     @property
     def finished(self) -> bool:

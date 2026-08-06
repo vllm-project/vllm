@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest import TestCase
 
+import numpy as np
 import torch
 
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 
 def test_logprobs_tensors_cat():
@@ -28,6 +30,48 @@ def test_logprobs_tensors_cat():
     assert result.selected_token_ranks.tolist() == [1, 2]
     assert result.cu_num_generated_tokens == [0, 1, 2]
     assert LogprobsTensors.cat([first]) is first
+
+
+def test_sampling_mask_tensors_tolist():
+    tensors = SamplingMaskTensors(
+        token_ids=torch.tensor([3, 5, 7]),
+        counts=torch.tensor([2, 1]),
+    )
+
+    result = tensors.tolists(np.array([1, 0, 1]))
+
+    assert result.token_ids.tolist() == [3, 5, 7]
+    assert result.offsets.tolist() == [0, 2, 3]
+    assert result.cu_num_generated_tokens == [0, 1, 1, 2]
+
+
+def test_sampling_mask_lists_to_nested_list():
+    from vllm.v1.outputs import SamplingMaskLists
+
+    mask = SamplingMaskLists(
+        token_ids=np.array([10, 11, 12, 20, 21]),
+        offsets=np.array([0, 3, 5]),
+    )
+
+    nested = mask.to_nested_list()
+
+    assert nested == [[10, 11, 12], [20, 21]]
+
+
+def test_sampling_mask_tensors_from_logits():
+    tensors = SamplingMaskTensors.from_logits(
+        logits=torch.tensor(
+            [
+                [1.0, float("-inf"), 2.0],
+                [3.0, 4.0, float("-inf")],
+                [float("-inf"), 5.0, 6.0],
+            ]
+        ),
+        num_sampled_tokens=torch.tensor([1, 0, 1]),
+    )
+
+    assert tensors.token_ids.tolist() == [0, 2, 1, 2]
+    assert tensors.counts.tolist() == [2, 2]
 
 
 class TestLogprobsLists(TestCase):

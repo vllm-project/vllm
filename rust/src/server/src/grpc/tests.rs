@@ -126,6 +126,7 @@ fn request_output(
         prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
+        new_sampling_mask: None,
     }
 }
 
