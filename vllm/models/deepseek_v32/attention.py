@@ -167,6 +167,7 @@ class DeepseekV32Attention(MLAAttention):
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
         attn_backend: "type | None" = None,
+        sequence_parallel: bool = False,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -299,7 +300,8 @@ class DeepseekV32Attention(MLAAttention):
             num_heads * v_head_dim,
             hidden_size,
             bias=False,
-            reduce_results=False,
+            reduce_results=sequence_parallel,
+            sequence_parallel=sequence_parallel,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )

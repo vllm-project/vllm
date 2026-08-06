@@ -1,9 +1,9 @@
 # Sequence-parallel communication in parallel linear layers
 
-This document describes the sequence-parallel (SP) implementation at commit
-`72cd5424d` and the boundary of the parallel-linear refactor.
+This document describes the sequence-parallel (SP) implementation and the
+boundary of the parallel-linear refactor.
 
-## Existing implementations
+## Pre-refactor implementations
 
 vLLM has two independent features called sequence parallelism:
 
@@ -16,7 +16,8 @@ vLLM has two independent features called sequence parallelism:
   dimension so expert work can use the tensor-parallel ranks as sequence
   ranks. Most of this path was implemented explicitly in model code.
 
-The model-side implementations fall into the following groups.
+Before this refactor, the model-side implementations fell into the following
+groups.
 
 | Implementation | Model families | Model-side communication |
 | --- | --- | --- |
@@ -73,17 +74,20 @@ LoRA column and row wrappers call the base layer's `prepare_input` and
 `reduce_output` methods. This keeps the communication policy in the parallel
 linear layer for both base and LoRA execution.
 
-## Model migration boundary
+## Model migration
 
-This change only establishes the common implementation. No model enables the
-new linear option yet. A later migration should, per model:
+The attention-to-MoE paths in DeepSeek V2, Qwen3-Next/Qwen3.5, and DeepSeek
+V3.2 now use the common input preparation and row-linear reduce-scatter. Kimi
+K3 and DeepSeek V4 attention use the same path, and Kimi K3's sharded dense
+MLP enables SP directly on its merged-column/row linear pair.
 
-1. Enable SP on the first column-parallel projection that consumes a token
-   shard.
-2. Enable SP on the row-parallel projection whose partial result returns to a
-   token shard.
-3. Remove the matching model-side all-gather, reduce-scatter, and
-   `reduce_results=False` workaround. Keep any required layout validation
-   outside the linear communication entry point.
-4. Retain and separately review model-boundary gathers that are not part of a
-   column/row linear pair.
+Some attention blocks fan one hidden-state tensor out to several projections,
+and the first SP-enabled sparse layer can still receive a replicated input.
+Those paths call `prepare_sequence_parallel_input` once and share the gathered
+tensor. The helper is also used by `ColumnParallelLinear.prepare_input`, so the
+collective policy and backend override remain centralized without performing
+duplicate gathers.
+
+Final hidden states, auxiliary hidden states, MTP inputs/outputs, pipeline
+boundaries, and MoE dispatch collectives are not parallel-linear pairs. Their
+explicit boundary gathers remain in model orchestration code.

@@ -416,6 +416,26 @@ class ReplicatedLinear(LinearBase):
         return s
 
 
+def prepare_sequence_parallel_input(
+    input_: torch.Tensor,
+    sequence_parallel: bool,
+    tp_size: int | None = None,
+) -> torch.Tensor:
+    """Gather token shards once before a parallel-linear projection region.
+
+    A single column-parallel projection can enable its ``sequence_parallel``
+    flag directly. Attention blocks whose input fans out to several
+    projections use this helper once and share the gathered tensor.
+    """
+    if not sequence_parallel:
+        return input_
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
+    if tp_size > 1:
+        return sequence_parallel_all_gather(input_)
+    return input_
+
+
 # --8<-- [start:column_parallel_linear]
 @PluggableLayer.register("column_parallel_linear")
 class ColumnParallelLinear(LinearBase):
@@ -615,9 +635,9 @@ class ColumnParallelLinear(LinearBase):
         return output, output_bias
 
     def prepare_input(self, input_: torch.Tensor) -> torch.Tensor:
-        if self.sequence_parallel and self.tp_size > 1:
-            return sequence_parallel_all_gather(input_)
-        return input_
+        return prepare_sequence_parallel_input(
+            input_, self.sequence_parallel, self.tp_size
+        )
 
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"

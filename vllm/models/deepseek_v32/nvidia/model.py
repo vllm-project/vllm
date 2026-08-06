@@ -10,12 +10,12 @@ from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     tensor_model_parallel_all_gather,
-    tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import prepare_sequence_parallel_input
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -77,19 +77,26 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.use_mha = False
+        is_moe_layer = (
+            config.n_routed_experts is not None
+            and layer_idx >= config.first_k_dense_replace
+            and layer_idx % moe_layer_freq == 0
+        )
+        self.use_sequence_parallel_moe = (
+            parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+            and is_moe_layer
+        )
 
         self.self_attn = DeepseekV32Attention(
             vllm_config=vllm_config,
             config=config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            sequence_parallel=self.use_sequence_parallel_moe,
         )
 
-        if (
-            config.n_routed_experts is not None
-            and layer_idx >= config.first_k_dense_replace
-            and layer_idx % moe_layer_freq == 0
-        ):
+        if is_moe_layer:
             # Defer the MoE cross-rank all-reduce; it is fused into the next
             # layer's input_layernorm (or the final norm) via
             # fused_allreduce_rms_norm.
@@ -110,12 +117,6 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 prefix=f"{prefix}.mlp",
                 reduce_results=False,
             )
-        self.use_sequence_parallel_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and isinstance(self.mlp, DeepseekV2MoE)
-        )
-        self.tp_size = parallel_config.tensor_parallel_size
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
@@ -147,18 +148,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
-        if input_is_sequence_parallel:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[:full_num_tokens]
-
-        # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
+        hidden_states = prepare_sequence_parallel_input(
+            hidden_states, input_is_sequence_parallel
+        )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         if self.use_sequence_parallel_moe:
-            # small trick using minus, eg. -17 % 8 = 7
-            sp_pad = (-hidden_states.shape[0]) % self.tp_size
-            # pad if not divisible by world size
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
-            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
             if not input_is_sequence_parallel:
                 residual = sequence_parallel_chunk(residual)
             hidden_states, residual = self.post_attention_layernorm(

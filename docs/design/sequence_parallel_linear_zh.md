@@ -1,9 +1,9 @@
 # 并行 Linear 层中的 Sequence Parallel 通信
 
-本文档梳理 vLLM 在提交 `72cd5424d` 上的 Sequence Parallel（SP）实现，
-并说明将 SP 通信收敛到并行 Linear 层这一重构的范围和边界。
+本文档梳理 vLLM 的 Sequence Parallel（SP）实现，并说明将 SP 通信收敛到
+并行 Linear 层这一重构的范围和边界。
 
-## 现有实现
+## 重构前的实现
 
 vLLM 当前有两套相互独立、都被称为 Sequence Parallel 的功能：
 
@@ -15,7 +15,7 @@ vLLM 当前有两套相互独立、都被称为 Sequence Parallel 的功能：
   sequence rank 执行 expert 计算。这条路径的大部分通信逻辑原本直接写在
   各个模型文件中。
 
-模型侧的实现可以分为以下几类：
+重构前，模型侧的实现可以分为以下几类：
 
 | 实现类型 | 模型系列 | 模型侧通信方式 |
 | --- | --- | --- |
@@ -77,14 +77,19 @@ LoRA 的 column 和 row wrapper 分别调用基础 Linear 层的 `prepare_input`
 `reduce_output`。这样无论执行基础权重还是 LoRA 权重，通信策略都由并行
 Linear 层统一管理。
 
-## 模型迁移边界
+## 模型迁移
 
-当前改动只建立公共实现入口，尚未让任何模型启用新的 Linear SP 开关。
-后续迁移每个模型时应完成以下工作：
+DeepSeek V2、Qwen3-Next/Qwen3.5 和 DeepSeek V3.2 的 Attention-to-MoE
+路径已经改用公共输入准备入口和 Row Linear 的 reduce-scatter。Kimi K3、
+DeepSeek V4 的注意力也使用同一入口；Kimi K3 的分片 dense MLP 则直接在
+MergedColumn/Row Linear 配对上启用 SP。
 
-1. 在第一个接收 token shard 的 column-parallel projection 上启用 SP；
-2. 在将部分结果重新转换成 token shard 的 row-parallel projection 上启用 SP；
-3. 删除对应的模型侧 all-gather、reduce-scatter，以及
-   `reduce_results=False` 临时绕行逻辑；需要的布局校验应保留在 Linear
-   通信入口之外；
-4. 保留并单独审查那些不属于 column/row Linear 配对的模型边界 gather。
+部分注意力会把同一个 hidden state 扇出给多个 projection，而且第一个启用
+SP 的稀疏层仍可能收到 replicated input。这类路径只调用一次
+`prepare_sequence_parallel_input`，再让多个 projection 共享 gather 后的张量。
+`ColumnParallelLinear.prepare_input` 也复用该函数，因此通信策略和后端覆盖点
+仍然集中，同时不会为多个 projection 重复执行 gather。
+
+最终 hidden state、辅助 hidden state、MTP 输入输出、流水线边界和 MoE dispatch
+collective 不属于 parallel-linear 配对，因此这些显式边界 gather 仍保留在模型
+编排代码中。

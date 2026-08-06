@@ -70,11 +70,6 @@ class _SequenceParallelMTPBlock:
 def _mock_sequence_parallel_collectives(monkeypatch):
     monkeypatch.setattr(
         kimi_model,
-        "sp_reduce_scatter",
-        lambda tensor: tensor.chunk(2, dim=0)[0],
-    )
-    monkeypatch.setattr(
-        kimi_model,
         "sp_shard",
         lambda tensor: torch.nn.functional.pad(tensor, (0, 0, 0, 1))[:2],
     )
@@ -82,6 +77,13 @@ def _mock_sequence_parallel_collectives(monkeypatch):
         kimi_model,
         "sp_all_gather",
         lambda tensor: torch.cat([tensor, tensor], dim=0),
+    )
+    monkeypatch.setattr(
+        kimi_model,
+        "prepare_sequence_parallel_input",
+        lambda tensor, enabled: (
+            torch.cat([tensor, tensor], dim=0) if enabled else tensor
+        ),
     )
 
 
@@ -144,7 +146,7 @@ def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
     layer.post_attention_layernorm = _IdentityNorm()
     layer.mlp = _RecordingMoE()
     layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+        lambda self, positions, hidden_states: hidden_states.chunk(2, dim=0)[0],
         layer,
     )
 
@@ -190,7 +192,7 @@ def test_kimi_attn_residual_states_stay_sequence_sharded(monkeypatch):
     layer.mlp_res_proj = _Projection()
     layer.mlp = _RecordingMoE()
     layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+        lambda self, positions, hidden_states: hidden_states.chunk(2, dim=0)[0],
         layer,
     )
 
@@ -367,9 +369,9 @@ def test_sp_all_gather_uses_custom_kernel(monkeypatch):
     fallback.assert_not_called()
 
 
-def test_sp_reduce_scatter_uses_custom_kernel_after_padding(monkeypatch):
+def test_sp_reduce_scatter_uses_custom_kernel_without_padding(monkeypatch):
     hidden_states = torch.arange(6, dtype=torch.float32).view(3, 2)
-    expected = torch.arange(4, dtype=torch.float32).view(2, 2)
+    expected = hidden_states[:1]
     custom_reduce_scatter = Mock(return_value=expected)
     device_communicator = SimpleNamespace(
         custom_reduce_scatter=custom_reduce_scatter,
@@ -391,10 +393,7 @@ def test_sp_reduce_scatter_uses_custom_kernel_after_padding(monkeypatch):
     output = sp_ops.sp_reduce_scatter(hidden_states)
 
     torch.testing.assert_close(output, expected)
-    padded = custom_reduce_scatter.call_args.args[0]
-    assert padded.shape == (4, 2)
-    torch.testing.assert_close(padded[:3], hidden_states)
-    torch.testing.assert_close(padded[3], torch.zeros(2))
+    custom_reduce_scatter.assert_called_once_with(hidden_states)
     sp_comm.tensor_model_parallel_reduce_scatter.assert_not_called()
 
 
