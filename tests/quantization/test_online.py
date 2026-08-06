@@ -9,6 +9,7 @@ from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
 )
+from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
@@ -18,6 +19,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    _quantize_moe_weight_to_nvfp4,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -182,6 +184,41 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
         llm.apply_model(check_model)
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
+)
+def test_online_nvfp4_quantizes_original_expert_weights() -> None:
+    torch.manual_seed(0)
+    weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+
+    quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(weight)
+    global_encode_scale = 1.0 / global_decode_scale
+    expected = [
+        scaled_fp4_quant(
+            expert_weight,
+            expert_scale,
+            is_sf_swizzled_layout=False,
+        )
+        for expert_weight, expert_scale in zip(
+            weight,
+            global_encode_scale,
+            strict=True,
+        )
+    ]
+
+    assert torch.equal(
+        quantized,
+        torch.stack([expert_weight for expert_weight, _ in expected]),
+    )
+    assert torch.equal(
+        block_scale,
+        torch.stack([expert_scale for _, expert_scale in expected]),
+    )
 
 
 @pytest.mark.skipif(
