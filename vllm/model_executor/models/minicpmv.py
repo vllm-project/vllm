@@ -110,6 +110,33 @@ from .utils import AutoWeightsLoader, flatten_bn, maybe_prefix
 _MAX_FRAMES_PER_VIDEO = 16
 
 
+def _validate_minicpm_image_processor_kwargs(
+    trusted_max_slice_nums: int,
+    kwargs: Mapping[str, object],
+) -> dict[str, object]:
+    bound_kwargs = dict(kwargs)
+    if "max_slice_nums" not in bound_kwargs:
+        return bound_kwargs
+
+    requested_max_slice_nums = bound_kwargs["max_slice_nums"]
+    if requested_max_slice_nums is None:
+        bound_kwargs.pop("max_slice_nums")
+        return bound_kwargs
+
+    if (
+        not isinstance(requested_max_slice_nums, int)
+        or isinstance(requested_max_slice_nums, bool)
+        or requested_max_slice_nums != trusted_max_slice_nums
+    ):
+        raise ValueError(
+            "MiniCPM image processor argument 'max_slice_nums' must match "
+            "the deployed MiniCPM image processor configuration "
+            f"({trusted_max_slice_nums!r}), got {requested_max_slice_nums!r}."
+        )
+
+    return bound_kwargs
+
+
 class MiniCPMVImagePixelInputs(TensorSchema):
     """
     Dimensions:
@@ -728,6 +755,13 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_image_max_slice_num(self) -> int:
         return getattr(self.get_hf_config(), "max_slice_num", 9)
 
+    def get_image_processor_max_slice_num(self) -> int:
+        image_processor = self.get_image_processor()
+        max_slice_nums = getattr(image_processor, "max_slice_nums", None)
+        if max_slice_nums is None:
+            return self.get_image_max_slice_num()
+        return int(max_slice_nums)
+
     def get_image_size_with_most_features(self) -> ImageSize:
         image_size = getattr(self.get_hf_config(), "image_size", 448)
         max_slice_num = self.get_image_max_slice_num()
@@ -857,6 +891,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (images := mm_data.get("images")) is None:
             return {}
 
+        image_mm_kwargs = _validate_minicpm_image_processor_kwargs(
+            self.info.get_image_processor_max_slice_num(),
+            mm_kwargs,
+        )
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
         parsed_images = mm_items.get_items(
             "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
@@ -868,7 +906,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_inputs = self._base_call_hf_processor(
                 prompts=[self.info.image_pattern] * len(parsed_images),
                 mm_data={"images": [[image] for image in parsed_images]},
-                mm_kwargs=mm_kwargs,
+                mm_kwargs=image_mm_kwargs,
                 tok_kwargs=tok_kwargs,
                 out_keys={"pixel_values", "image_sizes", "tgt_sizes"},
             )
