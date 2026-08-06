@@ -563,6 +563,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             quant_config=self.quant_config,
             may_have_zp=self.quant_config.zero_point,
             may_have_bias=True,
+            allow_tile_padding=True,
         )
 
     def create_weights(
@@ -591,7 +592,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 hidden_size,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                self.moe.w13_num_shards
+                * intermediate_size_per_partition
+                // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -622,7 +625,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                intermediate_size_per_partition * 2,
+                intermediate_size_per_partition * self.moe.w13_num_shards,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -643,7 +646,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                self.moe.w13_num_shards
+                * intermediate_size_per_partition
+                // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -780,16 +785,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
         )
 
     def apply(
