@@ -396,6 +396,8 @@ def _fp8_paged_mqa_logits_decode_kernel(
     N_SPLITS: tl.constexpr,  # KV-tile parallelism factor (grid dim 1)
     NEXT_N: tl.constexpr,  # query positions per batch (1 = decode; >1 = MTP verify)
 ):
+    # scale_region_off = block_size*D//4 needs D % 4 == 0 (D=128).
+    tl.static_assert(HEAD_SIZE % 4 == 0)
     # Grid (B*NEXT_N, N_SPLITS): disjoint KV tiles per program, no host sync.
     row = tl.program_id(0)
     split = tl.program_id(1)
@@ -405,9 +407,10 @@ def _fp8_paged_mqa_logits_decode_kernel(
 
     h = tl.arange(0, NUM_HEADS)
     d = tl.arange(0, HEAD_SIZE)
+    # keep q/kv fp8 -> fp8 MFMA (f32 accum), not the slow f32 path
     q = tl.load(
         q_ptr + b * stride_q_b + n * stride_q_n + h[:, None] * stride_q_h + d[None, :]
-    ).to(tl.float32)
+    )
     w = tl.load(weights_ptr + row * NUM_HEADS + h).to(tl.float32)  # [H]
 
     kv_col = tl.arange(0, BLOCK_KV)
@@ -424,16 +427,18 @@ def _fp8_paged_mqa_logits_decode_kernel(
 
         # block-flat layout: values region, then scales region.
         val_off = page * stride_kvblk_fp8 + pos_in_blk[:, None] * HEAD_SIZE + d[None, :]
-        kv = tl.load(kv_val_ptr + val_off, mask=mask_pos[:, None], other=0.0).to(
-            tl.float32
-        )  # [BLOCK_KV, D]
+        kv = tl.load(
+            kv_val_ptr + val_off, mask=mask_pos[:, None], other=0.0
+        )  # [BLOCK_KV, D] fp8
         sc = tl.load(
             kv_scale_ptr + page * stride_kvblk_f32 + scale_region_off + pos_in_blk,
             mask=mask_pos,
             other=0.0,
         )  # [BLOCK_KV]
 
-        s = tl.dot(kv, tl.trans(q), input_precision="ieee")  # [BLOCK_KV, H]
+        # fp8 upcasts exactly; bit-identical on gfx942, ~1e-5 rel on gfx950
+        # (accum order), top-k unchanged.
+        s = tl.dot(kv, tl.trans(q))  # [BLOCK_KV, H]
         s = tl.maximum(s, 0.0)
         s = s * w[None, :]
         s = tl.sum(s, axis=1)  # [BLOCK_KV]
