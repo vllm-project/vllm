@@ -112,7 +112,7 @@ RUN set -e; \
     git checkout "$lm_ref"; \
     git remote set-url origin "$LMCACHE_REPO_URL"; \
     echo "lmcache checked out to ${lm_ref}"; \
-    uv pip install --system --no-build-isolation -e .; \
+    uv pip install --system --no-build-isolation --no-deps -e .; \
     python -c "import torch, vllm, transformers as tf; \
 assert torch.__version__.startswith('2.10.'), 'lmcache 依赖改了 torch -> '+torch.__version__; \
 assert '/vllm-workspace/' in vllm.__file__, 'vllm 不再是 editable(被 lmcache 依赖覆盖) -> '+vllm.__file__; \
