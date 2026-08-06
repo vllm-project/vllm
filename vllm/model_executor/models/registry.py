@@ -814,6 +814,7 @@ class _ModelInfo:
     supports_transcription: bool
     supports_transcription_only: bool
     supported_video_pruning_methods: tuple[str, ...]
+    supports_mm_device_do_normalize: bool
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -846,6 +847,9 @@ class _ModelInfo:
             has_noops=has_noops(model),
             supported_video_pruning_methods=getattr(
                 model, "supported_video_pruning_methods", ()
+            ),
+            supports_mm_device_do_normalize=getattr(
+                model, "supports_mm_device_do_normalize", False
             ),
         )
 
