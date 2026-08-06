@@ -69,6 +69,10 @@ def _install_tilelang_kernel_stubs(
     monkeypatch.setitem(
         sys.modules, "tilelang.language", ModuleType("tilelang.language")
     )
+    # `vllm.tilelang_utils` is a real package that caches its `tilelang`/`T`
+    # globals at import time, so it must be re-imported against the stubs
+    # above rather than reused from a previous stub configuration.
+    monkeypatch.delitem(sys.modules, "vllm.tilelang_utils", raising=False)
 
     return calls
 

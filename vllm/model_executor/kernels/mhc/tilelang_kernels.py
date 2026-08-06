@@ -3,94 +3,13 @@
 
 from __future__ import annotations
 
-import functools
 import math
-from collections.abc import Callable
 from functools import cache
-from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_tilelang
+from vllm.tilelang_utils import ENABLE_PDL, T, tilelang, tilelang_jit
 from vllm.utils.math_utils import cdiv
-
-if TYPE_CHECKING or current_platform.is_cuda():
-    if not has_tilelang():
-        raise ImportError(
-            "tilelang is required for mhc but is not installed. Install it with "
-            "`pip install tilelang`."
-        )
-    import tilelang
-    import tilelang.language as T
-else:
-    tilelang = None  # type: ignore[assignment]
-    T = None  # type: ignore[assignment]
-
-ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
-
-
-def _ensure_tilelang_imported() -> None:
-    """Bind the `tilelang` and `T` module globals, importing them if needed.
-
-    The kernel bodies below reference `T` while TileLang parses them, and
-    `_tilelang_jit` references `tilelang` when it compiles a kernel. On ROCm,
-    this runs on the first kernel call instead of at decoration time.
-
-    Raises:
-        ImportError: If TileLang is not installed.
-    """
-    global T, tilelang
-
-    if tilelang is not None:
-        return
-    if not has_tilelang():
-        raise ImportError(
-            "tilelang is required for mhc but is not installed. Install it with "
-            "`pip install tilelang`."
-        )
-    import tilelang as tilelang_module
-    import tilelang.language as tilelang_language
-
-    tilelang = tilelang_module
-    T = tilelang_language
-
-
-@cache
-def _get_pass_configs() -> dict[Any, Any]:
-    _ensure_tilelang_imported()
-    pass_configs: dict[Any, Any] = {
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    }
-    if current_platform.is_cuda():
-        pass_configs[tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL] = 10
-    return pass_configs
-
-
-def _tilelang_jit(kernel_function: Callable[..., Any]) -> Callable[..., Any]:
-    """Apply `tilelang.jit`, deferring until first call on ROCm.
-
-    ROCm defers JIT decoration so importing this module does not require
-    TileLang immediately. CUDA keeps the eager decoration behavior.
-    """
-    if not current_platform.is_rocm():
-        _ensure_tilelang_imported()
-        return tilelang.jit(pass_configs=_get_pass_configs())(kernel_function)
-
-    compiled_kernel: Callable[..., Any] | None = None
-
-    @functools.wraps(kernel_function)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        nonlocal compiled_kernel
-        if compiled_kernel is None:
-            _ensure_tilelang_imported()
-            compiled_kernel = tilelang.jit(pass_configs=_get_pass_configs())(
-                kernel_function
-            )
-        return compiled_kernel(*args, **kwargs)
-
-    return wrapper
 
 
 @cache
@@ -106,7 +25,7 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     return split_k
 
 
-@_tilelang_jit
+@tilelang_jit
 def mhc_pre_big_fuse_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -246,7 +165,7 @@ def mhc_pre_big_fuse_tilelang(
 # Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
 
 
-@_tilelang_jit
+@tilelang_jit
 def mhc_pre_big_fuse_with_norm_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -406,7 +325,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
             T.pdl_trigger()
 
 
-@_tilelang_jit
+@tilelang_jit
 def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -568,7 +487,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
             T.pdl_trigger()
 
 
-@_tilelang_jit
+@tilelang_jit
 def mhc_fused_tilelang(
     comb_mix,
     residual_in,
@@ -689,7 +608,7 @@ def mhc_fused_tilelang(
             T.pdl_trigger()
 
 
-@_tilelang_jit
+@tilelang_jit
 def mhc_post_tilelang(
     a,
     b,
@@ -742,7 +661,7 @@ def mhc_post_tilelang(
             T.pdl_trigger()
 
 
-@_tilelang_jit
+@tilelang_jit
 def hc_prenorm_gemm_tilelang(
     x,
     fn,
@@ -826,7 +745,7 @@ def hc_prenorm_gemm_tilelang(
             T.pdl_trigger()
 
 
-@_tilelang_jit
+@tilelang_jit
 def hc_prenorm_gemm_block_m_tilelang(
     x,
     fn,
@@ -921,7 +840,7 @@ def hc_prenorm_gemm_block_m_tilelang(
             T.pdl_trigger()
 
 
-@_tilelang_jit
+@tilelang_jit
 def hc_head_fuse_tilelang(
     residual,
     fn,
