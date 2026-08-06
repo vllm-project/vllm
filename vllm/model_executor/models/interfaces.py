@@ -1582,16 +1582,21 @@ class EagleModelMixin:
         for handle in handles:
             handle.wait()
 
-        for i in range(self._num_local_taps_on_rank(last - 1, pp.world_size)):
-            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
-            if intermediate_tensors is not None and key in intermediate_tensors.tensors:
+        num_adjacent = self._num_local_taps_on_rank(last - 1, pp.world_size)
+        if num_adjacent:
+            assert intermediate_tensors is not None
+            for i in range(num_adjacent):
+                key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
+                if key not in intermediate_tensors.tensors:
+                    # Silently substituting zeros here costs acceptance without
+                    # failing, so make a missing slot loud instead. See
+                    # reserve_aux_intermediate_tensor_slots.
+                    raise RuntimeError(
+                        f"{key} missing from the pipeline handoff; the last "
+                        "stage's intermediate-tensor buffer has no aux slots "
+                        f"(got {sorted(intermediate_tensors.tensors)})"
+                    )
                 out.append(intermediate_tensors[key])
-            else:
-                # Profiling and warmup synthesise their inputs with
-                # make_empty_intermediate_tensors, which knows nothing about
-                # aux slots, so the adjacent stage's taps are absent. Only the
-                # shape matters on those runs; a real step always carries them.
-                out.append(torch.zeros_like(reference))
         return out
 
 
