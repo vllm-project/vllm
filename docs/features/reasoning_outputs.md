@@ -35,6 +35,8 @@ vLLM currently supports the following reasoning models:
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
 
+    For DeepSeek V4 tool calling, `chat_template_kwargs={"keep_thinking_tags": true}` keeps `<think>` and `</think>` in raw completion content. This option is ignored when a reasoning parser is configured: in that mode, the tags delimit the structured `reasoning` and `content` fields and are not included in either field.
+
 ## Quickstart
 
 To use reasoning models, you need to specify the `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
