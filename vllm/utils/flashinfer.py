@@ -176,14 +176,22 @@ def has_flashinfer_comm() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_two_sided() -> bool:
-    """Return `True` if FlashInfer mnnvl all2all is available."""
+    """Return `True` if FlashInfer mnnvl all2all is available.
+
+    Every entry is a symbol `all2all.py` imports under this gate, plus
+    `CommBackend`, which `mnnvl_compat` imports at module scope on a deferred
+    path the gate has already waved through. Probing a symbol the consumers do
+    not use, while missing one they do, is how a gate returns True and the
+    import still raises (see has_flashinfer_trtllm_sparse_mla_dsv4).
+    """
     if not has_flashinfer_comm():
         return False
 
-    # Check if all required functions are available
     required_functions = [
         ("flashinfer.comm", "Mapping"),
         ("flashinfer.comm.mnnvl", "MnnvlMemory"),
+        ("flashinfer.comm.mnnvl", "MnnvlConfig"),
+        ("flashinfer.comm.mnnvl", "CommBackend"),
         ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
         ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
     ]
@@ -197,10 +205,29 @@ def has_flashinfer_nvlink_two_sided() -> bool:
 
 @functools.cache
 def has_flashinfer_nvlink_one_sided() -> bool:
-    """Return `True` if FlashInfer trtllm_moe_alltoall module is available."""
+    """Return `True` if FlashInfer trtllm_moe_alltoall is available.
+
+    `find_spec` on the module alone answered a question nobody asked: the
+    intersection between what it proved and what `all2all.py` imports under
+    this gate was empty, and `trtllm_moe_alltoall`'s public surface changed
+    after the module first shipped. Probe the symbols themselves.
+    """
     if not has_flashinfer_comm():
         return False
-    return importlib.util.find_spec("flashinfer.comm.trtllm_moe_alltoall") is not None
+
+    required_functions = [
+        ("flashinfer.comm", "Mapping"),
+        ("flashinfer.comm.mnnvl", "MnnvlConfig"),
+        ("flashinfer.comm.mnnvl", "CommBackend"),
+        ("flashinfer.comm.trtllm_moe_alltoall", "MoeAlltoAll"),
+        ("flashinfer.comm.trtllm_moe_alltoall", "moe_a2a_get_workspace_size_per_rank"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
 
 
 @functools.cache
