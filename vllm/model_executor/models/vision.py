@@ -597,17 +597,16 @@ class FusedInputNorm(nn.Module):
         image_std: list[float],
         rescale_factor: float,
         channel: int = 3,
+        dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
 
         self.channel = channel
 
-        image_mean_tensor = torch.tensor(image_mean, dtype=torch.float32) * (
+        image_mean_tensor = torch.tensor(image_mean, dtype=dtype) * (
             1.0 / rescale_factor
         )
-        image_std_tensor = torch.tensor(image_std, dtype=torch.float32) * (
-            1.0 / rescale_factor
-        )
+        image_std_tensor = torch.tensor(image_std, dtype=dtype) * (1.0 / rescale_factor)
         weight = 1.0 / image_std_tensor
         bias = -image_mean_tensor / image_std_tensor
 
@@ -628,12 +627,15 @@ class FusedInputNorm(nn.Module):
             self.register_buffer("running_var", None)
 
     @classmethod
-    def identity(cls, channel: int = 3) -> "FusedInputNorm":
+    def identity(
+        cls, channel: int = 3, dtype: torch.dtype = torch.float32
+    ) -> "FusedInputNorm":
         return cls(
             image_mean=[0.0, 0.0, 0.0],
             image_std=[1.0, 1.0, 1.0],
             rescale_factor=1.0,
             channel=channel,
+            dtype=dtype,
         )
 
     @classmethod
