@@ -129,6 +129,33 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         raise NotImplementedError
 
+    def _merge_image_processor_kwargs(
+        self,
+        kwargs: Mapping[str, object],
+        *,
+        max_dynamic_patch: int,
+    ) -> dict[str, object]:
+        trusted_kwargs = self.ctx.get_merged_mm_kwargs({})
+        max_dynamic_patch_ceiling = trusted_kwargs.get(
+            "max_dynamic_patch", max_dynamic_patch
+        )
+        if not isinstance(max_dynamic_patch_ceiling, int):
+            raise ValueError("Configured max_dynamic_patch must be an integer")
+
+        merged_kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        request_max_dynamic_patch = merged_kwargs.get("max_dynamic_patch")
+        if request_max_dynamic_patch is None:
+            return merged_kwargs
+        if not isinstance(request_max_dynamic_patch, int):
+            raise ValueError("max_dynamic_patch must be an integer")
+        if request_max_dynamic_patch > max_dynamic_patch_ceiling:
+            raise ValueError(
+                f"max_dynamic_patch={request_max_dynamic_patch} cannot exceed "
+                f"the configured maximum of {max_dynamic_patch_ceiling}"
+            )
+
+        return merged_kwargs
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
@@ -326,7 +353,9 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
-        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs = self._merge_image_processor_kwargs(
+            kwargs, max_dynamic_patch=config.max_dynamic_patch
+        )
         kwargs.setdefault("image_size", vision_config.image_size)
         kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
         kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
