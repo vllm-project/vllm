@@ -35,6 +35,28 @@ logger = init_logger(__name__)
 _WRITE_SEQ = tl.constexpr(0)
 _READ_SEQ = tl.constexpr(1)
 _MAX_FENCE_SPINS = 100_000_000
+_STABLE_TOPK_CANDIDATE_GRANULARITY = 512
+
+
+def can_use_dcp_topk_symm(
+    rows: int,
+    local_candidates: int,
+    world_size: int,
+    row_starts: torch.Tensor | None,
+) -> bool:
+    """Return whether the owner-sharded kernel supports this invocation.
+
+    Prefill remains on the explicit exchange by phase policy. Decode has no
+    tuned row-range gate: the persistent workspace is sized from
+    ``max_num_seqs`` and validates its capacity at runtime.
+    """
+    return (
+        row_starts is None
+        and rows > 0
+        and world_size > 1
+        and local_candidates > 0
+        and local_candidates % _STABLE_TOPK_CANDIDATE_GRANULARITY == 0
+    )
 
 
 @triton.jit
@@ -167,15 +189,7 @@ class DcpTopkSymmWorkspace:
     allocation_bytes_per_rank: int
     local_candidates: torch.Tensor | None
     local_flags: torch.Tensor | None
-    peer_candidates: (
-        tuple[
-            torch.Tensor,
-            torch.Tensor,
-            torch.Tensor,
-            torch.Tensor,
-        ]
-        | None
-    )
+    candidate_ptrs: torch.Tensor | None
     flag_ptrs: torch.Tensor | None
 
     @property
@@ -209,6 +223,27 @@ class DcpTopkSymmWorkspace:
                 f"request=({dcp_rank}, {dcp_world_size})."
             )
         rows = topk_indices.shape[0]
+        if topk_tokens != self.local_candidates_count or topk_indices.shape != (
+            rows,
+            topk_tokens,
+        ):
+            raise RuntimeError(
+                "DCP symmetric-memory candidate geometry changed after "
+                "initialization: "
+                f"workspace_candidates={self.local_candidates_count}, "
+                f"topk_tokens={topk_tokens}, indices={tuple(topk_indices.shape)}."
+            )
+        if not can_use_dcp_topk_symm(
+            rows,
+            self.local_candidates_count,
+            self.world_size,
+            row_starts=row_starts,
+        ):
+            raise RuntimeError(
+                "DCP symmetric-memory top-k received an unsupported invocation: "
+                f"rows={rows}, candidates_per_rank={self.local_candidates_count}, "
+                f"world_size={self.world_size}, prefill={row_starts is not None}."
+            )
         if rows > self.max_rows:
             raise RuntimeError(
                 "DCP symmetric-memory workspace has "
@@ -216,7 +251,7 @@ class DcpTopkSymmWorkspace:
             )
         if (
             self.local_candidates is None
-            or self.peer_candidates is None
+            or self.candidate_ptrs is None
             or self.flag_ptrs is None
         ):
             raise RuntimeError("DCP symmetric-memory workspace is closed.")
@@ -245,7 +280,7 @@ class DcpTopkSymmWorkspace:
             max_spins=_MAX_FENCE_SPINS,
         )
         stable_topk_from_peer_candidates_cutedsl(
-            self.peer_candidates,
+            self.candidate_ptrs,
             self.world_size,
             rows,
             self.local_candidates_count,
@@ -262,7 +297,7 @@ class DcpTopkSymmWorkspace:
             return
         torch.accelerator.synchronize(self.local_candidates.device)
         self.flag_ptrs = None
-        self.peer_candidates = None
+        self.candidate_ptrs = None
         self.local_flags = None
         self.local_candidates = None
         self.flag_handle = None
@@ -287,12 +322,17 @@ def create_dcp_topk_symm_workspace_for_group(
         raise RuntimeError(
             "DCP symmetric-memory workspace requires dcp_world_size > 1."
         )
-    if world_size != 4:
-        raise RuntimeError("DCP symmetric-memory peer-shard top-k requires DCP4.")
-    if (world_size * local_candidates) % 512 != 0:
+    if max_rows <= 0 or local_candidates <= 0:
         raise RuntimeError(
-            "DCP symmetric-memory stable-topK requires total candidates to be "
-            f"a multiple of 512; got {world_size} * {local_candidates}."
+            "DCP symmetric-memory workspace requires positive row capacity and "
+            f"candidate count; got max_rows={max_rows}, "
+            f"local_candidates={local_candidates}."
+        )
+    if local_candidates % _STABLE_TOPK_CANDIDATE_GRANULARITY != 0:
+        raise RuntimeError(
+            "DCP symmetric-memory stable-topK requires candidates per owner to be "
+            f"a multiple of {_STABLE_TOPK_CANDIDATE_GRANULARITY}; got "
+            f"{local_candidates}."
         )
 
     local_candidates_tensor = symm_mem.empty(
@@ -320,34 +360,21 @@ def create_dcp_topk_symm_workspace_for_group(
         raise RuntimeError("DCP symmetric-memory rendezvous returned no handle.")
     candidate_handle.barrier()
     flag_handle.barrier()
-    peer_candidates = (
-        candidate_handle.get_buffer(
-            0,
-            (max_rows, local_candidates, 2),
-            torch.float32,
-        ),
-        candidate_handle.get_buffer(
-            1,
-            (max_rows, local_candidates, 2),
-            torch.float32,
-        ),
-        candidate_handle.get_buffer(
-            2,
-            (max_rows, local_candidates, 2),
-            torch.float32,
-        ),
-        candidate_handle.get_buffer(
-            3,
-            (max_rows, local_candidates, 2),
-            torch.float32,
-        ),
+    candidate_ptrs = torch.tensor(
+        candidate_handle.buffer_ptrs,
+        dtype=torch.int64,
+        device=device,
     )
     flag_ptrs = torch.tensor(
         flag_handle.buffer_ptrs,
         dtype=torch.int64,
         device=device,
     )
-    if bool(flag_ptrs.eq(0).any()):
+    if candidate_ptrs.shape != (world_size,) or flag_ptrs.shape != (world_size,):
+        raise RuntimeError(
+            "DCP symmetric-memory rendezvous returned an incomplete peer table."
+        )
+    if bool(candidate_ptrs.eq(0).any()) or bool(flag_ptrs.eq(0).any()):
         raise RuntimeError("DCP symmetric-memory peer mapping contains a null pointer.")
 
     return DcpTopkSymmWorkspace(
@@ -364,7 +391,7 @@ def create_dcp_topk_symm_workspace_for_group(
         ),
         local_candidates=local_candidates_tensor,
         local_flags=local_flags,
-        peer_candidates=peer_candidates,
+        candidate_ptrs=candidate_ptrs,
         flag_ptrs=flag_ptrs,
     )
 

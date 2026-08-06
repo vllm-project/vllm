@@ -7,7 +7,7 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
-from cutlass import Float32, Int32, Uint32, Uint64
+from cutlass import Float32, Int32, Int64, Uint32, Uint64
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import recast_val
@@ -32,12 +32,7 @@ def stable_topk_from_gathered_candidates_cutedsl(
 
 
 def stable_topk_from_peer_candidates_cutedsl(
-    peer_candidates: tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ],
+    peer_candidate_ptrs: torch.Tensor,
     world_size: int,
     rows: int,
     local_candidates: int,
@@ -46,31 +41,39 @@ def stable_topk_from_peer_candidates_cutedsl(
 ) -> None:
     """Select directly from owner-local symmetric-memory candidate shards.
 
-    ``peer_candidates`` contains one locally valid symmetric-memory tensor view
-    per owner. The consumer reads those views without materializing a contiguous
-    gathered tensor.
+    ``peer_candidate_ptrs`` contains one locally valid symmetric-memory address
+    per owner. The consumer follows this device pointer table without
+    materializing a contiguous gathered tensor.
     """
-    if world_size != 4 or len(peer_candidates) != 4:
-        raise ValueError("peer candidate stable top-k currently requires DCP4")
-    expected_tail = (local_candidates, 2)
-    for peer in peer_candidates:
-        if (
-            peer.ndim != 3
-            or peer.dtype != torch.float32
-            or peer.shape[0] < rows
-            or peer.shape[1:] != expected_tail
-        ):
-            raise ValueError(
-                "peer candidates must have shape "
-                f"(at_least_{rows}, {local_candidates}, 2) in FP32"
-            )
-    if out.shape != (rows, topk):
+    if world_size <= 1:
+        raise ValueError("peer candidate stable top-k requires world_size > 1")
+    if rows <= 0 or local_candidates <= 0:
+        raise ValueError(
+            "peer candidate stable top-k requires positive rows and candidate count"
+        )
+    if local_candidates % StableTopKFromPeerCandidatesKernel.tb_size:
+        raise ValueError(
+            "peer candidate stable top-k requires candidates per owner to be a "
+            f"multiple of {StableTopKFromPeerCandidatesKernel.tb_size}; got "
+            f"{local_candidates}"
+        )
+    if (
+        peer_candidate_ptrs.device != out.device
+        or peer_candidate_ptrs.dtype != torch.int64
+        or peer_candidate_ptrs.shape != (world_size,)
+        or not peer_candidate_ptrs.is_contiguous()
+    ):
+        raise ValueError(
+            "peer candidate pointers must be a contiguous CUDA int64 tensor "
+            f"with shape ({world_size},) on the output device"
+        )
+    if out.dtype != torch.int32 or out.shape != (rows, topk):
         raise ValueError(f"top-k output must have shape ({rows}, {topk})")
     StableTopKFromPeerCandidatesKernel.compile(
         topk,
         world_size,
         local_candidates,
-    )(*(peer[:rows] for peer in peer_candidates), out)
+    )(peer_candidate_ptrs, out)
 
 
 def pack_dcp_topk_candidates_cutedsl(
@@ -473,15 +476,12 @@ class StableTopKFromPeerCandidatesKernel(StableTopKFromGatheredCandidatesKernel)
     @cute.jit
     def __call__(
         self,
-        peer0: cute.Tensor,
-        peer1: cute.Tensor,
-        peer2: cute.Tensor,
-        peer3: cute.Tensor,
+        peer_candidate_ptrs: cute.Tensor,
         out: cute.Tensor,
         stream: CUstream,
     ):
         grid = (out.shape[0], 1, 1)
-        self.kernel(peer0, peer1, peer2, peer3, out).launch(
+        self.kernel(peer_candidate_ptrs, out).launch(
             grid=grid,
             block=(self.tb_size, 1, 1),
             stream=stream,
@@ -490,10 +490,7 @@ class StableTopKFromPeerCandidatesKernel(StableTopKFromGatheredCandidatesKernel)
     @cute.kernel
     def kernel(
         self,
-        peer0: cute.Tensor,
-        peer1: cute.Tensor,
-        peer2: cute.Tensor,
-        peer3: cute.Tensor,
+        peer_candidate_ptrs: cute.Tensor,
         out: cute.Tensor,
     ):
         row, _, _ = cute.arch.block_idx()
@@ -508,25 +505,30 @@ class StableTopKFromPeerCandidatesKernel(StableTopKFromGatheredCandidatesKernel)
         for i in range(tid, self.topk, self.tb_size):
             output_row[i] = Int32(-1)
 
-        for key_idx in cutlass.range_constexpr(self.keys_per_thread):
-            col = tid + Int32(key_idx * self.tb_size)
-            owner = col // Int32(self.local_candidates)
-            local_col = col - owner * Int32(self.local_candidates)
-            score = Float32(0.0)
-            token_id = Int32(-1)
-            if owner == Int32(0):
-                score = Float32(peer0[row, local_col, 0])
-                token_id = Int32(peer0[row, local_col, 1])
-            elif owner == Int32(1):
-                score = Float32(peer1[row, local_col, 0])
-                token_id = Int32(peer1[row, local_col, 1])
-            elif owner == Int32(2):
-                score = Float32(peer2[row, local_col, 0])
-                token_id = Int32(peer2[row, local_col, 1])
-            else:
-                score = Float32(peer3[row, local_col, 0])
-                token_id = Int32(peer3[row, local_col, 1])
-            keys[key_idx] = self._stable_key(score, token_id)
+        keys_per_owner = self.local_candidates // self.tb_size
+        for owner in cutlass.range_constexpr(self.world_size):
+            peer_ptr = cute.make_ptr(
+                Float32,
+                peer_candidate_ptrs[owner],
+                cute.AddressSpace.gmem,
+                assumed_align=8,
+            )
+            peer = cute.make_tensor(
+                peer_ptr,
+                cute.make_layout(
+                    (out.shape[0] * self.local_candidates * 2,),
+                    stride=(1,),
+                ),
+            )
+            for local_key in cutlass.range_constexpr(keys_per_owner):
+                key_idx = owner * keys_per_owner + local_key
+                local_col = tid + Int32(local_key * self.tb_size)
+                candidate_offset = (
+                    row * Int32(self.local_candidates) + local_col
+                ) * Int32(2)
+                score = Float32(peer[candidate_offset])
+                token_id = Int32(peer[candidate_offset + Int32(1)])
+                keys[key_idx] = self._stable_key(score, token_id)
 
         if tid == Int32(0):
             committed_count_smem.store(Int32(0))
@@ -562,11 +564,10 @@ class StableTopKFromPeerCandidatesKernel(StableTopKFromGatheredCandidatesKernel)
     @staticmethod
     def compile(topk: int, world_size: int, local_candidates: int):
         num_rows = cute.sym_int()
-        peer = cute.runtime.make_fake_tensor(
-            Float32,
-            (num_rows, local_candidates, 2),
-            stride=(local_candidates * 2, 2, 1),
-            assumed_align=8,
+        peer_candidate_ptrs = make_fake_tensor(
+            Int64,
+            (world_size,),
+            divisibility=1,
         )
         out = make_fake_tensor(Int32, (num_rows, topk), divisibility=1)
 
@@ -578,10 +579,7 @@ class StableTopKFromPeerCandidatesKernel(StableTopKFromGatheredCandidatesKernel)
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
             kernel,
-            peer,
-            peer,
-            peer,
-            peer,
+            peer_candidate_ptrs,
             out,
             stream,
             options="--enable-tvm-ffi",

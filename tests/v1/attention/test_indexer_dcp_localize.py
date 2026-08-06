@@ -254,15 +254,15 @@ def _merge_local_topks_global_with_fake_dcp(
 
 
 @pytest.mark.parametrize(
-    ("enabled", "rows", "is_prefill", "expected"),
+    ("enabled", "rows", "is_prefill", "world_size", "expected"),
     [
-        (False, 32, False, "explicit"),
-        (True, 15, False, "explicit"),
-        (True, 16, False, "symm"),
-        (True, 32, False, "symm"),
-        (True, 128, False, "symm"),
-        (True, 129, False, "explicit"),
-        (True, 32, True, "explicit"),
+        (False, 32, False, 4, "explicit"),
+        (True, 1, False, 2, "symm"),
+        (True, 15, False, 3, "symm"),
+        (True, 16, False, 4, "symm"),
+        (True, 128, False, 2, "symm"),
+        (True, 129, False, 4, "symm"),
+        (True, 32, True, 4, "explicit"),
     ],
 )
 def test_dcp_topk_symm_serving_dispatch(
@@ -270,6 +270,7 @@ def test_dcp_topk_symm_serving_dispatch(
     enabled: bool,
     rows: int,
     is_prefill: bool,
+    world_size: int,
     expected: str,
 ):
     from vllm.model_executor.kernels.attention.dsa import (
@@ -290,9 +291,9 @@ def test_dcp_topk_symm_serving_dispatch(
             return input_
 
     def get_symm_workspace(max_rows: int, candidates: int, world: int):
-        assert max_rows == sparse_indexer.DCP_TOPK_SYMM_MAX_DECODE_ROWS
-        assert candidates == 4
-        assert world == 4
+        assert max_rows == rows
+        assert candidates == 512
+        assert world == world_size
         calls.append("symm_init")
         return FakeSymmWorkspace()
 
@@ -325,15 +326,15 @@ def test_dcp_topk_symm_serving_dispatch(
         stable_topk,
     )
 
-    logits = torch.zeros((rows, 8), dtype=torch.float32)
-    topk_indices = torch.zeros((rows, 4), dtype=torch.int32)
+    logits = torch.zeros((rows, 1024), dtype=torch.float32)
+    topk_indices = torch.zeros((rows, 512), dtype=torch.int32)
     row_starts = torch.zeros((rows,), dtype=torch.int32) if is_prefill else None
     sparse_indexer._merge_dcp_topk_global(
         logits,
         topk_indices,
-        topk_tokens=4,
+        topk_tokens=512,
         dcp_rank=0,
-        dcp_world_size=4,
+        dcp_world_size=world_size,
         cp_interleave=1,
         row_starts=row_starts,
     )
@@ -376,18 +377,44 @@ def test_dcp_topk_symm_failure_is_fatal(
         get_symm_workspace,
     )
 
-    logits = torch.zeros((32, 8), dtype=torch.float32)
-    topk_indices = torch.zeros((32, 4), dtype=torch.int32)
+    logits = torch.zeros((32, 1024), dtype=torch.float32)
+    topk_indices = torch.zeros((32, 512), dtype=torch.int32)
     with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
         sparse_indexer._merge_dcp_topk_global(
             logits,
             topk_indices,
-            topk_tokens=4,
+            topk_tokens=512,
             dcp_rank=0,
             dcp_world_size=4,
             cp_interleave=1,
             row_starts=None,
         )
+
+
+@pytest.mark.parametrize(
+    ("rows", "candidates", "world_size", "is_prefill", "expected"),
+    [
+        (1, 512, 2, False, True),
+        (129, 2048, 8, False, True),
+        (0, 512, 2, False, False),
+        (1, 513, 2, False, False),
+        (1, 512, 1, False, False),
+        (1, 512, 4, True, False),
+    ],
+)
+def test_dcp_topk_symm_capability(
+    rows: int,
+    candidates: int,
+    world_size: int,
+    is_prefill: bool,
+    expected: bool,
+) -> None:
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm import (
+        can_use_dcp_topk_symm,
+    )
+
+    row_starts = torch.empty(rows, dtype=torch.int32) if is_prefill else None
+    assert can_use_dcp_topk_symm(rows, candidates, world_size, row_starts) is expected
 
 
 @pytest.mark.parametrize("world", [1, 2, 4])

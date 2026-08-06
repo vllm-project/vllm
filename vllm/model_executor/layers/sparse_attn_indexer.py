@@ -40,9 +40,6 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
-DCP_TOPK_SYMM_MIN_DECODE_ROWS = 16
-DCP_TOPK_SYMM_MAX_DECODE_ROWS = 128
-_logged_dcp_topk_symm_rows: set[int] = set()
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
@@ -108,10 +105,15 @@ def _merge_dcp_topk_global(
     )
 
     rows = topk_indices.shape[0]
-    use_symm = (
-        envs.VLLM_DCP_TOPK_SYMM
-        and row_starts is None
-        and DCP_TOPK_SYMM_MIN_DECODE_ROWS <= rows <= DCP_TOPK_SYMM_MAX_DECODE_ROWS
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm import (
+        can_use_dcp_topk_symm,
+    )
+
+    use_symm = envs.VLLM_DCP_TOPK_SYMM and can_use_dcp_topk_symm(
+        rows,
+        topk_indices.shape[1],
+        dcp_world_size,
+        row_starts,
     )
     if use_symm:
         from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm import (
@@ -119,7 +121,7 @@ def _merge_dcp_topk_global(
         )
 
         workspace = get_dcp_topk_symm_workspace(
-            DCP_TOPK_SYMM_MAX_DECODE_ROWS,
+            rows,
             topk_indices.shape[1],
             dcp_world_size,
         )
@@ -127,15 +129,7 @@ def _merge_dcp_topk_global(
             raise RuntimeError(
                 "DCP top-k symmetric-memory dispatch selected without a workspace."
             )
-        # Keep one reachability marker for integration validation without
-        # synchronously logging each first-seen dynamic batch size.
-        if rows == 32 and rows not in _logged_dcp_topk_symm_rows:
-            _logged_dcp_topk_symm_rows.add(rows)
-            logger.info(
-                "Executing owner-sharded symmetric-memory DCP top-k merge "
-                "for decode rows=%d.",
-                rows,
-            )
+        logger.info_once("Executing owner-sharded symmetric-memory DCP top-k merge.")
         workspace.merge(
             logits,
             topk_indices,
@@ -831,7 +825,7 @@ class SparseAttnIndexer(CustomOp):
             )
 
             workspace = get_dcp_topk_symm_workspace(
-                DCP_TOPK_SYMM_MAX_DECODE_ROWS,
+                get_current_vllm_config().scheduler_config.max_num_seqs,
                 self.topk_tokens,
                 self.dcp_world_size,
             )

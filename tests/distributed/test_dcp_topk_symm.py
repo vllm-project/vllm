@@ -127,8 +127,8 @@ def _worker(rank: int, world_size: int, port: int) -> None:
         max_rows * topk * 2 * 4 + 16 + world_size * 8
     )
     assert workspace.allocation_bytes_per_rank >= workspace.logical_bytes_per_rank
-    assert workspace.peer_candidates is not None
-    assert len(workspace.peer_candidates) == world_size
+    assert workspace.candidate_ptrs is not None
+    assert workspace.candidate_ptrs.shape == (world_size,)
     assert workspace.local_candidates is not None
     assert workspace.local_candidates.shape == (max_rows, topk, 2)
 
@@ -160,6 +160,23 @@ def _worker(rank: int, world_size: int, port: int) -> None:
             )
             torch.accelerator.synchronize()
             _assert_same_ids(indices, expected)
+
+        oversized_logits = torch.empty(
+            (max_rows + 1, num_cols), dtype=torch.float32, device=device
+        )
+        oversized_indices = torch.empty(
+            (max_rows + 1, topk), dtype=torch.int32, device=device
+        )
+        with pytest.raises(RuntimeError, match="requested 97"):
+            workspace.merge(
+                oversized_logits,
+                oversized_indices,
+                topk,
+                rank,
+                world_size,
+                1,
+                None,
+            )
 
         # Stable selection with ties and one empty owner shard.
         rows = 8
@@ -194,7 +211,8 @@ def _worker(rank: int, world_size: int, port: int) -> None:
         torch.accelerator.synchronize()
         _assert_same_ids(indices, expected)
 
-        # Prefill-style row-relative candidate indices.
+        # Prefill is an explicit-exchange phase policy. Direct workspace use
+        # must reject it rather than silently taking an unsupported path.
         rows = 8
         logits = torch.randn(
             (rows, num_cols),
@@ -211,25 +229,16 @@ def _worker(rank: int, world_size: int, port: int) -> None:
                 for row in range(rows)
             ]
         ).to(torch.int32)
-        expected = _reference_merge(
-            logits,
-            indices.clone(),
-            topk,
-            rank,
-            world_size,
-            row_starts,
-        )
-        workspace.merge(
-            logits,
-            indices,
-            topk,
-            rank,
-            world_size,
-            1,
-            row_starts,
-        )
-        torch.accelerator.synchronize()
-        _assert_same_ids(indices, expected)
+        with pytest.raises(RuntimeError, match="unsupported invocation"):
+            workspace.merge(
+                logits,
+                indices,
+                topk,
+                rank,
+                world_size,
+                1,
+                row_starts,
+            )
 
         # Capture once, then replay with two different input tensors. Device
         # epochs must advance on replay rather than reusing capture-time values.
@@ -288,8 +297,8 @@ def _worker(rank: int, world_size: int, port: int) -> None:
 )
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda", reason="Only test on CUDA")
 @pytest.mark.skipif(not has_cutedsl(), reason="Requires CuTeDSL.")
-def test_dcp_topk_symm_matches_allgather_and_replays_graph() -> None:
-    world_size = 4
+@pytest.mark.parametrize("world_size", [2, 3, 4])
+def test_dcp_topk_symm_matches_allgather_and_replays_graph(world_size: int) -> None:
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Test requires {world_size} GPUs")
     mp.spawn(
