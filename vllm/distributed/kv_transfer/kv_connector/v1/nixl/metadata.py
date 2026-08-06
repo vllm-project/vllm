@@ -41,10 +41,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   4: Add KV block lease renewal through heartbeats
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
-#   6: Add packed KV cache region strides to NixlAgentMetadata
-#   7: Add per-region block counts for independently sized cache pools
+#   6: Add packed KV cache region strides and per-region block counts to
+#      NixlAgentMetadata
 #
-NIXL_CONNECTOR_VERSION: int = 7
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass
