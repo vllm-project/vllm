@@ -897,7 +897,7 @@ class TieringOffloadingManager(OffloadingManager):
                 stats.aggregate(tier_stats)
 
         for tier, detector in self._bp_detectors.items():
-            label = (f"{self._tier_index[tier]}_{tier.tier_type}",)
+            label = (f"{self._tier_index[tier] + 1}:{tier.tier_type}",)
             ema = detector.stats.get("store_latency_ema")
             if ema is not None:
                 self._stats.set_gauge(
