@@ -32,7 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, LoRARoutingRequest
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFeatureSpec,
@@ -739,16 +739,25 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
-def test_max_loras_counts_running_request_awaiting_output():
+@pytest.mark.parametrize("routed", [False, True])
+def test_max_loras_counts_running_request_awaiting_output(routed):
     """PP: a running request with its prompt fully scheduled is skipped until
     its output returns, but still holds its LoRA slot, so a request with
     another adapter must not be admitted in the meantime."""
     scheduler = create_scheduler(
-        pipeline_parallel_size=2, lora_config=LoRAConfig(max_loras=1)
+        pipeline_parallel_size=2, lora_config=LoRAConfig(max_loras=2 if routed else 1)
     )
     req_a, req_b = create_requests(num_requests=2, num_tokens=8, req_ids=["a", "b"])
     req_a.lora_request = LoRARequest("lora-a", 1, "/path/a")
     req_b.lora_request = LoRARequest("lora-b", 2, "/path/b")
+
+    if routed:
+        req_a.lora_request = LoRARoutingRequest(
+            routing_name="mixture-a",
+            routing_int_id=10,
+            lora_requests=(req_a.lora_request, LoRARequest("lora-c", 3, "/path/c")),
+            lora_weights=(0.5, 0.5),
+        )
 
     scheduler.add_request(req_a)
     assert scheduler.schedule().num_scheduled_tokens == {"a": 8}

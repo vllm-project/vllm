@@ -29,7 +29,7 @@ def test_prompt_lora_mapping_aligns_with_spec_decode_logits_rows():
     # Query length is independent: req-a is still prefilling.
     num_scheduled = np.array([8, 1], dtype=np.int32)
 
-    prompt, token, requests = state.make_lora_inputs(
+    prompt, token, requests, route_mapping = state.make_lora_inputs(
         ["req-a", "req-b"],
         idx_mapping,
         num_scheduled,
@@ -41,6 +41,7 @@ def test_prompt_lora_mapping_aligns_with_spec_decode_logits_rows():
     assert len(prompt) == int(cu_num_logits[-1])
     assert token == (0,) * 8 + (5,)
     assert requests == {lora_b}
+    assert route_mapping is None
 
 
 def test_prompt_lora_mapping_repeats_for_multiple_sampled_tokens():
@@ -51,7 +52,7 @@ def test_prompt_lora_mapping_repeats_for_multiple_sampled_tokens():
     state.add_request("req-b", 1, None)
     # Two logits rows per request, no drafts.
     num_logits = np.array([2, 2], dtype=np.int32)
-    prompt, token, _requests = state.make_lora_inputs(
+    prompt, token, _requests, route_mapping = state.make_lora_inputs(
         ["req-a", "req-b"],
         np.array([0, 1], dtype=np.int32),
         np.array([2, 2], dtype=np.int32),
@@ -59,3 +60,4 @@ def test_prompt_lora_mapping_repeats_for_multiple_sampled_tokens():
     )
     assert prompt == (3, 3, 0, 0)
     assert token == (3, 3, 0, 0)
+    assert route_mapping is None
