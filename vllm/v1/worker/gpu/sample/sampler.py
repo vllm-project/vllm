@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config.model import LogprobsMode
+from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -19,7 +19,7 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
-    compute_topk_logprobs,
+    compute_topk_scores,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
@@ -38,8 +38,6 @@ class Sampler:
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
     ):
-        if logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
-            raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
         self.use_fp64_gumbel = use_fp64_gumbel
@@ -102,12 +100,12 @@ class Sampler:
         )
 
         if return_logprobs:
-            if self.logprobs_mode == "processed_logprobs":
+            if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
             num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
-            logprobs_tensors = compute_topk_logprobs(
+            logprobs_tensors = compute_topk_scores(
                 logits,
                 num_logprobs,
                 sampled,
@@ -115,6 +113,7 @@ class Sampler:
                 logprob_token_ids_state=self.logprob_token_ids_state,
                 expanded_idx_mapping=input_batch.expanded_idx_mapping,
                 max_per_req_token_ids=max_per_req_token_ids,
+                logits_mode=self.logprobs_mode in ("raw_logits", "processed_logits"),
             )
         else:
             logprobs_tensors = None
@@ -153,6 +152,9 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
+        if not self._requires_logits_processing(idx_mapping_np):
+            return logits
+
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
@@ -195,6 +197,24 @@ class Sampler:
             logits, expanded_idx_mapping, idx_mapping_np
         )
 
+    def _requires_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
+        if np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np]):
+            return True
+        if np.any(self.penalties_state.use_penalty[idx_mapping_np]):
+            return True
+        if np.any(self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0):
+            return True
+
+        states = self.sampling_states
+        temperatures = states.temperature.np[idx_mapping_np]
+        if np.any((temperatures != 0.0) & (temperatures != 1.0)):
+            return True
+        if np.any(states.min_p.np[idx_mapping_np] != 0.0):
+            return True
+        if np.any(states.top_k.np[idx_mapping_np] != states.vocab_size):
+            return True
+        return bool(np.any(states.top_p.np[idx_mapping_np] != 1.0))
+
     def sample(
         self,
         logits: torch.Tensor,
@@ -222,7 +242,7 @@ class Sampler:
             # any greedy requests or per-request seeds, or if post-processed
             # logprobs need to be returned for any requests.
             (top_k is None and top_p is None)
-            or (return_logprobs and self.logprobs_mode == "processed_logprobs")
+            or (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES)
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )

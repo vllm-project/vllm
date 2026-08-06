@@ -16,6 +16,14 @@ vLLM provides 4 optimization levels (`-O0`, `-O1`, `-O2`, `-O3`) that allow user
 
 For more information, see the [optimization level documentation](../design/optimization_levels.md).
 
+## Faster Startup
+
+Beyond the optimization levels, three mechanisms reduce time-to-first-token on repeated boots of the same (model, config, hardware) combination:
+
+- **Reuse the compile cache.** vLLM persists `torch.compile` artifacts under `VLLM_CACHE_ROOT` (default `~/.cache/vllm`), and the cache directory can be copied between machines or baked into a container image; see the [torch.compile design doc](../design/torch_compile.md). Set `VLLM_FORCE_AOT_LOAD=1` to fail loudly instead of silently recompiling when the cache misses (any change to the model, config, relevant `VLLM_*` environment variables, torch build, or GPU model invalidates it).
+- **Skip memory profiling with `--kv-cache-memory`.** On startup, vLLM logs the exact `--kv-cache-memory` value that reproduces the current allocation. Passing it back on the next boot skips the memory-profiling measurement and the CUDA-graph memory estimation pass. Note that this has performance implications: the KV cache is sized to exactly the given value instead of being measured, so a conservative value caps batch concurrency (and therefore throughput), while an optimistic one fails at allocation time. The value is only valid on the same GPU with the same initial free memory; if a boot OOMs after hardware or co-tenant changes, remove the flag to re-profile.
+- **Serve without CUDA graphs using `--enforce-eager`.** Skips both compilation and CUDA-graph capture for the fastest possible startup, at the cost of steady-state decode performance. Useful for development loops and for measuring how much of a boot is compile/capture.
+
 ## Preemption
 
 Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
@@ -109,7 +117,7 @@ from vllm import LLM
 
 # Combine pipeline and tensor parallelism
 llm = LLM(
-    model="meta-llama/Llama-3.3-70B-Instruct,
+    model="meta-llama/Llama-3.3-70B-Instruct",
     tensor_parallel_size=4,
     pipeline_parallel_size=2,
 )
@@ -276,8 +284,9 @@ By default vLLM uses the standard Hugging Face `tokenizers` library to power
 the fast tokenizer. For BPE tokenizers (Qwen, Llama, DeepSeek, GPT-OSS, etc.)
 you can switch to the [fastokens](https://github.com/crusoecloud/fastokens)
 Rust backend, a drop-in replacement that's substantially faster on
-encode/decode and on streaming detokenization. Enable it by setting
-`VLLM_USE_FASTOKENS=1`:
+encode/decode and on streaming detokenization. `VLLM_USE_FASTOKENS` is
+available in vLLM v0.23.0 and later. If your installed vLLM version does not
+recognize the environment variable, upgrade vLLM before enabling the override:
 
 ```console
 VLLM_USE_FASTOKENS=1 vllm serve Qwen/Qwen3-8B
@@ -297,7 +306,7 @@ The `fastokens` Python package (>= 0.2.0) must be installed; if it isn't,
 vLLM raises a clear `ImportError` at tokenizer load. The override applies to
 any `--tokenizer-mode` that ends up loading an HF fast tokenizer (`hf`,
 `deepseek_v32`, `deepseek_v4`, …). Models that don't use the HF
-fast tokenizer (`mistral`, `grok2`, `kimi_audio`) ignore the flag.
+fast tokenizer (`mistral`, `kimi_audio`) ignore the flag.
 
 Tokenizer-bound workloads — long shared prefixes, bursty short prompts,
 batch detokenization — see the largest wins. If your bottleneck is GPU

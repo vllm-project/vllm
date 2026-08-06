@@ -336,8 +336,8 @@ def split_audio(
     for splitting.
 
     Args:
-        audio_data: Audio array to split. Can be 1D (mono) or multi-dimensional.
-                   Splits along the last dimension (time axis).
+        audio_data: 1D mono audio array to split. ASR models consume mono, so
+                   callers must downmix before chunking.
         sample_rate: Sample rate of the audio in Hz.
         max_clip_duration_s: Maximum duration of each chunk in seconds.
         overlap_duration_s: Overlap duration in seconds between consecutive chunks.
@@ -345,8 +345,10 @@ def split_audio(
         min_energy_window_size: Window size in samples for finding low-energy regions.
 
     Returns:
-        List of audio chunks. Each chunk is a numpy array with the same shape
-        as the input except for the last (time) dimension.
+        List of 1D audio chunks.
+
+    Raises:
+        AssertionError: If ``audio_data`` is not 1D.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz
@@ -360,6 +362,11 @@ def split_audio(
         >>> len(chunks)
         3
     """
+    if audio_data.ndim > 1:
+        raise ValueError(
+            f"split_audio expects mono audio, got shape {audio_data.shape}"
+        )
+
     chunk_size = int(sample_rate * max_clip_duration_s)
     overlap_size = int(sample_rate * overlap_duration_s)
     chunks = []
@@ -377,6 +384,11 @@ def split_audio(
         split_point = find_split_point(
             audio_data, search_start, search_end, min_energy_window_size
         )
+
+        # Guarantee forward progress: if split_point didn't advance,
+        # fall back to the hard chunk boundary.
+        if split_point <= i:
+            split_point = min(i + chunk_size, audio_data.shape[-1])
 
         # Extract chunk up to the split point
         chunks.append(audio_data[..., i:split_point])
@@ -397,7 +409,7 @@ def find_split_point(
     RMS energy in sliding windows.
 
     Args:
-        wav: Audio array. Can be 1D or multi-dimensional.
+        wav: 1D mono audio array.
         start_idx: Start index of search region (inclusive).
         end_idx: End index of search region (exclusive).
         min_energy_window: Window size in samples for energy calculation.
@@ -423,12 +435,12 @@ def find_split_point(
 
     # Calculate RMS energy in small windows
     min_energy = math.inf
-    quietest_idx = 0
+    quietest_idx = start_idx
 
     for i in range(0, len(segment) - min_energy_window, min_energy_window):
         window = segment[i : i + min_energy_window]
         energy = (window**2).mean() ** 0.5
-        if energy < min_energy:
+        if not math.isnan(energy) and energy < min_energy:
             quietest_idx = i + start_idx
             min_energy = energy
 
