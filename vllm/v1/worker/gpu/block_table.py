@@ -264,7 +264,7 @@ def _compute_slot_mappings_kernel(
     pos,  # [num_tokens]
     block_table_ptrs,  # [num_kv_cache_groups]
     block_table_strides,  # [num_kv_cache_groups]
-    kv_block_sizes,  # [num_kv_cache_groups]
+    block_sizes,  # [num_kv_cache_groups]
     kernel_block_sizes,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
@@ -292,7 +292,7 @@ def _compute_slot_mappings_kernel(
 
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
-    kv_block_size = tl.load(kv_block_sizes + group_id)
+    kv_block_size = tl.load(block_sizes + group_id)
     kernel_block_size = tl.load(kernel_block_sizes + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
