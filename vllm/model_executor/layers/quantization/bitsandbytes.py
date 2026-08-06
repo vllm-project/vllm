@@ -523,7 +523,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         quant_ratio = calculate_quant_ratio(params_dtype)
         # Fused gate_up_proj (column parallel)
         w13_total_size = (
-            hidden_size * 2 * intermediate_size_per_partition
+            hidden_size * self.moe.w13_num_shards * intermediate_size_per_partition
         ) // quant_ratio
         w13_qweight = torch.nn.Parameter(
             torch.empty(
@@ -541,10 +541,10 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             {
                 "num_experts": num_experts,
                 "input_dim": hidden_size,
-                "output_dim": 2 * intermediate_size_per_partition,
+                "output_dim": self.moe.w13_num_shards * intermediate_size_per_partition,
                 "experts_shape": (
                     num_experts,
-                    intermediate_size_per_partition * 2,
+                    intermediate_size_per_partition * self.moe.w13_num_shards,
                     hidden_size,
                 ),
                 "pack_factor": quant_ratio,

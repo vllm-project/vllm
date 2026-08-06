@@ -1376,6 +1376,11 @@ class FusedMoEConfig:
         return self.activation.is_gated
 
     @property
+    def w13_num_shards(self) -> int:
+        """Number of shards fused into w13: gate and up for gated, up only."""
+        return 2 if self.is_act_and_mul else 1
+
+    @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
 
