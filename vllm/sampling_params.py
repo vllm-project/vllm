@@ -5,6 +5,7 @@
 import copy
 import json as json_mod
 import math
+from collections.abc import Sized
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -30,6 +31,11 @@ _MAX_TEMP = 1e-2
 MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
+# Fixed per-request row widths used by the V2 GPU sampler.
+MAX_NUM_ALLOWED_TOKEN_IDS = 1024
+MAX_NUM_LOGIT_BIAS_TOKENS = 1024
+MAX_NUM_STOP_TOKEN_IDS = 128
 
 
 def _verify_num_sequences(value: int, parameter_name: str) -> None:
@@ -527,6 +533,7 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+        self._validate_sampler_fixed_array_limits(self._all_stop_token_ids)
 
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
@@ -646,6 +653,45 @@ class SamplingParams(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
+        self._validate_sampler_fixed_array_limits()
+
+    @staticmethod
+    def _validate_fixed_array_length(
+        parameter: str,
+        values: Sized | None,
+        max_size: int,
+    ) -> None:
+        if values is None:
+            return
+        size = len(values)
+        if size > max_size:
+            raise VLLMValidationError(
+                f"Requested {parameter} of length {size}, "
+                f"which is greater than max allowed: {max_size}",
+                parameter=parameter,
+                value=size,
+            )
+
+    def _validate_sampler_fixed_array_limits(
+        self,
+        effective_stop_token_ids: Sized | None = None,
+    ) -> None:
+        self._validate_fixed_array_length(
+            "allowed_token_ids",
+            self.allowed_token_ids,
+            MAX_NUM_ALLOWED_TOKEN_IDS,
+        )
+        self._validate_fixed_array_length(
+            "logit_bias",
+            self.logit_bias,
+            MAX_NUM_LOGIT_BIAS_TOKENS,
+        )
+        if self.min_tokens > 0 and effective_stop_token_ids is not None:
+            self._validate_fixed_array_length(
+                "stop_token_ids",
+                effective_stop_token_ids,
+                MAX_NUM_STOP_TOKEN_IDS,
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -682,6 +728,7 @@ class SamplingParams(
                     assert self.stop_token_ids is not None
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
+        self._validate_sampler_fixed_array_limits(self._all_stop_token_ids)
 
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
