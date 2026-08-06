@@ -33,7 +33,7 @@ use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
     prompt_logprobs_to_maps, text_len,
 };
-use super::utils::types::Usage;
+use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
@@ -257,6 +257,12 @@ async fn completion_chunk_stream(
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
+    let envelope = Arc::new(StreamResponseEnvelope::new(
+        request_id,
+        "text_completion",
+        created,
+        response_model,
+    ));
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
     let mut continuous_usage = ContinuousUsage::default();
@@ -292,13 +298,7 @@ async fn completion_chunk_stream(
                     } else {
                         None
                     };
-                    let mut chunk = delta_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        prompt.clone(),
-                        logprobs,
-                    );
+                    let mut chunk = delta_chunk(&envelope, prompt.clone(), logprobs);
                     if return_token_ids && first_chunk {
                         if let Some(choice) = chunk.choices.first_mut() {
                             choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
@@ -308,8 +308,7 @@ async fn completion_chunk_stream(
                     yield_chunk!(chunk);
                 } else if return_token_ids {
                     // Emit a chunk with prompt_token_ids in the first streaming response
-                    let mut chunk =
-                        delta_chunk(&request_id, &response_model, created, String::new(), None);
+                    let mut chunk = delta_chunk(&envelope, String::new(), None);
                     if let Some(choice) = chunk.choices.first_mut() {
                         choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                     }
@@ -331,7 +330,7 @@ async fn completion_chunk_stream(
                         if enable_log_requests {
                             info!(
                                 stream = true,
-                                model = %response_model,
+                                model = %envelope.model(),
                                 prompt_tokens = finished.usage.prompt_token_count,
                                 output_tokens = finished.usage.output_token_count,
                                 finish_reason = finished.finish_reason.as_str(),
@@ -342,19 +341,12 @@ async fn completion_chunk_stream(
                             finished.usage.prompt_token_count,
                             finished.usage.output_token_count,
                         );
-                        let final_chunk = final_chunk(
-                            &request_id,
-                            &response_model,
-                            created,
-                            finished.finish_reason,
-                        )?;
+                        let final_chunk = final_chunk(&envelope, finished.finish_reason)?;
                         yield_chunk!(final_chunk);
 
                         if include_usage {
                             y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
-                                &request_id,
-                                &response_model,
-                                created,
+                                &envelope,
                                 Usage::from_token_usage(
                                     finished.usage,
                                     enable_prompt_tokens_details,
@@ -380,7 +372,7 @@ async fn completion_chunk_stream(
                 } else {
                     None
                 };
-                let mut chunk = delta_chunk(&request_id, &response_model, created, delta, logprobs);
+                let mut chunk = delta_chunk(&envelope, delta, logprobs);
                 let delta_token_count = token_ids.len();
                 continuous_usage.add_output_tokens(delta_token_count);
                 if return_token_ids && let Some(choice) = chunk.choices.first_mut() {
@@ -393,7 +385,7 @@ async fn completion_chunk_stream(
                     if enable_log_requests {
                         info!(
                             stream = true,
-                            model = %response_model,
+                            model = %envelope.model(),
                             prompt_tokens = finished.usage.prompt_token_count,
                             output_tokens = finished.usage.output_token_count,
                             finish_reason = finished.finish_reason.as_str(),
@@ -404,19 +396,12 @@ async fn completion_chunk_stream(
                         finished.usage.prompt_token_count,
                         finished.usage.output_token_count,
                     );
-                    let final_chunk = final_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        finished.finish_reason,
-                    )?;
+                    let final_chunk = final_chunk(&envelope, finished.finish_reason)?;
                     yield_chunk!(final_chunk);
 
                     if include_usage {
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
-                            &request_id,
-                            &response_model,
-                            created,
+                            &envelope,
                             Usage::from_token_usage(finished.usage, enable_prompt_tokens_details),
                         )))
                         .await;
@@ -436,13 +421,11 @@ async fn completion_chunk_stream(
 }
 
 fn delta_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
+    envelope: &Arc<StreamResponseEnvelope>,
     text: String,
     logprobs: Option<LogProbs>,
 ) -> CompletionStreamResponse {
-    let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
+    let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.choices.push(CompletionStreamChoice {
         text,
         logprobs,
@@ -452,15 +435,13 @@ fn delta_chunk(
 }
 
 fn final_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
+    envelope: &Arc<StreamResponseEnvelope>,
     finish_reason: FinishReason,
 ) -> Result<CompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?;
 
-    let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
+    let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.choices.push(CompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
         stop_reason,
@@ -517,13 +498,8 @@ fn prompt_only_logprobs_to_openai(
     ))
 }
 
-fn usage_chunk(
-    request_id: &str,
-    response_model: &str,
-    created: u64,
-    usage: Usage,
-) -> CompletionStreamResponse {
-    let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
+fn usage_chunk(envelope: &Arc<StreamResponseEnvelope>, usage: Usage) -> CompletionStreamResponse {
+    let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk
 }
@@ -556,17 +532,31 @@ async fn completion_sse_stream(
 
 /// Serialize one OpenAI chunk payload into one SSE `data:` event.
 fn to_sse_event(chunk: &CompletionSseChunk) -> Event {
-    let payload = serde_json::to_string(chunk).expect("completion chunk must serialize to JSON");
-    trace!(payload, "completion emitting chunk");
-    Event::default().data(payload)
+    if tracing::enabled!(tracing::Level::TRACE) {
+        let payload =
+            serde_json::to_string(chunk).expect("completion chunk must serialize to JSON");
+        trace!(payload, "completion emitting chunk");
+        Event::default().data(payload)
+    } else {
+        Event::default()
+            .json_data(chunk)
+            .expect("completion chunk must serialize to JSON")
+    }
 }
 
 /// Serialize one OpenAI error payload into one SSE `data:` event.
 fn to_error_sse_event(error: &ApiError) -> Event {
-    let payload = serde_json::to_string(&error.to_error_response())
-        .expect("ErrorResponse must serialize to JSON");
-    trace!(payload, "completion emitting error");
-    Event::default().data(payload)
+    let response = error.to_error_response();
+    if tracing::enabled!(tracing::Level::TRACE) {
+        let payload =
+            serde_json::to_string(&response).expect("ErrorResponse must serialize to JSON");
+        trace!(payload, "completion emitting error");
+        Event::default().data(payload)
+    } else {
+        Event::default()
+            .json_data(response)
+            .expect("ErrorResponse must serialize to JSON")
+    }
 }
 
 /// Build the terminal OpenAI SSE sentinel event.
@@ -577,6 +567,8 @@ fn done_sse_event() -> Event {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use futures::{StreamExt as _, stream};
     use itertools::Itertools as _;
     use vllm_engine_core_client::protocol::output::StopReason;
@@ -586,13 +578,29 @@ mod tests {
     };
 
     use super::{
-        ApiServerOptions, CompletionSseChunk, ResponseOptions, completion_chunk_stream, final_chunk,
+        ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
+        StreamResponseEnvelope, completion_chunk_stream, final_chunk,
     };
+
+    fn stream_envelope() -> Arc<StreamResponseEnvelope> {
+        Arc::new(StreamResponseEnvelope::new(
+            "cmpl-1".to_string(),
+            "text_completion",
+            1,
+            "model".to_string(),
+        ))
+    }
+
+    fn chunk_response(chunk: &CompletionSseChunk) -> &CompletionStreamResponse {
+        match chunk {
+            CompletionSseChunk::Chunk(response) | CompletionSseChunk::Usage(response) => response,
+        }
+    }
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
-        let chunk = final_chunk("cmpl-1", "model", 1, FinishReason::stop_eos())
-            .expect("finish reason valid");
+        let chunk =
+            final_chunk(&stream_envelope(), FinishReason::stop_eos()).expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         assert_eq!(chunk.choices[0].text, "");
     }
@@ -600,20 +608,20 @@ mod tests {
     #[test]
     fn final_chunk_maps_length_finish_reason() {
         let chunk =
-            final_chunk("cmpl-1", "model", 1, FinishReason::Length).expect("finish reason valid");
+            final_chunk(&stream_envelope(), FinishReason::Length).expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
     }
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
         let chunk =
-            final_chunk("cmpl-1", "model", 1, FinishReason::Abort).expect("finish reason valid");
+            final_chunk(&stream_envelope(), FinishReason::Abort).expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
     }
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk("cmpl-1", "model", 1, FinishReason::Error).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error).is_err());
     }
 
     #[tokio::test]
@@ -701,6 +709,13 @@ mod tests {
         .await;
 
         let chunks: Vec<_> = chunks.into_iter().try_collect().expect("stream should succeed");
+
+        assert!(chunks.windows(2).all(|pair| {
+            Arc::ptr_eq(
+                &chunk_response(&pair[0]).envelope,
+                &chunk_response(&pair[1]).envelope,
+            )
+        }));
 
         match &chunks[0] {
             CompletionSseChunk::Chunk(chunk) => {

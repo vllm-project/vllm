@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,9 +14,9 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
-    ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
-    default_true, validate_messages, validate_stop, validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StreamResponseEnvelope, StringOrArray,
+    Tool, ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID,
+    Usage, default_true, validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -396,10 +397,8 @@ pub(super) struct ChatCompletionMessage {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionStreamResponse {
-    pub id: String,
-    pub object: String,
-    pub created: u64,
-    pub model: String,
+    #[serde(flatten)]
+    pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
@@ -407,12 +406,9 @@ pub(super) struct ChatCompletionStreamResponse {
 
 impl ChatCompletionStreamResponse {
     /// Create a stream response with the standard envelope fields pre-filled.
-    pub fn new(id: &str, model: &str, created: u64) -> Self {
+    pub fn new(envelope: &Arc<StreamResponseEnvelope>) -> Self {
         Self {
-            id: id.to_string(),
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: model.to_string(),
+            envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
             prompt_token_ids: None,
