@@ -58,8 +58,8 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops import flashmla
 from vllm.v1.kv_offload.sparse import hisparse_layer as hisparse
 from vllm.v1.kv_offload.sparse.hisparse_layer import (
-    HiSparseLayer,
-    HiSparseOffloadLayer,
+    HiSparseCacheHandle,
+    HiSparseOffloadRuntime,
     HiSparsePrefillStagingPlan,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
@@ -1373,7 +1373,7 @@ requires_hisparse_ops = pytest.mark.skipif(
 
 
 def fallback_swap_in(
-    coordinator: HiSparseOffloadLayer,
+    coordinator: HiSparseOffloadRuntime,
     global_indices: torch.Tensor,
     hot_indices: torch.Tensor,
 ) -> None:
@@ -1447,8 +1447,8 @@ def _make_hisparse_offload_layer(
     max_num_reqs: int = 2,
     row_width: int = 8,
     block_size: int = 64,
-) -> HiSparseOffloadLayer:
-    coordinator = HiSparseOffloadLayer(
+) -> HiSparseOffloadRuntime:
+    coordinator = HiSparseOffloadRuntime(
         config=ResolvedHiSparseConfig(
             top_k=top_k,
             device_buffer_size=device_buffer_size,
@@ -1491,7 +1491,7 @@ def _make_hisparse_layer(
     max_num_reqs: int = 2,
     row_width: int = 8,
     block_size: int = 64,
-) -> HiSparseLayer:
+) -> HiSparseCacheHandle:
     offload = _make_hisparse_offload_layer(
         top_k=top_k,
         device_buffer_size=device_buffer_size,
@@ -1499,11 +1499,11 @@ def _make_hisparse_layer(
         row_width=row_width,
         block_size=block_size,
     )
-    return HiSparseLayer(offload)
+    return HiSparseCacheHandle(offload)
 
 
 def _hisparse_hot_slot(
-    coordinator: HiSparseOffloadLayer, row: int, logical: int
+    coordinator: HiSparseOffloadRuntime, row: int, logical: int
 ) -> int:
     assert coordinator.hot is not None
     assert coordinator.hot_block_table is not None
@@ -1626,7 +1626,7 @@ def test_hisparse_kernel_matches_fallback():
     ).pin_memory()
     flat_pool = kv_pool.reshape(-1, row_width)
 
-    def make() -> HiSparseOffloadLayer:
+    def make() -> HiSparseOffloadRuntime:
         c = _make_hisparse_offload_layer(
             top_k=top_k,
             device_buffer_size=buf,
@@ -1721,7 +1721,7 @@ def test_hisparse_apply_plan_matches_independent():
         (num_blocks, block_size, row_width), dtype=torch.float32
     ).pin_memory()
 
-    def make() -> HiSparseOffloadLayer:
+    def make() -> HiSparseOffloadRuntime:
         c = _make_hisparse_offload_layer(
             top_k=top_k,
             device_buffer_size=buf,

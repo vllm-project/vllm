@@ -222,7 +222,7 @@ def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
     )
 
 
-def release_pinned_state(layers: list[HiSparseOffloadLayer]) -> None:
+def release_pinned_state(layers: list[HiSparseOffloadRuntime]) -> None:
     """Synchronize, unregister host KV pools, and drop global state."""
     global _CURRENT_INDEX_GROUP
 
@@ -362,7 +362,7 @@ class _GroupPlan:
 _PINNED_HOST_POOLS: list[torch.Tensor] = []
 _INDEXER_SOURCES: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 _HOST_WRITE_EVENTS: dict[str, torch.Event] = {}
-_CURRENT_INDEX_GROUP: tuple[object, HiSparseOffloadLayer | None] | None = None
+_CURRENT_INDEX_GROUP: tuple[object, HiSparseOffloadRuntime | None] | None = None
 
 
 @cache
@@ -375,7 +375,7 @@ def _get_copy_stream(device: torch.device) -> torch.Stream:
     return torch.Stream(device=device)
 
 
-class HiSparseOffloadLayer:
+class HiSparseOffloadRuntime:
     """Store-owned host/hot data plane for one sparse MLA KV layer."""
 
     def __init__(
@@ -441,8 +441,8 @@ class HiSparseOffloadLayer:
         self._swap_stats = torch.zeros(2, dtype=torch.uint64, device=self.device)
         self.stats_row_bytes = row_bytes
         self._plan = _get_group_plan(self.device, max_num_reqs, config.top_k)
-        self.group_shared: list[HiSparseOffloadLayer] = []
-        self.leader: HiSparseOffloadLayer | None = None
+        self.group_shared: list[HiSparseOffloadRuntime] = []
+        self.leader: HiSparseOffloadRuntime | None = None
         self._prefetch_event: torch.Event | None = None
         self._copy_stream = _get_copy_stream(self.device)
 
@@ -451,7 +451,7 @@ class HiSparseOffloadLayer:
         self.resident_source_index = -1
         self.request_state_indices: torch.Tensor | None = None
 
-    def join_group(self, leader: HiSparseOffloadLayer) -> None:
+    def join_group(self, leader: HiSparseOffloadRuntime) -> None:
         self.leader = leader
         self._plan = leader._plan
         leader.group_shared.append(self)
@@ -621,7 +621,7 @@ class HiSparseOffloadLayer:
     def swap_in(
         self,
         *,
-        resident: HiSparseLayer | None = None,
+        resident: HiSparseCacheHandle | None = None,
         request_state_indices: torch.Tensor | None = None,
         req_id_per_token: torch.Tensor,
         block_table: torch.Tensor,
@@ -756,10 +756,10 @@ class HiSparseOffloadLayer:
         return self.hot.attention_cache, attention_indices
 
 
-class HiSparseLayer:
+class HiSparseCacheHandle:
     """Attention-facing handle for resident KV and sparse offload state."""
 
-    def __init__(self, offload: HiSparseOffloadLayer) -> None:
+    def __init__(self, offload: HiSparseOffloadRuntime) -> None:
         self.view: PagedCacheView | None = None
         self.block_table: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None
@@ -902,7 +902,7 @@ def create_hisparse_layer(
     device: torch.device | str | None = None,
     storage_block_size: int | None = None,
     row_value_bytes: int | None = None,
-) -> HiSparseLayer | None:
+) -> HiSparseCacheHandle | None:
     config = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k)
     if config is None:
         return None
@@ -913,7 +913,7 @@ def create_hisparse_layer(
             current_platform.device_type, torch.accelerator.current_device_index()
         )
 
-    offload = HiSparseOffloadLayer(
+    offload = HiSparseOffloadRuntime(
         config=config,
         max_num_reqs=max_num_reqs,
         row_width=row_width,
@@ -937,4 +937,4 @@ def create_hisparse_layer(
         config.host_pool_gib,
         max_num_reqs,
     )
-    return HiSparseLayer(offload)
+    return HiSparseCacheHandle(offload)

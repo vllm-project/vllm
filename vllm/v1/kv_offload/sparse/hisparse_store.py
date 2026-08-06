@@ -29,7 +29,7 @@ from vllm.v1.kv_offload.sparse.base import (
     SparseKVPageTransfer,
 )
 from vllm.v1.kv_offload.sparse.hisparse_layer import (
-    HiSparseLayer,
+    HiSparseCacheHandle,
     register_host_write_event,
     register_indexer_source,
     release_pinned_state,
@@ -56,7 +56,7 @@ def _expand_source_block_ids(
 
 def _get_hisparse_layer(
     forward_context: dict[str, Any], layer_name: str
-) -> HiSparseLayer:
+) -> HiSparseCacheHandle:
     layer = forward_context[layer_name]
     hisparse_layer = getattr(layer, "hisparse_layer", None)
     if hisparse_layer is None:
@@ -71,7 +71,7 @@ class HiSparseOffloadWorker:
     def __init__(
         self,
         cache_pairs: list[tuple[torch.Tensor, torch.Tensor]],
-        layers: list[HiSparseLayer],
+        layers: list[HiSparseCacheHandle],
         hot_backing: torch.Tensor,
         max_num_reqs: int,
         max_model_len: int,
@@ -507,7 +507,7 @@ def init_hisparse_worker(
         resident_source_index += 1
 
     hot_backing: torch.Tensor | None = None
-    layers: list[HiSparseLayer] = []
+    layers: list[HiSparseCacheHandle] = []
     for group_id, group in enumerate(groups):
         if not isinstance(group.kv_cache_spec, HiSparseHotSpec):
             continue

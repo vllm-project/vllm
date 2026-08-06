@@ -65,7 +65,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 from vllm.v1.kv_offload.sparse.hisparse_layer import (
-    HiSparseLayer,
+    HiSparseCacheHandle,
     create_hisparse_layer,
 )
 
@@ -336,7 +336,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if prefix:
             compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])
-        self.hisparse_layer: HiSparseLayer | None = None
+        self.hisparse_layer: HiSparseCacheHandle | None = None
         if (
             vllm_config.attention_config.hisparse_config is not None
             and self.compress_ratio == 4

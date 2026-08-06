@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_offload.sparse.hisparse_layer import (
     FP8_DS_MLA_ROW_BYTES,
-    HiSparseLayer,
+    HiSparseCacheHandle,
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
     create_hisparse_layer,
@@ -538,7 +538,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             else topk_indices_buffer
         )
 
-        self.hisparse_layer: HiSparseLayer | None = None
+        self.hisparse_layer: HiSparseCacheHandle | None = None
         vllm_config = get_current_vllm_config()
         if vllm_config.attention_config.hisparse_config is not None:
             if kv_cache_dtype == "fp8_ds_mla":
