@@ -7364,9 +7364,7 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
 
-        layout = resolve_kv_cache_layout(
-            tuple(g.backend for g in self._attn_group_iterator())
-        )
+        layout = resolve_kv_cache_layout()
         kv_caches = self._allocate_and_reshape_kv_cache(
             kv_cache_config, kernel_block_sizes, layout=layout
         )

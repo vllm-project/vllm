@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
@@ -172,58 +171,89 @@ def get_flashinfer_layout_string() -> str:
 
 
 def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):
-    """Override the KV cache layout (for tests and platform constraints)."""
-    global _KV_CACHE_LAYOUT_OVERRIDE
+    """Install a test-only layout override (highest priority)."""
+    global _KV_CACHE_LAYOUT_OVERRIDE, _RESOLVED_KV_CACHE_LAYOUT
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
-    resolve_kv_cache_layout.cache_clear()
+    _RESOLVED_KV_CACHE_LAYOUT = None
 
 
-@functools.lru_cache
-def resolve_kv_cache_layout(
-    attn_backends: tuple[type[AttentionBackend], ...] | None = None,
-) -> KVCacheLayout:
-    """Resolve the physical KV cache layout from the config priority chain.
+_RESOLVED_KV_CACHE_LAYOUT: KVCacheLayout | None = None
 
-    Priority:
-      1. Runtime override (set_kv_cache_layout, used by tests)
-      2. VLLM_KV_CACHE_LAYOUT env var (user override)
-      3. Connector's get_required_kvcache_layout() preference
-      4. "LBHNC" fallback
-    """
-    global _KV_CACHE_LAYOUT_OVERRIDE
-    layout_name: str | None
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        layout_name = _KV_CACHE_LAYOUT_OVERRIDE
-    else:
-        layout_name = envs.VLLM_KV_CACHE_LAYOUT
 
-        if layout_name is None and attn_backends is not None:
-            required_layouts = set(
-                backend.get_required_kv_cache_layout() for backend in attn_backends
-            )
-            required_layouts.discard(None)
-            if len(required_layouts) > 1:
-                raise ValueError(
-                    f"Multiple required KV cache layouts: {required_layouts}. "
-                    f"All backends must use the same layout."
-                )
-            if len(required_layouts) == 1:
-                layout_name = required_layouts.pop()
-
-        if layout_name is None:
-            layout_name = get_kv_connector_cache_layout()
-
-        layout_name = layout_name or "LBHNC"
+def _layout_from_name(layout_name: str) -> KVCacheLayout:
     layout_name = _LAYOUT_COMPAT_ALIASES.get(layout_name, layout_name)
     try:
-        layout = KVCacheLayout[layout_name]
+        return KVCacheLayout[layout_name]
     except KeyError:
         raise ValueError(
             f"Unknown KV cache layout {layout_name!r}. "
             f"Valid layouts: {[m.name for m in KVCacheLayout]}"
         ) from None
-    logger.debug_once("Resolved KV cache layout: %s", layout)
-    return layout
+
+
+def initialize_kv_cache_layout(
+    backend: type[AttentionBackend], cache_config=None
+) -> None:
+    """Resolve the layout once at backend selection and publish it.
+
+    Single writer for the resolved layout: stores it on
+    ``cache_config.kv_cache_layout`` (serialized with the config) and in a
+    process-local mirror for callers without a config handle. Priority is
+    main-parity: a backend-required layout silently corrects the env var.
+    """
+    global _RESOLVED_KV_CACHE_LAYOUT
+    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
+        return
+    layout_name = backend.get_required_kv_cache_layout()
+    if layout_name is not None:
+        logger.info_once(
+            "Using %s KV cache layout for %s backend.",
+            layout_name,
+            backend.get_name(),
+        )
+    elif _RESOLVED_KV_CACHE_LAYOUT is not None:
+        # A previously selected backend's requirement (or the default chain)
+        # already published; a no-requirement backend must not clobber it.
+        if cache_config is not None and cache_config.kv_cache_layout is None:
+            cache_config.kv_cache_layout = _RESOLVED_KV_CACHE_LAYOUT.name
+        return
+    else:
+        layout_name = envs.VLLM_KV_CACHE_LAYOUT
+    if layout_name is None:
+        layout_name = get_kv_connector_cache_layout()
+    layout = _layout_from_name(layout_name or "LBNHC")
+    _RESOLVED_KV_CACHE_LAYOUT = layout
+    if cache_config is not None:
+        cache_config.kv_cache_layout = layout.name
+
+
+def resolve_kv_cache_layout() -> KVCacheLayout:
+    """Return the resolved physical KV cache layout.
+
+    Read-only: prefers the test override, then the value published by
+    ``initialize_kv_cache_layout`` (via the process mirror or the current
+    vllm config), then falls back to env > connector > LBNHC for processes
+    where backend selection never runs (e.g. the engine core).
+    """
+    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
+        return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
+    if _RESOLVED_KV_CACHE_LAYOUT is not None:
+        return _RESOLVED_KV_CACHE_LAYOUT
+
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if (
+        vllm_config is not None
+        and vllm_config.cache_config is not None
+        and vllm_config.cache_config.kv_cache_layout is not None
+    ):
+        return _layout_from_name(vllm_config.cache_config.kv_cache_layout)
+
+    layout_name = envs.VLLM_KV_CACHE_LAYOUT
+    if layout_name is None:
+        layout_name = get_kv_connector_cache_layout()
+    return _layout_from_name(layout_name or "LBNHC")
 
 
 @dataclass

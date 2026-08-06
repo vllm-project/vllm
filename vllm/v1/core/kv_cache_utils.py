@@ -1260,9 +1260,11 @@ def _validate_layout_compatibility(
     """Ensure [H, N, C] is contiguous when layers sharing a tensor differ."""
     layout = resolve_kv_cache_layout()
 
-    # The per-layer-per-block content [H, N, C] is contiguous therefore
-    # these layouts are always valid.
-    if layout in (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC):
+    # Layer-compact layouts keep every slot an independent byte range, so
+    # layers sharing a tensor may have different (H, C) splits; each group's
+    # reshape produces its own correct view. BLHNC's block interior is
+    # [H, N, C]-contiguous, which is likewise always valid.
+    if layout.is_layer_compact or layout is KVCacheLayout.BLHNC:
         return
 
     layer_spec_map: dict[str, KVCacheSpec] = {}
@@ -1287,8 +1289,8 @@ def _validate_layout_compatibility(
                 f"Groups {kv_cache_groups} share a KVCacheTensor but"
                 f" have different (num_heads, state_content_size_bytes)"
                 f" for layers {all_layer_names}. Use a layout where"
-                f" [H, N, C] is contiguous (e.g."
-                f" VLLM_KV_CACHE_LAYOUT=LBHNC or BLHNC)."
+                f" the layer dim is outermost (e.g."
+                f" VLLM_KV_CACHE_LAYOUT=LBNHC or LBHNC)."
             )
 
 

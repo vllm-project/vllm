@@ -87,6 +87,13 @@ class CPUAttentionBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
 
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        # The CPU backend only reads head-major block interiors; declare
+        # the requirement so an NHD-style env override is corrected
+        # instead of failing at first forward (main parity).
+        return "LBHNC"
+
     @staticmethod
     def get_name() -> str:
         return "CPU_ATTN"

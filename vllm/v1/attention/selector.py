@@ -164,11 +164,19 @@ def get_attn_backend(
         )
         backend = attention_config.backend_per_kind.get(kind.value, backend)
 
-    return _cached_get_attn_backend(
+    selected = _cached_get_attn_backend(
         backend=backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
     )
+
+    # Publish the resolved KV cache layout so allocation, validation, and
+    # connectors all read the same value (a backend-required layout wins;
+    # otherwise first selection publishes the env/connector/default chain).
+    from vllm.v1.attention.backends.utils import initialize_kv_cache_layout
+
+    initialize_kv_cache_layout(selected, vllm_config.cache_config)
+    return selected
 
 
 @cache
