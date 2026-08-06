@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -27,6 +28,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.bailing_moe_v3 import (
     BailingMoeV3MLAAttention,
     BailingMoeV3MoE,
+    _get_linear_quant_config,
+    _is_serialized_block_fp8,
+    _maybe_pad_block_fp8_shared_expert_checkpoint_tensor,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
@@ -79,7 +83,22 @@ class BailingMoeV3MultiTokenPredictorLayer(nn.Module):
         self.layer_id = layer_id
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        eh_prefix = maybe_prefix(prefix, "eh_proj")
+        eh_quant_config = _get_linear_quant_config(vllm_config.quant_config, eh_prefix)
+        if _is_serialized_block_fp8(eh_quant_config):
+            self.eh_proj = ReplicatedLinear(
+                config.hidden_size * 2,
+                config.hidden_size,
+                bias=False,
+                quant_config=eh_quant_config,
+                prefix=eh_prefix,
+                return_bias=False,
+            )
+        else:
+            # Keep the BF16 module and weight-loading path unchanged.
+            self.eh_proj = nn.Linear(
+                config.hidden_size * 2, config.hidden_size, bias=False
+            )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.self_attn = BailingMoeV3MLAAttention(
             config,
@@ -217,6 +236,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
     ) -> None:
         super().__init__()
         self.config = _get_draft_hf_config(vllm_config)
+        self.quant_config = vllm_config.quant_config
         self.model = BailingMoeV3MultiTokenPredictor(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -349,6 +369,12 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
             if spec_layer is None:
                 continue
             name = normalize_name(name)
+            loaded_weight = _maybe_pad_block_fp8_shared_expert_checkpoint_tensor(
+                self.quant_config,
+                self.config,
+                name,
+                loaded_weight,
+            )
 
             loaded = False
             for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
