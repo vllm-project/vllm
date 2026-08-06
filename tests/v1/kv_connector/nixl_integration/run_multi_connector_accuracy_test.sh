@@ -70,25 +70,6 @@ KV_CONFIG_NORMAL='{
 # Remove whitespace for CLI safety
 KV_CONFIG_NORMAL=$(echo "$KV_CONFIG_NORMAL" | tr -d '[:space:]')
 
-<<<<<<< HEAD
-# Cross-layer layout: both connectors prefer cross-layer blocks.
-KV_CONFIG_CROSS_LAYERS='{
-  "kv_connector":"MultiConnector",
-  "kv_role":"kv_both",
-  "kv_connector_extra_config":{
-    "connectors":[
-      {"kv_connector":"NixlConnector","kv_role":"kv_both",
-       "kv_buffer_device":"'$KV_BUFFER_DEVICE'",
-       "kv_connector_extra_config":{"enable_cross_layers_blocks":"True"}},
-      {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
-       "kv_connector_extra_config":{"cpu_bytes_to_use":1000000000}}
-    ]
-  }
-}'
-KV_CONFIG_CROSS_LAYERS=$(echo "$KV_CONFIG_CROSS_LAYERS" | tr -d '[:space:]')
-
-=======
->>>>>>> de4d1fd33c ([KVCache] Standardize KV cache layout and remove legacy shape/stride APIs)
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 trap 'kill $(jobs -pr) 2>/dev/null' SIGINT SIGTERM EXIT
@@ -138,13 +119,8 @@ run_tests_for_model() {
 
   # ── Start prefill instance ──
   echo "Starting prefill instance on GPU $PREFILL_GPU, port $PREFILL_PORT"
-<<<<<<< HEAD
   BASE_CMD="$DEVICE_VISIBILITY_ENV=$PREFILL_GPU \
-    VLLM_KV_CACHE_LAYOUT='HND' \
-=======
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU \
     VLLM_KV_CACHE_LAYOUT='${VLLM_KV_CACHE_LAYOUT:-LBHNC}' \
->>>>>>> de4d1fd33c ([KVCache] Standardize KV cache layout and remove legacy shape/stride APIs)
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
     vllm serve $model_name \
@@ -169,13 +145,8 @@ run_tests_for_model() {
 
   # ── Start decode instance ──
   echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
-<<<<<<< HEAD
   BASE_CMD="$DEVICE_VISIBILITY_ENV=$DECODE_GPU \
-    VLLM_KV_CACHE_LAYOUT='HND' \
-=======
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU \
     VLLM_KV_CACHE_LAYOUT='${VLLM_KV_CACHE_LAYOUT:-LBHNC}' \
->>>>>>> de4d1fd33c ([KVCache] Standardize KV cache layout and remove legacy shape/stride APIs)
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \
     vllm serve $model_name \
