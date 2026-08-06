@@ -180,23 +180,21 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
 
 def _trtllm_bf16_lora_supported(moe_config: FusedMoEConfig) -> bool:
     """Gate for routing LoRA-enabled BF16 MoE to the FlashInfer TRT-LLM
-    gemm1_lora_delta path (PR #3153). Conservative: device + routing method;
-    the experts class's own _supports_* checks and the modular_kernel LoRA
-    gate provide the final filtering.
+    gemm1_lora_delta path (PR #3153).
     """
     from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
         TrtLlmBf16LoRAExperts,
     )
 
-    if not TrtLlmBf16LoRAExperts._supports_current_device():
-        return False
-    if not TrtLlmBf16LoRAExperts._supports_routing_method(
-        moe_config.routing_method, None, None
-    ):
-        return False
-    if not TrtLlmBf16LoRAExperts._supports_parallel_config(
-        moe_config.moe_parallel_config
-    ):
+    # LoRA path returns before the oracle loop; reuse is_supported_config here.
+    supported, _ = TrtLlmBf16LoRAExperts.is_supported_config(
+        TrtLlmBf16LoRAExperts,
+        moe_config,
+        None,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    if not supported:
         return False
     # The flashinfer trtllm fused-MoE kernel requires the per-partition
     # intermediate size to be a multiple of 128. Plain TP shards the MoE
