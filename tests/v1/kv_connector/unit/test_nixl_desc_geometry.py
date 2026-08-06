@@ -100,6 +100,24 @@ class _RecordingNixl:
         pass
 
 
+@pytest.mark.cpu_test
+def test_local_descriptors_follow_each_region_pool_capacity():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.device_id = 0
+    worker.block_len_per_layer = [16, 16]
+    worker.region_strides = [16, 16]
+    worker.region_num_blocks = [2, 3]
+
+    descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
+
+    assert descriptors[:, 0].tolist() == [100, 116, 1000, 1016, 1032]
+
+
 def test_packed_cache_initializes_descriptor_region_metadata():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
@@ -130,6 +148,7 @@ def test_packed_cache_initializes_descriptor_region_metadata():
     worker.nixl_wrapper.get_agent_metadata.return_value = b"metadata"
     worker._registered_descs = []
     worker.dst_num_blocks = {}
+    worker.dst_region_num_blocks = {}
     worker.src_xfer_handles_by_block_size = {}
     worker.kv_caches_base_addr = defaultdict(dict)
     worker._mamba_ssm_size = (0, 0)
@@ -137,6 +156,7 @@ def test_packed_cache_initializes_descriptor_region_metadata():
     worker._physical_blocks_per_logical_kv_block = 1
     worker.region_mem_types = []
     worker.region_group_ids = []
+    worker.region_num_blocks = []
     worker._mixed_mem_types = False
     worker._region_is_mla = []
 
@@ -179,7 +199,7 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroupRole, MLAAttentionSpec
 
     num_blocks = 4
     allocated_blocks = 6
@@ -215,6 +235,7 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
     worker.nixl_wrapper = _RecordingNixl()
     worker._registered_descs = []
     worker.dst_num_blocks = {}
+    worker.dst_region_num_blocks = {}
     worker.src_xfer_handles_by_block_size = {}
     worker.kv_caches_base_addr = defaultdict(dict)
     worker._mamba_ssm_size = (0, 0)
@@ -225,6 +246,7 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
     worker.region_mem_types = []
     worker.region_strides = []
     worker.region_group_ids = []
+    worker.region_num_blocks = []
     worker._mixed_mem_types = False
     worker._region_is_mla = []
     worker.block_len_per_layer = []
@@ -236,8 +258,13 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
     worker.kv_buffer_device = "cuda"
     worker._layer_specs = {name: spec for name in caches}
     worker._layer_group_ids = {name: group_id for group_id, name in enumerate(caches)}
+    worker._transfer_groups = [MagicMock(), MagicMock()]
+    for group in worker._transfer_groups:
+        group.role = KVCacheGroupRole.DEFAULT
+        group.block_pool_id = 0
     worker.kv_cache_config = MagicMock()
     worker.kv_cache_config.kv_cache_tensors = [MagicMock(), MagicMock()]
+    worker.kv_cache_config.num_blocks_by_pool = [num_blocks]
 
     transfer_topology = MagicMock()
     transfer_topology.cross_layers_blocks = False
@@ -274,6 +301,7 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
         type=NixlAgentMetadata,
     )
     assert metadata.region_strides == [block_stride, block_stride]
+    assert metadata.region_num_blocks == [num_blocks, num_blocks]
 
 
 def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):

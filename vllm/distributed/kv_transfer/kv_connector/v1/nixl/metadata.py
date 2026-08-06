@@ -42,8 +42,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Add packed KV cache region strides to NixlAgentMetadata
+#   7: Add per-region block counts for independently sized cache pools
 #
-NIXL_CONNECTOR_VERSION: int = 6
+NIXL_CONNECTOR_VERSION: int = 7
 
 
 @dataclass
@@ -60,6 +61,7 @@ class NixlAgentMetadata:
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
     region_strides: list[int] | None = None
+    region_num_blocks: list[int] | None = None
 
 
 @dataclass
