@@ -72,6 +72,19 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
+def _private_hisparse_parallel_config():
+    return SimpleNamespace(
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        world_size=1,
+        distributed_executor_backend="uni",
+        nnodes_within_dp=1,
+        data_parallel_index=0,
+    )
+
+
 @pytest.mark.parametrize(
     ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
     [
@@ -111,8 +124,8 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
             hf_config=SimpleNamespace(index_topk=128),
             max_model_len=block_size,
         ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        parallel_config=_private_hisparse_parallel_config(),
     )
     indexer_spec = specs["model.layers.0.self_attn.indexer"]
     assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == (
@@ -207,6 +220,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
         ),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        parallel_config=_private_hisparse_parallel_config(),
     )
 
     cache_config = kv_cache_utils._get_hisparse_hma_config(

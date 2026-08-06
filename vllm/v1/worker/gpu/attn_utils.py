@@ -32,8 +32,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.sparse.hisparse_runtime import (
-    allocate_pinned_host_pool,
-    check_hisparse_host_memory,
+    allocate_hisparse_host_pools,
 )
 from vllm.v1.kv_offload.sparse.hisparse_worker import (
     HiSparseWorker,
@@ -48,6 +47,7 @@ from vllm.v1.worker.utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 logger = init_logger(__name__)
@@ -220,22 +220,33 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-) -> tuple[dict[str, torch.Tensor], list[torch.Tensor]]:
-    host_bytes = sum(
-        tensor.size
-        for tensor in kv_cache_config.kv_cache_tensors
-        if tensor.host_resident
-    )
-    if host_bytes:
-        check_hisparse_host_memory(host_bytes)
+    vllm_config: VllmConfig,
+) -> tuple[
+    dict[str, torch.Tensor], list[torch.Tensor], "SharedOffloadRegion | None"
+]:
+    host_tensor_configs = [
+        tensor for tensor in kv_cache_config.kv_cache_tensors if tensor.host_resident
+    ]
+    shared_host_region = None
+    host_tensors: list[torch.Tensor] = []
+    pinned_host_pools: list[torch.Tensor] = []
+    if host_tensor_configs:
+        host_num_blocks = kv_cache_config.hisparse_host_num_blocks
+        assert host_num_blocks is not None
+        host_tensors, pinned_host_pools, shared_host_region = (
+            allocate_hisparse_host_pools(
+                vllm_config,
+                [tensor.size for tensor in host_tensor_configs],
+                host_num_blocks,
+            )
+        )
+    host_tensor_iter = iter(host_tensors)
 
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     packed_backings: dict[int, torch.Tensor] = {}
-    pinned_host_pools: list[torch.Tensor] = []
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         if kv_cache_tensor.host_resident:
-            tensor, registered_pool = allocate_pinned_host_pool(kv_cache_tensor.size)
-            pinned_host_pools.append(registered_pool)
+            tensor = next(host_tensor_iter)
         elif kv_cache_tensor.block_stride > 0:
             assert kv_cache_tensor.block_pool_id is not None
             # Allocate once; all packed tensors alias the same backing.
@@ -258,7 +269,7 @@ def _allocate_kv_cache(
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
-    return kv_cache_raw_tensors, pinned_host_pools
+    return kv_cache_raw_tensors, pinned_host_pools, shared_host_region
 
 
 def _kv_first_layers_sharing_pool_with_mamba(
@@ -590,8 +601,8 @@ def init_kv_cache(
     block_tables: "BlockTables",
 ) -> tuple[dict[str, Any], "HiSparseWorker | None"]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors, pinned_host_pools = _allocate_kv_cache(
-        kv_cache_config, shared_kv_cache_layers, device
+    kv_cache_raw_tensors, pinned_host_pools, shared_host_region = _allocate_kv_cache(
+        kv_cache_config, shared_kv_cache_layers, device, vllm_config
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
     kv_caches = _reshape_kv_cache(
@@ -615,6 +626,7 @@ def init_kv_cache(
             max_model_len=vllm_config.model_config.max_model_len,
             max_concurrent_batches=vllm_config.max_concurrent_batches,
             device=device,
+            shared_host_region=shared_host_region,
         )
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
     # decoder layer, so a layer name carries two integers (layer + module index).

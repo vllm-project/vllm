@@ -39,6 +39,7 @@ from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
@@ -82,8 +83,10 @@ class HiSparseWorker:
         device: torch.device,
         pinned_host_pools: list[torch.Tensor],
         indexer_source_layers: list[Any],
+        shared_host_region: SharedOffloadRegion | None = None,
     ) -> None:
         self.cache_pairs = cache_pairs
+        self.shared_host_region = shared_host_region
         kernel_block_size = cache_pairs[0][0].shape[1]
         self.kernel_block_size = kernel_block_size
         self.blocks_per_kv_block = blocks_per_kv_block
@@ -403,7 +406,9 @@ class HiSparseWorker:
             layer.hisparse_indexer_source = None
         self.indexer_source_layers.clear()
         release_pinned_state(
-            [cache.runtime for cache in self.cache_handles], self.pinned_host_pools
+            [cache.runtime for cache in self.cache_handles],
+            self.pinned_host_pools,
+            self.shared_host_region,
         )
 
     def restore_prefix(
@@ -483,6 +488,7 @@ def init_hisparse_worker(
     max_concurrent_batches: int,
     device: torch.device,
     pinned_host_pools: list[torch.Tensor],
+    shared_host_region: SharedOffloadRegion | None,
 ) -> HiSparseWorker:
     tensor_configs = {
         name: tensor_config
@@ -516,14 +522,26 @@ def init_hisparse_worker(
         source_block_size = source_spec.storage_block_size
         assert source_block_size % kernel_block_size == 0
         blocks_per_kv_block = source_block_size // kernel_block_size
+        raw_tensor = raw_tensors[cache_name]
         kernel_page_stride = (
             gpu_indexer_spec.page_size_bytes // source_spec.dtype.itemsize
         )
         assert source_spec.page_size_bytes == (
             blocks_per_kv_block * gpu_indexer_spec.page_size_bytes
         )
+        if raw_tensor.ndim == 2:
+            if blocks_per_kv_block != 1:
+                raise ValueError(
+                    "Shared HiSparse host pools require one kernel page per "
+                    "scheduler block."
+                )
+            kernel_page_stride = (
+                raw_tensor.stride(0)
+                * raw_tensor.element_size()
+                // source_spec.dtype.itemsize
+            )
         source_cache = torch.as_strided(
-            raw_tensors[cache_name].view(source_spec.dtype),
+            raw_tensor.view(source_spec.dtype),
             size=(
                 host_num_blocks * blocks_per_kv_block,
                 kernel_block_size,
@@ -627,4 +645,5 @@ def init_hisparse_worker(
         device,
         pinned_host_pools,
         indexer_source_layers,
+        shared_host_region,
     )
