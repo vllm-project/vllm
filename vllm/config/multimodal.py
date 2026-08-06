@@ -144,6 +144,11 @@ class MultiModalConfig:
 
     For example, for Phi-3-Vision:
     `{"num_crops": 4}`."""
+    mm_device_do_normalize: bool | None = True
+    """
+    Move the do_normalize computation in the mm preprocessing to before the ViT, 
+    and let the device do it, so that CPU computation can be saved.
+    """
     mm_processor_cache_gb: float = Field(default=4, ge=0)
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.
@@ -474,6 +479,7 @@ class MultiModalConfig:
             self.mm_encoder_tp_mode,
             self.mm_encoder_attn_dtype,
             self.mm_encoder_fp8_scale_path,
+            self.mm_device_do_normalize,
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -503,6 +509,9 @@ class MultiModalConfig:
         according to the extra arguments passed during inference.
         """
         kwargs = self.mm_processor_kwargs or {}
+        if self.mm_device_do_normalize:
+            kwargs["do_normalize"] = False
+            kwargs["do_rescale"] = False
         return kwargs | dict(inference_kwargs)
 
     def use_gpu_video_backend(self) -> bool:
