@@ -14,8 +14,8 @@ from tests.quantization.utils import (
     is_quant_method_supported,
 )
 from vllm import _custom_ops as ops
-from vllm.distributed import parallel_state
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.distributed import parallel_state
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
