@@ -183,7 +183,7 @@ class KVConnectorBase_V1(ABC):
 
     @property
     def supports_eagle_prefix_cache_hashing(self) -> bool:
-        """Whether lookup and stores honor successor-aware EAGLE cache keys."""
+        """Whether this engine can use successor-aware EAGLE cache keys."""
         return False
 
     @property

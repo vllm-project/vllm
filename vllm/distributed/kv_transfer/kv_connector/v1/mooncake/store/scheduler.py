@@ -33,19 +33,9 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-def _eagle_hashing_enabled(request: Request) -> bool:
-    return getattr(request, "eagle_hashing_enabled", False) is True
-
-
-def _transfer_hashes(request: Request) -> list[BlockHash]:
-    if _eagle_hashing_enabled(request):
-        return request.kv_transfer_block_hashes
-    return request.block_hashes
-
-
-def _materialized_transfer_hashes(request: Request) -> list[BlockHash]:
-    if _eagle_hashing_enabled(request):
-        return request.materialized_kv_transfer_block_hashes
+def _materialized_hashes(request: Request) -> list[BlockHash]:
+    if request.eagle_hashing_enabled:
+        return request.block_hashes[: request.num_materialized_block_hashes]
     return request.block_hashes
 
 
@@ -68,8 +58,8 @@ def _request_hashes_for_meta(
     load_spec: LoadSpec | None,
 ) -> list[BlockHash]:
     if load_spec is not None and load_spec.can_load:
-        return _transfer_hashes(request)
-    return _materialized_transfer_hashes(request)
+        return request.block_hashes
+    return _materialized_hashes(request)
 
 
 def _max_save_tokens(
@@ -78,12 +68,12 @@ def _max_save_tokens(
     load_spec: LoadSpec | None = None,
 ) -> int | None:
     if (
-        not _eagle_hashing_enabled(request)
+        not request.eagle_hashing_enabled
         or load_spec is not None
         and load_spec.can_load
     ):
         return None
-    return len(_materialized_transfer_hashes(request)) * hash_block_size
+    return request.num_materialized_block_hashes * hash_block_size
 
 
 class MooncakeStoreScheduler:
@@ -142,9 +132,9 @@ class MooncakeStoreScheduler:
         num_external_hit_tokens = self.client.lookup(
             request.request_id,
             request.num_tokens,
-            _transfer_hashes(request),
+            request.block_hashes,
             non_block=self.lookup_async,
-            apply_eagle=not _eagle_hashing_enabled(request),
+            apply_eagle=not request.eagle_hashing_enabled,
         )
         if num_external_hit_tokens is None:
             # Lookup not ready yet; scheduler will retry on a later step.
@@ -282,7 +272,7 @@ class MooncakeStoreScheduler:
                 skip_save=force_skip_save,
                 block_hashes=_request_hashes_for_meta(request_real, load_spec),
                 is_last_chunk=(request_tracker.token_len >= last_chunk_tokens_num),
-                eagle_hashing_enabled=_eagle_hashing_enabled(request_real),
+                eagle_hashing_enabled=request_real.eagle_hashing_enabled,
                 max_save_tokens=_max_save_tokens(
                     request_real, self._hash_block_size, load_spec
                 ),
@@ -300,7 +290,7 @@ class MooncakeStoreScheduler:
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if new_block_ids is None:
                     new_block_ids = tuple([] for _ in req_tuple[1])
-                if not new_block_ids and not (_eagle_hashing_enabled(req_tuple[0])):
+                if not new_block_ids and not req_tuple[0].eagle_hashing_enabled:
                     continue
 
                 req_meta = None
@@ -341,7 +331,7 @@ class MooncakeStoreScheduler:
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
-                        eagle_hashing_enabled=_eagle_hashing_enabled(request_real),
+                        eagle_hashing_enabled=request_real.eagle_hashing_enabled,
                         max_save_tokens=_max_save_tokens(
                             request_real, self._hash_block_size, load_spec
                         ),
@@ -372,11 +362,11 @@ class MooncakeStoreScheduler:
                         self._block_size,
                         load_spec=None,
                         skip_save=force_skip_save,
-                        block_hashes=_materialized_transfer_hashes(unfinished_req),
+                        block_hashes=_materialized_hashes(unfinished_req),
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
-                        eagle_hashing_enabled=_eagle_hashing_enabled(unfinished_req),
+                        eagle_hashing_enabled=unfinished_req.eagle_hashing_enabled,
                         max_save_tokens=_max_save_tokens(
                             unfinished_req, self._hash_block_size
                         ),
@@ -409,7 +399,7 @@ class MooncakeStoreScheduler:
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=_request_hashes_for_meta(unfinished_req, load_spec),
-                    eagle_hashing_enabled=_eagle_hashing_enabled(unfinished_req),
+                    eagle_hashing_enabled=unfinished_req.eagle_hashing_enabled,
                     max_save_tokens=None,
                 )
                 if req_meta is not None:
@@ -446,8 +436,8 @@ class MooncakeStoreScheduler:
                         req_id=req_id,
                         token_len_chunk=0,
                         block_ids=tracker.allocated_block_ids,
-                        block_hashes=_materialized_transfer_hashes(req_tuple[0]),
-                        eagle_hashing_enabled=_eagle_hashing_enabled(req_tuple[0]),
+                        block_hashes=_materialized_hashes(req_tuple[0]),
+                        eagle_hashing_enabled=req_tuple[0].eagle_hashing_enabled,
                         can_save=True,
                         num_prompt_tokens=tracker.prefill_end_tokens,
                         partial_tail_offloads=groups,
@@ -471,16 +461,16 @@ class MooncakeStoreScheduler:
         if tracker is None:
             return False, None
 
-        if _eagle_hashing_enabled(request):
+        if request.eagle_hashing_enabled:
             tracker.token_len = min(
                 request.num_tokens,
-                request.num_materialized_eagle_hashes * self._hash_block_size,
+                request.num_materialized_block_hashes * self._hash_block_size,
             )
             tracker.allocated_block_ids = tuple(group.copy() for group in block_ids)
             req_meta = ReqMeta.from_request_tracker(
                 tracker,
                 self._block_size,
-                block_hashes=_materialized_transfer_hashes(request),
+                block_hashes=_materialized_hashes(request),
                 is_last_chunk=True,
                 eagle_hashing_enabled=True,
                 max_save_tokens=_max_save_tokens(request, self._hash_block_size),

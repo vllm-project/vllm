@@ -443,16 +443,10 @@ class SingleTypeKVCacheManager(ABC):
                 a tail once per that-sized segment. Only SWA acts on it.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
-        use_eagle_hashes = (
-            self.use_eagle
-            and request.eagle_hashing_enabled
-            and not isinstance(self.kv_cache_spec, MambaSpec)
-        )
-        block_hashes = (
-            request.eagle_block_hashes if use_eagle_hashes else request.block_hashes
-        )
         resolved_block_hashes = resolve_block_hashes(
-            block_hashes, self.block_pool.hash_block_size, self.block_size
+            request.block_hashes,
+            self.block_pool.hash_block_size,
+            self.block_size,
         )
         num_full_blocks = min(num_tokens // self.block_size, len(resolved_block_hashes))
 
@@ -483,7 +477,6 @@ class SingleTypeKVCacheManager(ABC):
             block_size=self.block_size,
             kv_cache_group_id=self.kv_cache_group_id,
             block_mask=block_mask,
-            block_hashes=block_hashes,
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
@@ -831,11 +824,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
-            block_hashes=(
-                request.eagle_block_hashes
-                if self.use_eagle and request.eagle_hashing_enabled
-                else request.block_hashes
-            ),
         )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:

@@ -73,7 +73,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
-        eagle_block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        eagle_hashing_enabled: bool = False,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
@@ -203,13 +203,12 @@ class Request:
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []
-        self.eagle_block_hashes: list[BlockHash] = []
-        self.num_materialized_eagle_hashes = 0
+        self.num_materialized_block_hashes = 0
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
         self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
-        self._eagle_block_hasher = eagle_block_hasher
+        self.eagle_hashing_enabled = eagle_hashing_enabled
         self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
@@ -228,7 +227,7 @@ class Request:
         cls,
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
-        eagle_block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        eagle_hashing_enabled: bool = False,
     ) -> "Request":
         return cls(
             request_id=request.request_id,
@@ -245,7 +244,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
-            eagle_block_hasher=eagle_block_hasher,
+            eagle_hashing_enabled=eagle_hashing_enabled,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
@@ -269,21 +268,18 @@ class Request:
         """Compute block hashes for any new full blocks and append them."""
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
-        if self._eagle_block_hasher is not None:
-            self.eagle_block_hashes.extend(self._eagle_block_hasher(self))
 
     def truncate_block_hashes(self, num_tokens: int, hash_block_size: int) -> None:
         """Discard hashes whose token dependencies extend past ``num_tokens``."""
         if self._block_hasher is None:
             return
-        del self.block_hashes[num_tokens // hash_block_size :]
-        if self._eagle_block_hasher is not None:
-            num_eagle_hashes = max(num_tokens - 1, 0) // hash_block_size
-            del self.eagle_block_hashes[num_eagle_hashes:]
-            self.num_materialized_eagle_hashes = min(
-                self.num_materialized_eagle_hashes,
-                num_eagle_hashes,
-            )
+        num_hashes = max(num_tokens - int(self.eagle_hashing_enabled), 0)
+        num_hashes //= hash_block_size
+        del self.block_hashes[num_hashes:]
+        self.num_materialized_block_hashes = min(
+            self.num_materialized_block_hashes,
+            num_hashes,
+        )
 
     def mark_eagle_kv_materialized(
         self,
@@ -295,11 +291,11 @@ class Request:
             self.num_tokens,
             self.num_tokens if num_tokens is None else num_tokens,
         )
-        num_hashes = len(self.eagle_block_hashes)
+        num_hashes = len(self.block_hashes)
         if hash_block_size is not None:
             num_hashes = min(num_hashes, materialized_tokens // hash_block_size)
-        self.num_materialized_eagle_hashes = max(
-            self.num_materialized_eagle_hashes,
+        self.num_materialized_block_hashes = max(
+            self.num_materialized_block_hashes,
             num_hashes,
         )
 
@@ -308,28 +304,10 @@ class Request:
         num_hashes: int = 0,
     ) -> None:
         """Discard draft-KV readiness beyond a surviving resident prefix."""
-        self.num_materialized_eagle_hashes = min(
-            self.num_materialized_eagle_hashes,
+        self.num_materialized_block_hashes = min(
+            self.num_materialized_block_hashes,
             num_hashes,
         )
-
-    @property
-    def kv_transfer_block_hashes(self) -> list["BlockHash"]:
-        """Block hashes that prove every KV group transferred for this request."""
-        if self.eagle_hashing_enabled:
-            return self.eagle_block_hashes
-        return self.block_hashes
-
-    @property
-    def materialized_kv_transfer_block_hashes(self) -> list["BlockHash"]:
-        """Transfer hashes whose local KV contents are ready to export."""
-        if self.eagle_hashing_enabled:
-            return self.eagle_block_hashes[: self.num_materialized_eagle_hashes]
-        return self.block_hashes
-
-    @property
-    def eagle_hashing_enabled(self) -> bool:
-        return self._eagle_block_hasher is not None
 
     @property
     def use_structured_output(self) -> bool:

@@ -773,44 +773,131 @@ def get_request_eagle_block_hasher(
     """Return a hasher for EAGLE-safe prefix-cache blocks.
 
     A target block ending at position ``end - 1`` and the corresponding
-    EAGLE draft block together depend on the token at ``end``. Therefore an
-    EAGLE cache key extends the regular target block hash with that successor
-    token and its input identity. The resulting keys are still emitted once
-    per ``hash_block_size`` tokens; they only make the dependency at each
-    block boundary explicit.
+    EAGLE draft block together depend on the token at ``end``. Each hash
+    therefore covers one full block and records its successor token and input
+    identity in the hash extra keys. This preserves the normal block shape for
+    KV events while proving the EAGLE dependency at every block boundary.
     """
 
     def request_eagle_block_hasher(request: Request) -> list[BlockHash]:
-        block_idx = len(request.eagle_block_hashes)
+        start_token_idx = len(request.block_hashes) * hash_block_size
         num_tokens = request.num_tokens
         new_block_hashes: list[BlockHash] = []
-        curr_mm_idx = 0
+        curr_mm_idx = -1 if start_token_idx > 0 else 0
+        prev_block_hash_value = (
+            request.block_hashes[-1] if request.block_hashes else None
+        )
 
-        while block_idx < len(request.block_hashes):
-            successor_idx = (block_idx + 1) * hash_block_size
-            if successor_idx >= num_tokens:
-                break
-
-            successor_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+        while (end_token_idx := start_token_idx + hash_block_size) < num_tokens:
+            extra_keys, curr_mm_idx = generate_eagle_block_hash_extra_keys(
                 request,
-                successor_idx,
-                successor_idx + 1,
+                start_token_idx,
+                end_token_idx,
                 curr_mm_idx,
             )
-            eagle_extra_keys = ("eagle_successor", successor_extra_keys)
-            new_block_hashes.append(
-                hash_block_tokens(
-                    caching_hash_fn,
-                    request.block_hashes[block_idx],
-                    request.all_token_ids[successor_idx : successor_idx + 1],
-                    eagle_extra_keys,
-                )
+            block_hash = hash_block_tokens(
+                caching_hash_fn,
+                prev_block_hash_value,
+                request.all_token_ids[start_token_idx:end_token_idx],
+                extra_keys,
             )
-            block_idx += 1
+            new_block_hashes.append(block_hash)
+            prev_block_hash_value = block_hash
+            start_token_idx = end_token_idx
 
         return new_block_hashes
 
     return request_eagle_block_hasher
+
+
+def generate_eagle_block_hash_extra_keys(
+    request: Request,
+    start_token_idx: int,
+    end_token_idx: int,
+    start_mm_idx: int,
+) -> tuple[tuple[Any, ...], int]:
+    block_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+        request,
+        start_token_idx,
+        end_token_idx,
+        start_mm_idx,
+    )
+    successor_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+        request,
+        end_token_idx,
+        end_token_idx + 1,
+        curr_mm_idx,
+    )
+    return (
+        (
+            "eagle_successor",
+            block_extra_keys,
+            request.all_token_ids[end_token_idx],
+            successor_extra_keys,
+        ),
+        curr_mm_idx,
+    )
+
+
+def generate_request_block_hash_extra_keys(
+    request: Request,
+    start_token_idx: int,
+    end_token_idx: int,
+    start_mm_idx: int,
+) -> tuple[tuple[Any, ...] | None, int]:
+    if request.eagle_hashing_enabled:
+        return generate_eagle_block_hash_extra_keys(
+            request,
+            start_token_idx,
+            end_token_idx,
+            start_mm_idx,
+        )
+    return generate_block_hash_extra_keys(
+        request,
+        start_token_idx,
+        end_token_idx,
+        start_mm_idx,
+    )
+
+
+def get_request_block_hash_event_data(
+    request: Request,
+    block_idx: int,
+    block_size: int,
+    hash_block_size: int,
+) -> (
+    tuple[
+        BlockHash,
+        BlockHash | None,
+        int,
+        int,
+        tuple[Any, ...] | None,
+    ]
+    | None
+):
+    """Describe an individually emitted hash unit for a cache block."""
+    if not request.eagle_hashing_enabled or block_size == hash_block_size:
+        return None
+    assert block_size > hash_block_size
+    assert block_size % hash_block_size == 0
+
+    hash_end = (block_idx + 1) * block_size
+    hash_start = hash_end - hash_block_size
+    hash_idx = hash_end // hash_block_size - 1
+    parent_hash = request.block_hashes[hash_idx - 1] if hash_idx > 0 else None
+    extra_keys, _ = generate_request_block_hash_extra_keys(
+        request,
+        hash_start,
+        hash_end,
+        0,
+    )
+    return (
+        request.block_hashes[hash_idx],
+        parent_hash,
+        hash_start,
+        hash_end,
+        extra_keys,
+    )
 
 
 def _check_enough_kv_cache_memory(

@@ -80,6 +80,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     @property
+    def supports_eagle_prefix_cache_hashing(self) -> bool:
+        # Keep producer and consumer keys identical so decode-generated KV can
+        # be reused by a later prefill request.
+        return self._vllm_config.cache_config.enable_prefix_caching
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         if any(
             [

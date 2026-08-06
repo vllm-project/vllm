@@ -100,12 +100,12 @@ def make_request(
         pooling_params=None,
         lora_request=lora_request,
         cache_salt=cache_salt,
-        block_hasher=get_request_block_hasher(block_size, hash_fn),
-        eagle_block_hasher=(
+        block_hasher=(
             get_request_eagle_block_hasher(block_size, hash_fn)
             if use_eagle_hashes
-            else None
+            else get_request_block_hasher(block_size, hash_fn)
         ),
+        eagle_hashing_enabled=use_eagle_hashes,
         resumable=resumable,
     )
 
@@ -2598,6 +2598,7 @@ def test_eagle_identical_prompt_hits_last_safe_block():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        use_eagle_prefix_cache_hashing=True,
         hash_block_size=block_size,
     )
 
@@ -2644,6 +2645,7 @@ def test_eagle_with_partial_blocks():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        use_eagle_prefix_cache_hashing=True,
         hash_block_size=block_size,
     )
     # 2 full blocks + 5 tokens (non-divisible length)
@@ -2685,6 +2687,7 @@ def test_eagle_successor_token_controls_last_block_hit():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        use_eagle_prefix_cache_hashing=True,
         hash_block_size=block_size,
     )
 
@@ -2729,6 +2732,7 @@ def test_eagle_blocks_are_published_only_after_draft_materialization():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        use_eagle_prefix_cache_hashing=True,
         hash_block_size=block_size,
     )
     first = make_request(
@@ -2771,6 +2775,7 @@ def test_eagle_kv_events_publish_successor_hashes():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        use_eagle_prefix_cache_hashing=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
     )
@@ -2792,8 +2797,91 @@ def test_eagle_kv_events_publish_successor_hashes():
     assert isinstance(events[0], BlockStored)
     assert events[0].block_hashes == [
         kv_cache_utils.maybe_convert_block_hash(block_hash)
-        for block_hash in request.eagle_block_hashes
+        for block_hash in request.block_hashes
     ]
+    reconstructed_hashes = []
+    parent_hash = events[0].parent_block_hash
+    assert events[0].extra_keys is not None
+    for block_start, extra_keys in zip(
+        range(0, len(events[0].token_ids), block_size),
+        events[0].extra_keys,
+        strict=True,
+    ):
+        parent_hash = kv_cache_utils.hash_block_tokens(
+            sha256,
+            parent_hash,
+            events[0].token_ids[block_start : block_start + block_size],
+            extra_keys,
+        )
+        reconstructed_hashes.append(parent_hash)
+    assert reconstructed_hashes == request.block_hashes
+
+
+@pytest.mark.parametrize("reuse", [False, True], ids=["store", "reuse"])
+def test_eagle_kv_event_reconstructs_hash_with_coarser_cache_block(reuse: bool):
+    hash_block_size = 2
+    cache_block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    request = make_request(
+        "request",
+        list(range(cache_block_size * 2 + 1)),
+        hash_block_size,
+        sha256,
+        use_eagle_hashes=True,
+    )
+    blocks = pool.get_new_blocks(2)
+
+    pool.cache_full_blocks(
+        request=request,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=cache_block_size,
+        kv_cache_group_id=0,
+    )
+    if reuse:
+        pool.take_events()
+        pool.emit_cached_block_events(
+            request=request,
+            num_cached_blocks=2,
+            block_size=cache_block_size,
+            kv_cache_group_id=0,
+        )
+
+    events = pool.take_events()
+    assert len(events) == 2
+    expected_hashes = request.block_hashes[1::2]
+    for event, expected_hash in zip(events, expected_hashes, strict=True):
+        assert isinstance(event, BlockStored)
+        assert event.block_hashes == [
+            kv_cache_utils.maybe_convert_block_hash(expected_hash)
+        ]
+        assert event.extra_keys is not None
+
+        reconstructed_hashes = []
+        parent_hash = event.parent_block_hash
+        for block_start, extra_keys in zip(
+            range(0, len(event.token_ids), event.block_size),
+            event.extra_keys,
+            strict=True,
+        ):
+            parent_hash = kv_cache_utils.hash_block_tokens(
+                sha256,
+                parent_hash,
+                event.token_ids[block_start : block_start + event.block_size],
+                extra_keys,
+            )
+            reconstructed_hashes.append(parent_hash)
+
+        assert [
+            kv_cache_utils.maybe_convert_block_hash(block_hash)
+            for block_hash in reconstructed_hashes
+        ] == event.block_hashes
 
 
 def test_eagle_hash_is_published_when_successor_arrives():
@@ -2805,9 +2893,17 @@ def test_eagle_hash_is_published_when_successor_arrives():
         sha256,
         use_eagle_hashes=True,
     )
-    assert request.eagle_block_hashes == []
+    assert request.block_hashes == []
 
     request.append_output_token_ids(2)
+    assert request.block_hashes == [
+        kv_cache_utils.hash_block_tokens(
+            sha256,
+            None,
+            [0, 1],
+            ("eagle_successor", None, 2, None),
+        )
+    ]
 
     expected = make_request(
         "expected",
@@ -2816,13 +2912,12 @@ def test_eagle_hash_is_published_when_successor_arrives():
         sha256,
         use_eagle_hashes=True,
     )
-    assert request.eagle_block_hashes == expected.eagle_block_hashes
-    assert request.kv_transfer_block_hashes == request.eagle_block_hashes
-    assert request.materialized_kv_transfer_block_hashes == []
+    assert request.block_hashes == expected.block_hashes
+    assert request.num_materialized_block_hashes == 0
 
     request.mark_eagle_kv_materialized()
 
-    assert request.materialized_kv_transfer_block_hashes == (request.eagle_block_hashes)
+    assert request.num_materialized_block_hashes == len(request.block_hashes)
 
 
 def test_eagle_hashing_supports_resumable_requests():
@@ -2835,7 +2930,7 @@ def test_eagle_hashing_supports_resumable_requests():
         resumable=True,
     )
 
-    original_hash = request.eagle_block_hashes.copy()
+    original_hash = request.block_hashes.copy()
     assert request.eagle_hashing_enabled
     assert len(original_hash) == 1
 
@@ -2850,8 +2945,8 @@ def test_eagle_hashing_supports_resumable_requests():
         sha256,
         use_eagle_hashes=True,
     )
-    assert request.eagle_block_hashes == expected.eagle_block_hashes
-    assert request.eagle_block_hashes != original_hash
+    assert request.block_hashes == expected.block_hashes
+    assert request.block_hashes != original_hash
 
 
 def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
@@ -2887,6 +2982,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
+        use_eagle_prefix_cache_hashing=True,
         hash_block_size=hash_block_size,
     )
 

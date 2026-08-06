@@ -18,9 +18,10 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    generate_block_hash_extra_keys,
+    generate_request_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
+    get_request_block_hash_event_data,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
@@ -231,7 +232,6 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         block_mask: list[bool] | None = None,
-        block_hashes: list[BlockHash] | None = None,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -261,14 +261,15 @@ class BlockPool:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert block_mask is None or len(block_mask) == len(new_full_blocks)
-        if block_hashes is None:
-            block_hashes = request.block_hashes
-        resolved_block_hashes = resolve_block_hashes(
-            block_hashes, self.hash_block_size, block_size
+        block_hashes = resolve_block_hashes(
+            request.block_hashes, self.hash_block_size, block_size
         )
 
-        new_block_hashes = resolved_block_hashes[num_cached_blocks:]
+        new_block_hashes = block_hashes[num_cached_blocks:]
         new_hashes: list[ExternalBlockHash] | None = (
+            [] if self.enable_kv_cache_events else None
+        )
+        event_block_indices: list[int] | None = (
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
@@ -300,13 +301,24 @@ class BlockPool:
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+                assert event_block_indices is not None
+                event_block_indices.append(num_cached_blocks + i)
 
         if self.enable_kv_cache_events:
+            assert event_block_indices is not None
+            if self._emit_individual_block_stored_events(
+                request,
+                event_block_indices,
+                block_size,
+                kv_cache_group_id,
+            ):
+                return
+
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
                 parent_block_hash = maybe_convert_block_hash(
-                    resolved_block_hashes[num_cached_blocks - 1]
+                    block_hashes[num_cached_blocks - 1]
                 )
 
             # Calculate token range for the blocks being cached
@@ -326,7 +338,7 @@ class BlockPool:
                     continue
                 block_start = i * block_size
                 block_end = block_start + block_size
-                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
                     request, block_start, block_end, curr_mm_idx
                 )
                 extra_keys_list.append(extra_keys)
@@ -343,6 +355,37 @@ class BlockPool:
                     extra_keys_list=extra_keys_list,
                 )
             )
+
+    def _emit_individual_block_stored_events(
+        self,
+        request: Request,
+        block_indices: Iterable[int],
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> bool:
+        for block_idx in block_indices:
+            event_data = get_request_block_hash_event_data(
+                request,
+                block_idx,
+                block_size,
+                self.hash_block_size,
+            )
+            if event_data is None:
+                return False
+            block_hash, parent_hash, hash_start, hash_end, extra_keys = event_data
+            self.kv_event_queue.append(
+                self._build_block_stored_event(
+                    request,
+                    block_hashes=[maybe_convert_block_hash(block_hash)],
+                    parent_block_hash=parent_hash,
+                    start_token_idx=hash_start,
+                    end_token_idx=hash_end,
+                    block_size=self.hash_block_size,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=[extra_keys],
+                )
+            )
+        return True
 
     def _build_block_stored_event(
         self,
@@ -379,7 +422,6 @@ class BlockPool:
         num_cached_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
-        block_hashes: list[BlockHash] | None = None,
     ) -> None:
         """Generate BlockStored events for blocks reused from prefix cache.
 
@@ -396,11 +438,17 @@ class BlockPool:
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
             return
 
-        if block_hashes is None:
-            block_hashes = request.block_hashes
-        resolved_block_hashes = resolve_block_hashes(
-            block_hashes, self.hash_block_size, block_size
+        block_hashes = resolve_block_hashes(
+            request.block_hashes, self.hash_block_size, block_size
         )
+
+        if self._emit_individual_block_stored_events(
+            request,
+            range(num_cached_blocks),
+            block_size,
+            kv_cache_group_id,
+        ):
+            return
 
         # Collect external hashes and extra_keys for cached blocks.
         cached_hashes: list[ExternalBlockHash] = []
@@ -409,8 +457,8 @@ class BlockPool:
         for i in range(num_cached_blocks):
             block_start = i * block_size
             block_end = block_start + block_size
-            cached_hashes.append(maybe_convert_block_hash(resolved_block_hashes[i]))
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+            cached_hashes.append(maybe_convert_block_hash(block_hashes[i]))
+            extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
                 request, block_start, block_end, curr_mm_idx
             )
             extra_keys_list.append(extra_keys)
@@ -455,7 +503,6 @@ class BlockPool:
         num_tokens: int,
         kv_cache_group_id: int,
         block_size: int,
-        block_hashes: list[BlockHash] | None = None,
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
@@ -494,9 +541,7 @@ class BlockPool:
         assert block_size > self.hash_block_size
         assert block_size % self.hash_block_size == 0
         assert num_tokens % block_size != 0
-        if block_hashes is None:
-            block_hashes = request.block_hashes
-        block_hash = self._get_partial_block_hash(block_hashes, num_tokens)
+        block_hash = self._get_partial_block_hash(request, num_tokens)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
             block_hash, kv_cache_group_id
@@ -521,7 +566,7 @@ class BlockPool:
         )
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
-                block_hashes, num_tokens
+                request, num_tokens
             )
             parent_block_hash = (
                 maybe_convert_block_hash(parent_hash)
@@ -530,7 +575,7 @@ class BlockPool:
             )
             block_end = num_tokens
             curr_mm_idx = -1 if block_start > 0 else 0
-            extra_keys, _ = generate_block_hash_extra_keys(
+            extra_keys, _ = generate_request_block_hash_extra_keys(
                 request, block_start, block_end, curr_mm_idx
             )
             self.kv_event_queue.append(
@@ -554,24 +599,26 @@ class BlockPool:
 
     def _get_partial_block_hash(
         self,
-        block_hashes: list[BlockHash],
+        request: Request,
         num_tokens: int,
     ) -> BlockHash:
         assert num_tokens % self.hash_block_size == 0
         num_hash_blocks = num_tokens // self.hash_block_size
-        assert 0 < num_hash_blocks <= len(block_hashes)
+        assert 0 < num_hash_blocks <= len(request.block_hashes)
 
         # Each hash_block_size hash chains over its full prefix, so the partial
         # entry for any group block size is the hash at that prefix boundary.
-        return block_hashes[num_hash_blocks - 1]
+        return request.block_hashes[num_hash_blocks - 1]
 
     def _get_partial_block_parent_hash_and_start(
         self,
-        block_hashes: list[BlockHash],
+        request: Request,
         num_tokens: int,
     ) -> tuple[BlockHash | None, int]:
         num_hash_blocks = num_tokens // self.hash_block_size
-        parent_hash = block_hashes[num_hash_blocks - 2] if num_hash_blocks > 1 else None
+        parent_hash = (
+            request.block_hashes[num_hash_blocks - 2] if num_hash_blocks > 1 else None
+        )
         block_start = (num_hash_blocks - 1) * self.hash_block_size
         return parent_hash, block_start
 

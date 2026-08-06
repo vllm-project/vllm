@@ -36,6 +36,8 @@ class PauseState(enum.IntEnum):
 
 
 class SchedulerInterface(ABC):
+    use_eagle_prefix_cache_hashing = False
+
     @abstractmethod
     def __init__(
         self,

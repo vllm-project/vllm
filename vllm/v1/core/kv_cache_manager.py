@@ -20,7 +20,6 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -125,6 +124,7 @@ class KVCacheManager:
         max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
+        use_eagle_prefix_cache_hashing: bool = False,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
@@ -154,6 +154,7 @@ class KVCacheManager:
             max_model_len=self.max_model_len,
             max_in_flight_tokens=max_in_flight_tokens,
             use_eagle=self.use_eagle,
+            use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
@@ -261,7 +262,6 @@ class KVCacheManager:
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes,
-                request.eagle_block_hashes if request.eagle_hashing_enabled else None,
                 max_cache_hit_length,
             )
         )
@@ -283,13 +283,6 @@ class KVCacheManager:
                         num_blocks,
                         block_size,
                         group_idx,
-                        block_hashes=(
-                            request.eagle_block_hashes
-                            if request.eagle_hashing_enabled
-                            and group_idx in self.coordinator.eagle_group_ids
-                            and not isinstance(group.kv_cache_spec, MambaSpec)
-                            else request.block_hashes
-                        ),
                     )
 
         # The junction to pin is where the lagging sparse-retention group stops
@@ -339,9 +332,6 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             block_hashes=request.block_hashes,
             max_cache_hit_length=request.num_tokens - 1,
-            eagle_block_hashes=(
-                request.eagle_block_hashes if request.eagle_hashing_enabled else None
-            ),
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its

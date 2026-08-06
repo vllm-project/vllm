@@ -253,11 +253,6 @@ class SimpleCPUOffloadScheduler:
 
         num_skipped_hashes = num_computed_tokens // self.hash_block_size
         remaining_hashes = request.block_hashes[num_skipped_hashes:]
-        remaining_eagle_hashes = (
-            request.eagle_block_hashes[num_skipped_hashes:]
-            if request.eagle_hashing_enabled
-            else None
-        )
 
         if not remaining_hashes:
             return 0, False
@@ -267,7 +262,7 @@ class SimpleCPUOffloadScheduler:
         if max_hit_len <= 0:
             return 0, False
         cpu_hit_blocks, hit_length, _ = self.cpu_coordinator.find_longest_cache_hit(
-            remaining_hashes, remaining_eagle_hashes, max_hit_len
+            remaining_hashes, max_hit_len
         )
 
         if hit_length > 0:

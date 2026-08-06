@@ -37,7 +37,10 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    is_eagle_prefix_cache_hashing_enabled,
+)
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -269,6 +272,10 @@ class Scheduler(SchedulerInterface):
                 # query), so it needs exactly num_spec_tokens lookahead slots.
                 self.num_lookahead_tokens = self.num_spec_tokens
 
+        self.use_eagle_prefix_cache_hashing = is_eagle_prefix_cache_hashing_enabled(
+            vllm_config, self.connector
+        )
+
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
@@ -279,6 +286,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
+            use_eagle_prefix_cache_hashing=self.use_eagle_prefix_cache_hashing,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
@@ -1672,6 +1680,17 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
+    def _mark_eagle_kv_materialized(
+        self,
+        request: Request,
+        num_tokens: int,
+    ) -> None:
+        if request.eagle_hashing_enabled:
+            request.mark_eagle_kv_materialized(
+                num_tokens,
+                self.kv_cache_manager.block_pool.hash_block_size,
+            )
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -1773,13 +1792,12 @@ class Scheduler(SchedulerInterface):
                 # In this case, we use is_finished() to check.
                 continue
 
-            if request.eagle_hashing_enabled and (
-                prefix_tokens := materialized_prefix_tokens.get(req_id, 0)
+            if (
+                not output_is_stale
+                and request.eagle_hashing_enabled
+                and (prefix_tokens := materialized_prefix_tokens.get(req_id, 0))
             ):
-                request.mark_eagle_kv_materialized(
-                    prefix_tokens,
-                    self.kv_cache_manager.block_pool.hash_block_size,
-                )
+                self._mark_eagle_kv_materialized(request, prefix_tokens)
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
@@ -1843,16 +1861,14 @@ class Scheduler(SchedulerInterface):
 
             if (
                 req_id in draft_kv_materialized_req_ids
+                and request.eagle_hashing_enabled
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
             ):
                 num_materialized_tokens = (
                     request.num_computed_tokens - request.num_output_placeholders
                 )
-                request.mark_eagle_kv_materialized(
-                    num_materialized_tokens,
-                    self.kv_cache_manager.block_pool.hash_block_size,
-                )
+                self._mark_eagle_kv_materialized(request, num_materialized_tokens)
                 self.kv_cache_manager.cache_blocks(
                     request,
                     num_materialized_tokens,
@@ -2644,7 +2660,7 @@ class Scheduler(SchedulerInterface):
         if request.eagle_hashing_enabled:
             num_transferable_tokens = min(
                 num_transferable_tokens,
-                request.num_materialized_eagle_hashes
+                request.num_materialized_block_hashes
                 * self.kv_cache_manager.block_pool.hash_block_size,
             )
         block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
@@ -2698,11 +2714,10 @@ class Scheduler(SchedulerInterface):
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
                 # Cache any valid computed tokens.
-                if request.eagle_hashing_enabled:
-                    request.mark_eagle_kv_materialized(
-                        request.num_computed_tokens,
-                        self.kv_cache_manager.block_pool.hash_block_size,
-                    )
+                self._mark_eagle_kv_materialized(
+                    request,
+                    request.num_computed_tokens,
+                )
                 self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
                 if self.needs_kv_cache_zeroing:
                     # The failed load left the blocks beyond the valid
@@ -2722,11 +2737,10 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            if request.eagle_hashing_enabled:
-                request.mark_eagle_kv_materialized(
-                    request.num_computed_tokens,
-                    self.kv_cache_manager.block_pool.hash_block_size,
-                )
+            self._mark_eagle_kv_materialized(
+                request,
+                request.num_computed_tokens,
+            )
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
             # on a full prompt hit, we need to re-compute the last token

@@ -51,7 +51,6 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     get_request_eagle_block_hasher,
     init_none_hash,
-    is_eagle_prefix_cache_hashing_enabled,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
@@ -220,8 +219,8 @@ class EngineCore:
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
-        self.request_eagle_block_hasher: Callable[[Request], list[BlockHash]] | None = (
-            None
+        self.use_eagle_prefix_cache_hashing = (
+            self.scheduler.use_eagle_prefix_cache_hashing
         )
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
@@ -229,11 +228,12 @@ class EngineCore:
             )
             init_none_hash(caching_hash_fn)
 
-            self.request_block_hasher = get_request_block_hasher(
-                hash_block_size, caching_hash_fn
-            )
-            if is_eagle_prefix_cache_hashing_enabled(vllm_config, kv_connector):
-                self.request_eagle_block_hasher = get_request_eagle_block_hasher(
+            if self.use_eagle_prefix_cache_hashing:
+                self.request_block_hasher = get_request_eagle_block_hasher(
+                    hash_block_size, caching_hash_fn
+                )
+            else:
+                self.request_block_hasher = get_request_block_hasher(
                     hash_block_size, caching_hash_fn
                 )
 
@@ -992,7 +992,7 @@ class EngineCore:
         req = Request.from_engine_core_request(
             request,
             self.request_block_hasher,
-            self.request_eagle_block_hasher,
+            eagle_hashing_enabled=self.use_eagle_prefix_cache_hashing,
         )
         if req.use_structured_output:
             # Note on thread safety: no race condition.

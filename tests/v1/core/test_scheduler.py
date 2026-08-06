@@ -208,6 +208,7 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
     )
     coordinator = scheduler.kv_cache_manager.coordinator
     coordinator.eagle_group_ids = {0}
+    coordinator.use_eagle_prefix_cache_hashing = True
     coordinator.single_type_managers[0].use_eagle = True
 
     request = Request(
@@ -215,8 +216,8 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=2),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256),
-        eagle_block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        eagle_hashing_enabled=True,
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -226,8 +227,8 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256),
-        eagle_block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        eagle_hashing_enabled=True,
     )
     _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(before_ack)
     assert num_tokens == 0
@@ -247,8 +248,8 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, sha256),
-        eagle_block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        eagle_hashing_enabled=True,
     )
     _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(after_ack)
     assert num_tokens == 2 * block_size
@@ -257,12 +258,12 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
     scheduler._update_requests_with_invalid_blocks(
         [request], {block_ids[0]}, {}, evict_blocks=False
     )
-    assert request.num_materialized_eagle_hashes == 0
+    assert request.num_materialized_block_hashes == 0
 
     request.mark_eagle_kv_materialized(4, block_size)
     scheduler.running.remove(request)
     scheduler._preempt_request(request, timestamp=0.0)
-    assert request.num_materialized_eagle_hashes == 0
+    assert request.num_materialized_block_hashes == 0
 
 
 def test_schedule_multimodal_requests():

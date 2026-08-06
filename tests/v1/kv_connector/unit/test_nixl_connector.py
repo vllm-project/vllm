@@ -121,6 +121,29 @@ def get_default_xfer_telemetry(
     )
 
 
+@pytest.mark.parametrize(
+    ("kv_role", "enable_prefix_caching", "expected"),
+    [
+        ("kv_producer", True, True),
+        ("kv_consumer", True, True),
+        ("kv_producer", False, False),
+        ("kv_consumer", False, False),
+    ],
+)
+def test_eagle_prefix_hashing_is_consistent_across_pd_roles(
+    kv_role: str,
+    enable_prefix_caching: bool,
+    expected: bool,
+):
+    vllm_config = create_vllm_config(kv_role=kv_role)
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    connector = object.__new__(NixlConnector)
+    connector._vllm_config = vllm_config
+    connector._kv_transfer_config = vllm_config.kv_transfer_config
+
+    assert connector.supports_eagle_prefix_cache_hashing is expected
+
+
 class FakeNixlWrapper:
     """Mock implementation of NixlWrapper for testing.
 
