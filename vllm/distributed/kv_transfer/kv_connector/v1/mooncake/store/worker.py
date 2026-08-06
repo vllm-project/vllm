@@ -80,6 +80,7 @@ logger = init_logger(__name__)
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
+DEFAULT_TENANT_ID = "default"
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
@@ -134,6 +135,7 @@ class MooncakeStoreConfig:
     global_segment_size: int = DEFAULT_GLOBAL_SEGMENT_SIZE
     local_buffer_size: int = DEFAULT_LOCAL_BUFFER_SIZE
     enable_offload: bool = False
+    tenant_id: str = DEFAULT_TENANT_ID
 
     def __post_init__(self) -> None:
         if self.mode not in ("embedded", "standalone-store"):
@@ -162,6 +164,7 @@ class MooncakeStoreConfig:
                 config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
             ),
             enable_offload=bool(config.get("enable_offload", False)),
+            tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
         )
 
     @staticmethod
@@ -172,6 +175,17 @@ class MooncakeStoreConfig:
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
             )
         return MooncakeStoreConfig.from_file(config_path)
+
+
+def _normalize_tenant_id(value: Any) -> str:
+    if value is None:
+        return DEFAULT_TENANT_ID
+    if not isinstance(value, str):
+        raise TypeError(
+            f"tenant_id must be a string or null, got {type(value).__name__}: {value!r}"
+        )
+    tenant_id = value.strip()
+    return tenant_id if tenant_id else DEFAULT_TENANT_ID
 
 
 def _parse_size(value: Any) -> int:
@@ -1245,6 +1259,9 @@ class MooncakeStoreWorker:
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
         local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
+        setup_kwargs: dict[str, str] = {}
+        if store_config.tenant_id != DEFAULT_TENANT_ID:
+            setup_kwargs["tenant_id"] = store_config.tenant_id
         ret = self.store.setup(
             local_hostname,
             store_config.metadata_server,
@@ -1253,6 +1270,7 @@ class MooncakeStoreWorker:
             store_config.protocol,
             store_config.device_name,
             store_config.master_server_address,
+            **setup_kwargs,
         )
         if ret != 0:
             msg = "Initialize MooncakeDistributedStore failed."
@@ -1280,12 +1298,13 @@ class MooncakeStoreWorker:
 
         logger.info(
             "Mooncake mode=%s (global_segment_size=%d, local_buffer_size=%d, "
-            "preferred_segment=%s, enable_offload=%s)",
+            "preferred_segment=%s, enable_offload=%s, tenant_id=%s)",
             store_config.mode,
             store_config.global_segment_size,
             store_config.local_buffer_size,
             preferred_segment or "<none>",
             store_config.enable_offload,
+            store_config.tenant_id,
         )
         if store_config.mode == "embedded":
             if store_config.enable_offload and preferred_segment is None:
