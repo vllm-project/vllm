@@ -424,6 +424,7 @@ def _deep_ep_v2_moe_cudagraph(
     w1_scale: torch.Tensor | None,
     w2_scale: torch.Tensor | None,
     moe_backend: str,
+    activation: MoEActivation,
 ):
     """Verify DeepEP v2 with an explicit FP8 expert backend."""
     import tempfile
@@ -512,6 +513,7 @@ def _deep_ep_v2_moe_cudagraph(
             w2_scale=qw.w2_weight_scale,
             quant_dtype=torch.float8_e4m3fn,
             block_shape=block_shape,
+            activation=activation,
         )
 
         # EP-slice before format conversion
@@ -528,7 +530,13 @@ def _deep_ep_v2_moe_cudagraph(
             experts_per_token=config.topk,
             hidden_dim=hidden_size,
             intermediate_size=config.n,
+            activation=activation,
         )
+        if activation == MoEActivation.SITU:
+            moe_config = dataclasses.replace(
+                moe_config,
+                activation_situ_beta=1.0,
+            )
         moe_parallel_config = dataclasses.replace(
             moe_config.moe_parallel_config,
             ep_size=pgi.world_size,
@@ -616,7 +624,7 @@ def _deep_ep_v2_moe_cudagraph(
                     w2=w2_ep,
                     topk_weights=test_tensors.topk_weights,
                     topk_ids=test_tensors.topk,
-                    activation=MoEActivation.SILU,
+                    activation=activation,
                     global_num_experts=config.num_experts,
                     expert_map=expert_map,
                     apply_router_weight_on_input=False,
@@ -637,7 +645,18 @@ def _deep_ep_v2_moe_cudagraph(
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
-@pytest.mark.parametrize("moe_backend", ["flashinfer_trtllm", "humming"])
+@pytest.mark.parametrize(
+    ("moe_backend", "activation"),
+    [
+        pytest.param(
+            "flashinfer_trtllm",
+            MoEActivation.SILU,
+            id="flashinfer_trtllm-silu",
+        ),
+        pytest.param("humming", MoEActivation.SILU, id="humming-silu"),
+        pytest.param("humming", MoEActivation.SITU, id="humming-situ"),
+    ],
+)
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
 def test_deep_ep_v2_moe_cudagraph(
@@ -648,6 +667,7 @@ def test_deep_ep_v2_moe_cudagraph(
     topk: int,
     world_dp_size: tuple[int, int],
     moe_backend: str,
+    activation: MoEActivation,
     workspace_init,
 ):
     set_random_seed(7)
@@ -671,4 +691,5 @@ def test_deep_ep_v2_moe_cudagraph(
         None,
         None,
         moe_backend,
+        activation,
     )
