@@ -7,6 +7,30 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
+def _bucketed_logits_buffer(
+    num_rows: int, row_width: int, device: torch.device
+) -> torch.Tensor:
+    """fp32 (num_rows, row_width) output, allocated in power-of-two buckets.
+
+    During a chunked prefill the logits width (the compressed KV length) grows
+    monotonically with every chunk, so a fresh exact-size ``torch.empty`` per
+    call means no request can ever be served from a cached block: the caching
+    allocator maps a new segment each chunk and ``memory_reserved`` ratchets
+    toward the SUM of the distinct sizes. On unified-memory devices (GB10)
+    that reserve is system RAM -- ~2.6-3 GiB per 32K needle prompt
+    (jasl/vllm#31). Rounding the flat allocation up to a power of two makes
+    consecutive chunks share a bucket, bounding the transient footprint at
+    ~2x the largest live buffer instead of the running sum. The trailing view
+    keeps the tensor contiguous, so kernel stride assumptions are unchanged.
+    """
+    numel = num_rows * row_width
+    if numel == 0:
+        return torch.empty((num_rows, row_width), device=device, dtype=torch.float32)
+    alloc = 1 << (numel - 1).bit_length()
+    flat = torch.empty((alloc,), device=device, dtype=torch.float32)
+    return flat[:numel].view(num_rows, row_width)
+
+
 def _view_packed_fp8_paged_mqa_kv_cache(
     kv_cache: torch.Tensor,
     head_dim: int,
@@ -137,11 +161,7 @@ def fp8_mqa_logits_triton(
     k_fp8, scale = kv
     num_q, num_heads, head_dim = q.shape
     seq_len_kv = k_fp8.shape[0]
-    logits = torch.empty(
-        (num_q, seq_len_kv),
-        device=q.device,
-        dtype=torch.float32,
-    )
+    logits = _bucketed_logits_buffer(num_q, seq_len_kv, q.device)
     if num_q == 0 or seq_len_kv == 0:
         return logits
 
@@ -450,11 +470,7 @@ def fp8_paged_mqa_logits_rowwise_triton(
     assert token_start >= 0
     assert token_count >= 0
     assert token_start + token_count <= max_model_len
-    logits = torch.empty(
-        (num_rows, token_count),
-        device=q.device,
-        dtype=torch.float32,
-    )
+    logits = _bucketed_logits_buffer(num_rows, token_count, q.device)
     if num_rows == 0 or token_count == 0:
         return logits
 
@@ -540,11 +556,7 @@ def fp8_paged_mqa_logits_triton(
     assert token_start >= 0
     assert token_count >= 0
     assert token_start + token_count <= max_model_len
-    logits = torch.empty(
-        (num_rows, token_count),
-        device=q.device,
-        dtype=torch.float32,
-    )
+    logits = _bucketed_logits_buffer(num_rows, token_count, q.device)
     if num_rows == 0 or token_count == 0:
         return logits
 
