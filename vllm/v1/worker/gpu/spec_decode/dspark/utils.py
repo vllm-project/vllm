@@ -131,7 +131,9 @@ def _load_target_embed_tokens_for_pp(
         model_dir = download_weights_from_hf(
             model_name_or_path,
             load_config.download_dir,
-            allow_patterns=["*.safetensors"],
+            # Index included so the lookup below can go straight to the shard
+            # holding the embedding instead of opening every shard in turn.
+            allow_patterns=["*.safetensors", SAFE_WEIGHTS_INDEX_NAME],
             revision=model_config.revision,
             ignore_patterns=load_config.ignore_patterns,
         )
