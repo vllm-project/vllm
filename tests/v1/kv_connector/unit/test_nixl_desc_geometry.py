@@ -257,12 +257,15 @@ def test_packed_cache_preserves_cross_group_regions_and_layer_strides():
     worker.pp_size = 1
     worker.kv_buffer_device = "cuda"
     worker._layer_specs = {name: spec for name in caches}
-    worker._layer_group_ids = {name: group_id for group_id, name in enumerate(caches)}
-    worker._transfer_groups = [MagicMock(), MagicMock()]
-    for group in worker._transfer_groups:
+    transfer_groups = [MagicMock(), MagicMock()]
+    for group in transfer_groups:
         group.role = KVCacheGroupRole.DEFAULT
         group.block_pool_id = 0
     worker.kv_cache_config = MagicMock()
+    worker.kv_cache_config.transfer_groups = transfer_groups
+    worker.kv_cache_config.transfer_group_index_by_layer = {
+        name: group_id for group_id, name in enumerate(caches)
+    }
     worker.kv_cache_config.kv_cache_tensors = [MagicMock(), MagicMock()]
     worker.kv_cache_config.num_blocks_by_pool = [num_blocks]
 

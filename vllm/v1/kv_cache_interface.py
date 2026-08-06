@@ -1093,6 +1093,15 @@ class KVCacheConfig:
             self.kv_cache_groups[group_id] for group_id in self.transfer_group_ids
         )
 
+    @cached_property
+    def transfer_group_index_by_layer(self) -> dict[str, int]:
+        """Transfer-group tuple index for each participating layer."""
+        return {
+            layer_name: group_index
+            for group_index, group in enumerate(self.transfer_groups)
+            for layer_name in group.layer_names
+        }
+
     def select_transfer_block_ids(
         self, block_ids: Sequence[list[int]]
     ) -> tuple[list[int], ...]:

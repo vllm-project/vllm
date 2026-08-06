@@ -310,26 +310,23 @@ class NixlBaseConnectorWorker:
             )
         )
 
-        self._transfer_groups = kv_cache_config.transfer_groups
+        self.kv_cache_config = kv_cache_config
         self.block_size = math.lcm(
-            *(group.kv_cache_spec.block_size for group in self._transfer_groups)
+            *(
+                group.kv_cache_spec.block_size
+                for group in kv_cache_config.transfer_groups
+            )
         )
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in self._transfer_groups
+                for g in kv_cache_config.transfer_groups
             )
         )
-        self.kv_cache_config = kv_cache_config
         self._layer_specs = {
             layer: group.kv_cache_spec
-            for group in self._transfer_groups
-            for layer in group.layer_names
-        }
-        self._layer_group_ids = {
-            layer: group_id
-            for group_id, group in enumerate(self._transfer_groups)
+            for group in kv_cache_config.transfer_groups
             for layer in group.layer_names
         }
         self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
@@ -586,7 +583,8 @@ class NixlBaseConnectorWorker:
 
         # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
         self._group_spec_types = tuple(
-            get_representative_spec_type(g.kv_cache_spec) for g in self._transfer_groups
+            get_representative_spec_type(g.kv_cache_spec)
+            for g in self.kv_cache_config.transfer_groups
         )
 
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
@@ -1177,8 +1175,8 @@ class NixlBaseConnectorWorker:
                 physical_page_size = physical_page_size * len(
                     self.kv_cache_config.kv_cache_tensors
                 )
-            group_id = self._layer_group_ids[layer_name]
-            group = self._transfer_groups[group_id]
+            group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
+            group = self.kv_cache_config.transfer_groups[group_index]
             if group.role is KVCacheGroupRole.HISPARSE_SOURCE:
                 logical_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
                 assert logical_num_blocks is not None
@@ -1208,7 +1206,7 @@ class NixlBaseConnectorWorker:
             )
             is_packed_region = region_stride != region_block_len
             region_key = (
-                (base_addr, self._layer_group_ids[layer_name])
+                (base_addr, group_index)
                 if is_packed_region and not self._has_mamba
                 else base_addr
             )
@@ -1229,7 +1227,7 @@ class NixlBaseConnectorWorker:
             # Only record non-Mamba page sizes.
             self.block_len_per_layer.append(region_block_len)
             self.region_strides.append(region_stride)
-            self.region_group_ids.append(self._layer_group_ids[layer_name])
+            self.region_group_ids.append(group_index)
             self.region_num_blocks.append(num_blocks)
             self._region_is_mla.append(is_mla_region)
 
@@ -2111,7 +2109,7 @@ class NixlBaseConnectorWorker:
         )
         mamba_layers = {
             name
-            for g, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            for g, group in enumerate(self.kv_cache_config.transfer_groups)
             if _is_ssm_spec(self._group_spec_types[g])
             for name in group.layer_names
         }
@@ -2691,12 +2689,9 @@ class NixlBaseConnectorWorker:
             return block_ids
         block_arange = np.arange(0, ratio).reshape(1, -1)
         # Mamba blocks have no logical<>physical discrepancy (block-size=1)
-        group_specs = getattr(
-            self, "_transfer_groups", self.kv_cache_config.kv_cache_groups
-        )
         physical_block_ids = []
         for i, group in enumerate(block_ids):
-            spec = group_specs[i].kv_cache_spec
+            spec = self.kv_cache_config.transfer_groups[i].kv_cache_spec
             if isinstance(spec, MambaSpec):
                 physical_block_ids.append(group)
             else:
