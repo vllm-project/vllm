@@ -235,10 +235,18 @@ def _apply_moe_activation_masked(
 
     assert input.dim() in (2, 3), "Masked input must be 2D or 3D"
     _validate_moe_activation_shapes(activation, output, input, expected_dim=input.dim())
+    assert input.dtype == output.dtype, "Input and output dtypes must match"
+    assert input.device == output.device, "Input and output devices must match"
+    assert input.is_contiguous(), "Input must be contiguous"
+    assert output.is_contiguous(), "Output must be contiguous"
     assert valid_token_counts.dtype == torch.int32, (
         "valid_token_counts must use torch.int32"
     )
     assert valid_token_counts.dim() == 1, "valid_token_counts must be 1D"
+    assert valid_token_counts.device == input.device, (
+        "valid_token_counts must be on the input device"
+    )
+    assert valid_token_counts.is_contiguous(), "valid_token_counts must be contiguous"
     expected_counts = input.size(0) if input.dim() == 3 else 1
     assert valid_token_counts.size(0) == expected_counts, (
         f"valid_token_counts must have {expected_counts} element(s) for "

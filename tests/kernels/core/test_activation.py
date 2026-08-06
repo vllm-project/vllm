@@ -75,6 +75,27 @@ def test_masked_moe_activation_rejects_unsupported_activation() -> None:
         )
 
 
+def test_masked_moe_activation_validates_tensor_contract() -> None:
+    input = torch.empty(1, 1, 2)
+    valid_token_counts = torch.ones(1, dtype=torch.int32)
+
+    with pytest.raises(AssertionError, match="dtypes must match"):
+        apply_moe_activation(
+            MoEActivation.SILU,
+            torch.empty(1, 1, 1, dtype=torch.float16),
+            input,
+            valid_token_counts=valid_token_counts,
+        )
+
+    with pytest.raises(AssertionError, match="Input must be contiguous"):
+        apply_moe_activation(
+            MoEActivation.SILU,
+            torch.empty(1, 1, 1),
+            torch.empty(1, 1, 4)[..., ::2],
+            valid_token_counts=valid_token_counts,
+        )
+
+
 @pytest.mark.parametrize(
     "activation",
     [

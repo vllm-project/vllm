@@ -487,14 +487,10 @@ def _make_mxfp4_humming_experts(
     return experts, quant_config, layer.w13_weight, layer.w2_weight
 
 
-def _deep_ep_v2_moe_cudagraph(
+def _run_deep_ep_v2_backend_case(
     pgi: ProcessGroupInfo,
     dp_size: int,
     config: TestConfig,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor | None,
-    w2_scale: torch.Tensor | None,
     moe_backend: str,
     activation: MoEActivation,
     use_cudagraph: bool,
@@ -909,13 +905,9 @@ def _launch_deep_ep_v2_case(
 
     parallel_launch(
         world_size,
-        _deep_ep_v2_moe_cudagraph,
+        _run_deep_ep_v2_backend_case,
         dp_size,
         config,
-        None,  # weights created inside worker
-        None,
-        None,
-        None,
         moe_backend,
         activation,
         use_cudagraph,
