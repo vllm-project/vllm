@@ -455,9 +455,8 @@ class KimiMLAAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
-        output[:] = self.mla_attn(positions, hidden_states)
+    ) -> torch.Tensor:
+        return self.mla_attn(positions, hidden_states)
 
 
 class KimiDecoderLayer(nn.Module):
@@ -494,7 +493,6 @@ class KimiDecoderLayer(nn.Module):
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
                 )
-            self._self_attn_writes_output = False
         else:
             qk_nope_head_dim = config.qk_nope_head_dim
             qk_rope_head_dim = config.qk_rope_head_dim
@@ -522,7 +520,6 @@ class KimiDecoderLayer(nn.Module):
                 kv_lora_rank=kv_lora_rank,
                 use_nope=mla_use_nope,
             )
-            self._self_attn_writes_output = True
 
         if (
             self.is_moe
@@ -583,14 +580,6 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if self._self_attn_writes_output:
-            output = torch.empty_like(hidden_states)
-            self.self_attn(
-                hidden_states=hidden_states,
-                positions=positions,
-                output=output,
-            )
-            return output
         return self.self_attn(
             hidden_states=hidden_states,
             positions=positions,
