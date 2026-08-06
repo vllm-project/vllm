@@ -8,7 +8,11 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -625,9 +629,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
             ).real_page_size_bytes
-            sw_block_size = _largest_kernel_block_within(
-                self.attn_backend, sw_per_token, shared_page, block_size
-            )
+            with set_current_vllm_config(vllm_config):
+                sw_block_size = _largest_kernel_block_within(
+                    self.attn_backend, sw_per_token, shared_page, block_size
+                )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,

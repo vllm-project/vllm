@@ -85,13 +85,37 @@ class FlashAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def _get_sm90_fa4_fp8_kv_block_size() -> int | None:
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None or vllm_config.model_config is None:
+            return None
+
+        head_size = vllm_config.model_config.get_head_size()
+        if (
+            current_platform.is_device_capability_family(90)
+            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+            and head_size == 512
+            and get_flash_attn_version(head_size=head_size) == 4
+        ):
+            # The SM90 FP8-KV-dequant kernel uses a 64-token TMA tile/page.
+            return 64
+        return None
+
+    @classmethod
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
+            # Sliding-window cache specs select the smallest advertised size.
+            # Report the kernel's exact page-size contract instead of the
+            # generic FlashAttention multiple-of-16 capability.
+            return [block_size]
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
+        if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
+            return max(default_block_size, block_size)
         if current_platform.is_xpu():
             return max(default_block_size, 64)
         return super().get_preferred_block_size(default_block_size)
