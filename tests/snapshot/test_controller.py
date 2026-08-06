@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from vllm.snapshot.controller import (
+    LocalSnapshotTools,
     ProcessInventory,
+    SnapshotCreateError,
     SnapshotRestoreError,
     create_snapshot,
     restore_snapshot,
@@ -399,3 +401,20 @@ def test_partial_restore_is_killed_and_cuda_is_clear(tmp_path: Path):
         "kill-cuda",
         "verify-clear",
     ]
+
+
+def test_failed_child_is_reaped_and_reported(tmp_path: Path):
+    class FailedProcess:
+        returncode = 17
+
+        def poll(self) -> int:
+            return self.returncode
+
+    (tmp_path / "child.log").write_text("engine init failed")
+    tools = LocalSnapshotTools()
+    tools._children[100] = FailedProcess()  # type: ignore[assignment]
+
+    with pytest.raises(SnapshotCreateError, match="engine init failed"):
+        tools.wait_ready(tmp_path, 100)
+
+    assert 100 not in tools._children

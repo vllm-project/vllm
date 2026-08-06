@@ -196,6 +196,7 @@ class LocalSnapshotTools:
         plugin_dir = os.environ.get("VLLM_SNAPSHOT_CRIU_PLUGIN_DIR", "")
         self.plugin_dir = Path(plugin_dir) if plugin_dir else Path()
         self.timeout_s = float(os.environ.get("VLLM_SNAPSHOT_TIMEOUT_S", "900"))
+        self._children: dict[int, subprocess.Popen[bytes]] = {}
 
     def _privileged(self) -> list[str]:
         return [] if os.geteuid() == 0 else ["sudo", "-n"]
@@ -256,6 +257,7 @@ class LocalSnapshotTools:
             start_new_session=True,
         )
         log_file.close()
+        self._children[process.pid] = process
         return process.pid
 
     def wait_ready(self, workdir: Path, root_pid: int) -> Oracle:
@@ -268,6 +270,11 @@ class LocalSnapshotTools:
                     token_ids=tuple(payload["token_ids"]),
                     text=payload["text"],
                 )
+            process = self._children.get(root_pid)
+            if process is not None and process.poll() is not None:
+                self._children.pop(root_pid)
+                log = (workdir / "child.log").read_text(errors="replace")
+                raise SnapshotCreateError(f"snapshot child exited before ready:\n{log}")
             try:
                 os.kill(root_pid, 0)
             except ProcessLookupError as error:
@@ -365,6 +372,9 @@ class LocalSnapshotTools:
         )
 
     def verify_dead(self, inventory: ProcessInventory) -> None:
+        process = self._children.pop(inventory.root_pid, None)
+        if process is not None:
+            process.wait(timeout=10)
         for pid in inventory.process_tree:
             try:
                 os.kill(pid, 0)
@@ -613,3 +623,7 @@ class LocalSnapshotTools:
     def abort_create(self, root_pid: int, _inventory: ProcessInventory | None) -> None:
         with suppress(ProcessLookupError):
             os.killpg(root_pid, signal.SIGKILL)
+        process = self._children.pop(root_pid, None)
+        if process is not None:
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=10)
