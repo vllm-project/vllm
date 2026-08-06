@@ -54,6 +54,7 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
     IMAGE_SIZE,
+    MAX_CROPS,
     DeepseekOCRProcessor,
     count_tiles,
 )
@@ -75,6 +76,24 @@ from .deepseek_vl2 import MlpProjector
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
+
+
+def _bind_deepseek_ocr_processor_kwargs(
+    processor_config: Mapping[str, object],
+    kwargs: Mapping[str, object],
+) -> dict[str, object]:
+    trusted_config = dict(processor_config)
+    bound_kwargs = dict(kwargs)
+    for field, trusted_value in trusted_config.items():
+        if field in bound_kwargs and bound_kwargs[field] != trusted_value:
+            raise ValueError(
+                "DeepSeek OCR processor argument "
+                f"{field!r} must match the deployed DeepSeek OCR configuration "
+                f"({trusted_value!r}), got {bound_kwargs[field]!r}."
+            )
+        bound_kwargs[field] = trusted_value
+
+    return bound_kwargs
 
 
 class DeepseekOCRImagePixelInputs(TensorSchema):
@@ -203,11 +222,16 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
             base_size=BASE_SIZE,
             crop_mode=CROP_MODE,
             strategy="v1",
+            max_crops=MAX_CROPS,
+        )
+        processor_kwargs = _bind_deepseek_ocr_processor_kwargs(
+            v1_processor_config,
+            kwargs,
         )
 
         return self.ctx.get_hf_processor(
             DeepseekOCRProcessor,
-            **{**v1_processor_config, **kwargs},
+            **processor_kwargs,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:

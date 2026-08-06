@@ -89,6 +89,7 @@ from .deepseek_ocr import (
     DeepseekOCRMultiModalProcessor,
     DeepseekOCRProcessingInfo,
     NGramPerReqLogitsProcessor,
+    _bind_deepseek_ocr_processor_kwargs,
 )
 
 __all__ = [
@@ -123,9 +124,13 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
             strategy="v1",
             max_crops=_UNLIMITED_OCR_MAX_CROPS,
         )
+        processor_kwargs = _bind_deepseek_ocr_processor_kwargs(
+            v1_processor_config,
+            kwargs,
+        )
         return self.ctx.get_hf_processor(
             UnlimitedOCRProcessor,
-            **{**v1_processor_config, **kwargs},
+            **processor_kwargs,
         )
 
     def get_num_image_tokens(
