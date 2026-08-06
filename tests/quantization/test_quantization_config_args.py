@@ -34,6 +34,10 @@ def test_quant_spec_accepts_quant_key_directly():
     assert spec.activation is None
 
 
+def test_quant_spec_string_representation_uses_quantization_name():
+    assert str(QuantSpec(weight="mxfp4")) == "mxfp4"
+
+
 def test_quant_spec_rejects_unknown_name():
     with pytest.raises(ValueError, match="unknown quantization name"):
         QuantSpec(weight="not_a_real_format")
@@ -68,6 +72,19 @@ def test_args_string_shorthand_missing_slot_raises():
 def test_args_accepts_dict_form():
     args = QuantizationConfigArgs(moe={"activation": "mxfp8"})
     assert args.moe == QuantSpec(weight=None, activation=kMxfp8Dynamic)
+
+
+def test_targets_and_ignore_are_not_checked_during_config_resolution():
+    args = resolve_quantization_config(
+        "online",
+        {
+            "targets": {"model.layers.0.mlp.down_proj": "fp8_per_block"},
+            "ignore": ["model.layers.0.mlp.down_proj"],
+        },
+    )
+
+    assert args is not None
+    assert args.targets == {"model.layers.0.mlp.down_proj": "fp8_per_block"}
 
 
 # ---- resolve_quantization_config -----------------------------------------

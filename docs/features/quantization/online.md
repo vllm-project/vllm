@@ -138,4 +138,51 @@ llm = LLM(
 ```
 
 !!! note
-    For fused layers (e.g., `qkv_proj` which fuses `q_proj`, `k_proj`, `v_proj`), the ignore pattern must match the **unfused** shard names (`q_proj`, `k_proj`, `v_proj`), not the fused name.
+    For fused layers (e.g., `qkv_proj` which fuses `q_proj`, `k_proj`, `v_proj`), patterns may match the fused name directly or all of its unfused shard names.
+
+### Fine-Grained Per-Layer Quantization Schemes
+
+Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names or regex patterns (prefixed with `re:`); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `int8_per_channel_weight_only`, `nvfp4_per_token`).
+
+Example:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    "Qwen/Qwen3.5-35B-A3B",
+    quantization_config={
+        "targets": {
+            "re:.*o_proj.*": "mxfp8",
+        },
+    },
+)
+```
+
+Or with the CLI:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B \
+  --quantization-config.targets '{"re:.*o_proj.*":"mxfp8"}'
+```
+
+!!! info
+
+    - `targets` is mutually exclusive with online `linear` and `moe`: set one or the other, not both.
+    - A layer that matches no `targets` pattern is left unquantized.
+    - A layer name may not match both `targets` and `ignore`.
+    - A layer may not match more than one `targets` pattern.
+
+Partially pre-quantized models are supported. Examples:
+
+```bash
+vllm serve nvidia/Qwen3-30B-A3B-NVFP4 \
+  --quantization-config.targets '{"re:.*o_proj.*":"mxfp8"}'
+
+vllm serve amd/Qwen3-30B-A3B-MXFP4 \
+  --quantization-config.targets '{"re:.*o_proj.*":"mxfp8"}'
+
+# Enables shared expert fusion.
+vllm serve amd/Qwen3.5-397B-A17B-MXFP4 \
+  --quantization-config.targets '{"re:.*shared_experts.*":"mxfp8"}'
+```

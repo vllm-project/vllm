@@ -5,8 +5,11 @@ from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Any
 
-import regex as re
 import torch
+
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    check_equal_or_regex_match,
+)
 
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
@@ -92,35 +95,6 @@ def should_ignore_layer(
 
     assert should_ignore_layer is not None
     return should_ignore_layer
-
-
-def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
-    """
-    Checks whether a layer_name is exactly equal or a regex match for
-    if target starts with 're:' to any target in list.
-    """
-    return any(_is_equal_or_regex_match(layer_name, target) for target in targets)
-
-
-def _is_equal_or_regex_match(
-    value: str, target: str, check_contains: bool = False
-) -> bool:
-    """
-    Checks whether a value is exactly equal or a regex match for target
-    if target starts with 're:'. If check_contains is set to True,
-    additionally checks if the target string is contained within the value.
-    """
-
-    if target.startswith("re:"):
-        pattern = target[3:]
-        if re.match(pattern, value):
-            return True
-    elif check_contains:
-        if target.lower() in value.lower():
-            return True
-    elif target == value:
-        return True
-    return False
 
 
 # utility for tensor dims > 2 cases
