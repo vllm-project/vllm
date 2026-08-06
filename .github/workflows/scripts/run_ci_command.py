@@ -693,6 +693,7 @@ def resolve_workflow_run_pr(
 def handle_run_ci(
     *,
     actor: str,
+    allow_repeat_full_ci: bool,
     buildkite: BuildkiteClient,
     comment_id: int,
     command: str,
@@ -718,6 +719,13 @@ def handle_run_ci(
     )
     if active_build:
         return f"CI is already running for this commit: {active_build['web_url']}"
+
+    latest_build = select_latest_build(current_builds, pr["number"])
+    if latest_build and not allow_repeat_full_ci:
+        return (
+            f"CI already ran for this commit: {latest_build['web_url']}. "
+            "Use `/ci retry` to retry failed jobs."
+        )
 
     current_pr = github.get_pr(pr["number"])
     if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
@@ -905,6 +913,10 @@ def run(
         if command in RUN_CI_COMMAND_ENV:
             message = handle_run_ci(
                 actor=actor,
+                allow_repeat_full_ci=(
+                    is_trusted_permission(permission)
+                    or actor.casefold() in trusted_users
+                ),
                 buildkite=buildkite,
                 comment_id=comment_id,
                 command=command,

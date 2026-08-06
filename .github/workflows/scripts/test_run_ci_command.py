@@ -483,6 +483,72 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIn("Buildkite CI #123", github.comments[0])
         self.assertIn(command_comment_marker(99), github.comments[0])
 
+    def test_delegated_author_can_run_ci_on_new_commit(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+
+    def test_delegated_author_uses_retry_after_ci_ran_for_commit(self) -> None:
+        finished_build = {
+            "created_at": "2026-01-01T00:00:00Z",
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite([[], [finished_build]])
+
+        run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn("CI already ran for this commit", github.comments[0])
+        self.assertIn("Use `/ci retry`", github.comments[0])
+
+    def test_write_user_can_repeat_full_ci_for_commit(self) -> None:
+        finished_build = {
+            "created_at": "2026-01-01T00:00:00Z",
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        github = FakeGitHub()
+        buildkite = FakeBuildkite([[], [finished_build]])
+
+        run(make_event(COMMAND_RUN_CI), github, buildkite)
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+
+    def test_trusted_user_can_repeat_full_ci_for_commit(self) -> None:
+        finished_build = {
+            "created_at": "2026-01-01T00:00:00Z",
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        github = FakeGitHub(permission="read")
+        buildkite = FakeBuildkite([[], [finished_build]])
+
+        run(
+            make_event(COMMAND_RUN_CI, "trusted"),
+            github,
+            buildkite,
+            trusted_users_value="trusted",
+        )
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+
     def test_success_comment_marker_handles_rerun_when_rocket_fails(self) -> None:
         github = FakeGitHub(reaction_failures={"rocket"})
         buildkite = FakeBuildkite([[], []])
