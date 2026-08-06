@@ -340,30 +340,27 @@ def _shuffle_deepseek_fp8_moe_weights(
     Returns 4D weight tensors in BlockMajorK layout
     (E, K/block_k, Mn, block_k)
     """
-    from flashinfer import shuffle_matrix_a
-    from flashinfer.fused_moe import convert_to_block_layout
+    from flashinfer.utils import get_shuffle_matrix_a_row_indices
 
     epilogue_tile_m = 64
     block_k = 128
-    num_experts = w13.shape[0]
 
-    M13, K13 = w13.shape[1], w13.shape[2]
-    M2, K2 = w2.shape[1], w2.shape[2]
-    w13_out = torch.empty(
-        num_experts, K13 // block_k, M13, block_k, dtype=torch.uint8, device=w13.device
-    )
-    w2_out = torch.empty(
-        num_experts, K2 // block_k, M2, block_k, dtype=torch.uint8, device=w2.device
-    )
+    def shuffle_to_block_major_k(w: torch.Tensor) -> torch.Tensor:
+        # shuffle_matrix_a's row permutation depends only on (M,
+        # epilogue_tile_m), so it is computed once and applied to every expert
+        # in a single gather instead of once per expert. Gathering through the
+        # BlockMajorK-permuted view also folds convert_to_block_layout into
+        # that same kernel. Per-expert loops here cost minutes for a MoE this
+        # wide (~24k tiny launches plus a host round-trip each).
+        num_experts, m, k = w.shape
+        rows = get_shuffle_matrix_a_row_indices(
+            w[0].view(torch.uint8), epilogue_tile_m
+        ).to(w.device)
+        blocked = w.view(torch.uint8).view(num_experts, m, k // block_k, block_k)
+        out = blocked.permute(0, 2, 1, 3)[:, :, rows, :].contiguous()
+        return out.view(torch.float8_e4m3fn)
 
-    for i in range(num_experts):
-        t13 = shuffle_matrix_a(w13[i].view(torch.uint8), epilogue_tile_m)
-        w13_out[i] = convert_to_block_layout(t13, block_k)
-
-        t2 = shuffle_matrix_a(w2[i].view(torch.uint8), epilogue_tile_m)
-        w2_out[i] = convert_to_block_layout(t2, block_k)
-
-    return w13_out.view(torch.float8_e4m3fn), w2_out.view(torch.float8_e4m3fn)
+    return shuffle_to_block_major_k(w13), shuffle_to_block_major_k(w2)
 
 
 def _shuffle_mxfp8_moe_weights(
