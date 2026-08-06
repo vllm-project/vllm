@@ -47,7 +47,7 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
             addresses=EngineZmqAddresses(inputs=[], outputs=[]),
             tensor_queue=None,
         )
-        launch.set_watched_frontend_processes([_FinishedProcess(recv)])
+        launch.watched_frontend_processes = [_FinishedProcess(recv)]
         with pytest.raises(RuntimeError) as exc_info:
             wait_for_engine_startup(
                 handshake_socket,

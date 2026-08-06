@@ -1061,12 +1061,9 @@ class CoreEngineLaunch:
     coordinator: DPCoordinator | None
     addresses: EngineZmqAddresses
     tensor_queue: Queue | None
-    _watched_frontend_processes: Sequence[FrontendProcess] = ()
-
-    def set_watched_frontend_processes(
-        self, processes: Sequence[FrontendProcess]
-    ) -> None:
-        self._watched_frontend_processes = processes
+    # Frontend processes to watch during engine startup; may be assigned by
+    # the caller before the startup barrier runs on context manager exit.
+    watched_frontend_processes: Sequence[FrontendProcess] = ()
 
 
 @contextlib.contextmanager
@@ -1132,10 +1129,7 @@ def launch_core_engines(
         )
 
         yield CoreEngineLaunch(
-            engine_manager=engine_actor_manager,
-            coordinator=coordinator,
-            addresses=addresses,
-            tensor_queue=tensor_queue,
+            engine_actor_manager, coordinator, addresses, tensor_queue
         )
         return
 
@@ -1206,10 +1200,7 @@ def launch_core_engines(
             local_engine_manager = None
 
         launch = CoreEngineLaunch(
-            engine_manager=local_engine_manager,
-            coordinator=coordinator,
-            addresses=addresses,
-            tensor_queue=tensor_queue,
+            local_engine_manager, coordinator, addresses, tensor_queue
         )
         yield launch
         wait_for_engine_startup(
@@ -1253,7 +1244,7 @@ def wait_for_engine_startup(
         poller.register(coord_process.sentinel, zmq.POLLIN)
     # 3. Watched frontend processes, if any
     frontend_process_by_fd: dict[int, FrontendProcess] = {}
-    for proc in launch._watched_frontend_processes:
+    for proc in launch.watched_frontend_processes:
         fd = proc.sentinel if isinstance(proc.sentinel, int) else proc.sentinel.fileno()
         frontend_process_by_fd[fd] = proc
         poller.register(fd, zmq.POLLIN)
@@ -1274,11 +1265,10 @@ def wait_for_engine_startup(
             continue
         if len(events) > 1 or events[0][0] != handshake_socket:
             # One of the local core, coordinator, or watched frontend processes exited.
-            finished = (
-                launch.engine_manager.finished_procs()
-                if isinstance(launch.engine_manager, CoreEngineProcManager)
-                else {}
-            )
+            if isinstance(launch.engine_manager, CoreEngineProcManager):
+                finished = launch.engine_manager.finished_procs()
+            else:
+                finished = {}
             if coord_process is not None and coord_process.exitcode is not None:
                 finished[coord_process.name] = coord_process.exitcode
             failed_frontend_procs = {
@@ -1287,7 +1277,7 @@ def wait_for_engine_startup(
                 if proc.exitcode is not None
                 or any(event_fd == fd for event_fd, _ in events)
             }
-            if failed_frontend_procs:
+            if failed_frontend_procs and not finished:
                 raise RuntimeError(
                     "Frontend process failed during engine core initialization. "
                     "See root cause above. "
@@ -1297,6 +1287,11 @@ def wait_for_engine_startup(
                 "Engine core initialization failed. "
                 "See root cause above. "
                 f"Failed core proc(s): {finished}"
+                + (
+                    f", failed frontend proc(s): {failed_frontend_procs}"
+                    if failed_frontend_procs
+                    else ""
+                )
             )
 
         # Receive HELLO and READY messages from the input socket.
