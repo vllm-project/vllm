@@ -131,12 +131,12 @@ class EncoderRunner:
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=True
         ):
-            manager = self.cudagraph_manager
+            cg_manager = self.cudagraph_manager
             cudagraph_output = (
-                manager.execute(mm_kwargs_batch)
-                if manager is not None
-                and manager.is_captured()
-                and manager.supports_modality(modality)
+                cg_manager.execute(mm_kwargs_batch)
+                if cg_manager is not None
+                and cg_manager.is_captured()
+                and cg_manager.supports_modality(modality)
                 else None
             )
             batch_outputs = (
