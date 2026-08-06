@@ -13,6 +13,8 @@ guide::
 with causal (and optionally sliding-window) masking handled by the backend.
 """
 
+import importlib
+
 import pytest
 import torch
 
@@ -21,6 +23,7 @@ from vllm.models.inkling.nvidia.attention import (
     compute_log_scaling_tau,
 )
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
+    _use_sheared_bias,
     inkling_fa4_num_splits,
     inkling_fa4_rel_attention,
 )
@@ -76,6 +79,23 @@ def test_num_splits_hopper_is_unsplit(monkeypatch):
         )
         == 1
     )
+
+
+@pytest.mark.parametrize(
+    ("major", "expected"),
+    [(9, False), (10, True), (11, True), (12, False)],
+)
+def test_sheared_bias_architecture_selection(monkeypatch, major, expected):
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(major=major, minor=0),
+    )
+    _use_sheared_bias.cache_clear()
+    try:
+        assert _use_sheared_bias() is expected
+    finally:
+        _use_sheared_bias.cache_clear()
 
 
 @pytest.fixture
@@ -251,6 +271,14 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
     window_size = (-1, -1) if window_left is None else (window_left, 0)
 
     preallocated_out = torch.empty_like(q)
+    num_splits = inkling_fa4_num_splits(
+        is_local=window_left is not None,
+        batch_size=num_seqs,
+        max_query_len=max(q_lens),
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        max_kv_len=max(kv_lens),
+    )
     out = inkling_fa4_rel_attention(
         q,
         key_cache,
@@ -264,6 +292,7 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
         window_size=window_size,
         rel_extent=rel_extent,
         rel_logits=rel_logits,
+        num_splits=num_splits,
         out=preallocated_out,
     )
     assert out.data_ptr() == preallocated_out.data_ptr()
@@ -283,6 +312,24 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
     )
 
     torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    _cap is None or _cap.major < 9,
+    reason="FA4 score-mod requires Hopper+ (SM90+)",
+)
+@torch.inference_mode()
+def test_score_mod_relative_attention(monkeypatch):
+    module = importlib.import_module("vllm.models.inkling.nvidia.ops.fa4_rel_attention")
+    monkeypatch.setattr(module, "_use_sheared_bias", lambda: False)
+    _run_case(
+        [(64, 64), (1, 80)],
+        num_heads=4,
+        num_kv_heads=4,
+        rel_extent=128,
+        window_left=None,
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")

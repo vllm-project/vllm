@@ -41,7 +41,7 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
@@ -391,7 +391,7 @@ class MiniMaxM3MoE(nn.Module):
         # always-on shared expert; aiter applies the routed scaling internally.
         # Every other path (vLLM top-k bias router, or no fusion) applies the
         # routed scaling to the MoE output here.
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -642,7 +642,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # MiniMax-M3 sparse attention owns its KV-cache insert/read path instead
         # of wrapping the generic Attention module. Keep the same runtime scale
         # attributes so FP8 KV reads can honor vLLM's per-layer descale contract.
-        self.calculate_kv_scales = False
         set_default_quant_scales(self, register_buffer=True)
 
         # Shared top-k buffer: the indexer writes the selected blocks into it and

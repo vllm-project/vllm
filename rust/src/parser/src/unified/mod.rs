@@ -6,17 +6,19 @@
 mod combined;
 mod gemma4;
 mod inkling;
+mod kimi_k3;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
 pub use inkling::InklingUnifiedParser;
+pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::DynTokenizer;
 
 use crate::reasoning::ReasoningError;
 use crate::tool::{
-    StructuralTagModel, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
+    StructuralTagBuilder, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
 };
 
 /// Result alias for unified parser operations.
@@ -171,8 +173,8 @@ pub trait UnifiedParser: Send {
         false
     }
 
-    /// Return the xgrammar structural-tag model used for strict tool calling.
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+    /// Return the xgrammar structural-tag builder used for strict tool calling.
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
 

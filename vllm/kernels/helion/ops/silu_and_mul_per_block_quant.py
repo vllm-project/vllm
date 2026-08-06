@@ -60,7 +60,14 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             device=input.device,
             dtype=scale_dtype,
         )
-        scale_ub = torch.mean(input).to(scale_dtype)
+        # scale_ub clamps the per-group amax of the SiLU-and-mul activation. Use
+        # a non-degenerate upper bound (midway between the mean and max of the
+        # activation magnitude) so clamping is partially active and the baseline
+        # comparison is meaningful. torch.mean(input) ~= 0 for the zero-mean
+        # input would collapse every scale to the floor and saturate the output.
+        # Mirrors tests/kernels/helion/test_silu_and_mul_per_block_quant.py.
+        act_abs = SiluAndMul.forward_native(input.to(torch.float32)).abs()
+        scale_ub = (0.5 * (act_abs.mean() + act_abs.amax())).to(scale_dtype)
 
         config_key = CaseKey(
             {
