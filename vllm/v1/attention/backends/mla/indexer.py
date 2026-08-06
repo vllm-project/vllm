@@ -546,8 +546,20 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 f"cp_kv_cache_interleave_size=1 (got "
                 f"{self.cp_kv_cache_interleave_size})."
             )
+        # Resolved before the prefill budget below because the chunker feeds it
+        # compressed seq_lens and must be sized in the same units.
+        # KV compression. Default to 1 for no compression.
+        self.compress_ratio = 1
+        # Get compress_ratio for DeepseekV4 support
+        if isinstance(self.kv_cache_spec, MLAAttentionSpec):
+            # MLA compression is a whole number of tokens per state (fractions
+            # are whisper block pooling and never reach MLA).
+            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
+            self.compress_ratio = self.kv_cache_spec.tokens_per_state
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
-        self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
+        self.max_prefill_buffer_size = (
+            get_max_prefill_buffer_size(self.vllm_config) // self.compress_ratio
+        )
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config
@@ -618,14 +630,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
 
-        # KV compression. Default to 1 for no compression.
-        self.compress_ratio = 1
-        # Get compress_ratio for DeepseekV4 support
-        if isinstance(self.kv_cache_spec, MLAAttentionSpec):
-            # MLA compression is a whole number of tokens per state (fractions
-            # are whisper block pooling and never reach MLA).
-            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
-            self.compress_ratio = self.kv_cache_spec.tokens_per_state
+        # compress_ratio is resolved earlier (used to size the prefill budget).
         if self.dcp_world_size > 1 and self.compress_ratio > 1:
             raise NotImplementedError(
                 "DCP is not supported with sparse indexer KV compression "
