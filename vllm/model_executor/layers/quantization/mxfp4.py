@@ -628,13 +628,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        if self.is_k3_situ_int4_gfx942:
-            # K3's AITER A16W4 kernel handles K3's native intermediate size
-            # (moe_intermediate 3072; e.g. 384/partition at TP8); the generic
-            # 256 round-up would inflate weights and OOM. AITER's
-            # resolve_flydsl_stage1_tile_n() already downgrades tile_n 256->128
-            # for such shapes, so 384 is served natively.
-            return hidden_size, intermediate_size_per_partition
         return mxfp4_round_up_hidden_size_and_intermediate_size(
             self.mxfp4_backend,
             hidden_size,
@@ -883,24 +876,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
         return w13, w2, w13_scale, w2_scale
-
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
-        layer.w13_weight.is_shuffled = True
-        layer.w2_weight.is_shuffled = True
-
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
-            self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                mxfp4_backend=self.mxfp4_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-                layer=layer,
-            )
 
     def _setup_kernel_k3_situ_gfx942(self, layer: RoutedExperts) -> None:
         # gfx942 has no native MXFP4 matmul. Convert the weights to groupwise
