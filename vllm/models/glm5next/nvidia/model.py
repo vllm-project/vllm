@@ -405,9 +405,9 @@ class Glm5NextDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 positions=positions,
             )
-            hidden_states = residual + attn_output
-            residual = hidden_states
-            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states, residual = self.post_attention_layernorm(
+                attn_output, residual=residual
+            )
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states
             return hidden_states, residual
