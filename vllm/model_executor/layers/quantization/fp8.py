@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -546,7 +545,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -572,7 +571,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
@@ -589,13 +588,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # WEIGHT_SCALES
         if not self.block_quant:
             # For per-tensor quant, the scales are per expert and weight.
-            w13_scale_data = torch.ones(num_experts, 2, dtype=torch.float32)
+            w13_scale_data = torch.ones(
+                num_experts, self.moe.w13_num_shards, dtype=torch.float32
+            )
             w2_scale_data = torch.ones(num_experts, dtype=torch.float32)
         else:
             # For block quant, the scales are per block (typically 128x128).
             w13_scale_data = torch.ones(
                 num_experts,
-                2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                self.moe.w13_num_shards
+                * ((intermediate_size_per_partition + block_n - 1) // block_n),
                 (hidden_size + block_k - 1) // block_k,
                 dtype=torch.float32,
             )
@@ -723,21 +725,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if not self.block_quant:
             shard_size = layer.intermediate_size_per_partition
             w13, w13_scale = process_fp8_weight_tensor_strategy_moe(
-                w13, w13_scale, shard_size, layer.local_num_experts
+                w13,
+                w13_scale,
+                shard_size,
+                layer.local_num_experts,
+                is_act_and_mul=self.moe.is_act_and_mul,
             )
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
-        )
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
