@@ -349,6 +349,14 @@ def make_proton_wrapper(
     return wrapper, proton
 
 
+@pytest.fixture
+def nvidia_platform(monkeypatch):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+
+
+@pytest.mark.usefixtures("nvidia_platform")
 class TestProtonConfig:
     def test_normalizes_local_output_directory(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -401,7 +409,19 @@ class TestProtonConfig:
                 **{field: "invalid"},
             )
 
+    def test_rejects_non_cuda_platform(self, tmp_path, monkeypatch):
+        from vllm.platforms import current_platform
 
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+
+        with pytest.raises(ValueError, match="NVIDIA CUDA workers only"):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=str(tmp_path),
+            )
+
+
+@pytest.mark.usefixtures("nvidia_platform")
 class TestProtonProfilerWrapper:
     def test_passes_config_and_global_rank_name_to_proton(self, tmp_path):
         wrapper, proton = make_proton_wrapper(

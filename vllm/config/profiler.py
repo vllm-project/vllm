@@ -198,6 +198,13 @@ class ProfilerConfig:
             raise ValueError(
                 "proton_profiler_dir must be set when profiler is 'proton'"
             )
+        if self.profiler == "proton":
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "The Proton profiler currently supports NVIDIA CUDA workers only"
+                )
         if proton_profiler_dir:
             if _is_uri_path(proton_profiler_dir):
                 raise ValueError("proton_profiler_dir must be a local directory")
