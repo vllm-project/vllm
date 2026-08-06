@@ -111,7 +111,34 @@ class DeepseekVLV2Config(PretrainedConfig):
 
         self.vision_config = VisionEncoderConfig(**kwargs.pop("vision_config", {}))
         self.projector_config = MlpProjectorConfig(**kwargs.pop("projector_config", {}))
-        self.text_config = DeepseekVLV2TextConfig(**kwargs.pop("language_config", {}))
+
+        language_config = kwargs.pop("language_config", {})
+        # DeepSeek-VL2 checkpoints (e.g. deepseek-vl2, deepseek-vl2-small) omit
+        # several language-model fields in ``language_config`` and rely on the
+        # defaults of the *original* DeepSeek-VL2 ``DeepseekV2Config`` shipped
+        # with the model. vLLM instead parses ``language_config`` with the
+        # built-in Transformers ``DeepseekV2Config``, whose generic defaults
+        # differ (e.g. ``vocab_size`` 102400 -> 32000) and which does not treat
+        # ``kv_lora_rank`` as optional. As a result the omitted fields silently
+        # resolve to wrong values: this disables MLA detection
+        # (``ModelConfig.is_deepseek_mla``) -- which crashes
+        # ``DeepseekV2Attention`` on ``kv_lora_rank + qk_rope_head_dim`` -- and
+        # breaks the vocab-size check when loading ``embed_tokens``.
+        #
+        # Restore the original DeepSeek-VL2 defaults only for fields the
+        # checkpoint does NOT provide. ``setdefault`` intentionally leaves an
+        # explicit value untouched, including an explicit ``null`` such as
+        # ``kv_lora_rank: null`` used by the MHA-based deepseek-vl2-tiny.
+        deepseek_vl2_reference_defaults = {
+            "vocab_size": 102400,
+            "kv_lora_rank": 512,
+            "qk_nope_head_dim": 128,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 128,
+        }
+        for key, value in deepseek_vl2_reference_defaults.items():
+            language_config.setdefault(key, value)
+        self.text_config = DeepseekVLV2TextConfig(**language_config)
 
         self.tile_tag = tile_tag
         self.global_view_pos = global_view_pos
