@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -202,6 +203,15 @@ class Scheduler(SchedulerInterface):
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
+
+        # Async scheduling can have multiple model steps in flight for one
+        # resumable request. A stopped segment must not reuse its Request
+        # object until all of those old steps have returned, otherwise a stale
+        # output can enqueue a request which is already RUNNING again.
+        #
+        # request_id -> number of scheduled model steps not returned yet.
+        self._streaming_inflight_steps: dict[str, int] = {}
+        self._streaming_draining_req_ids: set[str] = set()
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
@@ -439,6 +449,9 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        audio_history_mode = os.environ.get(
+            "QWEN3_ASR_REALTIME_MODE", ""
+        ).strip().lower() in {"audio_history_kv", "aut_stable_window_kv"}
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -635,6 +648,18 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
+            if audio_history_mode:
+                logger.info(
+                    "QWEN3_ASR_AUDIO_HISTORY_KV_METRIC request_id=%s "
+                    "segment_id=%s computed_before=%d scheduled_new=%d "
+                    "request_tokens=%d audio_history_end=%s",
+                    request_id,
+                    getattr(request, "segment_id", None),
+                    request.num_computed_tokens,
+                    num_new_tokens,
+                    request.num_tokens,
+                    getattr(request, "audio_history_token_end", None),
+                )
             token_budget -= num_new_tokens
             req_index += 1
 
@@ -1229,6 +1254,14 @@ class Scheduler(SchedulerInterface):
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
+        if self.scheduler_config.async_scheduling:
+            for req_id in num_scheduled_tokens:
+                request = self.requests.get(req_id)
+                if request is not None and request.resumable:
+                    self._streaming_inflight_steps[req_id] = (
+                        self._streaming_inflight_steps.get(req_id, 0) + 1
+                    )
+
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
@@ -1368,23 +1401,163 @@ class Scheduler(SchedulerInterface):
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
     ) -> None:
+        """Apply one update after the previous segment is fully drained."""
+        assert session.request_id not in self._streaming_draining_req_ids, (
+            "A streaming session cannot be updated while old async steps "
+            "are still draining"
+        )
+        assert self._streaming_inflight_steps.get(session.request_id, 0) == 0, (
+            "A streaming session cannot be updated with model steps in flight"
+        )
+
+        self._apply_streaming_update(session, update)
+
+    def _apply_streaming_update(
+        self, session: Request, update: StreamingUpdate
+    ) -> None:
         """
         Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
+
+        This implementation is split from _update_request_as_session so tests
+        and subclasses still have one guarded entry point for all prompt/KV
+        mutations. Rollback/prefix construction remains in the realtime model
+        and is intentionally unaffected by scheduler draining.
         """
 
-        # Current streaming input behaviour: Keep only computed output tokens
-        # (discard final sampled output token).
+        # Diagnostic mode for Qwen3-ASR realtime: remove every token generated
+        # by the previous segment before appending the next streaming input.
+        # This deliberately keeps all prior prompt/mm-feature updates so the
+        # experiment isolates implicit assistant-output history only.
+        discard_prior_output = os.environ.get(
+            "VLLM_STREAMING_DISCARD_PRIOR_OUTPUT", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         num_computed_tokens = session.num_computed_tokens
-        kept_output_tokens = session._all_token_ids[
-            session.num_prompt_tokens : num_computed_tokens
-        ]
-        del session._all_token_ids[num_computed_tokens:]
-        session._output_token_ids.clear()
+        prior_prompt_tokens = session.num_prompt_tokens
+        audio_history_mode = os.environ.get(
+            "QWEN3_ASR_REALTIME_MODE", ""
+        ).strip().lower() == "audio_history_kv"
+        aut_stable_window_mode = os.environ.get(
+            "QWEN3_ASR_REALTIME_MODE", ""
+        ).strip().lower() == "aut_stable_window_kv"
+        incremental_audio_mode = audio_history_mode or aut_stable_window_mode
+        replacing_active_mm_index: int | None = None
+        if incremental_audio_mode:
+            truncate_to = update.truncate_to_token
+            if aut_stable_window_mode:
+                stable_feature_count = int(
+                    getattr(session, "aut_stable_feature_count", 0)
+                )
+                if stable_feature_count < len(session.mm_features):
+                    # The suffix after stable_feature_count is the previous
+                    # provisional AuT window. Replace it with the newly
+                    # recomputed active window.
+                    replacing_active_mm_index = stable_feature_count
+                    active_feature = session.mm_features[
+                        replacing_active_mm_index
+                    ]
+                    truncate_to = active_feature.mm_position.offset
+                    self.encoder_cache_manager.free_encoder_input(
+                        session, replacing_active_mm_index
+                    )
+                else:
+                    stable_audio_end = getattr(
+                        session, "aut_stable_audio_end", None
+                    )
+                    if stable_audio_end is not None:
+                        truncate_to = stable_audio_end
+            if truncate_to is None:
+                session_audio_history_end = getattr(
+                    session, "audio_history_token_end", None
+                )
+                if session_audio_history_end is not None:
+                    truncate_to = session_audio_history_end
+                elif session.mm_features:
+                    truncate_to = max(
+                        feature.mm_position.offset + feature.mm_position.length
+                        for feature in session.mm_features
+                    )
+            if truncate_to is None:
+                raise ValueError("audio-history update has no audio boundary")
+            if not 0 <= truncate_to <= session.num_computed_tokens:
+                raise ValueError(
+                    f"invalid audio-history boundary {truncate_to} for "
+                    f"num_computed_tokens={session.num_computed_tokens}"
+                )
+            projected_prompt_tokens = truncate_to + len(
+                update.prompt_token_ids or ()
+            )
+            requested_output_tokens = max(1, int(update.max_tokens))
+            if (
+                projected_prompt_tokens + requested_output_tokens
+                > self.max_model_len
+            ):
+                raise ValueError(
+                    "QWEN3_ASR_REALTIME_CONTEXT_LIMIT: "
+                    f"segment_id={update.segment_id}, "
+                    f"prompt_tokens={projected_prompt_tokens}, "
+                    f"requested_output_tokens={requested_output_tokens}, "
+                    f"max_model_len={self.max_model_len}. "
+                    "The full audio + full text prefix is preserved; increase "
+                    "--max-model-len or start a new realtime session."
+                )
+            # In append-only audio_history_kv this is the exclusive end of the
+            # last stable feature. In aut_stable_window_kv this can instead be
+            # the start of the provisional active feature, so the active AuT
+            # window and its LLM KV are replaced together.
+            del session._all_token_ids[truncate_to:]
+            del session.prompt_token_ids[truncate_to:]
+            if replacing_active_mm_index is not None:
+                del session.mm_features[replacing_active_mm_index:]
+            session._output_token_ids.clear()
+            session.num_prompt_tokens = truncate_to
+            session.num_computed_tokens = truncate_to
+            session.audio_history_token_end = truncate_to
+            session.block_hashes.clear()
+            logger.info(
+                "QWEN3_ASR_AUDIO_HISTORY_TRUNCATE request_id=%s "
+                "segment_id=%s truncate_to=%d",
+                session.request_id,
+                update.segment_id,
+                truncate_to,
+            )
+        if discard_prior_output:
+            discarded_output_tokens = max(
+                0, len(session._all_token_ids) - prior_prompt_tokens
+            )
+            del session._all_token_ids[prior_prompt_tokens:]
+            session._output_token_ids.clear()
+            # Rewind the logical compute frontier so the following prompt
+            # overwrites the former output-token KV positions. The diagnostic
+            # server is launched with prefix caching disabled, avoiding shared
+            # immutable blocks while these positions are reused.
+            session.num_computed_tokens = min(
+                num_computed_tokens, prior_prompt_tokens
+            )
+            logger.info(
+                "STREAMING_DISCARD_PRIOR_OUTPUT request_id=%s "
+                "prior_prompt_tokens=%d old_num_computed_tokens=%d "
+                "new_num_computed_tokens=%d discarded_output_tokens=%d",
+                session.request_id,
+                prior_prompt_tokens,
+                num_computed_tokens,
+                session.num_computed_tokens,
+                discarded_output_tokens,
+            )
+        elif not incremental_audio_mode:
+            # Current streaming input behaviour: Keep only computed output
+            # tokens (discard final sampled output token).
+            kept_output_tokens = session._all_token_ids[
+                session.num_prompt_tokens : num_computed_tokens
+            ]
+            del session._all_token_ids[num_computed_tokens:]
+            session._output_token_ids.clear()
+            assert session.prompt_token_ids is not None
+            # Extend prompt with kept output tokens.
+            session.prompt_token_ids.extend(kept_output_tokens)
+
         assert session.prompt_token_ids is not None
-        # Extend prompt with kept output tokens.
-        session.prompt_token_ids.extend(kept_output_tokens)
 
         if update.mm_features:
             base = session.num_tokens
@@ -1393,6 +1566,57 @@ class Scheduler(SchedulerInterface):
                     mm_feature.mm_position, offset=mm_feature.mm_position.offset + base
                 )
             session.mm_features.extend(update.mm_features)
+            if incremental_audio_mode:
+                session.audio_history_token_end = max(
+                    feature.mm_position.offset + feature.mm_position.length
+                    for feature in session.mm_features
+                )
+                if aut_stable_window_mode:
+                    if update.new_audio_feature_count != 1:
+                        raise ValueError(
+                            "aut_stable_window_kv requires exactly one "
+                            "active audio feature per update"
+                        )
+                    active_index = len(session.mm_features) - 1
+                    if update.final_segment:
+                        session.aut_stable_feature_count = len(
+                            session.mm_features
+                        )
+                        session.aut_stable_audio_end = (
+                            session.audio_history_token_end
+                        )
+                        logger.info(
+                            "QWEN3_ASR_AUT_WINDOW_COMMIT request_id=%s "
+                            "segment_id=%s stable_features=%d stable_end=%d",
+                            session.request_id,
+                            update.segment_id,
+                            session.aut_stable_feature_count,
+                            session.aut_stable_audio_end,
+                        )
+                    else:
+                        session.aut_stable_feature_count = active_index
+                        logger.info(
+                            "QWEN3_ASR_AUT_WINDOW_REPLACE request_id=%s "
+                            "segment_id=%s active_feature=%d active_start=%d "
+                            "active_end=%d",
+                            session.request_id,
+                            update.segment_id,
+                            active_index,
+                            session.mm_features[active_index].mm_position.offset,
+                            session.audio_history_token_end,
+                        )
+
+        if update.segment_id is not None:
+            previous_segment_id = getattr(session, "segment_id", None)
+            if (
+                previous_segment_id is not None
+                and update.segment_id <= previous_segment_id
+            ):
+                raise ValueError(
+                    "streaming segment_id must increase monotonically: "
+                    f"previous={previous_segment_id}, new={update.segment_id}"
+                )
+            session.segment_id = update.segment_id
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
@@ -1734,6 +1958,22 @@ class Scheduler(SchedulerInterface):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
+
+            # Drain results that were already in flight when a segment stopped.
+            if (
+                self.scheduler_config.async_scheduling
+                and req_id in self._streaming_draining_req_ids
+            ):
+                drained = self._finish_streaming_step(req_id)
+                if drained and request is not None:
+                    finished = self._resume_streaming_session(request)
+                    if finished:
+                        self._free_request(request)
+                continue
+
+            if self.scheduler_config.async_scheduling:
+                self._finish_streaming_step(req_id)
+
             output_is_stale = False
             if request is not None:
                 request.num_in_flight_tokens -= num_tokens_scheduled
@@ -2085,10 +2325,23 @@ class Scheduler(SchedulerInterface):
 
         return self.waiting or self.skipped_waiting or None
 
-    def _handle_stopped_request(self, request: Request) -> bool:
-        """Return True if finished (can be False for resumable requests)."""
-        if not request.resumable:
+    def _finish_streaming_step(self, request_id: str) -> bool:
+        """Account for one returned async step; return True when drained."""
+        inflight = self._streaming_inflight_steps.get(request_id)
+        if inflight is None:
             return True
+        assert inflight > 0, f"Invalid streaming inflight count: {inflight}"
+        if inflight == 1:
+            del self._streaming_inflight_steps[request_id]
+            return True
+        self._streaming_inflight_steps[request_id] = inflight - 1
+        return False
+
+    def _resume_streaming_session(self, request: Request) -> bool:
+        """Resume exactly once after every old async step has drained."""
+        request_id = request.request_id
+        assert self._streaming_inflight_steps.get(request_id, 0) == 0
+        self._streaming_draining_req_ids.discard(request_id)
 
         if request.streaming_queue:
             update = request.streaming_queue.popleft()
@@ -2102,6 +2355,29 @@ class Scheduler(SchedulerInterface):
 
         self._enqueue_waiting_request(request)
         return False
+
+    def _handle_stopped_request(self, request: Request) -> bool:
+        """Return True if finished (can be False for resumable requests)."""
+        if not request.resumable:
+            return True
+
+        request_id = request.request_id
+        if (
+            self.scheduler_config.async_scheduling
+            and self._streaming_inflight_steps.get(request_id, 0) > 0
+        ):
+            # Do not apply the queued update yet. Later model outputs still
+            # reference this same Request object and belong to the old segment.
+            self._streaming_draining_req_ids.add(request_id)
+            logger.debug(
+                "Deferring streaming resume for request %s until %d old "
+                "async step(s) drain",
+                request_id,
+                self._streaming_inflight_steps[request_id],
+            )
+            return False
+
+        return self._resume_streaming_session(request)
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
@@ -2312,6 +2588,9 @@ class Scheduler(SchedulerInterface):
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        request_id = request.request_id
+        self._streaming_inflight_steps.pop(request_id, None)
+        self._streaming_draining_req_ids.discard(request_id)
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)

@@ -42,6 +42,11 @@ class StreamingUpdate:
     max_tokens: int
     arrival_time: float
     sampling_params: SamplingParams | None
+    segment_id: int | None = None
+    truncate_to_token: int | None = None
+    audio_history_token_end: int | None = None
+    new_audio_feature_count: int = 0
+    final_segment: bool = False
 
     @classmethod
     def from_request(cls, request: "Request") -> "StreamingUpdate | None":
@@ -53,6 +58,11 @@ class StreamingUpdate:
             max_tokens=request.max_tokens,
             arrival_time=request.arrival_time,
             sampling_params=request.sampling_params,
+            segment_id=request.segment_id,
+            truncate_to_token=request.truncate_to_token,
+            audio_history_token_end=request.audio_history_token_end,
+            new_audio_feature_count=request.new_audio_feature_count,
+            final_segment=request.final_segment,
         )
 
 
@@ -78,8 +88,18 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        segment_id: int | None = None,
+        truncate_to_token: int | None = None,
+        audio_history_token_end: int | None = None,
+        new_audio_feature_count: int = 0,
+        final_segment: bool = False,
     ) -> None:
         self.request_id = request_id
+        self.segment_id = segment_id
+        self.truncate_to_token = truncate_to_token
+        self.audio_history_token_end = audio_history_token_end
+        self.new_audio_feature_count = new_audio_feature_count
+        self.final_segment = final_segment
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
@@ -247,6 +267,11 @@ class Request:
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
+            segment_id=request.segment_id,
+            truncate_to_token=request.truncate_to_token,
+            audio_history_token_end=request.audio_history_token_end,
+            new_audio_feature_count=request.new_audio_feature_count,
+            final_segment=request.final_segment,
         )
 
     def append_output_token_ids(

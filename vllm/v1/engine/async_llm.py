@@ -498,6 +498,11 @@ class AsyncLLM(EngineClient):
                         resumable=True,
                         **inputs,  # type: ignore[arg-type]
                     )
+                    req.segment_id = input_chunk.segment_id
+                    req.truncate_to_token = input_chunk.truncate_to_token
+                    req.audio_history_token_end = input_chunk.audio_history_token_end
+                    req.new_audio_feature_count = input_chunk.new_audio_feature_count
+                    req.final_segment = input_chunk.final_segment
                     req.external_req_id = request_id
                     if req.prompt_embeds is not None:
                         raise VLLMValidationError(
