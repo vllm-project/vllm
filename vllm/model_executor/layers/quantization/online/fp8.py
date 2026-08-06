@@ -582,12 +582,11 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         hidden_size = layer.moe_config.hidden_dim_unpadded
         intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
 
-        w13_half_size = layer.w13_weight.shape[1] // 2
-        if w13_half_size > intermediate_size:
-            layer.w13_weight[:, intermediate_size:w13_half_size, :] = 0
-            layer.w13_weight[
-                :, w13_half_size + intermediate_size : 2 * w13_half_size, :
-            ] = 0
+        w13_shard = layer.w13_weight.shape[1] // self.moe.w13_num_shards
+        if w13_shard > intermediate_size:
+            for shard in range(self.moe.w13_num_shards):
+                start = shard * w13_shard + intermediate_size
+                layer.w13_weight[:, start : (shard + 1) * w13_shard, :] = 0
         if layer.w13_weight.shape[2] > hidden_size:
             layer.w13_weight[:, :, hidden_size:] = 0
 
@@ -597,12 +596,11 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             layer.w2_weight[:, :, intermediate_size:] = 0
 
         if getattr(layer, "w13_bias", None) is not None:
-            w13_bias_half_size = layer.w13_bias.shape[1] // 2
-            if w13_bias_half_size > intermediate_size:
-                layer.w13_bias[:, intermediate_size:w13_bias_half_size] = 0
-                layer.w13_bias[
-                    :, w13_bias_half_size + intermediate_size : 2 * w13_bias_half_size
-                ] = 0
+            w13_bias_shard = layer.w13_bias.shape[1] // self.moe.w13_num_shards
+            if w13_bias_shard > intermediate_size:
+                for shard in range(self.moe.w13_num_shards):
+                    start = shard * w13_bias_shard + intermediate_size
+                    layer.w13_bias[:, start : (shard + 1) * w13_bias_shard] = 0
 
         if (
             getattr(layer, "w2_bias", None) is not None
