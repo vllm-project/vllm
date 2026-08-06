@@ -32,10 +32,10 @@ from vllm.utils import random_uuid
 class PlaceholderRangeInfo(BaseModel):
     """Serializable placeholder location for a single multi-modal item."""
 
-    offset: int
+    offset: int = Field(ge=0)
     """Start index of the placeholder tokens in the prompt."""
 
-    length: int
+    length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
     # TODO: add ``is_embed: list[bool] | None`` once the /generate side
@@ -65,6 +65,47 @@ class MultiModalFeatures(BaseModel):
     the item should be resolved from cache.  The entire field is
     ``None`` for metadata-only (cache-hit) responses.
     """
+
+    @model_validator(mode="after")
+    def _validate_parallel_fields(self) -> "MultiModalFeatures":
+        modalities = set(self.mm_hashes)
+        if set(self.mm_placeholders) != modalities:
+            raise ValueError(
+                "mm_hashes and mm_placeholders must use the same modalities"
+            )
+        if self.kwargs_data is not None and set(self.kwargs_data) != modalities:
+            raise ValueError("kwargs_data must use the same modalities as mm_hashes")
+
+        flattened_ranges: list[tuple[int, int]] = []
+        for modality in modalities:
+            num_hashes = len(self.mm_hashes[modality])
+            num_placeholders = len(self.mm_placeholders[modality])
+            if num_hashes != num_placeholders:
+                raise ValueError(
+                    f"{modality} mm_hashes and mm_placeholders must have "
+                    "the same length"
+                )
+            if (
+                self.kwargs_data is not None
+                and len(self.kwargs_data[modality]) != num_hashes
+            ):
+                raise ValueError(
+                    f"{modality} kwargs_data and mm_hashes must have the same length"
+                )
+            flattened_ranges.extend(
+                (placeholder.offset, placeholder.offset + placeholder.length)
+                for placeholder in self.mm_placeholders[modality]
+            )
+
+        flattened_ranges.sort()
+        for (offset, end), (next_offset, _) in zip(
+            flattened_ranges, flattened_ranges[1:]
+        ):
+            if next_offset < end:
+                raise ValueError(
+                    "mm_placeholders must be globally non-overlapping and sorted"
+                )
+        return self
 
 
 class GenerateRequest(BaseModel):
@@ -174,6 +215,20 @@ class GenerateRequest(BaseModel):
         instance = handler(data)
         instance._sampling_params_provided_keys = provided
         return instance
+
+    @model_validator(mode="after")
+    def _validate_multimodal_feature_bounds(self) -> "GenerateRequest":
+        if self.features is None:
+            return self
+
+        prompt_len = len(self.token_ids)
+        for ranges in self.features.mm_placeholders.values():
+            for placeholder in ranges:
+                if placeholder.offset + placeholder.length > prompt_len:
+                    raise ValueError(
+                        "mm_placeholders must remain within the token_ids sequence"
+                    )
+        return self
 
     def is_sampling_param_provided(self, name: str) -> bool:
         """Whether the caller explicitly set ``sampling_params.<name>``.
