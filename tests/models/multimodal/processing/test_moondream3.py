@@ -25,6 +25,7 @@ EXPECTED_IMAGE_TOKENS = 730
 CROP_SIZE = 378
 PATCH_SIZE = 14
 MAX_CROPS = 12
+OVERLAP_MARGIN = 4
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
@@ -102,6 +103,108 @@ def test_processor_pixel_values(
     assert pixel_values.shape[2] == 3  # RGB channels
     assert pixel_values.shape[3] == 378  # crop height
     assert pixel_values.shape[4] == 378  # crop width
+
+
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [
+        pytest.param({"crop_size": CROP_SIZE * 2}, id="flat-crop-size"),
+        pytest.param(
+            {"images_kwargs": {"crop_size": CROP_SIZE * 2}},
+            id="images-kwargs-crop-size",
+        ),
+        pytest.param(
+            {"common_kwargs": {"crop_size": CROP_SIZE * 2}},
+            id="common-kwargs-crop-size",
+        ),
+        pytest.param({"max_crops": MAX_CROPS + 1}, id="flat-max-crops"),
+        pytest.param(
+            {"images_kwargs": {"max_crops": MAX_CROPS + 1}},
+            id="images-kwargs-max-crops",
+        ),
+        pytest.param(
+            {"common_kwargs": {"max_crops": MAX_CROPS + 1}},
+            id="common-kwargs-max-crops",
+        ),
+        pytest.param({"patch_size": PATCH_SIZE * 2}, id="flat-patch-size"),
+        pytest.param(
+            {"images_kwargs": {"patch_size": PATCH_SIZE * 2}},
+            id="images-kwargs-patch-size",
+        ),
+        pytest.param(
+            {"common_kwargs": {"patch_size": PATCH_SIZE * 2}},
+            id="common-kwargs-patch-size",
+        ),
+        pytest.param(
+            {"overlap_margin": OVERLAP_MARGIN + 1},
+            id="flat-overlap-margin",
+        ),
+        pytest.param(
+            {"images_kwargs": {"overlap_margin": OVERLAP_MARGIN + 1}},
+            id="images-kwargs-overlap-margin",
+        ),
+        pytest.param(
+            {"common_kwargs": {"overlap_margin": OVERLAP_MARGIN + 1}},
+            id="common-kwargs-overlap-margin",
+        ),
+    ],
+)
+@pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
+def test_processor_rejects_request_geometry_overrides(
+    image_assets: ImageTestAssets,
+    mm_processor_kwargs: dict[str, object],
+    model_id: str,
+):
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    prompt = "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is this?<|md_reserved_2|>"  # noqa: E501
+    mm_data = {"image": [image_assets[0].pil_image]}
+
+    with pytest.raises(
+        ValueError,
+        match="must match the deployed vision configuration",
+    ):
+        processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs=mm_processor_kwargs,
+        )
+
+
+@pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
+def test_processor_accepts_trusted_geometry_overrides(
+    image_assets: ImageTestAssets,
+    model_id: str,
+):
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    prompt = "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is this?<|md_reserved_2|>"  # noqa: E501
+    mm_data = {"image": [image_assets[0].pil_image]}
+    mm_processor_kwargs = {
+        "images_kwargs": {
+            "crop_size": CROP_SIZE,
+            "max_crops": MAX_CROPS,
+            "overlap_margin": OVERLAP_MARGIN,
+            "patch_size": PATCH_SIZE,
+        }
+    }
+
+    processed_inputs = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=mm_processor_kwargs,
+    )
+
+    mm_kwargs = processed_inputs["mm_kwargs"].get_data()
+    assert mm_kwargs["pixel_values"].shape[2:] == (3, CROP_SIZE, CROP_SIZE)
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
