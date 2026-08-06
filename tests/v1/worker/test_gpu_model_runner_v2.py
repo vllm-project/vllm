@@ -590,8 +590,22 @@ def _prepare_initialize_runner(patch, tp_group, plan, inventory, connector_facto
         lambda *args, **kwargs: (attn_groups, support, [2]),
     )
     patch.setattr(model_runner_module, "BlockTables", lambda *args, **kwargs: None)
+
+    def disable_pcp_manager(
+        _vllm_config,
+        _device,
+        _supports_mm_inputs,
+        _req_states,
+        _block_tables,
+        cls,
+    ):
+        _ = cls
+        return None
+
     patch.setattr(
-        model_runner_module.pcp, "maybe_build_pcp_manager", lambda *args: None
+        model_runner_module.pcp,
+        "maybe_build_pcp_manager",
+        disable_pcp_manager,
     )
     patch.setattr(
         model_runner_module, "initialize_mamba_ssu_backend", lambda *args: None
@@ -2016,9 +2030,11 @@ def _make_c6_full_decode_seed(monkeypatch):
     )
     runner.dp_size = runner.dp_rank = 1
     runner.lora_config = None
-    runner.is_encoder_decoder = runner.supports_mm_inputs = False
+    runner.is_encoder_decoder = runner.is_encoder_only = False
+    runner.supports_mm_inputs = False
     runner.is_first_pp_rank = runner.is_last_pp_rank = True
     runner.use_aux_hidden_state_outputs = False
+    runner.routed_experts_capturer = None
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     runner.attn_groups = []
     runner.model_config = SimpleNamespace()
@@ -2040,11 +2056,22 @@ def _make_c6_full_decode_seed(monkeypatch):
         (torch.zeros(1, dtype=torch.int64),),
         torch.zeros(1),
     )
+
+    def prepare_model_state_attn(
+        _input_batch,
+        _cudagraph_mode,
+        _block_tables,
+        _slot_mappings,
+        _attn_groups,
+        _kv_cache_config,
+        for_capture=False,
+    ):
+        _ = for_capture
+        return {"main.0": SimpleNamespace(req_id_per_token=req_id_per_token)}
+
     runner.model_state = SimpleNamespace(
         preprocess_state=lambda *args: None,
-        prepare_attn=lambda *args: {
-            "main.0": SimpleNamespace(req_id_per_token=req_id_per_token)
-        },
+        prepare_attn=prepare_model_state_attn,
         prepare_inputs=lambda *args: {},
     )
     runner.kv_connector = SimpleNamespace(
