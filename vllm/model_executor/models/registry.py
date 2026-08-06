@@ -447,6 +447,10 @@ _MULTIMODAL_MODELS = {
         "interns1_pro",
         "InternS1ProForConditionalGeneration",
     ),
+    "InternS2MobiusForConditionalGeneration": (
+        "interns2_mobius",
+        "InternS2MobiusForConditionalGeneration",
+    ),
     "InternS2PreviewForConditionalGeneration": (
         "interns2_preview",
         "InternS2PreviewForConditionalGeneration",
@@ -661,6 +665,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Step3p5MTP": ("step3p5_mtp", "Step3p5MTP"),
     "Qwen3_5MTP": ("qwen3_5_mtp", "Qwen3_5MTP"),
     "Qwen3_5MoeMTP": ("qwen3_5_mtp", "Qwen3_5MoeMTP"),
+    "InternS2MobiusMTP": ("interns2_mobius", "InternS2MobiusMTP"),
     "HYV3MTPModel": ("hy_v3_mtp", "HYV3MTP"),
     "KimiK3MTPModel": ("vllm.models.kimi_k3", "KimiK3MTP"),
     # Temporarily disabled.
@@ -814,6 +819,7 @@ class _ModelInfo:
     supports_transcription: bool
     supports_transcription_only: bool
     supported_video_pruning_methods: tuple[str, ...]
+    supports_mm_device_do_normalize: bool
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -846,6 +852,9 @@ class _ModelInfo:
             has_noops=has_noops(model),
             supported_video_pruning_methods=getattr(
                 model, "supported_video_pruning_methods", ()
+            ),
+            supports_mm_device_do_normalize=getattr(
+                model, "supports_mm_device_do_normalize", False
             ),
         )
 
