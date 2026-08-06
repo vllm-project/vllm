@@ -188,6 +188,68 @@ fn reasoning_effort_none_disables_thinking() {
 }
 
 #[test]
+fn system_to_assistant_transitions_in_chat_and_thinking_modes() {
+    let rendered = [false, true].map(|enable_thinking| {
+        let mut request = ChatRequest {
+            messages: vec![
+                ChatMessage::system("rules"),
+                ChatMessage::assistant_blocks(vec![
+                    AssistantContentBlock::Reasoning {
+                        text: "reason".to_string(),
+                    },
+                    AssistantContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                ]),
+            ],
+            ..ChatRequest::for_test()
+        };
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
+        request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+        render_request(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜>rules<｜Assistant｜></think>answer<｜end▁of▁sentence｜>",
+            "<｜begin▁of▁sentence｜>rules<｜Assistant｜><think>reason</think>answer<｜end▁of▁sentence｜>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
+}
+
+#[test]
+fn trailing_system_transitions_in_chat_and_thinking_modes() {
+    let rendered = [false, true].map(|enable_thinking| {
+        let mut request = ChatRequest {
+            messages: vec![
+                ChatMessage::system("rules"),
+                ChatMessage::user("question"),
+                ChatMessage::system("final rules"),
+            ],
+            ..ChatRequest::for_test()
+        };
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
+        request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+        render_request(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜>rules<｜User｜>questionfinal rules<｜Assistant｜></think>",
+            "<｜begin▁of▁sentence｜>rules<｜User｜>questionfinal rules<｜Assistant｜><think>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
+}
+
+#[test]
 fn reasoning_effort_template_kwarg_is_ignored() {
     let mut request = ChatRequest {
         messages: vec![ChatMessage::user("solve it")],
