@@ -427,17 +427,17 @@ class KVTransferThread(threading.Thread):
     def run(self):
         self.ready_event.set()
         while True:
-            request_data = self.request_queue.get()
+            request_data = None
             try:
+                request_data = self.request_queue.get()
                 if request_data is None:
                     logger.warning("Received a None request!")
+                    self.request_queue.task_done()
                     continue
                 self._handle_request(request_data)
             except Exception:
                 req_id = getattr(request_data, "req_id", "<unknown>")
                 logger.exception("Error in %s (req=%s)", self.name, req_id)
-            finally:
-                self.request_queue.task_done()
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -747,8 +747,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         current_event = req_meta.current_event
 
         if req_id not in self.stored_requests:
+            self.request_queue.task_done()
             return
 
+        # Decrement the in-flight counter and signal task_done() in `finally`
+        # so the scheduler can release the GPU blocks it pinned for this
+        # request (via `delay_free_blocks`) even when the store path raises.
         try:
             if self._should_skip_request(req_id):
                 logger.debug(
@@ -981,6 +985,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.update_kv_event(stored_events)
         finally:
             self.dec_stored_request(req_id)
+            self.request_queue.task_done()
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):
@@ -1105,6 +1110,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         self.disk_offload_buffer_budget_bytes,
                     )
                     self.set_finished_request(req_id)
+                    self.request_queue.task_done()
                     return
                 load_batches = []
                 block_id_offset = 0
@@ -1182,6 +1188,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
 
         self.set_finished_request(req_id)
+        self.request_queue.task_done()
 
 
 # ============================================================
