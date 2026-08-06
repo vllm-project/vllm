@@ -4,16 +4,25 @@
 import json
 import subprocess
 import tempfile
+import threading
+from collections.abc import Generator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
+from vllm.connections import HTTPConnection
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.run_batch import (
     BatchRequestOutput,
+    BatchTranscriptionRequest,
     download_bytes_from_url,
+    make_transcription_wrapper,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.utils.mem_constants import MiB_bytes
 
 CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -281,6 +290,73 @@ INPUT_REASONING_BATCH = "\n".join(
 )
 
 MINIMAL_WAV_BASE64 = "UklGRigAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQQAAAAAAP9/"
+_EXACT_LIMIT_AUDIO = b"a" * MiB_bytes
+_OVERSIZED_HTTP_AUDIO = b"b" * (MiB_bytes + 1)
+
+
+class _BatchHTTPServer(ThreadingHTTPServer):
+    request_paths: list[str]
+
+
+class _BatchHTTPHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        server = self.server
+        assert isinstance(server, _BatchHTTPServer)
+        server.request_paths.append(self.path)
+
+        if self.path == "/exact-limit":
+            self._send_body(_EXACT_LIMIT_AUDIO)
+            return
+
+        if self.path == "/oversized-chunked":
+            self.send_response(200)
+            self.end_headers()
+            self._write_body(_OVERSIZED_HTTP_AUDIO)
+            return
+
+        self.send_error(404, "Unknown batch HTTP test path")
+
+    def _send_body(self, body: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self._write_body(body)
+
+    def _write_body(self, body: bytes) -> None:
+        try:
+            for offset in range(0, len(body), 64 * 1024):
+                self.wfile.write(body[offset : offset + 64 * 1024])
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+
+@pytest.fixture
+def batch_http_server() -> Generator[_BatchHTTPServer, None, None]:
+    server = _BatchHTTPServer(("127.0.0.1", 0), _BatchHTTPHandler)
+    server.request_paths = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def _batch_http_url(server: _BatchHTTPServer, path: str) -> str:
+    return f"http://localhost:{server.server_port}{path}"
+
+
+async def _close_async_connection(connection: HTTPConnection) -> None:
+    if connection._async_client is not None:
+        await connection._async_client.close()
+
+
 INPUT_TRANSCRIPTION_BATCH = (
     json.dumps(
         {
@@ -761,8 +837,15 @@ def test_tool_calling():
 
 def _make_aiohttp_mocks(response_data: bytes = b"fake-data", status: int = 200):
     """Create mock objects that simulate aiohttp.ClientSession context managers."""
+
+    async def iter_chunked(chunk_size: int):
+        del chunk_size
+        yield response_data
+
     mock_resp = MagicMock()
     mock_resp.status = status
+    mock_resp.content_length = len(response_data)
+    mock_resp.content.iter_chunked = iter_chunked
     mock_resp.read = AsyncMock(return_value=response_data)
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
     mock_resp.__aexit__ = AsyncMock(return_value=False)
@@ -892,3 +975,55 @@ async def test_download_bytes_backslash_bypass():
         await download_bytes_from_url(
             bypass_url, allowed_media_domains=["evil.internal"]
         )
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_allows_http_body_at_audio_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    batch_http_server: _BatchHTTPServer,
+):
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+    connection = HTTPConnection()
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.run_batch.global_http_connection",
+        connection,
+    )
+
+    try:
+        result = await download_bytes_from_url(
+            _batch_http_url(batch_http_server, "/exact-limit")
+        )
+        assert result == _EXACT_LIMIT_AUDIO
+    finally:
+        await _close_async_connection(connection)
+
+
+@pytest.mark.asyncio
+async def test_transcription_wrapper_rejects_oversized_http_before_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    batch_http_server: _BatchHTTPServer,
+):
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+    connection = HTTPConnection()
+    monkeypatch.setattr(
+        "vllm.entrypoints.openai.run_batch.global_http_connection",
+        connection,
+    )
+    handler = AsyncMock()
+    wrapped_handler = make_transcription_wrapper(is_translation=False)(handler)
+    request = BatchTranscriptionRequest.model_validate(
+        {
+            "model": SPEECH_LARGE_MODEL_NAME,
+            "file_url": _batch_http_url(batch_http_server, "/oversized-chunked"),
+            "response_format": "json",
+        }
+    )
+
+    try:
+        response = await wrapped_handler(request)
+    finally:
+        await _close_async_connection(connection)
+
+    assert isinstance(response, ErrorResponse)
+    assert "Maximum file size exceeded" in response.error.message
+    handler.assert_not_awaited()

@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CACHE_MAX_SIZE_MB: int = 5120
     VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
+    VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
@@ -987,6 +988,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # from URLs. Each retry quadruples the timeout. Default is 3.
     "VLLM_MEDIA_FETCH_MAX_RETRIES": lambda: int(
         os.getenv("VLLM_MEDIA_FETCH_MAX_RETRIES", "3")
+    ),
+    # Maximum size in MB for a single remote media download. The limit is
+    # enforced while streaming the response body so oversized or infinite
+    # responses cannot grow the API server heap without bound. Default is 256.
+    "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB": lambda: int(
+        os.getenv("VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB", "256")
     ),
     # Whether to allow HTTP redirects when fetching from media URLs.
     # Default to True
