@@ -333,7 +333,7 @@ def _resolve_backend_kernels(
     """Apply --linear-backend filtering to one layer type's kernel list.
 
     When the requested backend has no kernel for this layer type, fall back
-    to the unfiltered list (with an INFO log) instead of failing engine
+    to the unfiltered list (with a WARNING log) instead of failing engine
     startup: an explicitly requested backend usually provides kernels for a
     single quantization scheme, while a model can contain several linear
     layer types (e.g. NVFP4 MoE projections next to FP8 attention
@@ -344,7 +344,7 @@ def _resolve_backend_kernels(
         return kernels
     filtered = _filter_kernels_by_backend(linear_backend, kernels)
     if not filtered:
-        logger.info_once(
+        logger.warning_once(
             "--linear-backend=%s was requested, but no %s kernel exists for "
             "%s layers; falling back to normal kernel selection for this "
             "layer.",
@@ -496,8 +496,6 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferCuteDslNvFp4LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
-        # After CUTLASS for auto-selection; explicit --linear-backend
-        # flashinfer_b12x force-enables the autotuning it needs to win.
         FlashInferB12xNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
