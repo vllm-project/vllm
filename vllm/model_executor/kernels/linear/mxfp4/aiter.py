@@ -142,7 +142,7 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         from vllm._aiter_ops import is_aiter_found_and_supported
         from vllm.model_executor.kernels.linear import _get_linear_backend
 
-        linear_backend = _get_linear_backend()
+        linear_backend = _get_linear_backend(quantization="mxfp4")
 
         if (
             current_platform.is_rocm()

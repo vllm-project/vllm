@@ -237,6 +237,11 @@ class KernelConfig:
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
     """
 
+    linear_backend_per_quant: dict[str, LinearBackend] | None = Field(
+        default=None, min_length=1
+    )
+    """For example, ``{"nvfp4_w4a16": "humming"}``."""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
