@@ -184,7 +184,7 @@ struct Mxfp4GroupGemmArchConfig<cutlass::arch::Sm100> {
   using MmaTileShape = Shape<_128, _128, _128>;
   using EpilogueTile = Shape<_128, _64>;
   using KernelSchedule =
-  cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmMxf4Sm100;
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmMxf4Sm100;
   using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
 };
 #endif
@@ -242,7 +242,7 @@ void run_mxfp4_blockwise_scaled_group_mm_impl(
   using MmaTileShape = typename ArchConfig::MmaTileShape;
 
   using CollectiveEpilogue =
- typename cutlass::epilogue::collective::CollectiveBuilder<
+      typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, EpilogueOperatorClass, MmaTileShape, ClusterShape,
           typename ArchConfig::EpilogueTile, ElementAccumulator,
           ElementAccumulator, ElementC, LayoutC*, AlignmentC, ElementD,
@@ -250,12 +250,12 @@ void run_mxfp4_blockwise_scaled_group_mm_impl(
           typename ArchConfig::EpilogueSchedule>::CollectiveOp;
 
   using CollectiveMainloop =
-   typename cutlass::gemm::collective::CollectiveBuilder<
+      typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag, MainloopOperatorClass, ElementA, LayoutA*, AlignmentA,
           ElementB, LayoutB*, AlignmentB, ElementAccumulator, MmaTileShape,
           ClusterShape,
-  cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-          sizeof(typename CollectiveEpilogue::SharedStorage))>,
+          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+              sizeof(typename CollectiveEpilogue::SharedStorage))>,
           typename ArchConfig::KernelSchedule>::CollectiveOp;
 
   using GemmKernel =
@@ -412,21 +412,22 @@ void run_mxfp4_blockwise_scaled_group_mm(
     run_mxfp4_blockwise_scaled_group_mm_impl<cutlass::arch::Sm100, OutType>(
         output, a, b, a_blockscale, b_blockscales, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
-  return;
+    return;
   }
 #endif
 #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
   if (version_num >= 120 && version_num < 130) {
     run_mxfp4_blockwise_scaled_group_mm_impl<cutlass::arch::Sm120, OutType>(
-output, a, b, a_blockscale, b_blockscales, problem_sizes,
-      expert_offsets, sf_offsets, M, N, K);
+        output, a, b, a_blockscale, b_blockscales, problem_sizes,
+        expert_offsets, sf_offsets, M, N, K);
     return;
   }
 #endif
   STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_mxfp4_group_mm kernel for CUDA device capability: ",
-      version_num, ". Required capability: 100-119 (SM10x/11x) or 120-129 "
+      version_num,
+      ". Required capability: 100-119 (SM10x/11x) or 120-129 "
       "(SM12x).");
 }
 
@@ -459,7 +460,7 @@ void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
                             const torch::stable::Tensor& sf_offsets) {
 #if (defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100) || \
     (defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120)
-// Input validation
+  // Input validation
   CHECK_INPUT(a, MXFP4_FLOAT4_E2M1X2, "a");
   CHECK_INPUT(b, MXFP4_FLOAT4_E2M1X2, "b");
   // MXFP4 uses E8M0 scale factors (stored as uint8)
@@ -503,8 +504,8 @@ void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
 #else
   STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-    "No compiled cutlass_mxfp4_group_mm kernel; build vLLM with "
-   "SM10x/11x (ENABLE_NVFP4_SM100) or SM12x (ENABLE_NVFP4_SM120) "
+      "No compiled cutlass_mxfp4_group_mm kernel; build vLLM with "
+      "SM10x/11x (ENABLE_NVFP4_SM100) or SM12x (ENABLE_NVFP4_SM120) "
       "block-scaled FP4 MoE and CUDA 12.8+.");
 #endif
 }

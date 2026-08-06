@@ -395,9 +395,10 @@ void mxfp4_experts_quant(
     int64_t n_experts) {
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
   int32_t sm = get_sm_version_num();
-  STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
-                  "No compiled MXFP4 experts quant kernel for SM ", sm,
-                  ". Recompile with SM10x/11x or SM12x FP4 support and CUDA >= 12.9.");
+  STD_TORCH_CHECK(
+      mxfp4_experts_quant_sm_supported(sm),
+      "No compiled MXFP4 experts quant kernel for SM ", sm,
+      ". Recompile with SM10x/11x or SM12x FP4 support and CUDA >= 12.9.");
 
   auto m_topk = input.size(0);
   auto k = input.size(1);
@@ -433,9 +434,10 @@ void silu_and_mul_mxfp4_experts_quant(
     int64_t n_experts) {
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
   int32_t sm = get_sm_version_num();
-  STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
-                  "No compiled SiLU+Mul MXFP4 experts quant kernel for SM ", sm,
-                  ". Recompile with SM10x/11x or SM12x FP4 support and CUDA >= 12.9.");
+  STD_TORCH_CHECK(
+      mxfp4_experts_quant_sm_supported(sm),
+      "No compiled SiLU+Mul MXFP4 experts quant kernel for SM ", sm,
+      ". Recompile with SM10x/11x or SM12x FP4 support and CUDA >= 12.9.");
 
   auto m_topk = input.size(0);
   auto k_times_2 = input.size(1);

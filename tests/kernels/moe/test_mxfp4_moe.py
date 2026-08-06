@@ -31,8 +31,7 @@ def calc_diff(x, y):
 
 
 def is_mxfp4_moe_supported() -> bool:
-    """Ask the build which devices carry compiled MXFP4 MoE kernels.
-    """
+    """Ask the build which devices carry compiled MXFP4 MoE kernels."""
     capability = current_platform.get_device_capability()
     return (
         current_platform.is_cuda()
