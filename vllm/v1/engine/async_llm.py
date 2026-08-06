@@ -286,11 +286,7 @@ class AsyncLLM(EngineClient):
     def get_num_queued_tokens(self) -> int:
         return self.output_processor.get_num_queued_tokens()
 
-    def _validate_request_scheduling(
-        self,
-        request_id: str,
-        params: SamplingParams | PoolingParams,
-    ) -> None:
+    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
         """Reject the request if it would exceed queue limits.
 
         Both limits return HTTP 503 (Service Unavailable) so that load
@@ -306,11 +302,18 @@ class AsyncLLM(EngineClient):
         scheduler's ``num_computed_tokens`` and ``num_cached_tokens`` are only
         propagated to the API server after prefill completes. The overestimation is
         conservative — earlier rejection, preserving TTFT targets.
+
+        Args:
+            n: Number of sequences the request will occupy.
+            request_id: Request id, used for logging only.
+
+        Raises:
+            QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
+            MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
         """
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
             current = self.get_num_unfinished_requests()
-            n = getattr(params, "n", 1)
             if current + n > max_num_reqs:
                 logger.info(
                     "Request queue full - rejecting request %s "
@@ -379,7 +382,10 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
-        self._validate_request_scheduling(request_id, params)
+        # Enforcement backstop: entrypoints pre-flight this check so that
+        # rejections carry an HTTP status, but paths without one (beam search,
+        # the realtime WebSocket) are only gated here.
+        self.check_admission(getattr(params, "n", 1) or 1, request_id)
 
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
