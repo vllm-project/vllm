@@ -102,10 +102,11 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             self.enorm.variance_epsilon,
         )
         hidden_states = self.eh_proj(eh_input)
-        # mtp_block returns (hidden_states=residual+mlp, residual=post-attn); the
-        # post-attn residual is unused here (final norm is applied below without
-        # a second residual-add).
-        hidden_states, _ = self.mtp_block(
+        # mtp_block returns (hidden_states=residual+mlp, residual=post-attn,
+        # post=None, comb=None); the latter three are unused here (final norm is
+        # applied below without a second residual-add). post/comb are None on the
+        # non-mHC / MTP path.
+        hidden_states, _, _, _ = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
         # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
