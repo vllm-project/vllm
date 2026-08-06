@@ -1922,16 +1922,12 @@ class MoRIIOConnectorWorker:
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Block until all in-flight READs of this layer have landed.
 
-        A runtime mode other than PIECEWISE/NONE means full-graph capture,
-        where a host-side blocking wait must not run.
+        A host-side blocking wait must not run during full-graph capture.
         """
         if self.is_producer or self.mode != MoRIIOMode.READ:
             return
 
-        if get_forward_context().cudagraph_runtime_mode not in (
-            CUDAGraphMode.PIECEWISE,
-            CUDAGraphMode.NONE,
-        ):
+        if get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL:
             return
 
         deadline = time.monotonic() + self.moriio_config.transfer_timeout
