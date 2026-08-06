@@ -8,7 +8,6 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
-from vllm.utils import is_moe_layer
 
 logger = init_logger(__name__)
 
@@ -175,6 +174,7 @@ class DeviceCommunicatorBase:
         unique_name: str = "",
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
+        use_all2all: bool = False,
     ):
         self.device = device or torch.device("cpu")
         self.cpu_group = cpu_group
@@ -204,26 +204,15 @@ class DeviceCommunicatorBase:
             self.global_world_size = dist.get_world_size()
             self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
 
-        use_ep = False
         all2all_backend = None
         from vllm.config import get_current_vllm_config_or_none
 
         config = get_current_vllm_config_or_none()
         if config is not None:
-            # initialize the all2all manager for DP or sequence-parallel EP.
-            parallel_config = config.parallel_config
-            use_ep = (
-                parallel_config.data_parallel_size > 1
-                or parallel_config.use_sequence_parallel_moe
-                or (
-                    parallel_config.enable_expert_parallel
-                    and parallel_config.prefill_context_parallel_size > 1
-                )
-            )
-            all2all_backend = parallel_config.all2all_backend
+            all2all_backend = config.parallel_config.all2all_backend
 
         self.is_ep_communicator = unique_name.split(":")[0] == "ep"
-        self.use_all2all = self.is_ep_communicator and use_ep
+        self.use_all2all = self.is_ep_communicator and use_all2all
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 
@@ -394,17 +383,6 @@ class DeviceCommunicatorBase:
 
     def destroy(self):
         pass
-
-    def prepare_communication_buffer_for_model(self, model: torch.nn.Module) -> None:
-        """
-        Prepare the communication buffer for the model.
-        """
-        if not self.is_ep_communicator:
-            return
-
-        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
-        for module in moe_modules:
-            module.maybe_init_modular_kernel()
 
     def dispatch_router_logits(
         self,
