@@ -570,6 +570,125 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         image_processor = processor.image_processor
         return image_processor.dynamic_hd
 
+    @staticmethod
+    def _get_positive_int(name: str, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"`{name}` must be a positive integer.")
+
+        return value
+
+    def _get_trusted_dynamic_hd(self) -> int:
+        processor = self.get_hf_processor()
+        return self._get_positive_int(
+            "dynamic_hd",
+            self.get_dynamic_hd(processor=processor),
+        )
+
+    def _get_num_local_hd_crops(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        dynamic_hd_size: int,
+        vit_image_size: int,
+    ) -> int:
+        target_aspect_ratio, _, _ = self._find_target_aspect_ratio(
+            image_width,
+            image_height,
+            vit_image_size,
+            dynamic_hd_size,
+            min_num=1,
+        )
+        return target_aspect_ratio[0] * target_aspect_ratio[1]
+
+    @staticmethod
+    def _add_nearest_target_ratios(
+        target_ratios: set[tuple[int, int]],
+        *,
+        fixed_value: int,
+        ideal_value: float,
+        lower_bound: int,
+        upper_bound: int,
+        variable_is_width: bool,
+    ) -> None:
+        if lower_bound > upper_bound:
+            return
+
+        for candidate in (math.floor(ideal_value), math.ceil(ideal_value)):
+            bounded_candidate = min(max(candidate, lower_bound), upper_bound)
+            if variable_is_width:
+                target_ratios.add((bounded_candidate, fixed_value))
+            else:
+                target_ratios.add((fixed_value, bounded_candidate))
+
+    @classmethod
+    def _get_target_ratios(
+        cls,
+        *,
+        aspect_ratio: float,
+        max_num: int,
+        min_num: int,
+    ) -> list[tuple[int, int]]:
+        target_ratios: set[tuple[int, int]] = set()
+        for smaller_side in range(1, math.isqrt(max_num) + 1):
+            lower_bound = max(
+                smaller_side,
+                (min_num + smaller_side - 1) // smaller_side,
+            )
+            upper_bound = max_num // smaller_side
+
+            # For one fixed side, only the integers nearest the ideal ratio can
+            # win. This preserves the remote processor's selection while
+            # avoiding the full max_num x max_num enumeration.
+            cls._add_nearest_target_ratios(
+                target_ratios,
+                fixed_value=smaller_side,
+                ideal_value=aspect_ratio * smaller_side,
+                lower_bound=lower_bound,
+                upper_bound=upper_bound,
+                variable_is_width=True,
+            )
+            cls._add_nearest_target_ratios(
+                target_ratios,
+                fixed_value=smaller_side,
+                ideal_value=smaller_side / aspect_ratio,
+                lower_bound=lower_bound,
+                upper_bound=upper_bound,
+                variable_is_width=False,
+            )
+
+        return sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+    def _get_effective_dynamic_hd(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: ProcessorMixin,
+        vit_image_size: int,
+    ) -> int:
+        dynamic_hd_size = self._get_positive_int(
+            "dynamic_hd",
+            self.get_dynamic_hd(processor=processor),
+        )
+        trusted_dynamic_hd = self._get_trusted_dynamic_hd()
+        num_local_hd_crops = self._get_num_local_hd_crops(
+            image_width=image_width,
+            image_height=image_height,
+            dynamic_hd_size=dynamic_hd_size,
+            vit_image_size=vit_image_size,
+        )
+        if num_local_hd_crops > trusted_dynamic_hd:
+            raise ValueError(
+                "Phi4MM local HD crop count "
+                f"{num_local_hd_crops} exceeds the deployed limit of "
+                f"{trusted_dynamic_hd}."
+            )
+
+        # If a higher request cap still selects an in-budget ratio, the trusted
+        # cap selects the same ratio from the smaller candidate set.
+        return min(dynamic_hd_size, trusted_dynamic_hd)
+
     def get_feature_extractor(self, **kwargs: object) -> SequenceFeatureExtractor:
         return self.get_hf_processor(**kwargs).audio_processor
 
@@ -598,14 +717,11 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         if w_crop_num * h_crop_num > max_num:
             aspect_ratio = orig_width / orig_height
 
-            # calculate the existing image aspect ratio
-            target_ratios = set(
-                (i, j)
-                for i in range(1, max_num + 1)
-                for j in range(1, max_num + 1)
-                if i * j <= max_num and i * j >= min_num
+            target_ratios = self._get_target_ratios(
+                aspect_ratio=aspect_ratio,
+                max_num=max_num,
+                min_num=min_num,
             )
-            target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
 
             # find the closest aspect ratio to the target
             image_processor = self.get_hf_processor().image_processor
@@ -731,7 +847,12 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         vit_patch_size = prepro_config["vit_patch_size"]
         token_compression_factor = prepro_config["token_compression_factor"]
 
-        dynamic_hd_size = self.get_dynamic_hd(processor=processor)
+        dynamic_hd_size = self._get_effective_dynamic_hd(
+            image_width=image_width,
+            image_height=image_height,
+            processor=processor,
+            vit_image_size=vit_image_size,
+        )
 
         image_num_tokens = self._compute_num_image_tokens(
             image_width,
@@ -857,6 +978,40 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
 
 class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
+    def _get_effective_mm_kwargs(
+        self,
+        *,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        images = mm_data.get("images")
+        if images is None:
+            return mm_kwargs
+
+        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+        parsed_images = mm_items.get_items("image", ImageProcessorItems)
+        if len(parsed_images) == 0:
+            return mm_kwargs
+
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        for item_idx in range(len(parsed_images)):
+            image_size = parsed_images.get_image_size(item_idx)
+            self.info.get_num_image_tokens(
+                image_width=image_size.width,
+                image_height=image_size.height,
+                processor=hf_processor,
+            )
+
+        dynamic_hd_size = self.info._get_positive_int(
+            "dynamic_hd",
+            self.info.get_dynamic_hd(processor=hf_processor),
+        )
+        trusted_dynamic_hd = self.info._get_trusted_dynamic_hd()
+        if dynamic_hd_size <= trusted_dynamic_hd:
+            return mm_kwargs
+
+        return dict(mm_kwargs, dynamic_hd=trusted_dynamic_hd)
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -868,6 +1023,11 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        mm_kwargs = self._get_effective_mm_kwargs(
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
 
         sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
         if audio_data := mm_data.get("audios", []):
