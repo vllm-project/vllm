@@ -353,6 +353,11 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
+        trusted_kwargs = self.ctx.get_merged_mm_kwargs({})
+        image_size_limit = trusted_kwargs.get("image_size", vision_config.image_size)
+        max_dynamic_patch_limit = trusted_kwargs.get(
+            "max_dynamic_patch", config.max_dynamic_patch
+        )
         kwargs = self._merge_image_processor_kwargs(
             kwargs, max_dynamic_patch=config.max_dynamic_patch
         )
@@ -361,6 +366,8 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
+        kwargs["image_size_limit"] = image_size_limit
+        kwargs["max_dynamic_patch_limit"] = max_dynamic_patch_limit
 
         return InternVLImageProcessor(**kwargs)
 
@@ -368,8 +375,11 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
+        trusted_kwargs = self.ctx.get_merged_mm_kwargs({})
+        image_size_limit = trusted_kwargs.get("image_size", vision_config.image_size)
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("image_size", vision_config.image_size)
+        kwargs["image_size_limit"] = image_size_limit
 
         return InternVLVideoProcessor(**kwargs)
 
