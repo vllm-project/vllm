@@ -284,12 +284,17 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_block=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
             )
-        return CPUOffloadingWorker(
-            kv_caches=kv_caches,
-            blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
-            mmap_region=mmap_region,
-        )
+        try:
+            return CPUOffloadingWorker(
+                kv_caches=kv_caches,
+                blocks_per_chunk=self.blocks_per_chunk,
+                num_cpu_blocks=self.num_blocks,
+                mmap_region=mmap_region,
+            )
+        except Exception:
+            if mmap_region is not None:
+                mmap_region.cleanup()
+            raise
 
     @override
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:

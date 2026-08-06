@@ -184,16 +184,14 @@ def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
         seeds,
         pos,
         apply_temperature,
-        output_processed_logits=None,
-        output_processed_logits_col=None,
-        output_processed_logits_inplace=False,
+        logits_cache=None,
+        logits_cache_col=None,
         use_fp64=False,
     ):
-        assert output_processed_logits is speculator.draft_logits
-        assert output_processed_logits_col is not None
-        assert output_processed_logits_inplace is False
-        col = int(output_processed_logits_col.item())
-        output_processed_logits[idx_mapping.long(), col] = logits
+        assert logits_cache is speculator.draft_logits
+        assert logits_cache_col is not None
+        col = int(logits_cache_col.item())
+        logits_cache[idx_mapping.long(), col] = logits
         sampled = idx_mapping.to(torch.int64) * 10 + col
         sampled_by_step.append(sampled)
         return sampled

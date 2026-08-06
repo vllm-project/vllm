@@ -87,11 +87,6 @@ class DSparkSpeculator(DFlashSpeculator):
     ) -> torch.nn.Module:
         return load_dspark_model(target_model, self.vllm_config)
 
-    def clear_runtime_draft_logits(self) -> None:
-        # The persistent draft_logits buffer is graph-written every draft step.
-        # Do not clear it; rejection only reads rows selected by idx_map.
-        pass
-
     def _sample_logits(
         self,
         logits: torch.Tensor,
@@ -119,8 +114,8 @@ class DSparkSpeculator(DFlashSpeculator):
             self.seeds,
             sample_pos - 1,
             apply_temperature=True,
-            output_processed_logits=self.draft_logits,
-            output_processed_logits_col=self._step_cols[step],
+            logits_cache=self.draft_logits,
+            logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
         )
 

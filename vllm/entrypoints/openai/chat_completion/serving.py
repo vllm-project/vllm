@@ -354,7 +354,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority,
+                    priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
                     reasoning_ended=reasoning_ended,

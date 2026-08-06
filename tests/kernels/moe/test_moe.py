@@ -27,6 +27,11 @@ from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
     fused_topk,
 )
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    apply_moe_activation,
+    apply_moe_activation_supported,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     int4_w4a16_moe_quant_config,
@@ -996,6 +1001,23 @@ def test_fused_marlin_moe(
             per_act_token_quant=True,
         )
 
+    def instance_activation(
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        *,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
+        apply_moe_activation(
+            activation,
+            output,
+            input,
+            activation_config=ApplyMoEActivationConfig(),
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+
     marlin_output = fused_marlin_moe(
         a,
         w1_data.qweight,
@@ -1021,6 +1043,7 @@ def test_fused_marlin_moe(
         input_dtype=a_dtype,
         quant_type_id=b_type.id,
         is_k_full=is_k_full,
+        activation_func=instance_activation,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
@@ -1360,6 +1383,51 @@ def _make_humming_indexed_experts(activation: MoEActivation):
         quant_config,
     )
     return experts
+
+
+@pytest.mark.parametrize("activation", list(MoEActivation))
+def test_humming_activation_metadata_tracks_shared_apply(activation: MoEActivation):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    assert HummingExpertsBase._supports_activation(
+        activation
+    ) == apply_moe_activation_supported(activation)
+
+
+def test_humming_delegates_to_instance_activation():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    activation_func = Mock()
+    activation_config = ApplyMoEActivationConfig(
+        clamp_limit=7.0,
+        alpha=1.5,
+        beta=0.25,
+        activation_situ_beta=2.0,
+        activation_situ_linear_beta=3.0,
+    )
+    experts = SimpleNamespace(
+        activation=activation_func,
+        activation_config=activation_config,
+    )
+    input = torch.empty(1, 2)
+    output = torch.empty(1, 1)
+
+    HummingExpertsBase.apply_activation(
+        experts, MoEActivation.SWIGLUOAI_UNINTERLEAVE, output, input
+    )
+
+    activation_func.assert_called_once_with(
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        input=input,
+        output=output,
+    )
 
 
 @pytest.mark.parametrize(
