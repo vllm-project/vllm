@@ -469,6 +469,20 @@ class TestProtonProfilerWrapper:
         assert proton.deactivate.call_count == 2
         assert proton.finalize.call_args_list == [call(session=7), call(session=8)]
 
+    def test_uses_prefix_supplied_for_each_profile(self, tmp_path):
+        proton = make_proton()
+        proton.start.side_effect = [7, 8]
+        wrapper, proton = make_proton_wrapper(tmp_path, proton)
+
+        wrapper.start(worker_name="first_rank_3")
+        wrapper.stop()
+        wrapper.start(worker_name="second_rank_3")
+        wrapper.stop()
+
+        names = [c.kwargs["name"] for c in proton.start.call_args_list]
+        assert os.path.basename(names[0]).startswith("proton_first_rank_3_")
+        assert os.path.basename(names[1]).startswith("proton_second_rank_3_")
+
     def test_output_names_are_unique_across_worker_restarts(self, tmp_path):
         with patch(
             "vllm.profiler.wrapper.uuid4",
@@ -627,4 +641,28 @@ def test_gpu_worker_creates_proton_profiler():
         Worker.profile(worker)
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
-    worker.profiler.start.assert_called_once()
+    worker.profiler.start.assert_called_once_with(worker_name="rank1")
+
+
+def test_gpu_worker_updates_proton_prefix_each_run():
+    worker = MagicMock()
+    worker.rank = 1
+    worker.profiler = None
+    worker.profiler_config.profiler = "proton"
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank1",
+        ),
+        patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
+    ):
+        Worker.profile(worker, profile_prefix="first")
+        Worker.profile(worker, profile_prefix="second")
+
+    wrapper.return_value.start.assert_has_calls(
+        [
+            call(worker_name="first_rank1"),
+            call(worker_name="second_rank1"),
+        ]
+    )

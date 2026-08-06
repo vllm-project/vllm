@@ -480,7 +480,9 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._running = False
 
     @override
-    def start(self) -> None:
+    def start(self, worker_name: str | None = None) -> None:
+        if worker_name is not None and not self._active:
+            self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
         try:
             super().start()
         except Exception:
