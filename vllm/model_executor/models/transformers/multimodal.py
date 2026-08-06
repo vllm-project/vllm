@@ -512,8 +512,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         total_expected = sum(split_sizes)
 
         # Flatten to 2D: [total_tokens, hidden_dim]
-        if embeddings.ndim == 3:
-            embeddings = embeddings.view(-1, embeddings.shape[-1])
+        if embeddings.ndim > 2:
+            embeddings = embeddings.reshape(-1, embeddings.shape[-1])
 
         total_tokens = embeddings.shape[0]
         if total_tokens == total_expected:
