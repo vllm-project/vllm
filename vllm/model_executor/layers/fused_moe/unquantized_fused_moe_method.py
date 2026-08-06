@@ -14,6 +14,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.expert_weight_provider import (
+    ExpertWeightResult,
+    run_with_expert_cache,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -42,6 +46,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     # --8<-- [end:unquantized_fused_moe]
 
+    @property
+    def supports_expert_lru_cache(self) -> bool:
+        # Only TRITON: it genuinely honors expert_map via moe_align_block_size.
+        # BATCHED_TRITON: expert_map is signature-only, tokens dispatched by
+        #   global id into slot-indexed weights.
+        # CPU: prepack reads layer.w13_weight which the cache empties.
+        # XPU: expert_map signature-only, snapshots w1/w2 on first call.
+        # FLASHINFER_*: tiled layouts or swap_w13_to_w31 required.
+        # AITER: requires shuffle_weights.
+        return self.unquantized_backend == UnquantizedMoeBackend.TRITON
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
@@ -65,14 +80,25 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_up_dim = 2 * intermediate_size_per_partition
         else:
             w13_up_dim = intermediate_size_per_partition
+
+        # With the expert LRU cache enabled, expert weights are allocated in CPU
+        # pinned memory so checkpoint loading never needs GPU capacity for them;
+        # the cache later mirrors only moe_expert_cache_size of them onto the
+        # GPU. device="cpu" is explicit because vLLM loads under a
+        # torch.device("cuda") context, which pin_memory() alone would not
+        # override.
+        expert_weights_on_cpu = getattr(layer, "_moe_expert_cache_size", 0) > 0
+
+        def _empty_expert_weight(*shape: int) -> torch.Tensor:
+            if expert_weights_on_cpu:
+                return torch.empty(
+                    *shape, dtype=params_dtype, device="cpu"
+                ).pin_memory()
+            return torch.empty(*shape, dtype=params_dtype)
+
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                w13_up_dim,
-                hidden_size,
-                dtype=params_dtype,
-            ),
+            _empty_expert_weight(num_experts, w13_up_dim, hidden_size),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight", w13_weight)
@@ -86,11 +112,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             set_weight_attrs(w13_bias, extra_weight_attrs)
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                dtype=params_dtype,
+            _empty_expert_weight(
+                num_experts, hidden_size, intermediate_size_per_partition
             ),
             requires_grad=False,
         )
@@ -208,6 +231,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w13=w13,
                 w2=w2,
             )
+            layer._maybe_init_expert_lru_cache()
+        elif layer._moe_expert_cache_size > 0:
+            # Expert weights sit in CPU pinned memory and may exceed GPU
+            # capacity, so _setup_kernel -- which shuffles them into runtime
+            # format on device -- is skipped. The cache allocates the small GPU
+            # scratch buffer instead, but forward still needs a kernel.
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            layer._maybe_init_expert_lru_cache()
+            if self.moe_kernel is None:  # type: ignore[has-type]
+                assert self.experts_cls is not None
+                self.moe_kernel = make_unquantized_moe_kernel(
+                    quant_config=self.moe_quant_config,
+                    moe_config=self.moe,
+                    backend=self.unquantized_backend,
+                    experts_cls=self.experts_cls,
+                    routing_tables=layer._expert_routing_tables(),
+                )
         else:
             self._setup_kernel(
                 layer=layer,
@@ -266,6 +306,35 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
+
+        provider = layer.expert_weight_provider
+        if provider is not None:
+
+            def run(
+                result: ExpertWeightResult, rows: slice, include_shared: bool
+            ) -> torch.Tensor:
+                assert self.moe_kernel is not None
+                return self.moe_kernel.apply(
+                    hidden_states=x[rows],
+                    w1=result.w1,
+                    w2=result.w2,
+                    topk_weights=topk_weights[rows],
+                    topk_ids=topk_ids[rows],
+                    activation=layer.activation,
+                    apply_router_weight_on_input=(layer.apply_router_weight_on_input),
+                    global_num_experts=layer.global_num_experts,
+                    expert_map=result.expert_map,
+                    # Shared experts belong to the forward, not to one call.
+                    shared_experts=shared_experts if include_shared else None,
+                    shared_experts_input=(
+                        shared_experts_input[rows]
+                        if include_shared and shared_experts_input is not None
+                        else None
+                    ),
+                )
+
+            return run_with_expert_cache(provider, topk_ids, run)
+
         return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,

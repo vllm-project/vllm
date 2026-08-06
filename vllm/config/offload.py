@@ -10,6 +10,7 @@ from pydantic import Field, model_validator
 from vllm.config.utils import config
 
 OffloadBackend = Literal["auto", "uva", "prefetch"]
+MoECacheSplit = Literal["token", "expert"]
 
 
 @config
@@ -93,6 +94,20 @@ class OffloadConfig:
 
     prefetch: PrefetchOffloadConfig = Field(default_factory=PrefetchOffloadConfig)
     """Parameters for prefetch offloading backend."""
+
+    moe_expert_cache_size: int = Field(default=0, ge=0)
+    """Number of MoE expert weight rows to keep in a GPU cache buffer."""
+
+    moe_expert_cache_split: MoECacheSplit = "token"
+    """How a forward needing more experts than the cache holds is broken up.
+    - "token": split the batch by rows. Output matches the uncached path
+      exactly, but costs one kernel launch per chunk, approaching one per token
+      as the cache approaches top_k.
+    - "expert": split the expert set and sum the parts. Costs
+      ceil(experts/cache size) launches whatever the batch size, and fetches
+      each expert at most once per forward, but each part is rounded to the
+      model dtype before being summed, so results differ from the uncached
+      path at rounding level."""
 
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":

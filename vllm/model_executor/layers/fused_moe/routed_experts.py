@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -25,8 +26,12 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.utils import replace_parameter
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.expert_weight_provider import (
+        CachedWeightProvider,
+    )
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 
@@ -170,9 +175,167 @@ class RoutedExperts(PluggableLayer):
                 self.moe_config.intermediate_size
             )
 
+        # The provider itself is built after weights are loaded, in
+        # _maybe_init_expert_lru_cache(). The size is read here so that
+        # create_weights() can allocate expert weights in CPU pinned memory
+        # when offloading is requested.
+        self.expert_weight_provider: CachedWeightProvider | None = None
+        offload_config = get_current_vllm_config().offload_config
+        self._moe_expert_cache_size = offload_config.moe_expert_cache_size
+        self._moe_expert_cache_split = offload_config.moe_expert_cache_split
+        if self._moe_expert_cache_size > 0:
+            self._validate_expert_cache_supported()
+
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.lora_base_layer_prefix = ""
+
+    def _validate_expert_cache_supported(self) -> None:
+        # A forward is split into row chunks that fit the cache, so the floor is
+        # one token's worth of experts -- below that no split helps. Check the
+        # effective capacity, which is what the cache is actually built with.
+        top_k = self.moe_config.experts_per_token
+        capacity = min(self._moe_expert_cache_size, self.local_num_experts)
+        if capacity < top_k:
+            raise ValueError(
+                f"moe_expert_cache_size={self._moe_expert_cache_size} gives a "
+                f"cache of {capacity} slots, fewer than the {top_k} experts a "
+                f"single token routes to. Set --moe-expert-cache-size >= {top_k}."
+            )
+        parallel = self.moe_config.moe_parallel_config
+        if parallel.use_ep:
+            raise ValueError(
+                "moe_expert_cache_size is not compatible with expert "
+                f"parallelism (ep_size={parallel.ep_size})."
+            )
+        if parallel.dp_size > 1 or parallel.is_sequence_parallel:
+            raise ValueError(
+                "moe_expert_cache_size is not compatible with data parallelism "
+                "or sequence parallelism."
+            )
+        vllm_config = get_current_vllm_config()
+        if not vllm_config.model_config.enforce_eager:
+            splitting_ops = vllm_config.compilation_config.splitting_ops or []
+            if "vllm::moe_forward" not in splitting_ops:
+                raise ValueError(
+                    "moe_expert_cache_size without --enforce-eager requires "
+                    "the MoE op to run outside CUDA graphs "
+                    "(vllm::moe_forward in compilation_config.splitting_ops). "
+                    "This is configured automatically by VllmConfig; do not "
+                    "override splitting_ops to exclude it."
+                )
+        # Checked before create_weights: an unsupported method would still get
+        # its expert weights allocated in CPU pinned memory below and then run
+        # its normal setup against them, which is not a supported combination.
+        if not self.quant_method.supports_expert_lru_cache:
+            raise ValueError(
+                "moe_expert_cache_size is not supported by "
+                f"{self.quant_method.__class__.__name__} with the active "
+                "backend; its weight layout is incompatible with slot-based "
+                "expert remapping."
+            )
+
+    def _maybe_init_expert_lru_cache(self, scale_suffix: str = "weight_scale") -> None:
+        """Build the expert weight provider once weights have been loaded.
+
+        Expert weights may reside on CPU (loaded directly into pinned memory
+        when GPU capacity is insufficient) or on GPU (standard load path).
+        Allocates GPU scratch buffers of size ``moe_expert_cache_size`` and
+        releases the full weight tensors from whichever device they were on.
+
+        Per-expert weight scales are handed the same treatment: the layer's
+        scale parameters are repointed at the cache's slot-indexed buffers, so
+        a quant config built after this call reads scales that stay in sync
+        with the weights the kernel is given. Callers whose quant config is
+        already built must call this before building it.
+
+        Must be called only once, after weights are in their runtime layout.
+
+        Args:
+            scale_suffix: Parameter-name suffix for the per-expert weight
+                scales (``weight_scale``, or ``weight_scale_inv`` for
+                block-quantized checkpoints).
+        """
+        if self.expert_weight_provider is not None:
+            # process_weights_after_loading can be re-run for RL-style weight
+            # updates; the provider's CPU mirror and the freed layer params
+            # would go stale silently. Refuse until reload support exists.
+            raise RuntimeError(
+                "Re-running weight loading with an active expert cache is "
+                "not supported (moe_expert_cache_size > 0)."
+            )
+        if self._moe_expert_cache_size == 0:
+            return
+        if not hasattr(self, "w13_weight") or not hasattr(self, "w2_weight"):
+            raise ValueError(
+                "moe_expert_cache_size requires w13_weight and w2_weight "
+                f"parameters but they are missing on layer {self.layer_name}."
+            )
+        if self.moe_config.has_bias:
+            raise ValueError(
+                "Expert LRU cache does not support MoE layers with bias "
+                "terms (fused_experts() receives w1/w2 only, not bias). "
+                f"Layer: {self.layer_name}."
+            )
+        from vllm.model_executor.layers.fused_moe.expert_weight_provider import (
+            CachedWeightProvider,
+        )
+
+        # Only scales indexed by expert need remapping. Anything else (a global
+        # or per-tensor scale) is slot-agnostic and is left on the layer.
+        w13_scale_name = f"w13_{scale_suffix}"
+        w2_scale_name = f"w2_{scale_suffix}"
+        w13_scale = getattr(self, w13_scale_name, None)
+        w2_scale = getattr(self, w2_scale_name, None)
+        per_expert_scales = (
+            w13_scale is not None
+            and w2_scale is not None
+            and w13_scale.size(0) == self.local_num_experts
+            and w2_scale.size(0) == self.local_num_experts
+        )
+        if not per_expert_scales:
+            w13_scale = None
+            w2_scale = None
+
+        capacity = min(self._moe_expert_cache_size, self.local_num_experts)
+        provider = CachedWeightProvider(
+            capacity=capacity,
+            w13_weight=cast(torch.Tensor, self.w13_weight).data,
+            w2_weight=cast(torch.Tensor, self.w2_weight).data,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            split=self._moe_expert_cache_split,
+        )
+        self.expert_weight_provider = provider
+
+        # Repoint the scale parameters at the cache's slot-indexed buffers.
+        # Without this the kernel would index full-length, expert-indexed
+        # scales with slot ids and scale every expert by whichever one happens
+        # to occupy its slot.
+        if provider.buf_w13_scale is not None:
+            assert provider.buf_w2_scale is not None
+            # A quant config that already exists captured the expert-indexed
+            # scales, and the kernel keeps whatever it captured -- repointing
+            # now would be too late and silently wrong. Callers with scales
+            # must install the cache before building their quant config.
+            assert self.quant_method.moe_quant_config is None, (
+                f"expert cache installed after {type(self.quant_method).__name__}"
+                " built its quant config; the kernel is holding expert-indexed"
+                " scales that the cache cannot keep in sync"
+            )
+            replace_parameter(self, w13_scale_name, provider.buf_w13_scale)
+            replace_parameter(self, w2_scale_name, provider.buf_w2_scale)
+
+        # Release the full weight tensors (CachedWeightProvider holds its own
+        # reference to the CPU pinned backing store).
+        replace_parameter(self, "w13_weight", torch.empty(0))
+        replace_parameter(self, "w2_weight", torch.empty(0))
+        logger.info(
+            "Expert LRU cache enabled for %s: %d/%d experts cached on GPU.",
+            self.layer_name,
+            capacity,
+            self.local_num_experts,
+        )
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
