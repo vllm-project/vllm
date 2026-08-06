@@ -215,7 +215,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // 2,
                 dtype=weight_dtype,
             ),
@@ -227,7 +227,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // mxfp4_block,
                 dtype=scale_dtype,
             ),
@@ -267,7 +267,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.bfloat16,
                 ),
                 requires_grad=False,
@@ -305,13 +305,13 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         assert (
             w13.dim() == 3
             and w13.shape[0] == num_experts
-            and w13.shape[1] == intermediate_size * 2
+            and w13.shape[1] == intermediate_size * self.moe.w13_num_shards
             and w13.shape[2] == hidden_size // 2
         )
         assert (
             w13_scale.dim() == 3
             and w13_scale.shape[0] == num_experts
-            and w13_scale.shape[1] == intermediate_size * 2
+            and w13_scale.shape[1] == intermediate_size * self.moe.w13_num_shards
             and w13_scale.shape[2] == hidden_size // sf_block_size
         )
         assert (
@@ -329,7 +329,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             assert (
                 w13_bias.dim() == 2
                 and w13_bias.shape[0] == num_experts
-                and w13_bias.shape[1] == intermediate_size * 2
+                and w13_bias.shape[1] == intermediate_size * self.moe.w13_num_shards
             )
         if w2_bias is not None:
             assert (
@@ -594,7 +594,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // 2,
                 dtype=weight_dtype,
             ),
@@ -606,7 +606,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // mxfp4_block,
                 dtype=scale_dtype,
             ),
@@ -646,7 +646,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.bfloat16,
                 ),
                 requires_grad=False,
@@ -684,13 +684,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         assert (
             w13.dim() == 3
             and w13.shape[0] == num_experts
-            and w13.shape[1] == intermediate_size * 2
+            and w13.shape[1] == intermediate_size * self.moe.w13_num_shards
             and w13.shape[2] == hidden_size // 2
         )
         assert (
             w13_scale.dim() == 3
             and w13_scale.shape[0] == num_experts
-            and w13_scale.shape[1] == intermediate_size * 2
+            and w13_scale.shape[1] == intermediate_size * self.moe.w13_num_shards
             and w13_scale.shape[2] == hidden_size // sf_block_size
         )
         assert (
@@ -708,7 +708,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             assert (
                 w13_bias.dim() == 2
                 and w13_bias.shape[0] == num_experts
-                and w13_bias.shape[1] == intermediate_size * 2
+                and w13_bias.shape[1] == intermediate_size * self.moe.w13_num_shards
             )
         if w2_bias is not None:
             assert (
