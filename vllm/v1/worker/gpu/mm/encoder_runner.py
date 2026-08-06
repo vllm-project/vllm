@@ -134,7 +134,9 @@ class EncoderRunner:
             manager = self.cudagraph_manager
             cudagraph_output = (
                 manager.execute(mm_kwargs_batch)
-                if manager is not None and manager.supports_modality(modality)
+                if manager is not None
+                and manager.is_captured()
+                and manager.supports_modality(modality)
                 else None
             )
             batch_outputs = (
