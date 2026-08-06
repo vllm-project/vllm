@@ -114,7 +114,10 @@ class Fp8BlockScaledMMLinearKernel(
 
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], weight.shape[0]]
+        # The weight tensor may carry kernel-specific padding (e.g. the SM12x
+        # CUTLASS kernel pads N to the 128 scale block), so the logical output
+        # width comes from the layer config rather than weight.shape[0].
+        output_shape = [*x.shape[:-1], self.config.weight_shape[0]]
 
         if self.apply_input_quant:
             q_input, input_scale = self.quant_fp8(
