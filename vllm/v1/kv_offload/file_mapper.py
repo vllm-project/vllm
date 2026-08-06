@@ -4,6 +4,9 @@
 import hashlib
 import json
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    canonical_schema_id,
+)
 from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadKey,
@@ -36,6 +39,7 @@ class FileMapper:
         inference_engine: str = "vllm",
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
+        canonical_schema: str | None = None,
     ):
         """
         Initialize the file mapper. Each worker constructs its own, but
@@ -65,6 +69,11 @@ class FileMapper:
         # unchanged (False is the historical default and must not appear).
         if replicated_layout:
             self.fields["replicated_layout"] = True
+        # The canonical byte format is not interchangeable with the legacy
+        # layout (or with other canonical schema versions/families), so its
+        # identity participates in the storage namespace.
+        if canonical_schema is not None:
+            self.fields["canonical_schema"] = canonical_schema
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -85,6 +94,11 @@ class FileMapper:
             for group in config.groups
         ]
         parallel = config.parallel
+        canonical_schema = (
+            canonical_schema_id()
+            if config.extra_config.get("canonical_layout", False)
+            else None
+        )
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,
@@ -102,6 +116,7 @@ class FileMapper:
                 and (parallel.is_parallelism_agnostic or config.replicated_layout)
             ),
             replicated_layout=(parallel_agnostic and config.replicated_layout),
+            canonical_schema=canonical_schema,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:
