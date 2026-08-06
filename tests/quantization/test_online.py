@@ -15,7 +15,6 @@ from tests.quantization.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm._custom_ops import scaled_fp4_quant
-from vllm.distributed import parallel_state
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
@@ -32,6 +31,7 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
 )
+from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
@@ -206,8 +206,8 @@ def _patch_max_reduce(monkeypatch, full_amax) -> None:
     """Stand in for the TP/EP MAX all-reduce, returning the unsharded amax."""
     expected = cast(ProcessGroup, object())
     stub = SimpleNamespace(device_group=expected)
-    monkeypatch.setattr(parallel_state, "get_tp_group", lambda: stub)
-    monkeypatch.setattr(parallel_state, "get_ep_group", lambda: stub)
+    monkeypatch.setattr(quant_utils, "get_tp_group", lambda: stub)
+    monkeypatch.setattr(quant_utils, "get_ep_group", lambda: stub)
 
     def fake_all_reduce(tensor, op, group):
         assert op == torch.distributed.ReduceOp.MAX
