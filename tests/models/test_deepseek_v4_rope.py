@@ -60,9 +60,11 @@ def _config(compress_ratios: list[int]) -> types.SimpleNamespace:
         ([1, 4, 4, 1, 0], NUM_HIDDEN_LAYERS, 1, True),
         # Draft layer present with an explicit nonzero entry: honored.
         ([1, 4, 4, 1, 4], NUM_HIDDEN_LAYERS, 4, False),
-        # Draft layer absent from the list: legacy fallback (ratio 1, yarn).
-        ([1, 4, 4, 1], NUM_HIDDEN_LAYERS, 1, False),
-        ([1, 4, 4, 1], NUM_HIDDEN_LAYERS + 1, 1, False),
+        # Draft layer absent from the list: treated as an implicit 0 --
+        # plain rope, matching the trailing-0-per-draft-block convention
+        # every real checkpoint follows (jasl/vllm#30).
+        ([1, 4, 4, 1], NUM_HIDDEN_LAYERS, 1, True),
+        ([1, 4, 4, 1], NUM_HIDDEN_LAYERS + 1, 1, True),
     ],
 )
 def test_resolve_layer_compress_ratio(

@@ -137,7 +137,14 @@ def resolve_layer_compress_ratio(config, layer_id: int) -> tuple[int, bool]:
     if layer_id < len(config.compress_ratios):
         raw_compress_ratio = config.compress_ratios[layer_id]
         return max(1, raw_compress_ratio), raw_compress_ratio == 0
-    return 1, False
+    # Draft-module layer past the end of compress_ratios. Every real
+    # checkpoint declares draft blocks with a trailing 0 per block (0731
+    # ships [..., 0, 0, 0] for its three DSpark blocks), and the reference
+    # implementation indexes the list directly -- a short list is a config
+    # gap, not a request for yarn. Returning (1, False) here handed draft
+    # blocks yarn-scaled rope with the base rope_theta, inconsistent with
+    # their in-range siblings (jasl/vllm#30). Treat the missing entry as 0.
+    return 1, True
 
 
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
