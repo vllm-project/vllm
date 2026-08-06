@@ -611,15 +611,21 @@ class FusedInputNorm(nn.Module):
         weight = 1.0 / image_std_tensor
         bias = -image_mean_tensor / image_std_tensor
 
-        self.register_buffer("weight", weight)
-        self.register_buffer("bias", bias)
-        self.register_buffer("running_mean", torch.zeros_like(image_mean_tensor))
-        self.register_buffer("running_var", torch.ones_like(image_mean_tensor))
-
         self.is_identity = bool(
             torch.allclose(weight, torch.ones_like(weight))
             and torch.allclose(bias, torch.zeros_like(bias))
         )
+
+        if not self.is_identity:
+            self.register_buffer("weight", weight)
+            self.register_buffer("bias", bias)
+            self.register_buffer("running_mean", torch.zeros_like(image_mean_tensor))
+            self.register_buffer("running_var", torch.ones_like(image_mean_tensor))
+        else:
+            self.register_buffer("weight", None)
+            self.register_buffer("bias", None)
+            self.register_buffer("running_mean", None)
+            self.register_buffer("running_var", None)
 
     @classmethod
     def identity(cls, channel: int = 3) -> "FusedInputNorm":
