@@ -12,6 +12,7 @@ mod metrics;
 pub(crate) mod openai;
 mod pause;
 mod profile;
+pub(super) mod render;
 mod server_info;
 mod sleep;
 mod tokenize;
