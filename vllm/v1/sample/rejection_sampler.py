@@ -906,6 +906,8 @@ def sample_recovered_tokens_kernel(
     else:
         max_val = tl.full((), float("-inf"), tl.float32)
     recovered_id = 0
+    target_max = 0.0
+    target_argmax_id = 0
     for v in range(0, vocab_size, BLOCK_SIZE):
         vocab_offset = v + tl.arange(0, BLOCK_SIZE)
         vocab_mask = vocab_offset < vocab_size
@@ -941,13 +943,45 @@ def sample_recovered_tokens_kernel(
         # Mask out-of-vocabulary entries to -inf so they can never win
         # the argmax — prevents producing recovered_id >= vocab_size
         # when all valid entries in the last tile have zero probability.
+        #
+        # Zero and NaN scores must lose the argmax too. A drafter can hand
+        # this kernel an all-NaN draft_probs row (softmax of a fully masked
+        # logits row); `tl.maximum(target - nan, 0.0)` follows fmaxf and
+        # returns 0.0, so every score in the row collapses to zero. With the
+        # old `score > -inf` comparison the first tile then won with index 0
+        # and the kernel emitted token id 0 -- observed in generated text as
+        # `<|begin of sentence|>` leaks with p_target(0) ~ 1e-22
+        # (vllm-project/vllm#41834). If tl.maximum propagates NaN instead,
+        # every comparison is false and recovered_id keeps its initial 0,
+        # which leaks the same token id. Send both cases to -inf and pick a
+        # principled fallback below.
         score = prob * inv_q
-        score = tl.where(vocab_mask, score, float("-inf"))
+        score = tl.where(vocab_mask & (score > 0.0), score, float("-inf"))
         local_max, local_id = tl.max(score, axis=0, return_indices=True)
 
         if local_max > max_val:
             max_val = local_max
             recovered_id = v + local_id
+
+        # Track the target argmax in the same pass as the fallback for
+        # degenerate rows (costs one extra reduction on already-loaded data).
+        if NO_DRAFT_PROBS:
+            target_prob = prob
+        target_score = tl.where(vocab_mask, target_prob, float("-inf"))
+        t_max, t_id = tl.max(target_score, axis=0, return_indices=True)
+        if t_max > target_max:
+            target_max = t_max
+            target_argmax_id = v + t_id
+
+    if max_val == float("-inf"):
+        # Every candidate score degenerated (NaN draft probs, or the residual
+        # distribution is identically zero). Recover greedily from the target
+        # distribution; if that is degenerate too, fall back to the draft
+        # token rather than inventing token id 0.
+        if target_max > 0.0:
+            recovered_id = target_argmax_id
+        else:
+            recovered_id = tl.load(draft_token_ids_ptr + token_idx).to(tl.int32)
 
     recovered_id = tl.minimum(recovered_id, vocab_size - 1)
     tl.store(output_token_ids_ptr + token_idx, recovered_id)
