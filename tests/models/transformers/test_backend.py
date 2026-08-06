@@ -435,24 +435,43 @@ def test_replace_composed_embedding(vpe):
     assert_scaled(vpe, new_embedding, embedding.embed)
 
 
-def test_replace_every_composed_embedding(vpe):
-    """Every composed `nn.Embedding` is replaced, however deeply it is nested."""
-
-    class NestingWordEmbedding(ScaledWordEmbedding):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.extra = nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE)
-
+def test_replace_nested_embedding(vpe):
+    """The composed `nn.Embedding` is found and set however deeply it is nested."""
     wrapper = nn.Module()
-    wrapper.add_module(
-        "embed", NestingWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
+    wrapper.add_module("inner", nn.Module())
+    wrapper.inner.add_module(
+        "embed", ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
     )
-    wrapper.add_module("sibling", nn.Module())
-    wrapper.sibling.add_module("nested", nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))
     replace(wrapper)
 
-    # A subclass is rebased in one step; its `nn.Embedding` base is not a submodule
-    assert isinstance(wrapper.embed, vpe)
-    assert type(wrapper.embed.extra) is vpe
-    assert type(wrapper.sibling.nested) is vpe
-    assert_scaled(vpe, wrapper.embed)
+    assert isinstance(wrapper.inner.embed, vpe)
+    assert_scaled(vpe, wrapper.inner.embed)
+
+
+@pytest.mark.parametrize("num_embeddings", [0, 2])
+def test_replace_ambiguous_embedding(tp_init, num_embeddings):
+    """Composing anything but one `nn.Embedding` is an error, not a silent guess."""
+    wrapper = nn.Module()
+    for i in range(num_embeddings):
+        wrapper.add_module(f"embed_{i}", nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))
+
+    with pytest.raises(ValueError, match=f"found {num_embeddings}"):
+        replace(wrapper)
+
+
+def test_replaced_embedding_exposes_one_vpe(vpe):
+    """`CausalMixin` ties `lm_head` to the one `VocabParallelEmbedding` it can find.
+
+    `tie_weights` reads `.weight`, which a composing module does not have, so it must
+    be handed the composed embedding instead.
+    """
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    inherited = replace(ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE))
+    composed = replace(ComposedWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, EMBED_SCALE))
+
+    assert [m for m in inherited.modules() if isinstance(m, vpe)] == [inherited]
+    assert [m for m in composed.modules() if isinstance(m, vpe)] == [composed.embed]
+
+    lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
+    assert lm_head.tie_weights(composed.embed).weight is composed.embed.weight
