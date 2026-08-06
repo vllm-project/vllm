@@ -567,15 +567,11 @@ class ModelConfig:
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
         # to prevent resolving it multiple times downstream.
-        # Only resolve the shared revision against self.model when the
-        # weights are loaded from that same repo. When model_weights points
-        # elsewhere (e.g. GGUF, where model is redirected to the base repo
-        # for config), pinning revision to the config repo's commit hash
-        # would leak an invalid revision into the weights download.
-        weights_match_model = not self.model_weights or self.model_weights == self.model
-        can_resolve_model_revision = (
-            self.hf_config_path is None or self.hf_config_path == self.model
-        ) and weights_match_model
+        # If the weights come from a different repo, we cannot eagerly resolve revision
+        weights_from_model = not self.model_weights or self.model_weights == self.model
+        # If the config comes from a different repo, we cannot eagerly resolve revision
+        config_from_model = not self.hf_config_path or self.hf_config_path == self.model
+        can_resolve_model_revision = config_from_model and weights_from_model
         if can_resolve_model_revision:
             self.revision = resolve_revision(
                 self.model,

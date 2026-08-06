@@ -1773,25 +1773,16 @@ def test_load_config_rejects_non_string_load_format(bad_load_format):
         LoadConfig(load_format=bad_load_format)
 
 
-@patch("vllm.config.model.resolve_revision", return_value="main")
+@patch("vllm.transformers_utils.repo_utils.resolve_revision", return_value="abc123")
 def test_revision_not_resolved_when_weights_differ_from_model(mock_resolve):
-    """When model_weights points to a different repo than model (e.g.
-    GGUF, where model is redirected to the base repo for config), the shared
-    revision must stay unresolved, or the config repo's commit hash would
-    leak into the weights download and 404 against the weights repo."""
-    config = ModelConfig(
-        "Qwen/Qwen3-0.6B",
-        model_weights="unsloth/Qwen3-0.6B-GGUF:Q8_0",
-    )
-
+    model_weights = "unsloth/Qwen3-0.6B-GGUF:Q8_0"
+    config = ModelConfig("Qwen/Qwen3-0.6B", model_weights=model_weights)
     assert config.revision is None
 
 
-@patch("vllm.config.model.resolve_revision", return_value="main")
+@patch("vllm.transformers_utils.repo_utils.resolve_revision", return_value="abc123")
 def test_revision_resolved_when_weights_match_model(mock_resolve):
-    """Normal case: weights come from model, so the shared revision is
-    resolved once against that repo."""
-    config = ModelConfig("Qwen/Qwen3-0.6B")
-
-    assert config.revision == "main"
-    mock_resolve.assert_any_call("Qwen/Qwen3-0.6B", None, config.hf_token)
+    model = "Qwen/Qwen3-0.6B"
+    config = ModelConfig(model)
+    assert config.revision == "abc123"
+    mock_resolve.assert_any_call(model, None, config.hf_token)
