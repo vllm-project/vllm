@@ -52,38 +52,29 @@ def test_dsv4_aiter_tgemm_routing_uses_static_eligibility_and_input_dtype(
 ) -> None:
     from vllm.models.deepseek_v4.amd import rocm
 
-    class BasePath(Exception):
-        pass
-
-    class OptimizedPath(Exception):
-        pass
-
     attention = object.__new__(rocm.DeepseekV4ROCMAiterMLAAttention)
     torch.nn.Module.__init__(attention)
     attention._tgemm_static_eligible = eligible
-    attention.padded_heads = 1
-    attention.head_dim = 1
-
-    def base_forward(*args, **kwargs):
-        raise BasePath
-
-    def optimized_forward(*args, **kwargs):
-        raise OptimizedPath
+    base_result = object()
+    optimized_result = object()
 
     monkeypatch.setattr(
         rocm,
         "get_forward_context",
         lambda: pytest.fail("tgemm routing should not inspect forward context"),
     )
-    monkeypatch.setattr(rocm.DeepseekV4Attention, "forward", base_forward)
-    attention._forward_aiter_tgemm = optimized_forward
+    monkeypatch.setattr(
+        rocm.DeepseekV4Attention,
+        "attn_gemm_parallel_execute",
+        lambda *_args, **_kwargs: base_result,
+    )
+    attention._attn_gemm_parallel_execute_aiter_tgemm = (
+        lambda *_args, **_kwargs: optimized_result
+    )
 
-    expected_path = OptimizedPath if expected_optimized else BasePath
-    with pytest.raises(expected_path):
-        attention.forward(
-            torch.empty(0, dtype=torch.int64),
-            torch.empty((1, 1), dtype=dtype),
-        )
+    result = attention.attn_gemm_parallel_execute(torch.empty((1, 1), dtype=dtype))
+
+    assert result is (optimized_result if expected_optimized else base_result)
 
 
 def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:
@@ -91,12 +82,11 @@ def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:
 
     from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 
-    class StopAfterScores(Exception):
-        pass
-
     hidden_states = torch.empty((2, 4), dtype=torch.bfloat16)
     main_weight = torch.empty((3, 4), dtype=torch.bfloat16)
     indexer_weight = torch.empty((5, 4), dtype=torch.bfloat16)
+    indexer_weights = torch.empty((2, 1), dtype=torch.bfloat16)
+    qr_kv = torch.empty((2, 2), dtype=torch.bfloat16)
     attention = object.__new__(DeepseekV4ROCMAiterMLAAttention)
     torch.nn.Module.__init__(attention)
     attention.compressor = SimpleNamespace(
@@ -105,32 +95,29 @@ def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:
     attention.indexer = SimpleNamespace(
         compressor=SimpleNamespace(
             fused_wkv_wgate=SimpleNamespace(weight=indexer_weight)
-        )
+        ),
+        weights_proj=lambda _hidden_states: (indexer_weights, None),
     )
 
     calls = []
 
     def fake_mm(inp, weight, *, otype):
         calls.append((inp, weight, otype))
-        return torch.empty((inp.shape[0], weight.shape[0]), dtype=otype)
-
-    def stop_after_scores(_hidden_states):
-        raise StopAfterScores
+        return weight
 
     monkeypatch.setattr(tgemm, "mm", fake_mm)
-    attention._fused_wqa_wkv_gemm = stop_after_scores
+    attention._fused_wqa_wkv_gemm = lambda _hidden_states: qr_kv
 
-    with pytest.raises(StopAfterScores):
-        attention._forward_aiter_tgemm(
-            hidden_states,
-            torch.empty(0, dtype=torch.int64),
-            torch.empty(0, dtype=torch.bfloat16),
-        )
+    result = attention._attn_gemm_parallel_execute_aiter_tgemm(hidden_states)
 
     assert calls == [
         (hidden_states, main_weight, torch.bfloat16),
         (hidden_states, indexer_weight, torch.bfloat16),
     ]
+    assert result[0] is qr_kv
+    assert result[1] is main_weight
+    assert result[2] is indexer_weight
+    assert result[3] is indexer_weights
 
 
 def _ref_global_topk_ragged(

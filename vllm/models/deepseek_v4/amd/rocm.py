@@ -2,18 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
-from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
@@ -465,31 +463,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
         )
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        llama_4_scaling: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def attn_gemm_parallel_execute(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[Any, ...]:
         if not self._tgemm_static_eligible or hidden_states.dtype != torch.bfloat16:
-            return super().forward(positions, hidden_states, llama_4_scaling)
+            return super().attn_gemm_parallel_execute(hidden_states)
 
-        num_tokens = hidden_states.shape[0]
-        output = torch.empty(
-            (num_tokens, self.padded_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        self._forward_aiter_tgemm(hidden_states, positions, output)
-        return self._o_proj(output[:, : self.n_local_heads], positions)
+        return self._attn_gemm_parallel_execute_aiter_tgemm(hidden_states)
 
-    @eager_break_during_capture
-    def _forward_aiter_tgemm(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
+    def _attn_gemm_parallel_execute_aiter_tgemm(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[Any, ...]:
         from aiter.tuned_gemm import tgemm
 
         assert self.compressor is not None
@@ -500,44 +484,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             otype=torch.bfloat16,
         )
         indexer_kv_score = None
+        indexer_weights = None
         if self.indexer is not None:
             indexer_kv_score = tgemm.mm(
                 hidden_states,
                 self.indexer.compressor.fused_wkv_wgate.weight,
                 otype=torch.bfloat16,
             )
+            indexer_weights, _ = self.indexer.weights_proj(hidden_states)
 
         qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
-        qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        qr, kv = fused_q_kv_rmsnorm(
-            qr,
-            kv,
-            self.q_norm.weight.data,
-            self.kv_norm.weight.data,
-            self.eps,
-        )
-        q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-        q = self._fused_qnorm_rope_kv_insert(
-            q,
-            kv,
-            positions,
-            get_forward_context().attn_metadata,
-        )
-
-        self.compressor(kv_score, positions, self.rotary_emb)
-        if self.indexer is not None:
-            assert indexer_kv_score is not None
-            indexer_weights, _ = self.indexer.weights_proj(hidden_states)
-            self.indexer(
-                hidden_states,
-                qr,
-                indexer_kv_score,
-                indexer_weights,
-                positions,
-                self.indexer_rotary_emb,
-            )
-
-        self.forward_mqa(q, kv, positions, output)
+        return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
