@@ -271,13 +271,13 @@ class DeepseekV4FlashMLAMetadataBuilder(
         assert cm.positions is not None, (
             "positions is required for C128A metadata build"
         )
-        active_topk_width = min(
-            max(
-                triton.next_power_of_2(max(cm.max_seq_len // self.compress_ratio, 1)),
-                _C128A_TOPK_ALIGNMENT,
-            ),
-            self.c128a_max_compressed,
-        )
+        # FULL-cudagraph decode kernels bake this layout's row stride at
+        # capture time (capture builds with max_seq_len = max_model_len), so
+        # the stride must not depend on the batch. A narrower runtime layout
+        # makes the captured kernels read decode rows r >= 1 from stale bytes:
+        # in a mixed batch, prefill row 0 is written at exactly the offset the
+        # captured kernel reads as decode row 1.
+        active_topk_width = self.c128a_max_compressed
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
