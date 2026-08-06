@@ -537,6 +537,24 @@ class VllmConfig:
         return hash_str
 
     @property
+    def is_ec_producer_only(self) -> bool:
+        ec_config = self.ec_transfer_config
+        return (
+            ec_config is not None
+            and ec_config.is_ec_producer
+            and not ec_config.is_ec_consumer
+        )
+
+    @property
+    def is_encoder_only(self) -> bool:
+        mm_config = (
+            self.model_config.multimodal_config
+            if self.model_config is not None
+            else None
+        )
+        return self.is_ec_producer_only or bool(mm_config and mm_config.mm_encoder_only)
+
+    @property
     def max_concurrent_batches(self) -> int:
         # PP requires PP-size concurrent batches to fill the pipeline.
         # Async scheduling requires 2 concurrent batches to overlap.
@@ -1142,11 +1160,6 @@ class VllmConfig:
             else:
                 self.scheduler_config.async_scheduling = True
 
-        logger.info_once(
-            "Asynchronous scheduling is %s.",
-            "enabled" if self.scheduler_config.async_scheduling else "disabled",
-        )
-
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (
@@ -1196,7 +1209,7 @@ class VllmConfig:
             )
 
         if self.model_config is not None and self.model_config.enforce_eager:
-            logger.warning(
+            logger.warning_once(
                 "Enforce eager set, disabling torch.compile and CUDAGraphs. "
                 "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
             )
@@ -1204,7 +1217,7 @@ class VllmConfig:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
-            logger.warning(
+            logger.warning_once(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
                 "This is equivalent to setting -cc.mode=none"
             )
@@ -1238,18 +1251,22 @@ class VllmConfig:
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
-        if envs.VLLM_USE_BREAKABLE_CUDAGRAPH:
-            logger.warning_once(
-                "VLLM_USE_BREAKABLE_CUDAGRAPH is set, disabling vLLM's "
-                "torch.compile pipeline. Equivalent to -cc.mode=none."
-            )
+        from vllm.compilation.breakable_cudagraph import (
+            is_breakable_cudagraph_enabled,
+        )
+
+        breakable_cudagraph_enabled = is_breakable_cudagraph_enabled()
+        if breakable_cudagraph_enabled:
             self.compilation_config.mode = CompilationMode.NONE
 
-        if self.compilation_config.backend == "eager" or (
-            self.compilation_config.mode is not None
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        if not breakable_cudagraph_enabled and (
+            self.compilation_config.backend == "eager"
+            or (
+                self.compilation_config.mode is not None
+                and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+            )
         ):
-            logger.warning(
+            logger.warning_once(
                 "Inductor compilation was disabled by user settings, "
                 "optimizations settings that are only active during "
                 "inductor compilation will be ignored."
@@ -1317,7 +1334,7 @@ class VllmConfig:
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
             and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
         ):
-            logger.info(
+            logger.info_once(
                 "Cudagraph mode %s is not compatible with compilation mode %s."
                 "Overriding to NONE.",
                 self.compilation_config.cudagraph_mode,
@@ -1331,7 +1348,7 @@ class VllmConfig:
             pass_config.enable_sp = True
         if pass_config.enable_sp:
             if self.parallel_config.tensor_parallel_size == 1:
-                logger.warning("Sequence Parallelism requires TP>1, disabling")
+                logger.warning_once("Sequence Parallelism requires TP>1, disabling")
                 pass_config.enable_sp = False
                 pass_config.fuse_gemm_comms = False
             else:
@@ -1349,7 +1366,7 @@ class VllmConfig:
                     )
 
                 if pass_config.sp_min_token_num is None:
-                    logger.warning(
+                    logger.warning_once(
                         "Model hidden_size too small for the SP "
                         "threshold heuristic, disabling. To force SP, "
                         "set pass_config.sp_min_token_num manually."
@@ -1428,7 +1445,7 @@ class VllmConfig:
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
-                logger.info("Cudagraph is disabled under eager mode")
+                logger.info_once("Cudagraph is disabled under eager mode")
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
                 # override related settings when enforce eager
                 self.compilation_config.max_cudagraph_capture_size = 0
@@ -1463,7 +1480,7 @@ class VllmConfig:
             and self.model_config.architecture == "WhisperForConditionalGeneration"
             and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
         ):
-            logger.warning(
+            logger.warning_once(
                 "Whisper is known to have issues with "
                 "forked workers. If startup is hanging, "
                 "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
@@ -1475,7 +1492,7 @@ class VllmConfig:
             and self.kv_events_config.enable_kv_cache_events
             and not self.cache_config.enable_prefix_caching
         ):
-            logger.warning(
+            logger.warning_once(
                 "KV cache events are on, but prefix caching is not enabled. "
                 "Use --enable-prefix-caching to enable."
             )
@@ -1484,13 +1501,17 @@ class VllmConfig:
             and self.kv_events_config.publisher != "null"
             and not self.kv_events_config.enable_kv_cache_events
         ):
-            logger.warning(
+            logger.warning_once(
                 "KV cache events are disabled, "
                 "but the scheduler is configured to publish them. "
                 "Modify KVEventsConfig.enable_kv_cache_events "
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        self._resolve_mm_embeds_from_ec_connector()
+        self._resolve_mm_processor_device()
+        self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
@@ -1522,7 +1543,7 @@ class VllmConfig:
             # the pass will operate on higher-level IR to avoid the issue.
             # TODO: https://github.com/vllm-project/vllm/issues/27894
             if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
-                logger.warning(
+                logger.warning_once(
                     "Sequence parallelism is enabled, but running in wrong "
                     "vllm compile mode: %s.",
                     self.compilation_config.mode,
@@ -2168,6 +2189,101 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
+    def _resolve_mm_embeds_from_ec_connector(self) -> None:
+        """Allow `*_embeds` to be omitted only where the connector supplies them.
+
+        That is exactly an EC consumer: the encoder instance publishes the
+        embeddings through the EC connector, so the request only has to carry
+        the grid metadata that sizes the placeholder range. On every other
+        deployment a missing `*_embeds` is a client error and must keep failing
+        fast in the frontend.
+        """
+        model_config = self.model_config
+        if model_config is None:
+            return
+        mm_config = model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        ec_config = self.ec_transfer_config
+        # Derived, so overwrite unconditionally rather than honouring a value
+        # that was set by hand.
+        mm_config.mm_embeds_from_ec_connector = (
+            ec_config is not None and ec_config.is_ec_consumer
+        )
+        if mm_config.mm_embeds_from_ec_connector:
+            logger.info_once(
+                "EC consumer: pre-computed-embedding inputs may omit the "
+                "embedding tensor; embeddings are loaded from the EC connector."
+            )
+
+    def _resolve_mm_processor_device(self) -> None:
+        """Settle `--mm-processor-device=auto` now that the EC role is known.
+
+        "auto" means "the accelerator, but only where the processor has it to
+        itself and its output can be handed over without a copy back to host":
+        an encode-only instance whose tensor transport carries device tensors.
+        Every other deployment keeps the processor on CPU.
+
+        An explicit device -- from `--mm-processor-device` or straight from
+        `mm_processor_kwargs` -- is already folded in by `MultiModalConfig`, so
+        it is left alone here and validated by `_validate_mm_processor_device`.
+        """
+        model_config = self.model_config
+        if model_config is None:
+            return
+        mm_config = model_config.multimodal_config
+        if mm_config is None:
+            return
+        if mm_config.get_mm_processor_device_type() is not None:
+            return
+
+        from vllm.platforms import current_platform
+
+        device_type = current_platform.device_type
+        if device_type in ("", "cpu"):
+            return
+
+        ec_config = self.ec_transfer_config
+        # An EC producer that is not also a consumer runs no forward pass and
+        # allocates no KV cache, so frontend accelerator work has the device to
+        # itself.
+        if ec_config is None or not ec_config.is_encode_only:
+            return
+
+        if mm_config.mm_tensor_ipc != "torch_shm":
+            # Any other transport serializes host bytes, so the output would be
+            # copied back, and that copy costs more than running the transform
+            # on device saves.
+            logger.info_once(
+                "EPD encoder instance: keeping the multi-modal processor on CPU "
+                "because mm_tensor_ipc=%s cannot carry device tensors. Add "
+                "--mm-tensor-ipc=torch_shm to run it on the accelerator.",
+                mm_config.mm_tensor_ipc,
+            )
+            return
+
+        mm_config.mm_processor_kwargs = {
+            **(mm_config.mm_processor_kwargs or {}),
+            "device": device_type,
+        }
+        logger.info_once(
+            "EPD encoder instance: running the multi-modal processor on %s. "
+            "Override with --mm-processor-device=cpu.",
+            device_type,
+        )
+
+    def _validate_mm_processor_device(self) -> None:
+        """Hand the EC config to `MultiModalConfig`, which owns the rule."""
+        model_config = self.model_config
+        if model_config is None:
+            return
+        mm_config = model_config.multimodal_config
+        if mm_config is None:
+            return
+
+        mm_config.validate_mm_processor_device(self.ec_transfer_config)
+
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
@@ -2229,10 +2345,6 @@ class VllmConfig:
         if self.parallel_config.enable_elastic_ep:
             unsupported.append("elastic expert parallelism")
 
-        if model_config is not None and model_config.enable_return_routed_experts:
-            # Will be added by https://github.com/vllm-project/vllm/pull/38163
-            unsupported.append("routed experts capture")
-
         has_logitsproc_plugins = False
         if model_config is not None:
             from importlib.metadata import entry_points
@@ -2250,10 +2362,6 @@ class VllmConfig:
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")
-
-        if self.ec_transfer_config is not None:
-            # Will be added by https://github.com/vllm-project/vllm/pull/38390
-            unsupported.append("EC transfer")
 
         return unsupported
 

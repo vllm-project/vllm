@@ -1134,9 +1134,9 @@ class FusedMoEParallelConfig:
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
-            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
-            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
+            tp_size_ (int): `tp_size` passed into the FusedMoEFactory constructor.
+            pcp_size_ (int): `pcp_size` passed into the FusedMoEFactory constructor.
+            dp_size_ (int): `dp_size` passed into the FusedMoEFactory constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 
@@ -1374,6 +1374,11 @@ class FusedMoEConfig:
     @property
     def is_act_and_mul(self) -> bool:
         return self.activation.is_gated
+
+    @property
+    def w13_num_shards(self) -> int:
+        """Number of shards fused into w13: gate and up for gated, up only."""
+        return 2 if self.is_act_and_mul else 1
 
     @property
     def tp_size(self):

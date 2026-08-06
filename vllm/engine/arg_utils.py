@@ -77,7 +77,7 @@ from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -86,7 +86,13 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MMTensorIPC
+from vllm.config.multimodal import (
+    MMCacheType,
+    MMEncoderTPMode,
+    MMHasherAlgorithm,
+    MMProcessorDevice,
+    MMTensorIPC,
+)
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
@@ -566,6 +572,9 @@ class EngineArgs:
     mm_processor_cache_type: MMCacheType | None = (
         MultiModalConfig.mm_processor_cache_type
     )
+    mm_hasher_algorithm: MMHasherAlgorithm = get_field(
+        MultiModalConfig, "mm_hasher_algorithm"
+    )
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
@@ -588,6 +597,7 @@ class EngineArgs:
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
+    mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     # LoRA fields
     enable_lora: bool = False
@@ -687,7 +697,6 @@ class EngineArgs:
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
-    calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     kv_cache_dtype_skip_layers: list[str] = get_field(
         CacheConfig, "kv_cache_dtype_skip_layers"
     )
@@ -700,6 +709,7 @@ class EngineArgs:
     use_replayssm: bool = CacheConfig.use_replayssm
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -955,6 +965,9 @@ class EngineArgs:
         )
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
         mamba_group.add_argument(
+            "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
+        )
+        mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
             **mamba_kwargs["enable_stochastic_rounding"],
         )
@@ -1203,9 +1216,6 @@ class EngineArgs:
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
         cache_group.add_argument(
-            "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
-        )
-        cache_group.add_argument(
             "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
         )
         cache_group.add_argument(
@@ -1296,6 +1306,9 @@ class EngineArgs:
             "--mm-processor-cache-type", **multimodal_kwargs["mm_processor_cache_type"]
         )
         multimodal_group.add_argument(
+            "--mm-hasher-algorithm", **multimodal_kwargs["mm_hasher_algorithm"]
+        )
+        multimodal_group.add_argument(
             "--mm-shm-cache-max-object-size-mb",
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
         )
@@ -1341,6 +1354,30 @@ class EngineArgs:
         )
         multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
+        )
+        multimodal_group.add_argument(
+            "--mm-processor-device",
+            choices=["auto", "cpu"]
+            + (
+                [current_platform.device_type]
+                if current_platform.device_type not in ("", "cpu")
+                else []
+            ),
+            default="auto",
+            help="Device the HF multi-modal processor runs the image/video "
+            "transform on. Convenience for `--mm-processor-kwargs "
+            "'{\"device\": ...}'`: the value is resolved here and stored there, "
+            "it is not kept as separate state. Only takes effect for HF "
+            '"fast" (torchvision-backed) processors, which accept a `device` '
+            "argument; the others ignore it and stay on CPU.\n\n"
+            '"auto" uses the accelerator on encoder instances of an '
+            "encode/prefill/decode deployment -- an EC producer that is not "
+            "also a consumer allocates no KV cache, so its accelerator is not "
+            "contended by the language model -- and then only when "
+            "`--mm-tensor-ipc=torch_shm` can carry device tensors, since every "
+            "other transport would copy the result back to the host and that "
+            'copy costs more than it saves. "auto" resolves to "cpu" '
+            "everywhere else.",
         )
         multimodal_group.add_argument(
             "--mm-ipc-gpu-memory-gb",
@@ -1712,6 +1749,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
@@ -1731,6 +1769,7 @@ class EngineArgs:
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
+            mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
         )
@@ -1945,7 +1984,6 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
-            calculate_kv_scales=self.calculate_kv_scales,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
@@ -2349,6 +2387,8 @@ class EngineArgs:
             mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
         else:
             mamba_config.backend = self.mamba_backend
+        if self.mamba_ssu_algorithm is not None:
+            mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding
@@ -2357,6 +2397,7 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
+        mamba_config.validate_ssu_algorithm()
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
@@ -2580,11 +2621,7 @@ class EngineArgs:
         self, model_config: ModelConfig
     ) -> None:
         default_chunked_prefill = model_config.is_chunked_prefill_supported
-        # Hybrid models support prefix caching but keep it opt-in for now
-        # while the feature matures.
-        default_prefix_caching = (
-            model_config.is_prefix_caching_supported and not model_config.is_hybrid
-        )
+        default_prefix_caching = model_config.is_prefix_caching_supported
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill

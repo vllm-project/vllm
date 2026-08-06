@@ -146,6 +146,23 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: Multi-Modal Models (PPL)
+  device: h200_35gb
+  key: multi-modal-models-extended-ppl
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation_ppl_test/
+  commands:
+    - pytest -v -s models/multimodal/generation_ppl_test/
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+
 - label: Multi-Modal Models (Extended Generation 2)
   device: h200_35gb
   key: multi-modal-models-extended-generation-2
