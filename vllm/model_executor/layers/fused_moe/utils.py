@@ -591,6 +591,11 @@ def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
     )
 
 
+# tensor_descriptor.gather() asserts at least this many rows in the gathered
+# tile, so a TD launch needs BLOCK_SIZE_M >= 8.
+TD_MIN_GATHER_ROWS = 8
+
+
 def moe_use_td_hw_supported() -> bool:
     """Whether the current device can run the TD (gather) path of
     ``fused_moe_kernel`` (ignores the ``VLLM_TRITON_USE_TD`` override).
@@ -637,9 +642,11 @@ def warn_if_moe_use_td_ineffective(
     """One-shot warning when ``VLLM_TRITON_USE_TD`` is set but ignored.
 
     Fires when the user set the env explicitly and either (a) the active
-    MoE backend is not the fused Triton kernel, or (b) the model is
-    quantized (the TD path falls back to the pointer path under any
-    quantization).
+    MoE backend is not the fused Triton kernel, or (b) the weights are
+    quantized in a scheme ``fused_moe_kernel`` has no TD path for -- which is
+    every scheme reaching it, including the ungrouped ``int8_w8a16`` produced
+    by ``oracle/int8.py``. Grouped WNA16 has a TD path, but it lives in
+    ``fused_moe_kernel_gptq_awq`` and is warned about by its own launcher.
     """
     global _warned_moe_use_td_ineffective
     if _warned_moe_use_td_ineffective:
@@ -656,9 +663,8 @@ def warn_if_moe_use_td_ineffective(
         )
     else:
         reason = (
-            "the model uses quantized MoE weights; the TD path is "
-            "currently restricted to non-quantized weights and falls "
-            "back to the pointer path"
+            "this MoE layer's quantization scheme has no tensor-descriptor "
+            "path in fused_moe_kernel and falls back to the pointer path"
         )
     logger.warning(
         "VLLM_TRITON_USE_TD is set to %s but %s.",
