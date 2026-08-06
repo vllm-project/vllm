@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import inspect
 from importlib.util import find_spec
 from types import ModuleType
 from typing import Any
@@ -95,6 +96,19 @@ if find_spec("flashinfer"):
             flashinfer_comm = _flashinfer_comm
     except ImportError:
         pass
+
+# ``allreduce_fusion`` gained a ``weight_bias`` argument in flashinfer 0.6.12,
+# which adds GemmaRMSNorm's ``(1 + weight)`` offset inside the fused kernel.
+# Older flashinfer (e.g. 0.6.11) lacks it, so detect support to fold the bias
+# into ``rms_gamma`` instead. ``inspect.signature`` can raise on signature-less
+# C-extension callables, so default to "unsupported" defensively.
+try:
+    _FI_ALLREDUCE_FUSION_SUPPORTS_WEIGHT_BIAS = flashinfer_comm is not None and (
+        "weight_bias"
+        in inspect.signature(flashinfer_comm.allreduce_fusion).parameters
+    )
+except (TypeError, ValueError):
+    _FI_ALLREDUCE_FUSION_SUPPORTS_WEIGHT_BIAS = False
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
@@ -262,6 +276,23 @@ if flashinfer_comm is not None:
         if workspace.backend in ("trtllm", "mnnvl"):
             layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
 
+        # GemmaRMSNorm scales by ``(1 + weight)``; ``weight_bias`` (=1.0) carries
+        # that offset. flashinfer >= 0.6.12 applies it inside the kernel via the
+        # ``weight_bias`` arg. On older flashinfer, fold it into ``rms_gamma``
+        # instead (mathematically identical: ``normed * (gamma + bias)``). The
+        # fold happens in ``rms_gamma``'s dtype, so a bf16/fp16 gamma incurs
+        # slightly more rounding than the kernel's fp32 accumulation.
+        if _FI_ALLREDUCE_FUSION_SUPPORTS_WEIGHT_BIAS:
+            weight_bias_kwargs: dict[str, Any] = {"weight_bias": weight_bias}
+        else:
+            weight_bias_kwargs = {}
+            if weight_bias != 0.0:
+                logger.warning_once(
+                    "flashinfer allreduce_fusion lacks 'weight_bias' (needs "
+                    ">=0.6.12); folding the RMSNorm bias into weights instead."
+                )
+                rms_gamma = rms_gamma + weight_bias
+
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
             workspace=workspace,
@@ -279,7 +310,7 @@ if flashinfer_comm is not None:
             layout_code=layout_code,
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
-            weight_bias=weight_bias,
+            **weight_bias_kwargs,
             # The one-shot Lamport all-reduce signals PDL completion before its
             # output buffer is committed when trigger_completion_at_end is
             # False, so the next PDL-launched kernel can read the uninitialized
