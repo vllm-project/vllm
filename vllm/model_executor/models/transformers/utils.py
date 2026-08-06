@@ -238,15 +238,27 @@ def replace_embedding_class(
     Returns:
         The module to install with `model.set_input_embeddings()`. Composing and
         inheriting modules are mutated in place and returned as-is.
+    Raises:
+        ValueError: If `embedding` composes anything other than one `nn.Embedding`,
+            which would leave the input embedding weights ambiguous.
     """
-    # If `embedding` composes its `nn.Embedding`s, recurse into each of them
+    # If `embedding` composes its `nn.Embedding`, recurse into it
     if not isinstance(embedding, nn.Embedding):
-        for name, module in embedding.named_modules():
-            if isinstance(module, nn.Embedding):
-                new_embedding = replace_embedding_class(
-                    module, quant_config, prefix=maybe_prefix(prefix, name)
-                )
-                attrsetter(name)(embedding, new_embedding)
+        composed = [
+            (name, module)
+            for name, module in embedding.named_modules()
+            if isinstance(module, nn.Embedding)
+        ]
+        if len(composed) != 1:
+            raise ValueError(
+                f"Expected {type(embedding).__name__} to be an `nn.Embedding` or to "
+                f"compose exactly one, but found {len(composed)}."
+            )
+        name, module = composed[0]
+        new_embedding = replace_embedding_class(
+            module, quant_config, prefix=maybe_prefix(prefix, name)
+        )
+        attrsetter(name)(embedding, new_embedding)
         return embedding
 
     kwargs = dict(
