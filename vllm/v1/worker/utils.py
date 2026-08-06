@@ -192,6 +192,7 @@ class KVBlockZeroer:
                 logical_block_stride_bytes = block_stride_bytes * ratio
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                    assert (dp + off_bytes) % 4 == 0
                     for virtual_index in range(ratio):
                         seg_addrs.append(
                             dp + off_bytes + virtual_index * block_stride_bytes

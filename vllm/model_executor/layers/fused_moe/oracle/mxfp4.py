@@ -1081,6 +1081,9 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 .view(-1, n)
             )
 
+        w13_weight.is_shuffled = True
+        w2_weight.is_shuffled = True
+
         return (
             w13_weight,
             w2_weight,
@@ -1545,6 +1548,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             True,
             False,
         )
+
+        w13_weight.is_shuffled = True
+        w2_weight.is_shuffled = True
 
         return (
             w13_weight,

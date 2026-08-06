@@ -385,7 +385,8 @@ class Scheduler(SchedulerInterface):
         )
         # Split only during prefill: `request.num_tokens - 1` extends this to
         # resumed requests replaying their output tokens.
-        if start >= max(request.num_prompt_tokens, request.num_tokens - 1):
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if start >= prefill_end:
             return num_new_tokens
 
         block_size = self.cache_config.block_size
@@ -397,10 +398,12 @@ class Scheduler(SchedulerInterface):
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
-        # Until `last_cache_position`, prefer chunks ending on block
-        # boundaries. When a block cannot fit in any configured prefill chunk,
-        # allow sub-block progress and re-align at the next reachable boundary.
-        if end < last_cache_position:
+        # Invariant: slot p holds the state after exactly (p + 1) * block_size
+        # tokens. State is written at chunk ends, so chunk ends must be block
+        # aligned. Exempt: the prompt's last chunk, whose slot decode advances
+        # to the boundary. A block too wide for one chunk advances sub-block
+        # and re-aligns at the next boundary.
+        if end < prefill_end:
             max_prefill_tokens = self.max_num_scheduled_tokens
             long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
             if long_prefill_threshold > 0:
@@ -416,12 +419,9 @@ class Scheduler(SchedulerInterface):
             else 0
         )
         stops = (
-            # Resumed mid-block (fine-grained partial hash hit): re-align to
-            # the block grid before running on, so the crossed boundary's
-            # state is materialized (unless it is past the cacheable range).
-            next_block_boundary
-            if start % block_size != 0 and next_block_boundary <= last_cache_position
-            else 0,
+            # Same invariant: a chunk starting mid-block stops at the boundary
+            # rather than running past it.
+            next_block_boundary if start % block_size != 0 else 0,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
             # Fine-grained hits: the prompt's partial-tail entry can only be

@@ -124,6 +124,7 @@ def test_packed_segment_zeros_only_its_last_block_page():
     expected[-1, page_offset_el : page_offset_el + page_size_el] = 0
     assert torch.equal(backing, expected)
 
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_warmup_compiles_every_n_blocks_specialization():
     """After warmup, no launch should trigger a first-request JIT compile.
@@ -143,6 +144,7 @@ def test_warmup_compiles_every_n_blocks_specialization():
         # seg_block_strides: this fixture is contiguous, so the logical block
         # stride equals the page size. A packed view is covered by
         # test_packed_segment_zeros_only_its_last_block_page.
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         1,  # max_chunks
@@ -183,6 +185,7 @@ def test_warmup_respects_available_block_count():
         # seg_block_strides: this fixture is contiguous, so the logical block
         # stride equals the page size. A packed view is covered by
         # test_packed_segment_zeros_only_its_last_block_page.
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         1,
