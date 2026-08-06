@@ -609,6 +609,28 @@ class ParserEngine(Parser):
             return False
         return self._reasoning_ended
 
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        """Reasoning-end check scoped to a single decode step.
+
+        The scheduler calls this once per structured-output request per decode
+        step while the request is still inside its reasoning block, so only the
+        tokens produced this step can change the verdict. The inherited default
+        re-scans the whole sequence, which makes the scheduler O(context) per
+        request per step.
+        """
+        end_id = self._reasoning_end_token_id
+        if end_id is None or not delta_ids:
+            return self.is_reasoning_end(list(input_ids))
+        start_id = self._reasoning_start_token_id
+        for token_id in reversed(delta_ids):
+            if token_id == end_id:
+                return True
+            if start_id is not None and token_id == start_id:
+                return False
+        return False
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         end_id = self._reasoning_end_token_id
         if end_id is not None:

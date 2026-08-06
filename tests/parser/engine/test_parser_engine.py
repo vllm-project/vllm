@@ -8,6 +8,7 @@ DeltaMessage / ExtractedToolCallInformation protocol.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -1694,3 +1695,79 @@ class TestDropSpecialTokens:
             e.value for e in events if e.type == EventType.REASONING_CHUNK
         )
         assert "<bos>" not in reasoning_text
+
+
+# ── TestIsReasoningEndStreaming ──────────────────────────────────────
+
+
+class _CountingSequence(Sequence):
+    """Sequence that records how many elements were read.
+
+    Used to assert the decode-step check stays proportional to the step rather
+    than the whole sequence, without timing anything.
+    """
+
+    def __init__(self, data: list[int]):
+        self._data = data
+        self.reads = 0
+
+    def __getitem__(self, index):
+        self.reads += 1
+        return self._data[index]
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+class TestIsReasoningEndStreaming:
+    """The scheduler calls this once per request per decode step while a
+    request is still reasoning (see ``should_advance`` in
+    vllm/v1/structured_output/__init__.py), so its cost must depend on the
+    step, not on the accumulated context.
+    """
+
+    def test_does_not_scan_the_whole_sequence(self):
+        engine = _make_engine()
+        all_ids = _CountingSequence([200] + [72] * 5000)
+
+        assert not engine.is_reasoning_end_streaming(all_ids, [72])
+
+        assert all_ids.reads == 0, (
+            "the decode-step check must not walk the accumulated sequence"
+        )
+
+    def test_detects_end_marker_in_the_step(self):
+        engine = _make_engine()
+        assert engine.is_reasoning_end_streaming([200, 72, 201], [201])
+
+    def test_start_marker_in_the_step_keeps_reasoning_open(self):
+        engine = _make_engine()
+        assert not engine.is_reasoning_end_streaming([201, 72, 200], [200])
+
+    def test_empty_delta_falls_back_to_the_full_predicate(self):
+        engine = _make_engine()
+        assert engine.is_reasoning_end_streaming([200, 72, 201], []) is True
+        assert engine.is_reasoning_end_streaming([201, 72, 200], []) is False
+
+    @pytest.mark.parametrize(
+        "sequence",
+        [
+            [200, 72, 201],
+            [200, 72, 72, 201, 73],
+            [201, 200, 72],
+            [200, 201, 200],
+            [72, 73],
+        ],
+    )
+    def test_agrees_with_full_predicate_while_reasoning(self, sequence):
+        """Stepping one token at a time must match the full-sequence answer
+        for every step up to the first one that ends reasoning."""
+        engine = _make_engine()
+        for end in range(1, len(sequence) + 1):
+            prefix = sequence[:end]
+            full = engine.is_reasoning_end(prefix)
+            assert (
+                engine.is_reasoning_end_streaming(prefix, [sequence[end - 1]]) == full
+            )
+            if full:
+                break
