@@ -16,6 +16,7 @@ from openai.types.responses import (
     ResponseReasoningTextDoneEvent,
     ResponseTextConfig,
     ResponseTextDeltaEvent,
+    response_text_delta_event,
 )
 from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
@@ -900,6 +901,91 @@ def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
     mock_parser_instance.is_reasoning_end = MagicMock(return_value=False)
     serving.parser = MagicMock(return_value=mock_parser_instance)
     return mock_parser_instance
+
+
+class TestSimpleStreamingLogprobsInclude:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("include", "expect_logprobs"),
+        [
+            (["reasoning.encrypted_content"] * 3, False),
+            (
+                ["reasoning.encrypted_content"] * 3 + ["message.output_text.logprobs"],
+                True,
+            ),
+        ],
+    )
+    async def test_include_output_logprobs_evaluated_once_per_request(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        include: list[str],
+        expect_logprobs: bool,
+    ) -> None:
+        serving = _make_serving_instance_with_reasoning()
+        contexts = [
+            _make_simple_context_with_output("hello", [10]),
+            _make_simple_context_with_output(" world", [20]),
+            _make_simple_context_with_output("!", [30]),
+        ]
+        stream_logprobs = [
+            response_text_delta_event.Logprob(
+                token="token", logprob=-0.1, top_logprobs=[]
+            )
+        ]
+        create_stream_response_logprobs = MagicMock(return_value=stream_logprobs)
+        monkeypatch.setattr(
+            serving,
+            "_create_stream_response_logprobs",
+            create_stream_response_logprobs,
+        )
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(
+            input="hi",
+            tools=[],
+            stream=True,
+            include=include,
+        )
+        include_output_logprobs_calls = 0
+        original_is_include_output_logprobs = (
+            ResponsesRequest.is_include_output_logprobs
+        )
+
+        def count_is_include_output_logprobs(request: ResponsesRequest) -> bool:
+            nonlocal include_output_logprobs_calls
+            include_output_logprobs_calls += 1
+            return original_is_include_output_logprobs(request)
+
+        monkeypatch.setattr(
+            ResponsesRequest,
+            "is_include_output_logprobs",
+            count_is_include_output_logprobs,
+        )
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=64),
+            result_generator=result_generator(),
+            context=SimpleContext(response_parser=None),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        text_deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+        assert [e.delta for e in text_deltas] == ["hello", " world", "!"]
+        expected_logprobs = stream_logprobs if expect_logprobs else []
+        assert [e.logprobs for e in text_deltas] == [expected_logprobs] * len(contexts)
+        expected_create_calls = len(contexts) if expect_logprobs else 0
+        assert create_stream_response_logprobs.call_count == expected_create_calls
+        assert include_output_logprobs_calls == 1
 
 
 class TestStreamingReasoningToContentTransition:
