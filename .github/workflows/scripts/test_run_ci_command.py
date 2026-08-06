@@ -529,6 +529,24 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(len(buildkite.created_builds), 1)
 
+    def test_delegated_author_can_rerun_after_canceled_build(self) -> None:
+        canceled_build = {
+            "created_at": "2026-01-01T00:00:00Z",
+            "number": 122,
+            "pull_request": {"id": 42},
+            "state": "canceled",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite([[], [canceled_build]])
+
+        run(make_event(COMMAND_RUN_CI, "author"), github, buildkite)
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+
     def test_trusted_user_can_repeat_full_ci_for_commit(self) -> None:
         finished_build = {
             "created_at": "2026-01-01T00:00:00Z",

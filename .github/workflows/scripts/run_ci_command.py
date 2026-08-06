@@ -721,7 +721,11 @@ def handle_run_ci(
         return f"CI is already running for this commit: {active_build['web_url']}"
 
     latest_build = select_latest_build(current_builds, pr["number"])
-    if latest_build and not allow_repeat_full_ci:
+    if (
+        latest_build
+        and latest_build.get("state") in {"failed", "passed"}
+        and not allow_repeat_full_ci
+    ):
         return (
             f"CI already ran for this commit: {latest_build['web_url']}. "
             "Use `/ci retry` to retry failed jobs."
