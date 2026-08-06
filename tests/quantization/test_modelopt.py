@@ -679,3 +679,33 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     assert config.nvfp4_config.LinearMethodCls is m.ModelOptNvFp4LinearMethod
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
     assert config.w4a16_nvfp4_config.LinearMethodCls is m.ModelOptNvFp4W4A16LinearMethod
+
+
+def test_modelopt_nvfp4_moe_forwards_swiglu_params():
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4FusedMoE
+
+    scale = torch.ones(1)
+    layer = Mock(
+        w13_weight_scale=scale,
+        w2_weight_scale=scale,
+        w13_weight_scale_2=scale,
+        w2_weight_scale_2=scale,
+        w13_input_scale=scale,
+        w2_input_scale=scale,
+        swiglu_alpha=1.702,
+        swiglu_beta=1.0,
+        swiglu_limit=7.0,
+    )
+
+    for backend in (
+        NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.EMULATION,
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
+    ):
+        method = Mock(nvfp4_backend=backend)
+        quant_config = ModelOptNvFp4FusedMoE.get_fused_moe_quant_config(method, layer)
+
+        assert quant_config.gemm1_alpha == 1.702, backend
+        assert quant_config.gemm1_beta == 1.0, backend
+        assert quant_config.gemm1_clamp_limit == 7.0, backend
