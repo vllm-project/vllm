@@ -103,10 +103,9 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    FusedInputNorm,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
-    make_input_norm,
-    maybe_do_input_norm,
     run_dp_sharded_mrope_vision_model,
 )
 
@@ -797,12 +796,6 @@ def _create_qwen2vl_field_factory(
 
 
 class Qwen2VLMultiModalDataParser(MultiModalDataParser):
-    # The patch grid is what sizes the placeholder range.
-    embedding_fields = {
-        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
-        "video": {"video_embeds": "values", "video_grid_thw": "metadata"},
-    }
-
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
         self._spatial_merge_size = spatial_merge_size
         super().__init__(*args, **kwargs)
@@ -812,12 +805,10 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
-            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields=required,
-                optional_fields=optional,
+                required_fields={"image_embeds", "image_grid_thw"},
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
@@ -828,12 +819,10 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
-            required, optional = self.embedding_field_sets("video")
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields=required,
-                optional_fields=optional,
+                required_fields={"video_embeds", "video_grid_thw"},
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
@@ -858,7 +847,6 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return Qwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -1299,10 +1287,7 @@ class Qwen2VLForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            if multimodal_config.mm_device_do_normalize:
-                self.input_norm = make_input_norm(self.model_config)
-            else:
-                self.input_norm = nn.Identity()
+            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -1373,9 +1358,7 @@ class Qwen2VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            pixel_values = maybe_do_input_norm(
-                pixel_values, self.input_norm, self.visual.dtype
-            )
+            pixel_values = self.input_norm(pixel_values, self.visual.dtype)
 
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
@@ -1399,8 +1382,8 @@ class Qwen2VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            pixel_values_videos = maybe_do_input_norm(
-                pixel_values_videos, self.input_norm, self.visual.dtype
+            pixel_values_videos = self.input_norm(
+                pixel_values_videos, self.visual.dtype
             )
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
@@ -1732,10 +1715,7 @@ class Qwen2VLForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        if self.multimodal_config.mm_device_do_normalize:
-            autoloaded_weights.update({"input_norm.weight", "input_norm.bias"})
-        return autoloaded_weights
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """

@@ -72,24 +72,24 @@ To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation
 
 Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
 
-- **How it works**: We use a helper called `make_input_norm` (backed by `nn.BatchNorm1d(3, eps=0.0)`) and bake the rescale factor (typically 1/255) directly into the mean and standard deviation:
+- **How it works**: We use a dedicated `FusedInputNorm` module — essentially a frozen `BatchNorm1d` with the rescale factor baked into its statistics — and bake the rescale factor (typically 1/255) directly into the effective mean and standard deviation:
     - Effective mean = `image_mean * (1/rescale_factor)`
     - Effective std  = `image_std  * (1/rescale_factor)`
-- **At runtime**: The layer takes raw uint8 pixel values (0–255) and does the full normalised mapping in a single GPU kernel—no CPU involvement.
+- **At runtime**: The `FusedInputNorm` layer takes raw `uint8` pixel values (0–255) and performs the full normalised mapping in a single GPU kernel—no CPU involvement.
 
 #### Optimized Data Path for Fused Normalisation
 
 Performing fused normalisation directly on the device allows us to keep the entire transfer path—from **Entrypoint** through **Engine Core** to **GPU memory**—in **`uint8`**. This halves PCIe bandwidth and reduces CPU memory footprint.
 
-Only after data reaches GPU memory do we cast to `fp32` for `BatchNorm1d` (to ensure numerical accuracy), then cast to `bf16` for subsequent layers—all within the GPU, avoiding any host‑side conversions.
+Only after data reaches GPU memory do we cast to `fp32` for the `FusedInputNorm` layer (to ensure numerical accuracy), then cast to `bf16` for subsequent layers—all within the GPU, avoiding any host‑side conversions.
 
-Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → GPU Memory (uint8)`** → GPU‑local `fp32` BN → `bf16` output.
+Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → GPU Memory (uint8)`** → GPU‑local `fp32` `FusedInputNorm` → `bf16` output.
 
 #### Toggle: `mm_device_do_normalize`
 
 This GPU‑side fusion is controlled by a config flag called **`mm_device_do_normalize`**.
 
-- When `True`, normalisation and rescaling are done on the GPU using the fused layer; when `False`, we fall back to the old CPU‑side path.
+- When `True`, normalisation and rescaling are done on the GPU using the `FusedInputNorm` layer; when `False`, we fall back to the old CPU‑side path.
 - The flag is **enabled by default** for all models that support it.
 - Currently, it’s on by default for these architectures:
 

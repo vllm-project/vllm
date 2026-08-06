@@ -6,7 +6,7 @@ import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.model_executor.models.vision import make_input_norm, maybe_do_input_norm
+from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ....conftest import ImageTestAssets
@@ -171,9 +171,11 @@ def test_mm_device_do_normalize(
     pixel_values_without_normalize = processed_inputs_without_normalize[
         "mm_kwargs"
     ].get_data()["pixel_values"]
-    input_norm = make_input_norm(ctx.model_config)
-    pixel_values_do_input_norm = maybe_do_input_norm(
-        pixel_values_without_normalize.to(dtype), input_norm, torch.bfloat16
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = True
+    input_norm = FusedInputNorm.from_model_config(ctx.model_config)
+    pixel_values_do_input_norm = input_norm(
+        pixel_values_without_normalize.to(dtype), dtype
     )
 
     torch.testing.assert_close(pixel_values_with_normalize, pixel_values_do_input_norm)
