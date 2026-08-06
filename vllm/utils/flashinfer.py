@@ -216,16 +216,33 @@ def has_flashinfer_moe() -> bool:
 def has_flashinfer_trtllm_sparse_mla_dsv4() -> bool:
     """Return ``True`` if FlashInfer's official SM120 packed sparse-MLA decode
     kernel (``trtllm_batch_decode_sparse_mla_dsv4``, PR3395, merged in
-    flashinfer >= 0.6.13) is available."""
+    flashinfer >= 0.6.13) is available.
+
+    Imports every symbol the decode path actually uses, not just the one the
+    kernel is named after. Reported by aldc-john-moran on
+    vllm-project/vllm#41834: this checked ``trtllm_batch_decode_sparse_mla_dsv4``
+    while ``flashinfer_sm120_decode`` imports ``_SparseMLAPagedAttentionRunner``
+    from ``flashinfer.mla._sparse_mla_sm120``. On FlashInfer 0.6.12 — the version
+    the harness Dockerfile pins — the first exists and the second does not, so
+    the gate returned True, the documented FlashMLA fallback never fired, and
+    both ranks died on ModuleNotFoundError right after a successful NCCL
+    rendezvous. An availability gate that tests a different symbol than the
+    caller imports is not a gate.
+    """
     if not has_flashinfer():
         return False
     try:
-        from flashinfer.mla import (  # noqa: F401
+        from flashinfer.mla import (
             trtllm_batch_decode_sparse_mla_dsv4,
+        )
+        from flashinfer.mla._sparse_mla_sm120 import (
+            _SparseMLAPagedAttentionRunner,
         )
     except ImportError:
         return False
-    return True
+    return callable(trtllm_batch_decode_sparse_mla_dsv4) and callable(
+        _SparseMLAPagedAttentionRunner
+    )
 
 
 @functools.cache
