@@ -432,6 +432,30 @@ class TestLoadWeightsExpertBias:
         loaded = list(RoutedExperts.load_weights(experts, self._checkpoint_weights()))
         assert set(loaded) == {"w13_weight", "w2_weight", "w13_bias", "w2_bias"}
 
+    def test_missing_non_bias_param_names_the_weight(self):
+        experts = self._make_experts(has_bias=False)
+        weights = [("0.down_proj.new_scale", torch.zeros(1, 1))]
+        with pytest.raises(AttributeError, match="w2_new_scale"):
+            list(RoutedExperts.load_weights(experts, weights))
+
+    @pytest.mark.parametrize(
+        "expert_name,param_name",
+        [
+            # Pre-fused checkpoints name biases `<proj>_bias` (gpt-oss) or
+            # `<proj>.bias` (quark), neither of which rewrites to a real param.
+            # Skipping them would silently drop a bias the layer does have, so
+            # they must raise; models rename them via WeightsMapper instead.
+            ("down_proj_bias", "w2_weight_bias"),
+            ("gate_up_proj_bias", "w13_weight_bias"),
+            ("down_proj.bias", "w2_weight.bias"),
+        ],
+    )
+    def test_fused_bias_names_are_not_skipped(self, expert_name, param_name):
+        experts = self._make_experts(has_bias=True)
+        weights = [(expert_name, torch.zeros(self.NUM_EXPERTS, 1))]
+        with pytest.raises(AttributeError, match=param_name.replace(".", r"\.")):
+            list(RoutedExperts.load_weights(experts, weights))
+
 
 class TestPerTensorScaleCoercion:
     """Regression test for shape-(1,) per-tensor scales (issue #43297).
