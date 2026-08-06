@@ -387,6 +387,9 @@ class EngineCoreReadyResponse:
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
     kv_events_config: KVEventsConfig | None = None
+    weight_transfer_backend: str | None = None
+    enable_sleep_mode: bool = False
+    supports_draft_weight_updates: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -405,6 +408,9 @@ ready_response = EngineCoreReadyResponse(
     max_num_seqs=256,
     max_num_batched_tokens=8192,
     instance_id="test-instance",
+    weight_transfer_backend="nccl",
+    enable_sleep_mode=True,
+    supports_draft_weight_updates=True,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
