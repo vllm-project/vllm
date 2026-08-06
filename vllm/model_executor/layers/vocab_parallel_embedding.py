@@ -507,7 +507,8 @@ class VocabParallelEmbedding(PluggableLayer):
         return output_parallel
 
     def extra_repr(self) -> str:
-        s = f"num_embeddings={self.num_embeddings_per_partition}"
+        s = f"num_embeddings={self.num_embeddings}"
+        s += f", num_embeddings_per_partition={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"
         s += f", org_vocab_size={self.org_vocab_size}"
         s += f", num_embeddings_padded={self.num_embeddings_padded}"
