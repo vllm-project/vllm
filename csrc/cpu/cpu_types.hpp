@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 #ifndef CPU_TYPES_HPP
 #define CPU_TYPES_HPP
 
@@ -12,7 +15,13 @@
   #include "cpu_types_vxe.hpp"
 #elif defined(__aarch64__)
   // arm implementation
-  #include "cpu_types_arm.hpp"
+  #if defined(CPU_CAPABILITY_SVE256)
+    #include "cpu_types_sve256.hpp"
+  #elif defined(CPU_CAPABILITY_SVE128)
+    #include "cpu_types_sve128.hpp"
+  #else
+    #include "cpu_types_simd.hpp"
+  #endif
 #elif defined(__riscv_v)
   // riscv implementation
   #include "cpu_types_riscv.hpp"

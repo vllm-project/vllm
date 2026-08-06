@@ -103,6 +103,7 @@ else()
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
+    find_isa(${CPUINFO} "sve" SVE_FOUND) # Check for ARM SVE support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "i8mm" ARM_I8MM_FOUND) # Check for ARM I8MM support
     find_isa(${CPUINFO} "S390" S390_FOUND)
@@ -166,18 +167,32 @@ elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
 
 elseif (ASIMD_FOUND)
     message(STATUS "ARMv8 or later architecture detected")
-    if(ARM_BF16_FOUND)
-        message(STATUS "BF16 extension detected")
-        set(MARCH_FLAGS "-march=armv8.2-a+bf16+dotprod+fp16")
-        add_compile_definitions(ARM_BF16_SUPPORT)
-    else()
-        message(WARNING "BF16 functionality is not available")
-        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
-    endif()
+    set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")
     if(ARM_I8MM_FOUND)
         message(STATUS "I8MM extension detected")
         string(APPEND MARCH_FLAGS "+i8mm")
         add_compile_definitions(ARM_I8MM_SUPPORT)
+    endif()
+    if(ARM_BF16_FOUND)
+        message(STATUS "BF16 extension detected")
+        string(APPEND MARCH_FLAGS "+bf16")
+        add_compile_definitions(ARM_BF16_SUPPORT)
+        if(SVE_FOUND)
+            message(STATUS "SVE detected")
+            set(SVE_MARCH_FLAGS "${MARCH_FLAGS}+sve")
+            set(SVE256_COMPILE_FLAGS "-msve-vector-bits=256")
+            list(APPEND SVE256_CXX_COMPILE_FLAGS
+                ${CXX_COMPILE_FLAGS}
+                ${SVE256_COMPILE_FLAGS}
+                ${SVE_MARCH_FLAGS})
+            set(SVE128_COMPILE_FLAGS "-msve-vector-bits=128")
+            list(APPEND SVE128_CXX_COMPILE_FLAGS
+                ${CXX_COMPILE_FLAGS}
+                ${SVE128_COMPILE_FLAGS}
+                ${SVE_MARCH_FLAGS})
+        endif()
+    else()
+        message(WARNING "BF16 functionality is not available")
     endif()
     list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
 elseif (S390_FOUND)
@@ -612,6 +627,42 @@ else()
     )
     if (VLLM_OPENBLAS_LIB)
         target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
+    endif()
+    if (ASIMD_FOUND)
+        # PyTorch requires this to enable Sleef for SIMD and SVE
+        target_compile_definitions(_C PRIVATE AT_BUILD_ARM_VEC256_WITH_SLEEF)
+    endif()
+    if (ARM_BF16_FOUND AND SVE_FOUND)
+        define_extension_target(
+            _C_SVE256
+            DESTINATION vllm
+            LANGUAGE CXX
+            SOURCES ${VLLM_EXT_SRC}
+            LIBRARIES ${LIBS}
+            COMPILE_FLAGS ${SVE256_CXX_COMPILE_FLAGS}
+            USE_SABI 3
+            WITH_SOABI
+        )
+        target_compile_definitions(_C_SVE256 PRIVATE
+            AT_BUILD_ARM_VEC256_WITH_SLEEF# PyTorch requires this to enable Sleef for SIMD and SVE
+            CPU_CAPABILITY=SVE256
+            CPU_CAPABILITY_SVE# PyTorch requires this for SVE-256 only.
+            CPU_CAPABILITY_SVE256)
+
+        define_extension_target(
+            _C_SVE128
+            DESTINATION vllm
+            LANGUAGE CXX
+            SOURCES ${VLLM_EXT_SRC}
+            LIBRARIES ${LIBS}
+            COMPILE_FLAGS ${SVE128_CXX_COMPILE_FLAGS}
+            USE_SABI 3
+            WITH_SOABI
+        )
+        target_compile_definitions(_C_SVE128 PRIVATE
+            AT_BUILD_ARM_VEC256_WITH_SLEEF# PyTorch requires this to enable Sleef for SIMD and SVE
+            CPU_CAPABILITY=SVE128
+            CPU_CAPABILITY_SVE128)
     endif()
 endif()
 
