@@ -22,8 +22,10 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    amax_for_moe_weight_quant,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
+    weight_amax,
 )
 from vllm.model_executor.utils import replace_parameter
 
@@ -72,6 +74,9 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             dtype=torch.float32,
         )
 
+        w2_amax = weight_amax(layer.w2_weight, dim=-1)
+        w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
+
         for expert in range(layer.local_num_experts):
             # w13: per-row quantization over hidden_size dim
             w = layer.w13_weight[expert, :, :]
@@ -82,7 +87,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
 
             # w2: per-row quantization over intermediate_size dim
             w = layer.w2_weight[expert, :, :]
-            scales = w.abs().amax(dim=1) / vmax
+            scales = w2_amax[expert] / vmax
             q = w.div(scales.unsqueeze(1)).round().clamp(-vmax, vmax)
             w2[expert, :, :] = q.to(torch.int8)
             w2_scale[expert, :] = scales

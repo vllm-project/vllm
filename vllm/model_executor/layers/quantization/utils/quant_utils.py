@@ -11,6 +11,7 @@ import numpy
 import torch
 from torch import fx
 
+from vllm.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -22,6 +23,43 @@ FP4_DTYPE = torch.uint8
 MXFP_SCALE_DTYPE = torch.uint8
 INT4_DTYPE = scalar_types.uint4b8
 INT8_DTYPE = scalar_types.uint8b128
+
+
+def weight_amax(
+    weight: torch.Tensor, *, dim: int | None = None, keepdim: bool = False
+) -> torch.Tensor:
+    """``max(|weight|)``, without materializing a full-size ``abs()``."""
+    lo, hi = weight.aminmax(dim=dim, keepdim=keepdim)
+    return torch.maximum(lo.abs(), hi.abs())
+
+
+def amax_for_tp_weight_quant(amax: torch.Tensor, is_sharded: bool) -> torch.Tensor:
+    """Reduce a weight ``amax`` over the TP group when the weight is sharded
+    along a dim the ``amax`` reduces over, so each shard derives the same scale
+    it would as part of the whole weight.
+    """
+    if is_sharded:
+        torch.distributed.all_reduce(
+            amax,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_tp_group().device_group,
+        )
+    return amax
+
+
+def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Tensor:
+    """Reduce a per-expert weight ``amax`` over the ranks that tensor-shard the
+    MoE weights. That sharding is flattened over DP x PCP x TP, exactly the EP
+    group's span. Under EP ``moe_tp_size`` is 1 and each rank owns whole
+    experts, so no reduction is needed.
+    """
+    if moe_tp_size > 1:
+        torch.distributed.all_reduce(
+            amax,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_ep_group().device_group,
+        )
+    return amax
 
 
 def get_fp8_min_max() -> tuple[float, float]:
