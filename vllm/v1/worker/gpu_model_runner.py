@@ -888,6 +888,7 @@ class GPUModelRunner(
         # KVCacheConfig of the scheduler.
         self.runner_only_attn_layers: set[str] = set()
 
+        self._drafter_gate_off_logged = 0
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
         self._draft_probs: torch.Tensor | None = None
@@ -4548,6 +4549,17 @@ class GPUModelRunner(
     def _input_fits_in_drafter(
         self, common_attn_metadata: CommonAttentionMetadata | None
     ) -> bool:
+        # INVARIANT (do not weaken): every input here must be identical on all
+        # TP ranks. max_seq_len derives from optimistic_seq_lens_cpu =
+        # scheduler-broadcast num_computed_tokens + scheduler-broadcast
+        # scheduled counts; the rank-local acceptance correction
+        # (valid_sampled_token_count_gpu) is applied ONLY to the GPU
+        # num_computed_tokens buffer and must never be written back to the CPU
+        # tensor. If a rank-local value ever leaks into this gate, TP ranks
+        # can disagree near the max_model_len ceiling and launch mismatched
+        # drafter collectives -- the wedge / corrupt-and-continue class of
+        # vllm-project/vllm#49027. Pinned by
+        # tests/v1/worker/test_drafter_gate_determinism.py.
         if common_attn_metadata is None:
             return False
         assert self.speculative_config is not None
@@ -4555,10 +4567,28 @@ class GPUModelRunner(
         num_drafter_query_tokens = self.num_spec_tokens + (
             1 if self.speculative_config.use_dflash() else 0
         )
-        return (
+        fits = (
             common_attn_metadata.max_seq_len + num_drafter_query_tokens
             <= self.effective_drafter_max_model_len
         )
+        if (
+            not fits
+            and self.parallel_config.tensor_parallel_size > 1
+            and self._drafter_gate_off_logged < 8
+        ):
+            # Boundary sentinel: gate-off steps only occur within
+            # num_drafter_query_tokens of the ceiling, so this is quiet in
+            # normal serving. Per-rank lines allow offline cross-rank
+            # comparison if the determinism invariant is ever broken.
+            self._drafter_gate_off_logged += 1
+            logger.warning(
+                "[drafter-gate] off at max_seq_len=%d (+%d > %d); "
+                "scheduler-derived, must match on all TP ranks",
+                common_attn_metadata.max_seq_len,
+                num_drafter_query_tokens,
+                self.effective_drafter_max_model_len,
+            )
+        return fits
 
     @torch.inference_mode
     def sample_tokens(
