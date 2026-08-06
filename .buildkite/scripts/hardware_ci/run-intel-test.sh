@@ -20,6 +20,11 @@ fi
 # Export Python path
 export PYTHONPATH=".."
 
+# Unified default for Intel jobs: give worker teardown more time to avoid
+# random post-load segfaults during EngineCore shutdown. Individual jobs can
+# still override this via their own env config.
+export VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS=${VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS:-20}
+
 ###############################################################################
 # Helper Functions
 ###############################################################################
