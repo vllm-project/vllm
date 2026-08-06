@@ -641,10 +641,7 @@ class MooncakeConnectorScheduler:
         )
         # GDN is represented as a MambaSpec in vLLM. This Mooncake MambaSpec
         # path is currently tested with GDN; Mamba2 is not validated yet.
-        self._has_mamba = any(
-            isinstance(group.kv_cache_spec, MambaSpec)
-            for group in kv_cache_config.transfer_groups
-        )
+        self._has_mamba = kv_cache_config.has_mamba_layers
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -1028,8 +1025,6 @@ class MooncakeConnectorWorker:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
-        self._transfer_groups = kv_cache_config.transfer_groups
-        assert self._transfer_groups
         self.use_mla = self.model_config.use_mla
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
@@ -1044,7 +1039,7 @@ class MooncakeConnectorWorker:
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._layer_specs: dict[str, KVCacheSpec] = {}
-        for group in self._transfer_groups:
+        for group in kv_cache_config.transfer_groups:
             group_spec = group.kv_cache_spec
             specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
             for layer_name in group.layer_names:
@@ -1053,7 +1048,7 @@ class MooncakeConnectorWorker:
                 )
         self._layer_group_indices: dict[str, int] = {
             layer: group_index
-            for group_index, group in enumerate(self._transfer_groups)
+            for group_index, group in enumerate(kv_cache_config.transfer_groups)
             for layer in group.layer_names
         }
         self.transfer_topo = TransferTopology(
@@ -1062,10 +1057,7 @@ class MooncakeConnectorWorker:
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
-            is_mamba=any(
-                isinstance(group.kv_cache_spec, MambaSpec)
-                for group in self._transfer_groups
-            ),
+            is_mamba=kv_cache_config.has_mamba_layers,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
         )
@@ -1424,7 +1416,7 @@ class MooncakeConnectorWorker:
         block_arange = np.arange(self._physical_blocks_per_logical_kv_block).reshape(
             1, -1
         )
-        group_specs = self._transfer_groups
+        group_specs = self.kv_cache_config.transfer_groups
         return [
             BlockTable.map_to_kernel_blocks(
                 np.array(group),
@@ -1477,11 +1469,7 @@ class MooncakeConnectorWorker:
             local_block_ids_by_group: list[list[int]] = []
             remote_block_ids_by_group: list[list[int]] = []
             has_block_error = False
-            group_specs = getattr(
-                self,
-                "_transfer_groups",
-                tuple(self.kv_cache_config.kv_cache_groups),
-            )
+            group_specs = self.kv_cache_config.transfer_groups
             for group_index, (local_group, remote_group) in enumerate(
                 zip(send_meta.local_block_ids, remote_block_ids_per_group)
             ):

@@ -59,7 +59,6 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -81,12 +80,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     @property
     def prefer_cross_layer_blocks(self) -> bool:
-        if any(
-            [
-                isinstance(group.kv_cache_spec, MambaSpec)
-                for group in self.kv_cache_config.kv_cache_groups
-            ]
-        ):
+        if self.kv_cache_config.has_mamba_layers:
             # Hybrid SSM models do not yet support cross-layer layout
             return False
 

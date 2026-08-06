@@ -91,9 +91,7 @@ class NixlBaseConnectorScheduler:
                 for g in transfer_groups
             )
         )
-        self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec) for g in transfer_groups
-        )
+        self._has_mamba = kv_cache_config.has_mamba_layers
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:

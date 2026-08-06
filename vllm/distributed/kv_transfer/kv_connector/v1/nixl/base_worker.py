@@ -340,9 +340,7 @@ class NixlBaseConnectorWorker:
         # The transfer requires DS (dim, state_len) conv layout so that
         # conv sub-projections are contiguous in memory.
         self._conv_decomp: MambaConvSplitInfo | None = None
-        self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec) for g in self._transfer_groups
-        )
+        self._has_mamba = kv_cache_config.has_mamba_layers
         if self._has_mamba:
             assert self._is_hma_required
             from vllm.model_executor.layers.mamba.mamba_utils import (
