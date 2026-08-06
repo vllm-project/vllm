@@ -573,6 +573,7 @@ class TestMLP(torch.nn.Module):
 def modular_triton_fused_moe(
     moe_config: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
+    experts_cls: type[TritonExperts] = TritonExperts,
 ) -> FusedMoEKernel:
     return FusedMoEKernel(
         maybe_make_prepare_finalize(
@@ -581,7 +582,7 @@ def modular_triton_fused_moe(
             allow_new_interface=True,
             use_monolithic=False,
         ),
-        TritonExperts(moe_config, quant_config),
+        experts_cls(moe_config, quant_config),
     )
 
 
