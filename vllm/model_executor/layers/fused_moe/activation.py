@@ -201,6 +201,7 @@ def apply_moe_activation(
     activation_config: ApplyMoEActivationConfig | None = None,
     topk_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
+    valid_rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Apply MoE activation function.
 
@@ -256,6 +257,7 @@ def apply_moe_activation(
             -1.0
             if config.activation_situ_linear_beta is None
             else config.activation_situ_linear_beta,
+            valid_rows,
         )
     elif activation == MoEActivation.SWIGLUOAI:
         torch.ops._C.swigluoai_and_mul(output, input)

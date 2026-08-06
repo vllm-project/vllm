@@ -478,8 +478,10 @@ template <typename scalar_t>
 __global__ void situ_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
-    const int d, const float beta, const float linear_beta) {
+    const int d, const float beta, const float linear_beta,
+    const int64_t* __restrict__ valid_rows_ptr) {
   const int64_t row = blockIdx.x;
+  if (valid_rows_ptr != nullptr && row >= *valid_rows_ptr) return;
   const scalar_t* gate_ptr = input + row * 2 * d;
   const scalar_t* up_ptr = gate_ptr + d;
   scalar_t* out_ptr = out + row * d;
@@ -620,7 +622,8 @@ void swigluoai_and_mul(torch::stable::Tensor& out,    // [..., d]
 // through), matching SituAndMul(linear_beta=None) on the Python side.
 void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
                   torch::stable::Tensor& input,  // [..., 2 * d]
-                  double beta, double linear_beta) {
+                  double beta, double linear_beta,
+                  std::optional<torch::stable::Tensor> valid_rows) {
   int d = input.size(-1) / 2;
   int64_t num_tokens = input.numel() / input.size(-1);
   if (num_tokens == 0) {
@@ -628,6 +631,10 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
   }
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
+  const int64_t* valid_rows_ptr = nullptr;
+  if (valid_rows.has_value()) {
+    valid_rows_ptr = valid_rows->const_data_ptr<int64_t>();
+  }
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
@@ -635,7 +642,7 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
       input.scalar_type(), "situ_and_mul_kernel", [&] {
         vllm::situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
             out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
-            d, (float)beta, (float)linear_beta);
+            d, (float)beta, (float)linear_beta, valid_rows_ptr);
       });
 }
 

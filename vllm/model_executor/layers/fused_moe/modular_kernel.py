@@ -101,6 +101,7 @@ class ExpertTokensMetadata:
 
     expert_num_tokens: torch.Tensor
     expert_num_tokens_cpu: torch.Tensor | None
+    psum_recv_per_rank: torch.Tensor | None = None
 
     @staticmethod
     def make_from_list(
@@ -891,6 +892,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         *,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
+        valid_rows: torch.Tensor | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
@@ -899,6 +901,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
+            valid_rows=valid_rows,
         )
 
     @abstractmethod

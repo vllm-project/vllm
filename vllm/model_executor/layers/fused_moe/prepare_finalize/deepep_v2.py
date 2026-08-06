@@ -247,6 +247,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             recv_expert_num_tokens,
             device=expert_x.device,
         )
+        if self.use_cudagraph:
+            expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
 
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None
