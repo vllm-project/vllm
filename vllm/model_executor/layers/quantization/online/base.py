@@ -42,6 +42,8 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
+    Nvfp4W4A4OnlineLinearMethod,
+    Nvfp4W4A16OnlineLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -50,6 +52,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
     kMxfp8Dynamic,
+    kNvfp4Dynamic,
     kNvfp4Static,
 )
 
@@ -64,6 +67,10 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8Static128BlockSym: Fp8PerBlockOnlineLinearMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
+    # NVFP4 weight-only (activations stay bf16/fp16) -> Marlin, any SM>=75.
+    kNvfp4Static: Nvfp4W4A16OnlineLinearMethod,
+    # NVFP4 W4A4 (dynamic activation quant) -> CUTLASS, Blackwell SM>=100.
+    kNvfp4Dynamic: Nvfp4W4A4OnlineLinearMethod,
 }
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {

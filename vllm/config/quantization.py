@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp8Dynamic,
+    kNvfp4Dynamic,
     kNvfp4Static,
 )
 
@@ -31,6 +32,8 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "fp8_per_block_dynamic": kFp8Dynamic128Sym,
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
+    "nvfp4_w4a16": kNvfp4Static,
+    "nvfp4_w4a4": kNvfp4Dynamic,
     "int8_per_channel_static": kInt8StaticChannelSym,
 }
 
@@ -139,6 +142,16 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # FlashInfer TRTLLM only); linear stays unquantized (no `linear` field).
     "nvfp4_per_token": QuantizationConfigArgs(
         moe=QuantSpec(weight=kNvfp4Static),
+    ),
+    # Online NVFP4 weight-only (W4A16) on dense linear. Portable: Marlin FP4
+    # runs on any SM>=75. MoE stays unquantized (no `moe` field).
+    "nvfp4": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kNvfp4Static),
+    ),
+    # Online NVFP4 W4A4 on dense linear: FP4 weights + dynamic per-token FP4
+    # activation quant. CUTLASS/FlashInfer FP4, Blackwell SM>=100.
+    "nvfp4_w4a4": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kNvfp4Dynamic),
     ),
 }
 
