@@ -46,7 +46,12 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs) -> None:
         super().__init__(tokenizer, *args, **kwargs)
-        self._parser_engine = self._parser_engine_cls(tokenizer, **kwargs)  # type: ignore[call-arg]
+        engine_kwargs = dict(kwargs)
+        # Let engine parsers distinguish the reasoning-parser adapter from
+        # their standalone and tool-parser uses. Some display-only parser
+        # options are intentionally not compatible with reasoning extraction.
+        engine_kwargs["_parser_engine_adapter_role"] = "reasoning"
+        self._parser_engine = self._parser_engine_cls(tokenizer, **engine_kwargs)  # type: ignore[call-arg]
         self._parser_engine_kwargs = kwargs
         self._counting_parser_engine: ParserEngine | None = None
         # TODO: Remove once Responses finalization reuses accumulated streaming
