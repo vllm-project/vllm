@@ -23,8 +23,8 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
+    select_common_block_size_from_constraints,
 )
-from vllm.v1.attention.block_size import select_common_block_size_from_constraints
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,

@@ -7,7 +7,7 @@ from typing import NamedTuple
 from vllm import envs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.hisparse_residency import HiSparseManager
+from vllm.v1.core.hisparse_manager import HiSparseManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,

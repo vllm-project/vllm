@@ -23,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_connector import (
+    attach_hisparse_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -290,10 +293,6 @@ class Scheduler(SchedulerInterface):
             watermark=self.scheduler_config.watermark,
         )
         if self.kv_cache_config.hisparse_host_num_blocks is not None:
-            from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_connector import (  # noqa: E501
-                attach_hisparse_connector,
-            )
-
             self.connector = attach_hisparse_connector(
                 self.connector,
                 self.vllm_config,

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
@@ -17,7 +18,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.utils.torch_utils import np_to_pinned_tensor
-from vllm.v1.attention.block_size import MultipleOf
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -46,6 +46,47 @@ class AttentionType(str, Enum):
     """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
+
+
+@dataclass(frozen=True)
+class MultipleOf:
+    base: int
+
+
+def select_common_block_size_from_constraints(
+    kv_manager_block_size: int,
+    constraints: Sequence[Sequence[int | MultipleOf]],
+) -> int:
+    """Select the largest manager-block divisor supported by every constraint."""
+
+    def is_supported(block_size: int) -> bool:
+        return all(
+            any(
+                block_size == supported
+                if isinstance(supported, int)
+                else block_size % supported.base == 0
+                for supported in sizes
+            )
+            for sizes in constraints
+        )
+
+    if not constraints or any(not sizes for sizes in constraints):
+        raise ValueError("Kernel block-size constraints must not be empty.")
+
+    if is_supported(kv_manager_block_size):
+        return kv_manager_block_size
+
+    exact_sizes = {
+        supported
+        for sizes in constraints
+        for supported in sizes
+        if isinstance(supported, int)
+    }
+    for block_size in sorted(exact_sizes, reverse=True):
+        if kv_manager_block_size % block_size == 0 and is_supported(block_size):
+            return block_size
+
+    raise ValueError(f"No common block size for {kv_manager_block_size}.")
 
 
 class AttentionBackend(ABC):

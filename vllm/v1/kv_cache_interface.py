@@ -19,11 +19,11 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.attention.block_size import KernelBlockSize
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import MultipleOf
 
 logger = init_logger(__name__)
 
@@ -227,7 +227,7 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
     indexes_kv_by_block_stride: bool = False
-    supported_kernel_block_sizes: tuple[KernelBlockSize, ...] = ()
+    supported_kernel_block_sizes: tuple[int | MultipleOf, ...] = ()
 
     @property
     def unpadded_page_size_bytes(self) -> int:
