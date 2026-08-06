@@ -71,6 +71,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.pyav_utils import UnsafePyAVError
 from vllm.multimodal.video_prune.evs import (
     compute_retained_tokens_count,
     compute_retention_mask,
@@ -637,6 +638,8 @@ class NanoNemotronVLMultiModalProcessor(
                     )
                 )
                 has_audio.append(True)
+            except UnsafePyAVError:
+                raise
             except Exception:
                 logger.debug(
                     "Video %d: no audio stream found, skipping audio extraction.",

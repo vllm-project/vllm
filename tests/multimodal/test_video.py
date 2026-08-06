@@ -16,6 +16,7 @@ from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
 from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
+from vllm.multimodal import video as video_module
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
@@ -1160,6 +1161,21 @@ def test_pyav_backend_loads_frames(dummy_video_path, monkeypatch: pytest.MonkeyP
         assert "total_num_frames" in metadata
         assert "fps" in metadata
         assert "duration" in metadata
+
+
+def test_pyav_backend_rejects_vulnerable_iamf_parser_before_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(video_module.av.library_versions, "libavformat", (62, 3, 100))
+
+    def fail_open(*_args, **_kwargs):
+        raise AssertionError("av.open must not be reached on a vulnerable FFmpeg stack")
+
+    monkeypatch.setattr(video_module.av, "open", fail_open)
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    with pytest.raises(ValueError, match="FFmpeg build with the IAMF parser fix"):
+        loader.load_bytes(b"not parsed", backend="pyav")
 
 
 def test_pyav_dynamic_backend_loads_frames(

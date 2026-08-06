@@ -6,6 +6,7 @@ from io import BytesIO
 import numpy as np
 import numpy.typing as npt
 
+from vllm.multimodal.pyav_utils import require_safe_pyav_stack
 from vllm.utils.import_utils import PlaceholderModule
 
 from .base import (
@@ -26,6 +27,7 @@ def decode_pyav(
     target: VideoTargetMetadata,
     sampling_kwargs: dict,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
+    require_safe_pyav_stack(av.library_versions)
     with av.open(BytesIO(data)) as container:
         stream = container.streams.video[0]
         check_frame_pixel_limit(stream.width, stream.height)

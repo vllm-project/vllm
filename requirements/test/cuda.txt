@@ -63,7 +63,7 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
-av==16.1.0
+av==18.0.0
     # via -r requirements/test/cuda.in
 azure-core==1.38.2
     # via
