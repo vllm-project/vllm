@@ -86,3 +86,77 @@ def test_c128a_build_kernel_iterates_the_same_stride():
     ]
     assert kws, "build_c128a_topk_metadata call lost its max_compressed_tokens kwarg"
     assert ast.unparse(kws[0].value) == "active_topk_width"
+
+
+def test_c128a_decode_row_addresses_survive_batch_width_changes():
+    """GPU reproduction of the corruption: decode row addresses must not move.
+
+    FULL-cudagraph capture builds metadata with ``max_seq_len =
+    max_model_len``, and the captured decode kernels bake the resulting row
+    addresses. Every later build must therefore lay decode rows out at those
+    same addresses, or the captured kernels read rows r >= 1 from bytes the
+    builder no longer writes. On the unfixed tree this fails concretely: a
+    build at batch ``max_seq_len=300`` puts row 1 at stride 128 while the
+    capture-time build put it at stride 8192, so row 1's address moves by
+    (8192 - 128) * 4 bytes and the replayed kernel reads stale memory.
+    """
+    import pytest
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v4.sparse_mla import DeepseekV4FlashMLAMetadataBuilder
+
+    device = torch.device("cuda")
+    max_tokens = 64
+    width_cap = 8192
+
+    b = DeepseekV4FlashMLAMetadataBuilder.__new__(DeepseekV4FlashMLAMetadataBuilder)
+    b.reorder_batch_threshold = 1
+    b.compress_ratio = 128
+    b.c128a_max_compressed = width_cap
+    b.kv_cache_spec = SimpleNamespace(block_size=256)
+    b.c128a_topk_buffer = torch.full(
+        (max_tokens, width_cap), -1, dtype=torch.int32, device=device
+    )
+    b.c128a_decode_lens_buffer = torch.zeros(
+        max_tokens, dtype=torch.int32, device=device
+    )
+
+    def build(max_seq_len):
+        # Two single-token decode requests -- the smallest batch that has a
+        # row 1. The split helper's pure-decode path only needs the CPU
+        # bookkeeping fields plus is_prefilling for the tiering gate.
+        cm = SimpleNamespace(
+            query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+            num_reqs=2,
+            max_query_len=1,
+            num_actual_tokens=2,
+            max_seq_len=max_seq_len,
+            is_prefilling=torch.tensor([False, False]),
+            positions=torch.tensor([256, 299], dtype=torch.int64, device=device),
+            block_table_tensor=torch.zeros((2, 8), dtype=torch.int32, device=device),
+            slot_mapping=torch.zeros(2, dtype=torch.int64, device=device),
+        )
+        req_id = torch.tensor([0, 1], dtype=torch.int32, device=device)
+        fields = b._build_c128a_metadata(cm, req_id)
+        return fields["c128a_global_decode_topk_indices"]
+
+    # Capture-time build (max_seq_len = max_model_len), then a runtime build
+    # for a small batch.
+    wide = build(1_048_576)
+    narrow = build(300)
+
+    assert narrow.shape[-1] == wide.shape[-1], (
+        f"decode topk row stride changed with the batch's max_seq_len "
+        f"({wide.shape[-1]} at capture vs {narrow.shape[-1]} at runtime): "
+        "FULL-cudagraph consumers baked the capture-time stride and will "
+        "read every decode row after row 0 from stale bytes"
+    )
+    assert narrow[1].data_ptr() == wide[1].data_ptr(), (
+        "decode row 1 moved between builds; captured kernels read it at the "
+        "capture-time address"
+    )
