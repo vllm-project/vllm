@@ -21,7 +21,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -39,8 +39,10 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdateDetails,
+    TimingContext,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -392,6 +394,40 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
 
 
 class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
+    @staticmethod
+    def _iter_request_tile_bounds(
+        mm_kwargs: Mapping[str, object],
+    ) -> Iterable[tuple[str, object]]:
+        for key in ("min_tiles", "max_tiles"):
+            if key in mm_kwargs:
+                yield key, mm_kwargs[key]
+
+        images_kwargs = mm_kwargs.get("images_kwargs")
+        if isinstance(images_kwargs, Mapping):
+            for key in ("min_tiles", "max_tiles"):
+                if key in images_kwargs:
+                    yield f"images_kwargs.{key}", images_kwargs[key]
+
+    def _validate_request_tile_bounds(
+        self,
+        mm_kwargs: Mapping[str, object],
+    ) -> None:
+        configured_max_tiles = self.info.get_image_processor().max_tiles
+        for key, value in self._iter_request_tile_bounds(mm_kwargs):
+            if isinstance(value, int) and not 1 <= value <= configured_max_tiles:
+                raise ValueError(
+                    f"LFM2-VL request {key} must be between 1 and the configured "
+                    f"max_tiles ({configured_max_tiles}), got {value}."
+                )
+
+    def apply(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        self._validate_request_tile_bounds(inputs.hf_processor_mm_kwargs)
+        return super().apply(inputs, timing_ctx)
+
     def _call_hf_processor(
         self,
         prompt: str,
