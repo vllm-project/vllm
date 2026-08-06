@@ -626,6 +626,10 @@ class FusedInputNorm(nn.Module):
             self.register_buffer("running_mean", None)
             self.register_buffer("running_var", None)
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.weight.dtype
+
     @classmethod
     def identity(
         cls, channel: int = 3, dtype: torch.dtype = torch.float32
