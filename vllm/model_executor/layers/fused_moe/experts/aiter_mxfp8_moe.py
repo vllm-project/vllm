@@ -62,6 +62,8 @@ def is_aiter_mxfp8_moe_available() -> bool:
 class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
     """MXFP8 MoE through AITER's FlyDSL two-stage grouped GEMM (gfx950)."""
 
+    consumes_expert_mask = True
+
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype
@@ -153,14 +155,9 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
 
-        # Under EP, aiter expects a 0/1 *local-expert* mask over global ids with
-        # a trailing sentinel slot (shape [global_num_experts + 1]), derived
-        # from the canonical global->local expert_map (-1 for non-local).
-        if expert_map is None:
-            expert_mask = None
-        else:
-            local_mask = (expert_map >= 0).to(torch.int32)
-            expert_mask = torch.cat([local_mask, local_mask.new_zeros(1)])
+        # RoutedExperts.expert_map hands AITER experts the precomputed 0/1
+        # expert_mask (with trailing sentinel) instead of the vLLM expert_map.
+        expert_mask = expert_map
 
         # Route through the graph-safe ``rocm_aiter_fused_moe`` custom op so the
         # call is captured under HIP graphs / torch.compile (a direct

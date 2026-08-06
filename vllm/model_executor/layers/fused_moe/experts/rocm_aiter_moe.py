@@ -240,7 +240,7 @@ def rocm_aiter_fused_experts(
     moe_config: FusedMoEConfig,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
-    expert_map: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
@@ -270,15 +270,6 @@ def rocm_aiter_fused_experts(
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
-
-    # AITER wants a 0/1 local-expert mask ([global_num_experts + 1], trailing
-    # sentinel); derive it from the canonical global->local expert_map (-1 for
-    # non-local).
-    expert_mask = (
-        None
-        if expert_map is None
-        else torch.cat([(expert_map >= 0).to(torch.int32), expert_map.new_zeros(1)])
-    )
 
     # w8a8 per-channel quantization
     if (
@@ -427,6 +418,8 @@ def rocm_aiter_fused_experts(
 
 
 class AiterExperts(mk.FusedMoEExpertsModular):
+    consumes_expert_mask = True
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         # When paired with MoRI, the prepare/finalize handles FP8
@@ -557,7 +550,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             topk_ids=topk_ids,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
+            expert_mask=expert_map,
             quant_config=self.quant_config,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
