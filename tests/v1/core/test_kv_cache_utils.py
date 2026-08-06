@@ -2202,7 +2202,9 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     full_spec = FullAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
-        head_size=1024,
+        # FullAttentionSpec stores both K and V, so this produces a
+        # 544 * 1 * (512 + 512) * 2 = 1,114,112-byte page.
+        head_size=512,
         dtype=torch.bfloat16,
     )
     mamba_spec = MambaSpec(
