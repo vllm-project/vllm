@@ -250,6 +250,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
+        # Lazily-built merged q|k|v conv weight (built on first forward, after
+        # weights are loaded). See _forward.
+        self._merged_conv_weight: torch.Tensor | None = None
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -319,7 +322,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             ],
             dim=-1,
         )
-        q, k, v = qkv.split(self.local_projection_size, dim=-1)
 
         beta = _cast_sigmoid(beta_raw)
         beta = beta.unsqueeze(0)
@@ -340,10 +342,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # neither a splitting op nor @eager_break_during_capture-decorated, so
         # routing through it lets the host-branching prefill body be
         # Inductor-compiled + stream-captured under PIECEWISE -> stale garbage.
+        # qkv stays merged through the short-conv (one conv call, not three).
         self._forward(
-            q_proj_states=q,
-            k_proj_states=k,
-            v_proj_states=v,
+            qkv_proj_states=qkv,
             g1=g1,
             beta=beta,
             core_attn_out=core_attn_out,
@@ -355,9 +356,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     @eager_break_during_capture
     def _forward(
         self,
-        q_proj_states: torch.Tensor,
-        k_proj_states: torch.Tensor,
-        v_proj_states: torch.Tensor,
+        qkv_proj_states: torch.Tensor,
         g1: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
@@ -396,9 +395,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         lower_bound = getattr(self, "kda_lower_bound", -5.0)
         constant_caches = self.kv_cache
 
-        q_proj_states = q_proj_states[:num_actual_tokens]
-        k_proj_states = k_proj_states[:num_actual_tokens]
-        v_proj_states = v_proj_states[:num_actual_tokens]
+        qkv_proj_states = qkv_proj_states[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
@@ -408,17 +405,24 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
 
-        conv_state_q, conv_state_k, conv_state_v = conv_state.chunk(3, dim=-2)
+        # One merged short-conv over q|k|v instead of three separate calls. The
+        # 1D conv is independent per channel, so concatenating q/k/v along the
+        # channel dim and running a single causal_conv1d is bit-identical to
+        # three calls. The merged weight is q|k|v conv weights concatenated;
+        # built once and cached (params are fixed after load). conv_state is
+        # already stored as the merged q|k|v state, so it is used directly.
+        if self._merged_conv_weight is None:
 
-        q_conv_weights = self.q_conv1d.weight.view(
-            self.q_conv1d.weight.size(0), self.q_conv1d.weight.size(2)
-        )
-        k_conv_weights = self.k_conv1d.weight.view(
-            self.k_conv1d.weight.size(0), self.k_conv1d.weight.size(2)
-        )
-        v_conv_weights = self.v_conv1d.weight.view(
-            self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
-        )
+            def _w(m):
+                return m.weight.view(m.weight.size(0), m.weight.size(2))
+
+            self._merged_conv_weight = torch.cat(
+                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
+                dim=0,
+            ).contiguous()
+        conv_weights = self._merged_conv_weight
+        conv_bias = self.q_conv1d.bias
+
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry
         # num_spec+1 recurrent-state columns each and are advanced with
@@ -426,23 +430,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # are one-per-request. Mirrors olmo_gdn_linear_attn.py. Projections are
         # [n, *] (token dim 0); g1/beta are [1, n, h, d] (token dim 1).
         if use_spec:
-            qp_spec = q_proj_states.index_select(0, spec_token_indx)
-            kp_spec = k_proj_states.index_select(0, spec_token_indx)
-            vp_spec = v_proj_states.index_select(0, spec_token_indx)
+            qkv_spec = qkv_proj_states.index_select(0, spec_token_indx)
             g1_spec = g1.index_select(1, spec_token_indx)
             beta_spec = beta.index_select(1, spec_token_indx)
             if non_spec_token_indx is not None and non_spec_token_indx.numel() > 0:
-                qp_ns = q_proj_states.index_select(0, non_spec_token_indx)
-                kp_ns = k_proj_states.index_select(0, non_spec_token_indx)
-                vp_ns = v_proj_states.index_select(0, non_spec_token_indx)
+                qkv_ns = qkv_proj_states.index_select(0, non_spec_token_indx)
                 g1_ns = g1.index_select(1, non_spec_token_indx)
                 beta_ns = beta.index_select(1, non_spec_token_indx)
             else:
-                qp_ns = kp_ns = vp_ns = g1_ns = beta_ns = None
+                qkv_ns = g1_ns = beta_ns = None
         else:
-            qp_spec = kp_spec = vp_spec = g1_spec = beta_spec = None
-            qp_ns, kp_ns, vp_ns = q_proj_states, k_proj_states, v_proj_states
-            g1_ns, beta_ns = g1, beta
+            qkv_spec = g1_spec = beta_spec = None
+            qkv_ns, g1_ns, beta_ns = qkv_proj_states, g1, beta
 
         # --- causal conv1d: spec (draft-verify) path ---
         if use_spec:
@@ -450,108 +449,55 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             assert num_accepted_tokens is not None
             conv_idx = spec_state_indices_tensor[:, 0][:num_spec_decodes]
             conv_mql = spec_state_indices_tensor.size(-1)
-            q_spec = causal_conv1d_update(
-                qp_spec,
-                conv_state_q,
-                q_conv_weights,
-                self.q_conv1d.bias,
+            qkv_spec = causal_conv1d_update(
+                qkv_spec,
+                conv_state,
+                conv_weights,
+                conv_bias,
                 activation="silu",
                 conv_state_indices=conv_idx,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
                 max_query_len=conv_mql,
             )
-            k_spec = causal_conv1d_update(
-                kp_spec,
-                conv_state_k,
-                k_conv_weights,
-                self.k_conv1d.bias,
-                activation="silu",
-                conv_state_indices=conv_idx,
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=spec_query_start_loc,
-                max_query_len=conv_mql,
-            )
-            v_spec = causal_conv1d_update(
-                vp_spec,
-                conv_state_v,
-                v_conv_weights,
-                self.v_conv1d.bias,
-                activation="silu",
-                conv_state_indices=conv_idx,
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=spec_query_start_loc,
-                max_query_len=conv_mql,
+            q_spec, k_spec, v_spec = qkv_spec.split(
+                self.local_projection_size, dim=-1
             )
 
         # --- causal conv1d: non-spec path (prefill or plain decode) ---
         q_ns = k_ns = v_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
-            assert qp_ns is not None
-            q_ns = causal_conv1d_fn(
-                qp_ns.transpose(0, 1),
-                q_conv_weights,
-                self.q_conv1d.bias,
+            assert qkv_ns is not None
+            qkv_ns = causal_conv1d_fn(
+                qkv_ns.transpose(0, 1),
+                conv_weights,
+                conv_bias,
                 activation="silu",
-                conv_states=conv_state_q,
+                conv_states=conv_state,
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata_narrowed,
             ).transpose(0, 1)
-            k_ns = causal_conv1d_fn(
-                kp_ns.transpose(0, 1),
-                k_conv_weights,
-                self.k_conv1d.bias,
-                activation="silu",
-                conv_states=conv_state_k,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
-            v_ns = causal_conv1d_fn(
-                vp_ns.transpose(0, 1),
-                v_conv_weights,
-                self.v_conv1d.bias,
-                activation="silu",
-                conv_states=conv_state_v,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
+            q_ns, k_ns, v_ns = qkv_ns.split(
+                self.local_projection_size, dim=-1
+            )
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_state_indices_tensor is not None
             decode_conv_indices = non_spec_state_indices_tensor[
                 : attn_metadata_narrowed.num_decodes
             ]
-            q_ns = causal_conv1d_update(
-                qp_ns,
-                conv_state_q,
-                q_conv_weights,
-                self.q_conv1d.bias,
+            qkv_ns = causal_conv1d_update(
+                qkv_ns,
+                conv_state,
+                conv_weights,
+                conv_bias,
                 activation="silu",
                 conv_state_indices=decode_conv_indices,
                 validate_data=True,
             )
-            k_ns = causal_conv1d_update(
-                kp_ns,
-                conv_state_k,
-                k_conv_weights,
-                self.k_conv1d.bias,
-                activation="silu",
-                conv_state_indices=decode_conv_indices,
-                validate_data=True,
-            )
-            v_ns = causal_conv1d_update(
-                vp_ns,
-                conv_state_v,
-                v_conv_weights,
-                self.v_conv1d.bias,
-                activation="silu",
-                conv_state_indices=decode_conv_indices,
-                validate_data=True,
+            q_ns, k_ns, v_ns = qkv_ns.split(
+                self.local_projection_size, dim=-1
             )
 
         def _rearr(x):
