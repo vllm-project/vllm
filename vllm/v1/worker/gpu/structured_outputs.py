@@ -5,19 +5,26 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.v1.structured_output.utils import apply_token_bitmask_cpu
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class StructuredOutputsWorker:
     def __init__(self, max_num_logits: int, vocab_size: int, device: torch.device):
+        self.device = device
+        if device.type == "cpu":
+            self.logits_indices = None
+            self.grammar_bitmask = None
+            self.copy_stream = None
+            return
+
         self.logits_indices = torch.zeros(
             max_num_logits, dtype=torch.int32, device=device
         )
         self.grammar_bitmask = torch.zeros(
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
-        self.device = device
         self.copy_stream = torch.cuda.Stream()
 
     def apply_grammar_bitmask(
@@ -30,12 +37,6 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
-        # Asynchronously copy the bitmask to GPU.
-        with torch.cuda.stream(self.copy_stream):
-            bitmask = async_copy_to_gpu(
-                grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
-            )
-
         # Construct bitmask -> logits mapping
         mapping: list[int] = []
         req_ids = input_batch.req_ids
@@ -46,6 +47,35 @@ class StructuredOutputsWorker:
             logits_start_idx = cu_num_logits[req_idx]
             logits_end_idx = cu_num_logits[req_idx + 1]
             mapping.extend(range(logits_start_idx, logits_end_idx))
+
+        num_masks = grammar_bitmask.shape[0]
+        assert num_masks == len(mapping)
+
+        if self.device.type == "cpu":
+            compact_bitmask = torch.from_numpy(grammar_bitmask)
+            if mapping == list(range(logits.shape[0])):
+                bitmask = compact_bitmask
+                indices = None
+            else:
+                bitmask = torch.full(
+                    (logits.shape[0], compact_bitmask.shape[1]),
+                    -1,
+                    dtype=compact_bitmask.dtype,
+                )
+                bitmask[mapping] = compact_bitmask
+                indices = mapping
+            apply_token_bitmask_cpu(logits, bitmask, indices)
+            return
+
+        assert self.grammar_bitmask is not None
+        assert self.logits_indices is not None
+        assert self.copy_stream is not None
+
+        # Asynchronously copy the bitmask to GPU.
+        with torch.cuda.stream(self.copy_stream):
+            bitmask = async_copy_to_gpu(
+                grammar_bitmask, out=self.grammar_bitmask[:num_masks]
+            )
 
         # Asynchronously copy the mapping to GPU.
         with torch.cuda.stream(self.copy_stream):
@@ -60,8 +90,6 @@ class StructuredOutputsWorker:
         current_stream = torch.cuda.current_stream()
         current_stream.wait_stream(self.copy_stream)
 
-        num_masks = bitmask.shape[0]
-        assert num_masks == len(mapping)
         vocab_size = logits.shape[-1]
         BLOCK_SIZE = 8192
         grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))

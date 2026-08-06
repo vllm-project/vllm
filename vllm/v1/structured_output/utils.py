@@ -45,6 +45,20 @@ _T = TypeVar("_T")
 CACHE = None
 
 
+def apply_token_bitmask_cpu(
+    logits: torch.Tensor,
+    grammar_bitmask: torch.Tensor,
+    indices: list[int] | None,
+) -> None:
+    """Apply a grammar bitmask to CPU logits."""
+    if logits.dtype != torch.float32:
+        logits_fp32 = logits.to(torch.float32)
+        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
+        logits.copy_(logits_fp32.to(logits.dtype))
+    else:
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
+
+
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """Run a regex compilation callable with a timeout.
 
@@ -163,16 +177,7 @@ def apply_grammar_bitmask(
 
     # CPU case, use list for indices.
     indices = None if skip_out_indices else out_indices
-    # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
-    # See: https://github.com/vllm-project/vllm/issues/31901
-    if logits.dtype != torch.float32:
-        # Convert to float32, apply bitmask, then convert back
-        logits_fp32 = logits.to(torch.float32)
-        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
-        # Copy the modified values back to the original tensor
-        logits.copy_(logits_fp32.to(logits.dtype))
-    else:
-        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
+    apply_token_bitmask_cpu(logits, grammar_bitmask, indices)
 
 
 class OutlinesVocabulary:
