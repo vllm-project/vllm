@@ -8,6 +8,7 @@ steps:
   device: h200_18gb
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/benchmarks/
   commands:
   - pytest -v -s benchmarks/

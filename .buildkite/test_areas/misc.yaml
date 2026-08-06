@@ -9,6 +9,7 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/logger.py
@@ -45,6 +46,7 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/entrypoints/pooling/
     - vllm/inputs/
@@ -101,6 +103,7 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
@@ -161,6 +164,7 @@ steps:
   source_file_dependencies:
   - vllm/config/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/inputs/
   - vllm/model_executor/
@@ -228,6 +232,7 @@ steps:
   source_file_dependencies:
   - vllm/config/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/inputs/
   - vllm/model_executor/
@@ -287,6 +292,7 @@ steps:
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/inputs/
   - vllm/model_executor/
