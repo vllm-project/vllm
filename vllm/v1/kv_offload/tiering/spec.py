@@ -197,13 +197,24 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             self._scheduler_mmap = scheduler_mmap
 
             # Create primary tier (CPU-based)
-            primary_tier = CPUPrimaryTierOffloadingManager(
-                num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,
-                cache_policy_module_path=self.cache_policy_module_path,
-                enable_events=self.kv_events_config.enable_kv_cache_events,
-                mmap_region=scheduler_mmap,
-            )
+            try:
+                primary_tier = CPUPrimaryTierOffloadingManager(
+                    num_blocks=self.num_blocks,
+                    cache_policy=self.eviction_policy,
+                    cache_policy_module_path=self.cache_policy_module_path,
+                    enable_events=self.kv_events_config.enable_kv_cache_events,
+                    mmap_region=scheduler_mmap,
+                )
+            except Exception:
+                try:
+                    scheduler_mmap.cleanup()
+                except Exception:
+                    logger.exception(
+                        "Failed to clean up scheduler mmap after primary tier "
+                        "initialization failure"
+                    )
+                self._scheduler_mmap = None
+                raise
 
             # Create secondary tiers
             primary_kv_view = primary_tier.get_kv_memoryview()
@@ -225,6 +236,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         i,
                         e,
                     )
+                    for tier in reversed(secondary_tiers):
+                        try:
+                            tier.shutdown()
+                        except Exception:
+                            logger.exception(
+                                "Failed to shut down secondary tier during "
+                                "initialization cleanup"
+                            )
+                    try:
+                        primary_tier.shutdown()
+                    except Exception:
+                        logger.exception(
+                            "Failed to shut down primary tier during "
+                            "initialization cleanup"
+                        )
+                    self._scheduler_mmap = None
                     raise
 
             # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
@@ -273,9 +300,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
-        return CPUOffloadingWorker(
-            kv_caches=kv_caches,
-            blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
-            mmap_region=worker_mmap,
-        )
+        try:
+            return CPUOffloadingWorker(
+                kv_caches=kv_caches,
+                blocks_per_chunk=self.blocks_per_chunk,
+                num_cpu_blocks=self.num_blocks,
+                mmap_region=worker_mmap,
+            )
+        except Exception:
+            worker_mmap.cleanup()
+            raise
