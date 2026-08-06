@@ -8,10 +8,6 @@ head counts are tile-padded to 16 and the padding heads are sliced back off
 the output. Divisor counts (1/2/4/8) may keep the Gluon kernel, but only on
 gfx950 where that kernel has a build; every small head count on gfx942 (which
 has no Gluon build) is routed to the asm persistent decode instead.
-
-The structure of these tests is adapted from the 12-head MLA decode work in
-https://github.com/vllm-project/vllm/pull/50371 (yinfengLiu), extended here to
-this PR's tile-and-slice padding and gfx950 kernel gate.
 """
 
 import math
