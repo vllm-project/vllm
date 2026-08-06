@@ -65,6 +65,62 @@ def _strip_partial_delim(value: str) -> str:
     return value
 
 
+def _read_fallback_string(src: str, i: int) -> tuple[str, int] | None:
+    """Read a JSON/Python string literal starting at ``src[i]``, if any.
+
+    Gemma4 delimits strings with ``STRING_DELIM``, but for keys and values
+    *inside a container* the model regularly falls back to plain JSON or
+    Python source syntax instead::
+
+        data_refs:["ds_152a4bfd"]      data_refs:['ds_152a4bfd']
+        opts:{"mode": "fast"}
+
+    Those quotes are syntax, not content. Consuming the whole literal here --
+    rather than scanning to the next ``,`` and stripping afterwards -- also
+    keeps separator characters *inside* the literal from splitting the value.
+
+    Returns ``(value, index_after_literal)``, or ``None`` when no terminated
+    literal starts at ``i`` (including the streaming case where the closing
+    quote has not arrived yet), leaving the caller's bare-value scan in charge.
+    """
+    quote = src[i]
+    if quote not in ('"', "'"):
+        return None
+    n = len(src)
+    j = i + 1
+    while j < n:
+        c = src[j]
+        if c == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if c == quote:
+            raw = src[i : j + 1]
+            if quote == '"':
+                try:
+                    decoded = json.loads(raw)
+                except ValueError:
+                    decoded = raw[1:-1]
+                if not isinstance(decoded, str):
+                    decoded = raw[1:-1]
+            else:
+                decoded = raw[1:-1].replace("\\'", "'").replace('\\"', '"')
+            return decoded, j + 1
+        j += 1
+    return None
+
+
+def _unquote_fallback(raw: str) -> str:
+    """Strip one matching pair of JSON/Python quotes from an already-cut token.
+
+    Used for object keys, which are cut at ``:`` before this runs. Values go
+    through :func:`_read_fallback_string` instead.
+    """
+    literal = _read_fallback_string(raw, 0) if raw else None
+    if literal is not None and literal[1] == len(raw):
+        return literal[0]
+    return raw
+
+
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
     """Parse Gemma4's custom key:value format into a Python dict.
 
@@ -105,6 +161,9 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         key = args_str[key_start:i].strip()
         if key.startswith(STRING_DELIM) and key.endswith(STRING_DELIM):
             key = key[_DELIM_LEN:-_DELIM_LEN]
+        else:
+            # Objects written in JSON syntax carry quoted keys.
+            key = _unquote_fallback(key)
         i += 1
 
         if i >= n:
@@ -177,6 +236,11 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 result[key] = _parse_gemma4_array(args_str[arr_start : i - 1])
 
         else:
+            literal = _read_fallback_string(args_str, i)
+            if literal is not None:
+                value, i = literal
+                result[key] = value
+                continue
             val_start = i
             while i < n and args_str[i] not in (",", "}", "]"):
                 i += 1
@@ -262,6 +326,11 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                 items.append(_parse_gemma4_array(arr_str[sub_start : i - 1]))
 
         else:
+            literal = _read_fallback_string(arr_str, i)
+            if literal is not None:
+                value, i = literal
+                items.append(value)
+                continue
             val_start = i
             while i < n and arr_str[i] not in (",", "]"):
                 i += 1

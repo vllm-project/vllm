@@ -196,6 +196,36 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('<|"|>name<|"|>:<|"|>Alice<|"|>,count:42')
         assert result == {"name": "Alice", "count": "42"}
 
+    def test_json_object_keys_and_values_unquoted(self):
+        """JSON-syntax objects must not keep quotes on keys or values.
+
+        Regression for issue #51284: the object branch recurses into the
+        key:value parser, which previously stored '"mode"' / '"fast"'.
+        """
+        result = _parse_gemma4_args('opts:{"mode": "fast"}')
+        assert result == {"opts": {"mode": "fast"}}
+
+    def test_json_quoted_value_unquoted(self):
+        result = _parse_gemma4_args('name:"ds_152a4bfd"')
+        assert result == {"name": "ds_152a4bfd"}
+
+    def test_json_object_with_nested_array(self):
+        result = _parse_gemma4_args('opts:{"tags": ["a","b"], "n": 3}')
+        assert result == {"opts": {"tags": ["a", "b"], "n": "3"}}
+
+    def test_single_quoted_value_unquoted(self):
+        result = _parse_gemma4_args("name:'ds_152a4bfd'")
+        assert result == {"name": "ds_152a4bfd"}
+
+    def test_quoted_value_containing_separator(self):
+        """A comma inside a quoted literal must not end the value."""
+        result = _parse_gemma4_args('a:"x,y",b:1')
+        assert result == {"a": "x,y", "b": "1"}
+
+    def test_quoted_value_keeps_string_type(self):
+        result = _parse_gemma4_args('depth:"7"')
+        assert result == {"depth": "7"}
+
     def test_unterminated_string(self):
         """Unterminated strings should take everything after the delimiter."""
         result = _parse_gemma4_args('key:<|"|>unterminated')
@@ -267,6 +297,38 @@ class TestParseGemma4Array:
     def test_stray_closing_bracket(self):
         result = _parse_gemma4_array("42,]trailing")
         assert result == ["42"]
+
+    def test_json_quoted_elements_unquoted(self):
+        """Gemma4 also emits container values as plain JSON/Python literals.
+
+        The quote characters are syntax, not content, so they must not reach
+        the tool as part of the value (issue #51284).
+        """
+        assert _parse_gemma4_array('"ds_152a4bfd"') == ["ds_152a4bfd"]
+        assert _parse_gemma4_array("'DUPE_RESULTS','EVASION_RESULTS'") == [
+            "DUPE_RESULTS",
+            "EVASION_RESULTS",
+        ]
+
+    def test_quoted_element_containing_separator(self):
+        """A separator inside a quoted literal must not split the element."""
+        assert _parse_gemma4_array('"a,b","c"') == ["a,b", "c"]
+
+    def test_quoted_element_keeps_string_type(self):
+        """A quoted numeric stays a string; only bare tokens are coercible."""
+        assert _parse_gemma4_array('"42"') == ["42"]
+
+    def test_mixed_delimited_and_json_elements(self):
+        """The model can switch spellings inside one array."""
+        assert _parse_gemma4_array('<|"|>a<|"|>,"b",\'c\'') == ["a", "b", "c"]
+
+    def test_bare_values_still_untouched(self):
+        """Unquoted scalars are left for the engine layer to coerce."""
+        assert _parse_gemma4_array("42,true,null") == ["42", "true", "null"]
+
+    def test_unterminated_quote_partial_withheld(self):
+        """A literal whose closing quote has not arrived is withheld."""
+        assert _parse_gemma4_array('"abc', partial=True) == []
 
     def test_trailing_dot_float_partial_withheld(self):
         """Array elements with trailing dot withheld in partial mode."""
