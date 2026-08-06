@@ -23,6 +23,7 @@ from vllm.benchmarks.datasets import (
     ConversationDataset,
     CustomAudioDataset,
     InstructCoderDataset,
+    MMVUDataset,
     MultiModalConversationDataset,
     PrefixRepetitionRandomDataset,
     RandomDataset,
@@ -613,6 +614,14 @@ def get_requests(args, tokenizer):
             common_kwargs["dataset_split"] = "train"
             sample_kwargs["enable_multimodal_chat"] = True
         elif (
+            args.dataset_path in MMVUDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MMVUDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_cls = MMVUDataset
+            common_kwargs["dataset_subset"] = None
+            common_kwargs["dataset_split"] = "validation"
+            sample_kwargs["enable_multimodal_chat"] = True
+        elif (
             args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in InstructCoderDataset.SUPPORTED_DATASET_PATHS
         ):
@@ -788,10 +797,12 @@ def validate_args(args):
     elif args.dataset_name == "hf":
         if args.dataset_path in (
             VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MMVUDataset.SUPPORTED_DATASET_PATHS.keys()
             | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             | ConversationDataset.SUPPORTED_DATASET_PATHS
         ) or args.hf_name in (
             VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MMVUDataset.SUPPORTED_DATASET_PATHS.keys()
             | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             | ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
