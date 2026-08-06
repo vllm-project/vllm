@@ -18,6 +18,7 @@ from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
     MMHasherAlgorithm,
+    MMProcessorDevice,
     MMTensorIPC,
     MultiModalConfig,
 )
@@ -47,6 +48,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -394,6 +396,7 @@ class ModelConfig:
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -524,11 +527,13 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        mm_processor_device: MMProcessorDevice | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
         )
+        requested_revision = self.revision
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -557,6 +562,31 @@ class ModelConfig:
             hf_overrides_fn = None
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
+
+        # If loading model/tokenizer from HF Hub, resolve the revision once
+        # to prevent resolving it multiple times downstream.
+        can_resolve_model_revision = (
+            self.hf_config_path is None or self.hf_config_path == self.model
+        )
+        if can_resolve_model_revision:
+            self.revision = resolve_revision(
+                self.model,
+                self.revision,
+                self.hf_token,
+            )
+
+        if (
+            can_resolve_model_revision
+            and self.tokenizer == self.model
+            and self.tokenizer_revision == requested_revision
+        ):
+            self.tokenizer_revision = self.revision
+        else:
+            self.tokenizer_revision = resolve_revision(
+                self.tokenizer,
+                self.tokenizer_revision,
+                self.hf_token,
+            )
 
         if self.override_attention_dtype is not None and not current_platform.is_rocm():
             warnings.warn(
@@ -735,6 +765,10 @@ class ModelConfig:
                     "Falling back to `--mm-encoder-tp-mode weights`."
                 )
                 mm_encoder_tp_mode = "weights"
+
+            mm_processor_kwargs = MultiModalConfig.fold_mm_processor_device(
+                mm_processor_kwargs, mm_processor_device
+            )
 
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,
@@ -1435,6 +1469,9 @@ class ModelConfig:
 
     def get_num_experts(self) -> int:
         return self.model_arch_config.num_experts
+
+    def get_num_experts_per_tok(self) -> int:
+        return self.model_arch_config.num_experts_per_token
 
     def get_total_num_hidden_layers(self) -> int:
         return self.model_arch_config.total_num_hidden_layers

@@ -12,7 +12,10 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation_supported,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -32,7 +35,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
+    swiglu_limit_func,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -296,18 +302,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def _supports_activation(activation: MoEActivation) -> bool:
         # Humming uses apply_moe_activation() callback for activation,
         # so any activation supported there can be used here.
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        return apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -561,23 +556,22 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         output: torch.Tensor,
         input: torch.Tensor,
     ) -> None:
-        clamp_limit = self.quant_config.gemm1_clamp_limit
-        self.activation(
-            activation=activation,
-            input=input,
-            output=output,
-            clamp_limit=clamp_limit,
-            alpha=(
-                self.quant_config.gemm1_alpha
-                if self.quant_config.gemm1_alpha is not None
-                else 1.0
-            ),
-            beta=(
-                self.quant_config.gemm1_beta
-                if self.quant_config.gemm1_beta is not None
-                else 0.0
-            ),
-        )
+        activation_config = self.activation_config
+        if (
+            activation == MoEActivation.SILU
+            and activation_config.clamp_limit is not None
+        ):
+            swiglu_limit_func(
+                output=output,
+                input=input,
+                swiglu_limit=activation_config.clamp_limit,
+            )
+        else:
+            self.activation(
+                activation=activation,
+                input=input,
+                output=output,
+            )
 
 
 class HummingIndexedExperts(HummingExpertsBase):

@@ -724,8 +724,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
         # sublayer: a layer contains multiple sets of weights for quantized GEMM
         # (e.g., weight, weight_scale, etc.).
         # The weight names of sublayer start with the prefix "{sublayer_name}_"
-        w13_output_size = intermediate_size_per_partition * (
-            2 if self.moe.activation.is_gated else 1
+        w13_output_size = (
+            intermediate_size_per_partition * self.moe.w13_num_shards
         )
         layer.sublayer_configs = {
             "w13": {

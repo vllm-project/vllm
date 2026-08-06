@@ -127,7 +127,7 @@ def should_bundle_tcmalloc() -> bool:
     return (
         VLLM_TARGET_DEVICE == "cpu"
         and sys.platform.startswith("linux")
-        and platform.machine() in ("aarch64", "x86_64")
+        and platform.machine() in ("aarch64", "x86_64", "s390x")
     )
 
 
