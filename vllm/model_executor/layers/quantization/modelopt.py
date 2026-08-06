@@ -105,23 +105,39 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-QUANT_ALGOS = [
-    # FP8 (per-tensor weight + optional static activation scale).
-    "FP8",
+# Single source of truth for the ModelOpt linear algos.
+#
+# Each entry is (owning config's name, mixed-precision sub-config attribute).
+# ``resolve`` turns the algo into a QuantSpec; this table only records which
+# config object holds the checkpoint parameters resolve may read -- today just
+# group_size, and only for the NVFP4 family.
+#
+# To add a format: one row here plus one row in resolve(). Every consumer below
+# is derived, so nothing else needs editing.
+LINEAR_ALGOS: dict[str, tuple[str, str]] = {
+    # FP8 per-tensor weight + optional static activation scale.
+    "FP8": ("modelopt", "fp8_config"),
     # FP8 per-channel weight scale + per-token activation scale.
-    "FP8_PER_CHANNEL_PER_TOKEN",
-    # FP8 per-block weight-only (ModelOpt may emit this as lowercase).
-    "FP8_PB_WO",
-    # NVFP4 W4A4 (4-bit float weights AND 4-bit float activations).
-    "NVFP4",
-    # W4A16 NVFP4 (4-bit float weights, fp16/bf16 activations).
-    "W4A16_NVFP4",
-    # MXFP8
-    "MXFP8",
-    # MIXED_PRECISION,
-    "MIXED_PRECISION",
-]
+    "FP8_PER_CHANNEL_PER_TOKEN": ("modelopt", "fp8_config"),
+    # FP8 128x128 per-block weight (ModelOpt may emit this lowercase).
+    "FP8_PB_WO": ("modelopt", "fp8_config"),
+    # NVFP4 W4A4: 4-bit float weights AND 4-bit float activations.
+    "NVFP4": ("modelopt_fp4", "nvfp4_config"),
+    # W4A16 NVFP4: 4-bit float weights, fp16/bf16 activations.
+    "W4A16_NVFP4": ("modelopt_fp4", "w4a16_nvfp4_config"),
+    # MXFP8: e4m3 weights with per-32-block e8m0 scales.
+    "MXFP8": ("modelopt_mxfp8", "mxfp8_config"),
+}
+
+# MIXED_PRECISION is not a linear algo; it selects a per-layer algo from the
+# table above.
+QUANT_ALGOS = [*LINEAR_ALGOS, "MIXED_PRECISION"]
 KV_CACHE_QUANT_ALGOS = ["FP8", "NVFP4"]
+
+
+def algos_owned_by(config_name: str) -> tuple[str, ...]:
+    """The linear algos a given config accepts, for its quant_algo validation."""
+    return tuple(a for a, (owner, _) in LINEAR_ALGOS.items() if owner == config_name)
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
@@ -385,23 +401,13 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         self.quant_method = quant_method
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         self.kv_cache_quant_method = kv_cache_quant_method
-        if is_checkpoint_fp8_serialized:
-            logger.warning(
-                "Detected ModelOpt fp8 checkpoint (quant_algo=%s). Please note "
-                "that the format is experimental and could change.",
-                quant_method,
-            )
 
         # Validate the quant_algo; resolve() maps it to a QuantSpec at dispatch.
-        if self.quant_method not in (
-            "FP8",
-            "FP8_PER_CHANNEL_PER_TOKEN",
-            "FP8_PB_WO",
-        ):
+        supported = algos_owned_by("modelopt")
+        if self.quant_method not in supported:
             raise ValueError(
                 "Unsupported ModelOpt FP8 quant_algo for vLLM: "
-                f"{self.quant_method}. Supported: FP8 / "
-                "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO."
+                f"{self.quant_method}. Supported: {' / '.join(supported)}."
             )
 
     def has_blocked_weights(self) -> bool:
@@ -712,23 +718,17 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         self.quant_method = quant_method
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
-            logger.warning(
-                "Detected ModelOpt NVFP4 checkpoint (quant_algo=%s). Please "
-                "note that the format is experimental and could change in "
-                "future.",
-                quant_method,
-            )
-
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
 
         # Validate the quant_algo; resolve() maps it to a QuantSpec at dispatch.
         # NVFP4       -> W4A4: cutlass NVFP4 GEMM with input quantization
         # W4A16_NVFP4 -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
-        if quant_method not in ("NVFP4", "W4A16_NVFP4"):
+        supported = algos_owned_by("modelopt_fp4")
+        if quant_method not in supported:
             raise ValueError(
                 f"Unsupported ModelOpt NVFP4 quant_algo: {quant_method}. "
-                "Supported: NVFP4 / W4A16_NVFP4."
+                f"Supported: {' / '.join(supported)}."
             )
 
     def get_name(self) -> QuantizationMethods:
@@ -1092,11 +1092,6 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
                 "MXFP8 quantization requires a serialized checkpoint. "
                 "Dynamic quantization is not supported."
             )
-
-        logger.warning(
-            "Detected ModelOpt MXFP8 checkpoint. Please note that "
-            "the format is experimental and could change in future."
-        )
 
         self.kv_cache_quant_algo = kv_cache_quant_algo
 
@@ -1701,16 +1696,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             # resolve() reads group_size off whichever sub-config it is handed.
             # Read-only — never write back, or a linear-only change leaks into
             # the MoE method that shares the sub-config.
-            subcfg = {
-                "FP8": self.fp8_config,
-                "NVFP4": self.nvfp4_config,
-                "W4A16_NVFP4": self.w4a16_nvfp4_config,
-                "MXFP8": self.mxfp8_config,
-            }.get(quant_algo)
-            if subcfg is None:
+            if quant_algo is None or quant_algo not in LINEAR_ALGOS:
                 # Layer not in quantized_layers — leave unquantized
                 return UnquantizedLinearMethod()
-            return build_linear_method(subcfg, quant_algo, prefix)
+            _, subcfg_attr = LINEAR_ALGOS[quant_algo]
+            return build_linear_method(getattr(self, subcfg_attr), quant_algo, prefix)
 
         if isinstance(layer, RoutedExperts):
             if quant_algo == "FP8":
@@ -1758,8 +1748,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 #   * Needs format-wide state but the same lifecycle -> also return a
 #     FormatScheme subclass from that resolve() row (extra_weights / pre_process
 #     / post_process hooks).
-#   * Needs a different lifecycle entirely -> write a bespoke LinearMethodBase
-#     and register it in LINEAR_METHOD_BUILDERS by algo.
+#   * Needs a different lifecycle entirely -> write a LinearMethodBase and
+#     register it in LINEAR_METHOD_BUILDERS by algo.
 #   In all cases accept the algo in the owning config's quant_method validation,
 #   so get_quant_method can dispatch it.
 # ===========================================================================
@@ -1794,17 +1784,17 @@ class RuntimeDtypes:
 class Shapes:
     """Layer geometry from create_weights args."""
 
-    out_parts: list[int]
-    in_: int
+    output_partition_sizes: list[int]
+    input_size_per_partition: int
     params_dtype: torch.dtype
 
     @property
-    def out(self) -> int:
-        return sum(self.out_parts)
+    def output_size_per_partition(self) -> int:
+        return sum(self.output_partition_sizes)
 
     @property
-    def nparts(self) -> int:
-        return len(self.out_parts)
+    def num_partitions(self) -> int:
+        return len(self.output_partition_sizes)
 
 
 class QuantKeyScheme:
@@ -1846,7 +1836,7 @@ class KNvfp4Static(QuantKeyScheme):
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
             self.reject(role)
-        if shapes.in_ % 16 != 0:
+        if shapes.input_size_per_partition % 16 != 0:
             raise ValueError(
                 "Unsupported model when in features size is not multiple of 16"
             )
@@ -1854,7 +1844,7 @@ class KNvfp4Static(QuantKeyScheme):
         self.register_params(
             layer,
             "weight",
-            (shapes.out, shapes.in_ // 2),
+            (shapes.output_size_per_partition, shapes.input_size_per_partition // 2),
             torch.uint8,
             ModelWeightParameter,
             wl,
@@ -1865,7 +1855,7 @@ class KNvfp4Static(QuantKeyScheme):
         self.register_params(
             layer,
             "weight_scale_2",
-            (shapes.nparts,),
+            (shapes.num_partitions,),
             torch.float32,
             PerTensorScaleParameter,
             wl,
@@ -1874,7 +1864,10 @@ class KNvfp4Static(QuantKeyScheme):
         self.register_params(
             layer,
             "weight_scale",
-            (shapes.out, shapes.in_ // ctx.group_size),
+            (
+                shapes.output_size_per_partition,
+                shapes.input_size_per_partition // ctx.group_size,
+            ),
             torch.float8_e4m3fn,
             ModelWeightParameter,
             wl,
@@ -1889,8 +1882,8 @@ class KNvfp4Static(QuantKeyScheme):
             logger.warning_once(
                 "In NVFP4 linear, the global weight scale differs across "
                 "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
-                "likely reduce accuracy. Consider a checkpoint with a shared "
-                "global NVFP4 scale for parallel layers."
+                "likely reduce accuracy. Consider a checkpoint with the same "
+                "global NVFP4 scale for fused weights."
             )
         # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
@@ -1910,7 +1903,7 @@ class KNvfp4Dynamic(QuantKeyScheme):
         self.register_params(
             layer,
             "input_scale",
-            (shapes.nparts,),
+            (shapes.num_partitions,),
             torch.float32,
             PerTensorScaleParameter,
             wl,
@@ -1923,8 +1916,8 @@ class KNvfp4Dynamic(QuantKeyScheme):
             logger.warning_once(
                 "In NVFP4 linear, the global input scale differs across "
                 "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
-                "likely reduce accuracy. Consider a checkpoint with a shared "
-                "global NVFP4 scale for parallel layers."
+                "likely reduce accuracy. Consider a checkpoint with the same "
+                "global NVFP4 scale for fused weights."
             )
         input_global_scale = layer.input_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
@@ -1946,7 +1939,7 @@ class KFp8StaticTensor(QuantKeyScheme):
             self.register_params(
                 layer,
                 "weight",
-                (shapes.out, shapes.in_),
+                (shapes.output_size_per_partition, shapes.input_size_per_partition),
                 torch.float8_e4m3fn,
                 ModelWeightParameter,
                 wl,
@@ -1957,7 +1950,7 @@ class KFp8StaticTensor(QuantKeyScheme):
             self.register_params(
                 layer,
                 "weight_scale",
-                (shapes.nparts,),
+                (shapes.num_partitions,),
                 torch.float32,
                 PerTensorScaleParameter,
                 wl,
@@ -1967,7 +1960,7 @@ class KFp8StaticTensor(QuantKeyScheme):
             self.register_params(
                 layer,
                 "input_scale",
-                (shapes.nparts,),
+                (shapes.num_partitions,),
                 torch.float32,
                 PerTensorScaleParameter,
                 wl,
@@ -1993,6 +1986,13 @@ class KFp8StaticTensor(QuantKeyScheme):
             layer.weight.output_dim = 1
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         elif role is ACT:
+            if torch.unique(layer.input_scale).numel() != 1:
+                logger.warning_once(
+                    "In FP8 linear, the static input scale differs across "
+                    "parallel layers (e.g. q_proj, k_proj, v_proj). Collapsing "
+                    "them to the max will likely reduce accuracy. Consider a "
+                    "checkpoint with the same input scale for fused weights."
+                )
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         else:
             self.reject(role)
@@ -2010,7 +2010,7 @@ class KFp8StaticChannel(QuantKeyScheme):
         self.register_params(
             layer,
             "weight",
-            (shapes.out, shapes.in_),
+            (shapes.output_size_per_partition, shapes.input_size_per_partition),
             torch.float8_e4m3fn,
             ModelWeightParameter,
             wl,
@@ -2020,7 +2020,7 @@ class KFp8StaticChannel(QuantKeyScheme):
         self.register_params(
             layer,
             "weight_scale",
-            (shapes.out,),
+            (shapes.output_size_per_partition,),
             torch.float32,
             ChannelQuantScaleParameter,
             wl,
@@ -2048,22 +2048,28 @@ class KFp8Block128(QuantKeyScheme):
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
             self.reject(role)
-        if shapes.out % 128 != 0 or shapes.in_ % 128 != 0:
+        if (
+            shapes.output_size_per_partition % 128 != 0
+            or shapes.input_size_per_partition % 128 != 0
+        ):
             raise ValueError(
                 f"FP8_PB_WO requires out/in divisible by 128, got "
-                f"{shapes.out}x{shapes.in_}"
+                f"{shapes.output_size_per_partition}x{shapes.input_size_per_partition}"
             )
         self.register_params(
             layer,
             "weight",
-            (shapes.out, shapes.in_),
+            (shapes.output_size_per_partition, shapes.input_size_per_partition),
             torch.float8_e4m3fn,
             ModelWeightParameter,
             wl,
             input_dim=1,
             output_dim=0,
         )
-        ob, ib = shapes.out // 128, shapes.in_ // 128
+        ob, ib = (
+            shapes.output_size_per_partition // 128,
+            shapes.input_size_per_partition // 128,
+        )
         self.register_params(
             layer,
             "weight_scale",
@@ -2100,14 +2106,15 @@ class KMxfp8Static(QuantKeyScheme):
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
             self.reject(role)
-        if shapes.in_ % MXFP8_BLOCK_SIZE != 0:
+        if shapes.input_size_per_partition % MXFP8_BLOCK_SIZE != 0:
             raise ValueError(
-                f"MXFP8 requires in divisible by {MXFP8_BLOCK_SIZE}, got {shapes.in_}"
+                f"MXFP8 requires input size divisible by {MXFP8_BLOCK_SIZE}, "
+                f"got {shapes.input_size_per_partition}"
             )
         self.register_params(
             layer,
             "weight",
-            (shapes.out, shapes.in_),
+            (shapes.output_size_per_partition, shapes.input_size_per_partition),
             MXFP8_VALUE_DTYPE,
             ModelWeightParameter,
             wl,
@@ -2117,7 +2124,10 @@ class KMxfp8Static(QuantKeyScheme):
         self.register_params(
             layer,
             "weight_scale",
-            (shapes.out, shapes.in_ // MXFP8_BLOCK_SIZE),
+            (
+                shapes.output_size_per_partition,
+                shapes.input_size_per_partition // MXFP8_BLOCK_SIZE,
+            ),
             MXFP8_SCALE_DTYPE,
             ModelWeightParameter,
             wl,
@@ -2180,6 +2190,7 @@ def maybe_fuse_global_scales(layer) -> None:
 def select_linear_kernel(spec: QuantSpec, layer, rt: RuntimeDtypes):
     """Thin family dispatcher on the weight key: nvfp4 / mxfp8 / fp8."""
     w = spec.weight
+    assert isinstance(w, QuantKey), f"resolve() must supply a weight key, got {w!r}"
     if w.dtype == FP4_DTYPE:
         # W4A16 (activation is None) → use_a16=True defaults to Marlin *and*
         # honors --linear-backend (matches upstream ModelOptNvFp4W4A16LinearMethod
@@ -2187,9 +2198,12 @@ def select_linear_kernel(spec: QuantSpec, layer, rt: RuntimeDtypes):
         return init_nvfp4_linear_kernel(use_a16=spec.activation is None)
     if w.scale.dtype == MXFP8_SCALE_DTYPE:
         return init_mxfp8_linear_kernel()
-    # fp8 family: init_fp8 routes block-vs-plain itself off the activation key.
+    # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
+    # and needs a real key -- weight-only fp8 is not a ModelOpt format.
+    act = spec.activation
+    assert isinstance(act, QuantKey), f"fp8 needs an activation key, got {act!r}"
     return init_fp8_linear_kernel(
-        activation_quant_key=spec.activation,
+        activation_quant_key=act,
         weight_quant_key=w,
         input_dtype=rt.input_dtype,
         out_dtype=rt.out_dtype,
@@ -2258,7 +2272,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         # Kernel/backend are chosen in create_weights (after get_quant_method),
         # so the front-end marlin poke stays dormant here — same as the old
         # NVFP4 methods.
-        self.kernel = None
+        self.kernel: Any = None
 
     def create_weights(
         self,
