@@ -104,7 +104,7 @@ class TieringMetricsTracker:
                 )
         elif result is LookupResult.RETRY and state.observed_lookups is not None:
             observed = state.observed_lookups.setdefault(tier_label, {})
-            observed.setdefault(key, time.monotonic())
+            observed.setdefault(key, time.monotonic() - lookup_duration)
 
     def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
         transfer_job = job_metadata.transfer_job
