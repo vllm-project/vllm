@@ -61,6 +61,7 @@ class RoutedExperts(PluggableLayer):
         ckpt_gate_proj_name: str = "gate_proj",
         ckpt_down_proj_name: str = "down_proj",
         ckpt_up_proj_name: str = "up_proj",
+        is_fused_checkpoint_transposed: bool = False,
         #
         # Extra params that are needed by quant_methods, pass along for now
         # Prefer getting these from other sources, e.g. moe_config or
@@ -86,6 +87,7 @@ class RoutedExperts(PluggableLayer):
         self.ckpt_gate_proj_name = ckpt_gate_proj_name
         self.ckpt_down_proj_name = ckpt_down_proj_name
         self.ckpt_up_proj_name = ckpt_up_proj_name
+        self.is_fused_checkpoint_transposed = is_fused_checkpoint_transposed
         self.expert_map_manager = expert_map_manager
         self.hidden_size = moe_config.hidden_dim
         self.global_num_experts = moe_config.num_experts
@@ -424,45 +426,11 @@ class RoutedExperts(PluggableLayer):
     @staticmethod
     def _orient_fused_weight(
         fused_weight: torch.Tensor,
-        shard_id: str,
-        unpadded_hidden: int,
-        target_shape: torch.Size | None = None,
-        tp_size: int = 1,
+        is_fused_checkpoint_transposed: bool,
     ) -> torch.Tensor:
-        """Normalise a fused expert tensor from either checkpoint orientation
-        to (intermediate, hidden) for w1/w3 and (hidden, intermediate) for w2.
-
-        Only transposes when the hidden dim is definitively on the wrong axis,
-        or when the transposed shape exactly matches the target parameter. The
-        latter resolves block scales, whose dimensions are both divided by the
-        block size and therefore do not contain the hidden size directly.
-        """
-        if shard_id == "w2":
-            hidden_axis, intermediate_axis = -2, -1
-        else:
-            hidden_axis, intermediate_axis = -1, -2
-        if (
-            fused_weight.shape[hidden_axis] != unpadded_hidden
-            and fused_weight.shape[intermediate_axis] == unpadded_hidden
-        ):
+        """Normalise a fused expert tensor to the vLLM weight layout."""
+        if is_fused_checkpoint_transposed:
             return fused_weight.transpose(-1, -2)
-
-        if target_shape is not None and len(target_shape) >= 2:
-            # The caller only supplies canonical, TP-sharded block-scale
-            # targets. ``param`` is TP-local, whereas a fused checkpoint tensor
-            # contains the global intermediate dimension. Reconstruct that
-            # global shape: w1/w3 shard their first data axis and w2 its second.
-            expected_global_shape = list(target_shape[-2:])
-            expected_global_shape[intermediate_axis] *= tp_size
-            checkpoint_shape = list(fused_weight.shape[-2:])
-            # This is only a tie-breaker: require an exact reversed-shape
-            # match so padded, square, or otherwise ambiguous layouts are
-            # never guessed.
-            if (
-                checkpoint_shape != expected_global_shape
-                and checkpoint_shape[::-1] == expected_global_shape
-            ):
-                return fused_weight.transpose(-1, -2)
         return fused_weight
 
     @staticmethod
@@ -942,9 +910,6 @@ class RoutedExperts(PluggableLayer):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         expert_mapping = self.get_expert_mapping(include_fused=True)
-        unpadded_hidden = (
-            self.moe_config.hidden_dim_unpadded or self.moe_config.hidden_dim
-        )
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
             # Fused expert weights can be identified by their 3D tensors
@@ -960,29 +925,19 @@ class RoutedExperts(PluggableLayer):
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name)
                 if is_fused:
-                    # PR #50137's hidden-axis heuristic cannot orient block
-                    # scales because both dimensions are divided by the block
-                    # size. Use the exact destination shape only for canonical,
-                    # TP-sharded BLOCK parameters. Other quant formats may use
-                    # transposed storage or replicated/full axes, for which
-                    # shard_id alone does not describe the target layout.
-                    use_block_scale_shape_fallback = (
-                        getattr(param, "quant_method", None)
-                        == FusedMoeWeightScaleSupported.BLOCK.value
-                        and not getattr(param, "is_transposed", False)
-                        and not getattr(param, "load_full_w2", False)
+                    quant_method = getattr(param, "quant_method", None)
+                    # Block scales share the weight's two-dimensional layout.
+                    # Other quantization metadata can use independent layouts.
+                    uses_weight_layout = (
+                        "scale" not in weight_name
+                        or quant_method == FusedMoeWeightScaleSupported.BLOCK.value
                     )
                     # w1 and w3 share one fused tensor; use a local copy so the
                     # transpose below doesn't mutate loaded_weight across
                     # iterations (else w3 is transposed twice and wrongly chunked)
                     fused_weight = self._orient_fused_weight(
                         loaded_weight,
-                        shard_id,
-                        unpadded_hidden,
-                        target_shape=(
-                            param.shape if use_block_scale_shape_fallback else None
-                        ),
-                        tp_size=self.moe_config.tp_size,
+                        self.is_fused_checkpoint_transposed and uses_weight_layout,
                     )
                     if shard_id in {"w1", "w3"}:
                         # Repurpose expert_id for deconcatenating w1 and w3

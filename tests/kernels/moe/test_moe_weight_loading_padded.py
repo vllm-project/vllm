@@ -71,123 +71,62 @@ class TestOrientFusedWeight:
 
     def test_w13_standard_orientation_is_untouched(self):
         weight = torch.randn(8, 2048, self.HIDDEN)
-        result = RoutedExperts._orient_fused_weight(weight, "w1", self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(weight, False)
         assert result.shape == (8, 2048, self.HIDDEN)
 
     def test_w13_transposed_checkpoint_is_normalised(self):
         # e.g. Qwen3 VL MoE stores [experts, hidden, 2 * intermediate]
         weight = torch.randn(8, self.HIDDEN, 2048)
-        result = RoutedExperts._orient_fused_weight(weight, "w3", self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(weight, True)
         assert result.shape == (8, 2048, self.HIDDEN)
 
     def test_w2_standard_orientation_is_untouched(self):
         weight = torch.randn(8, self.HIDDEN, 1024)
-        result = RoutedExperts._orient_fused_weight(weight, "w2", self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(weight, False)
         assert result.shape == (8, self.HIDDEN, 1024)
 
     def test_w2_transposed_checkpoint_is_normalised(self):
         weight = torch.randn(8, 1024, self.HIDDEN)
-        result = RoutedExperts._orient_fused_weight(weight, "w2", self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(weight, True)
         assert result.shape == (8, self.HIDDEN, 1024)
 
     def test_w13_per_channel_scale_is_untouched(self):
         # A fused per-channel scale has no hidden dim, so transposing it would
         # leave chunk()/TP sharding operating on the wrong axis.
         scale = torch.randn(8, 2048, 1)
-        result = RoutedExperts._orient_fused_weight(scale, "w1", self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(scale, False)
         assert result.shape == (8, 2048, 1)
         assert result.chunk(2, dim=1)[0].shape == (8, 1024, 1)
 
     def test_w2_per_channel_scale_is_untouched(self):
         scale = torch.randn(8, self.HIDDEN, 1)
-        result = RoutedExperts._orient_fused_weight(scale, "w2", self.HIDDEN)
+        result = RoutedExperts._orient_fused_weight(scale, False)
         assert result.shape == (8, self.HIDDEN, 1)
 
     def test_block_scale_is_untouched(self):
         # Block scales are [experts, 2 * intermediate / block, hidden / block]
         scale = torch.randn(8, 16, 24)
-        result = RoutedExperts._orient_fused_weight(
-            scale,
-            "w1",
-            self.HIDDEN,
-            target_shape=torch.Size((8, 16, 24)),
-        )
+        result = RoutedExperts._orient_fused_weight(scale, False)
         assert result.shape == (8, 16, 24)
-
-    def test_padded_target_does_not_guess_block_scale_orientation(self):
-        # Both orientations fit inside a target padded on both axes. Without
-        # quantization-layout metadata there is no sound way to choose one.
-        scale = torch.randn(8, 6, 16)
-        result = RoutedExperts._orient_fused_weight(
-            scale,
-            "w2",
-            unpadded_hidden=2048,
-            target_shape=torch.Size((8, 24, 24)),
-        )
-        assert result.shape == (8, 6, 16)
-
-    def test_square_target_does_not_guess_orientation(self):
-        scale = torch.arange(8 * 16 * 16).reshape(8, 16, 16)
-        result = RoutedExperts._orient_fused_weight(
-            scale,
-            "w1",
-            unpadded_hidden=2048,
-            target_shape=torch.Size((8, 16, 16)),
-        )
         assert result.data_ptr() == scale.data_ptr()
-        torch.testing.assert_close(result, scale)
 
     @pytest.mark.parametrize(
-        ("shard_id", "checkpoint_shape", "target_shape"),
+        "checkpoint_shape",
         [
             # Qwen3-VL stores block scales in checkpoint weight orientation.
-            ("w1", (8, 16, 12), (8, 12, 16)),
-            ("w2", (8, 6, 16), (8, 16, 6)),
+            (8, 16, 12),
+            (8, 6, 16),
+            (8, 16, 16),
         ],
     )
-    def test_qwen3_vl_transposed_block_scale_matches_target(
+    def test_qwen3_vl_transposed_block_scale_uses_explicit_layout(
         self,
-        shard_id: str,
         checkpoint_shape: tuple[int, ...],
-        target_shape: tuple[int, ...],
     ):
         scale = torch.arange(torch.tensor(checkpoint_shape).prod()).reshape(
             checkpoint_shape
         )
-        result = RoutedExperts._orient_fused_weight(
-            scale,
-            shard_id,
-            unpadded_hidden=2048,
-            target_shape=torch.Size(target_shape),
-        )
-        assert result.shape == target_shape
-        torch.testing.assert_close(result, scale.transpose(-1, -2))
-
-    @pytest.mark.parametrize(
-        ("shard_id", "checkpoint_shape", "target_shape"),
-        [
-            ("w1", (8, 16, 12), (8, 6, 16)),
-            ("w2", (8, 6, 16), (8, 16, 3)),
-        ],
-    )
-    def test_qwen3_vl_transposed_block_scale_matches_tp_shard(
-        self,
-        shard_id: str,
-        checkpoint_shape: tuple[int, ...],
-        target_shape: tuple[int, ...],
-    ):
-        scale = torch.arange(torch.tensor(checkpoint_shape).prod()).reshape(
-            checkpoint_shape
-        )
-        result = RoutedExperts._orient_fused_weight(
-            scale,
-            shard_id,
-            unpadded_hidden=2048,
-            target_shape=torch.Size(target_shape),
-            tp_size=2,
-        )
-        expected_shape = (8, 12, 16) if shard_id == "w1" else (8, 16, 6)
-        assert result.shape == expected_shape
+        result = RoutedExperts._orient_fused_weight(scale, True)
         torch.testing.assert_close(result, scale.transpose(-1, -2))
 
 
