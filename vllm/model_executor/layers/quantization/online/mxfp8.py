@@ -26,12 +26,46 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.layers.quantization.online.quant_utils import (
+    _generate_mx_scales,
+    _quantize_fp8,
+    _round_to_uint8,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
-    mxfp8_e4m3_quantize,
+    MXFP8_VALUE_DTYPE,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+
+
+def _quantize_mxfp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """MXFP8 weight quant *bit-identical* to compressed-tensors' MXFP8 export.
+
+    Ports ``generate_mx_scales`` / ``round_to_power_2`` from
+    https://github.com/vllm-project/compressed-tensors/blob/f96819e16d6928d41171946cb89647ad783cc67c/src/compressed_tensors/quantization/utils/mxfp_utils.py
+
+    FlashInfer's ``mxfp8_quantize`` picks the E8M0 exponent via
+    ``ceil(log2(amax / 448))``, which disagrees with compressed-tensors on the
+    ``amax = 1.75 * 2**f`` boundary. For exact bytes we use the ported
+    compressed-tensors math in ``quant_utils``.
+    Returns ``(qweight[N, K] fp8_e4m3, scale[N, K // 32] uint8)``
+    in the non-swizzled layout.
+    """
+    assert weight.dim() == 2
+    weight = weight.to(torch.bfloat16)
+    n, k = weight.shape
+    assert k % MXFP8_BLOCK_SIZE == 0
+    groups = weight.view(n, k // MXFP8_BLOCK_SIZE, MXFP8_BLOCK_SIZE)
+
+    amax = groups.abs().amax(dim=2)  # [N, K//32] bf16
+    scale = _generate_mx_scales(amax, num_bits=8)
+    scale_byte = _round_to_uint8(scale)
+
+    scale_f = torch.exp2(scale_byte.to(torch.int32).to(torch.float32) - 127.0).to(
+        torch.bfloat16
+    )
+    q = _quantize_fp8(groups, scale_f.unsqueeze(-1), MXFP8_VALUE_DTYPE)
+    return q.reshape(n, k).contiguous(), scale_byte.contiguous()
 
 
 class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
@@ -75,7 +109,8 @@ class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        weight_fp8, weight_scale = mxfp8_e4m3_quantize(layer.weight.contiguous())
+        # See _quantize_mxfp8 for offline byte-for-byte parity.
+        weight_fp8, weight_scale = _quantize_mxfp8(layer.weight.contiguous())
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp8.data)
@@ -141,7 +176,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Batch quantization: bf16/fp16 weights -> MXFP8 (fp8 + uint8 scales)."""
         E = weight.size(0)
-        first_q, first_s = mxfp8_e4m3_quantize(weight[0], is_sf_swizzled_layout=False)
+        first_q, first_s = _quantize_mxfp8(weight[0])
         # Pre-allocate the output tensors rather than stacking.
         # This is important for consistent memory layout.
         w_quant = torch.empty(
@@ -153,9 +188,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         w_quant[0] = first_q
         w_scales[0] = first_s
         for i in range(1, E):
-            w_quant[i], w_scales[i] = mxfp8_e4m3_quantize(
-                weight[i], is_sf_swizzled_layout=False
-            )
+            w_quant[i], w_scales[i] = _quantize_mxfp8(weight[i])
 
         return w_quant, w_scales
 
@@ -234,9 +267,6 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
