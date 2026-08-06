@@ -113,6 +113,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    FusedInputNorm,
     get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
@@ -1255,6 +1256,7 @@ class Qwen2_5_VLForConditionalGeneration(
     )
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
@@ -1364,6 +1366,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -1438,6 +1441,8 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
+            pixel_values = self.input_norm(pixel_values, self.visual.dtype)
+
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
@@ -1494,6 +1499,10 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
+            pixel_values_videos = self.input_norm(
+                pixel_values_videos, self.visual.dtype
+            )
+
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,

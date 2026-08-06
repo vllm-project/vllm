@@ -215,7 +215,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // 2,
                 dtype=weight_dtype,
             ),
@@ -227,7 +227,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // mxfp4_block,
                 dtype=scale_dtype,
             ),
@@ -267,7 +267,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.bfloat16,
                 ),
                 requires_grad=False,
@@ -305,13 +305,13 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         assert (
             w13.dim() == 3
             and w13.shape[0] == num_experts
-            and w13.shape[1] == intermediate_size * 2
+            and w13.shape[1] == intermediate_size * self.moe.w13_num_shards
             and w13.shape[2] == hidden_size // 2
         )
         assert (
             w13_scale.dim() == 3
             and w13_scale.shape[0] == num_experts
-            and w13_scale.shape[1] == intermediate_size * 2
+            and w13_scale.shape[1] == intermediate_size * self.moe.w13_num_shards
             and w13_scale.shape[2] == hidden_size // sf_block_size
         )
         assert (
@@ -329,7 +329,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             assert (
                 w13_bias.dim() == 2
                 and w13_bias.shape[0] == num_experts
-                and w13_bias.shape[1] == intermediate_size * 2
+                and w13_bias.shape[1] == intermediate_size * self.moe.w13_num_shards
             )
         if w2_bias is not None:
             assert (
@@ -365,11 +365,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
-
-        # AITER backend requires weights to be marked as shuffled.
-        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
 
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
@@ -599,7 +594,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // 2,
                 dtype=weight_dtype,
             ),
@@ -611,7 +606,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size // mxfp4_block,
                 dtype=scale_dtype,
             ),
@@ -651,7 +646,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    self.moe.w13_num_shards * intermediate_size_per_partition,
                     dtype=torch.bfloat16,
                 ),
                 requires_grad=False,
@@ -689,13 +684,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         assert (
             w13.dim() == 3
             and w13.shape[0] == num_experts
-            and w13.shape[1] == intermediate_size * 2
+            and w13.shape[1] == intermediate_size * self.moe.w13_num_shards
             and w13.shape[2] == hidden_size // 2
         )
         assert (
             w13_scale.dim() == 3
             and w13_scale.shape[0] == num_experts
-            and w13_scale.shape[1] == intermediate_size * 2
+            and w13_scale.shape[1] == intermediate_size * self.moe.w13_num_shards
             and w13_scale.shape[2] == hidden_size // sf_block_size
         )
         assert (
@@ -713,7 +708,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             assert (
                 w13_bias.dim() == 2
                 and w13_bias.shape[0] == num_experts
-                and w13_bias.shape[1] == intermediate_size * 2
+                and w13_bias.shape[1] == intermediate_size * self.moe.w13_num_shards
             )
         if w2_bias is not None:
             assert (
@@ -759,14 +754,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
-
-        # AITER backend requires weights to be marked as shuffled.
-        if (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-            and not uses_triton_weight_format
-        ):
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
 
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
@@ -816,6 +803,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_scale_raw.view(-1, w13_scale_raw.shape[-1]), num_experts, guinterleave
         )
         w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
+
+        w13.is_shuffled = True
+        w2.is_shuffled = True
+
         return w13, w2, w13_scale, w2_scale
 
     def process_weights_after_loading(self, layer):
