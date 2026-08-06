@@ -145,6 +145,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_USE_LATENT_MOE_RUNNER: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1327,6 +1328,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # QuickReduce. This does not affect QuickReduce eligibility.
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
+    # For Kimi-K3 on ROCm, use the latent-MoE runner if set.
+    "VLLM_ROCM_USE_LATENT_MOE_RUNNER": lambda: bool(
+        int(os.getenv("VLLM_ROCM_USE_LATENT_MOE_RUNNER", "1"))
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(
