@@ -184,7 +184,7 @@ pub(super) fn prepare_chat_request(
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
-        priority: request.priority.unwrap_or(0),
+        priority: ctx.priority.or(request.priority).unwrap_or(0),
         documents: request.documents,
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
@@ -1275,6 +1275,23 @@ mod tests {
             prepared.chat_request.session_id.as_deref(),
             Some("header-session")
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_header_priority_overrides_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Vllm-Priority", "-5".parse().unwrap());
+        let request = ChatCompletionRequest {
+            priority: Some(10),
+            ..base_request()
+        };
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.priority, -5);
     }
 
     #[test]

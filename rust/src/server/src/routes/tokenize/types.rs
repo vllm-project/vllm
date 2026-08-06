@@ -9,6 +9,7 @@ use serde_json::Value;
 use validator::{Validate, ValidationErrors};
 use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
+use vllm_text::{Prompt, TextRequest};
 
 use crate::error::ApiError;
 use crate::routes::openai::chat_completions::convert::{
@@ -35,6 +36,28 @@ pub struct TokenizeCompletionRequest {
     pub add_special_tokens: bool,
     #[serde(default)]
     pub return_token_strs: bool,
+}
+
+impl TokenizeCompletionRequest {
+    /// Lower this tokenize body into a [`TextRequest`] for prompt tokenization.
+    pub fn into_text_request(self, request_id: String) -> TextRequest {
+        TextRequest {
+            request_id,
+            prompt: Prompt::Text(self.prompt),
+            mm_features: None,
+            sampling_params: SamplingParams::default(),
+            decode_options: TextDecodeOptions::default(),
+            intermediate: false,
+            priority: 0,
+            cache_salt: None,
+            add_special_tokens: self.add_special_tokens,
+            data_parallel_rank: None,
+            session_id: None,
+            reasoning_parser_kwargs: None,
+            lora_request: None,
+            arrival_time: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Validate)]

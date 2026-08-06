@@ -155,17 +155,9 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    /// Prepare one chat request without submitting it to an engine.
-    pub async fn prepare(
-        &self,
-        mut request: ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
-    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
-        request.validate()?;
-
+    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
         let rendered = self.backend.chat_renderer().render(&request)?;
         let reasoning_parser_kwargs =
             request
@@ -176,7 +168,7 @@ impl ChatRequestProcessor {
                     chat_template_kwargs: rendered.effective_template_kwargs.clone(),
                 });
         let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
-        let text_request = TextRequest {
+        Ok(TextRequest {
             request_id: request.request_id,
             prompt,
             mm_features,
@@ -191,7 +183,24 @@ impl ChatRequestProcessor {
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),
-        };
+        })
+    }
+
+    /// Prepare one chat request for tokenization without constructing an output processor.
+    pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
+        request.validate()?;
+        self.prepare_text_request(request).await
+    }
+
+    /// Prepare one chat request without submitting it to an engine.
+    pub async fn prepare(
+        &self,
+        mut request: ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> Result<(TextRequest, DynChatOutputProcessor)> {
+        request.validate()?;
+        let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
+        let text_request = self.prepare_text_request(request).await?;
         Ok((text_request, output_processor))
     }
 }
@@ -265,6 +274,11 @@ impl ChatLlm {
         &self.text
     }
 
+    /// Return the chat request processor.
+    pub fn request_processor(&self) -> &ChatRequestProcessor {
+        &self.processor
+    }
+
     /// Return the model ID reported by the underlying text backend.
     pub fn model_id(&self) -> &str {
         self.text.model_id()
@@ -330,28 +344,6 @@ impl ChatLlm {
         let structured_stream = output_processor.process(decoded_stream)?;
 
         Ok(ChatEventStream::new(request_id, structured_stream))
-    }
-
-    /// Render through the chat template and tokenize, without submitting to the engine.
-    ///
-    /// Same render → [`multimodal::finalize_rendered_prompt`] → encode pipeline as
-    /// [`Self::chat`], but stops after token IDs so `/tokenize` counts match what
-    /// generation would see. Used by `POST /tokenize` (chat form).
-    pub async fn tokenize_chat(&self, request: ChatRequest) -> Result<Vec<u32>> {
-        request.validate()?;
-
-        let rendered = self.processor.backend.chat_renderer().render(&request)?;
-        let (prompt, _mm_features) =
-            self.processor.finalize_rendered_prompt(&request, rendered).await?;
-
-        let tokenizer = self.text.tokenizer();
-        let token_ids = match prompt {
-            // Rendered string from the template (usual chat path).
-            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
-            // Already tokenized (e.g. multimodal path); pass through unchanged.
-            Prompt::TokenIds(ids) => ids,
-        };
-        Ok(token_ids)
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
