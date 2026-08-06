@@ -382,6 +382,31 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=8,
+        data_parallel_size=2,
+        data_parallel_size_local=1,
+        data_parallel_rank=1,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+
+    parallel_config.reconfigure_for_independent_dp_rank()
+
+    assert parallel_config.data_parallel_size == 1
+    assert parallel_config.data_parallel_size_local == 1
+    assert parallel_config.data_parallel_rank == 0
+    assert parallel_config.data_parallel_index == 1
+    assert parallel_config.nnodes == 1
+    assert parallel_config.node_rank == 0
+    assert parallel_config.world_size == 8
+
+
 @dataclass
 class _TestConfigFields:
     a: int
@@ -1233,6 +1258,26 @@ def test_vllm_config_defaults_are_none():
         for k in default_config["compilation_config"]:
             if k != "pass_config":
                 assert getattr(config.compilation_config, k) is None
+
+
+def test_validate_mamba_align_subblock_prefill():
+    """Align mode permits configured prefill chunks smaller than a block."""
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=11392,
+            mamba_cache_mode="align",
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8192,
+            long_prefill_token_threshold=4096,
+            disable_chunked_mm_input=False,
+        ),
+    )
+
+    VllmConfig.validate_block_size(config)
 
 
 @pytest.mark.parametrize(

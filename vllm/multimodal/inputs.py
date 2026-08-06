@@ -23,7 +23,7 @@ from typing_extensions import TypeVar
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.jsontree import json_iter_leaves, json_map_leaves
 
 from .media import MediaWithBytes
 
@@ -229,44 +229,68 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
 
-def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
+def nested_tensors_equal(
+    a: NestedTensors,
+    b: NestedTensors,
+    check_dtype: bool = True,
+) -> bool:
     """
     Equality check between
     [`NestedTensors`][vllm.multimodal.inputs.NestedTensors] objects.
+
+    If `check_dtype` is `True`, the tensors must have the same dtype.
     """
+    check_dtype_func = (
+        lambda a, b, check_dtype: a.dtype == b.dtype if check_dtype else True
+    )
     if isinstance(a, torch.Tensor):
-        return isinstance(b, torch.Tensor) and torch.equal(a, b)
+        return (
+            isinstance(b, torch.Tensor)
+            and torch.equal(a, b)
+            and check_dtype_func(a, b, check_dtype)
+        )
     elif isinstance(b, torch.Tensor):
-        return isinstance(a, torch.Tensor) and torch.equal(b, a)
+        return (
+            isinstance(a, torch.Tensor)
+            and torch.equal(b, a)
+            and check_dtype_func(b, a, check_dtype)
+        )
 
     if isinstance(a, list):
         return (
             isinstance(b, list)
             and len(a) == len(b)
-            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+            and all(nested_tensors_equal(a_, b_, check_dtype) for a_, b_ in zip(a, b))
         )
     if isinstance(b, list):
         return (
             isinstance(a, list)
             and len(b) == len(a)
-            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+            and all(nested_tensors_equal(b_, a_, check_dtype) for b_, a_ in zip(b, a))
         )
 
     if isinstance(a, tuple):
         return (
             isinstance(b, tuple)
             and len(a) == len(b)
-            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+            and all(nested_tensors_equal(a_, b_, check_dtype) for a_, b_ in zip(a, b))
         )
     if isinstance(b, tuple):
         return (
             isinstance(a, tuple)
             and len(b) == len(a)
-            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+            and all(nested_tensors_equal(b_, a_, check_dtype) for b_, a_ in zip(b, a))
         )
 
     # Both a and b are scalars
     return a == b
+
+
+def _nested_tensors_are_cpu(tensors: NestedTensors) -> bool:
+    """Whether every tensor in `tensors` lives in host memory."""
+    return not any(
+        isinstance(x, torch.Tensor) and not x.is_cpu for x in json_iter_leaves(tensors)
+    )
 
 
 def _nested_tensors_h2d(
@@ -457,8 +481,15 @@ class BaseMultiModalField(ABC):
             device = "cpu"
         if pin_memory and self.keep_on_cpu:
             pin_memory = False
+        if device == "cpu" or device == torch.device("cpu"):
+            pin_memory = False
 
         batch = [elem.data for elem in elems]
+        if pin_memory and not _nested_tensors_are_cpu(batch):
+            # Data already sits on an accelerator (e.g. a device-side HF
+            # processor handed it over by IPC). Pinning is a host-memory
+            # concept, and `pin_memory()` rejects device tensors outright.
+            pin_memory = False
         out = self._reduce_data(batch, pin_memory=pin_memory)
         return _nested_tensors_h2d(out, device=device)
 

@@ -12,7 +12,10 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation_supported,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -246,17 +249,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def _supports_activation(activation: MoEActivation) -> bool:
         # Humming uses apply_moe_activation() callback for activation,
         # so any activation supported there can be used here.
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        return apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -509,11 +502,22 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         output: torch.Tensor,
         input: torch.Tensor,
     ) -> None:
-        swiglu_limit = self.quant_config.gemm1_clamp_limit
-        if activation == MoEActivation.SILU and swiglu_limit is not None:
-            swiglu_limit_func(output=output, input=input, swiglu_limit=swiglu_limit)
+        activation_config = self.activation_config
+        if (
+            activation == MoEActivation.SILU
+            and activation_config.clamp_limit is not None
+        ):
+            swiglu_limit_func(
+                output=output,
+                input=input,
+                swiglu_limit=activation_config.clamp_limit,
+            )
         else:
-            self.activation(activation=activation, input=input, output=output)
+            self.activation(
+                activation=activation,
+                input=input,
+                output=output,
+            )
 
 
 class HummingIndexedExperts(HummingExpertsBase):
@@ -662,11 +666,8 @@ class HummingIndexedExperts(HummingExpertsBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            outputs=buffers["output"],
+            outputs=output,
         )
-
-        # Note: output is already written to buffers["output"]
-        # which aliases workspace13/output
 
 
 class HummingGroupedExperts(HummingExpertsBase):
@@ -777,15 +778,12 @@ class HummingGroupedExperts(HummingExpertsBase):
         )
 
         moe_unpermute(
-            out=buffers["output"],
+            out=output,
             permuted_hidden_states=buffers["down_output"].view(*topk_ids.shape, -1),
             topk_weights=topk_weights,
             inv_permuted_idx=inv_perm,
             expert_first_token_offset=expert_first_token_offset,
         )
-
-        # Note: output is already written to buffers["output"]
-        # which aliases workspace13/output
 
 
 class BatchedHummingGroupedExperts(HummingExpertsBase):
@@ -880,13 +878,10 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             layer=self.layer,
             inputs=inputs,
             input_scale=input_scale,
-            outputs=buffers["down_output"].view(-1, hidden_states.size(-1)),
+            outputs=output.view(-1, hidden_states.size(-1)),
             valid_shape_m=valid_shape_m,
             expert_layout=expert_num_tokens,
             compute_config=self.compute_config_str,
             tuning_config=self.w2_tuning_config_str,
             sublayer_name="w2",
         )
-
-        # Note: output is already written to buffers["down_output"]
-        # which aliases workspace13/output

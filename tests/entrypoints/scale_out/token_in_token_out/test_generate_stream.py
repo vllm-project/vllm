@@ -204,6 +204,32 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
 
 
 @pytest.mark.asyncio
+async def test_serve_tokens_threads_session_id_header_to_engine():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=False,
+    )
+    raw_request = MagicMock()
+    raw_request.headers = {"X-Session-ID": "header-session"}
+
+    await serving.serve_tokens(request, raw_request)
+
+    assert engine.generate.call_args.kwargs["session_id"] == "header-session"
+
+
+@pytest.mark.asyncio
 async def test_stream_basic():
     """Streaming returns SSE chunks with correct token_ids and ends with [DONE]."""
     engine = _mock_engine()

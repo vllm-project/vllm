@@ -1276,8 +1276,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         embeds_prompt["prompt_embeds"] = full_embeds
         embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask
 
-    @staticmethod
     def _apply_prompt_embeds_to_engine_input(
+        self,
         engine_input: MultiModalInput,
         prompt_embeds_tensors: list[torch.Tensor],
         mm_updates: MultiModalPromptUpdates,
@@ -1300,6 +1300,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         pe_kwargs_items: list[MultiModalKwargsItem] = []
         pe_hashes: list[str] = []
         pe_placeholders: list[PlaceholderRange] = []
+        mm_config = self.model_config.get_multimodal_config()
         for tensor, (start, length) in zip(
             prompt_embeds_tensors, positions, strict=True
         ):
@@ -1313,7 +1314,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                     }
                 )
             )
-            pe_hashes.append(MultiModalHasher.hash_kwargs(prompt_embeds=tensor))
+            pe_hashes.append(
+                MultiModalHasher.hash_kwargs(
+                    mm_config.mm_hasher_algorithm, prompt_embeds=tensor
+                )
+            )
             # `is_embed=None` matches the existing image_embeds-style
             # "no encoder, just splice the tensor directly" semantics.
             pe_placeholders.append(
