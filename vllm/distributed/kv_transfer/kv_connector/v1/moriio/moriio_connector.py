@@ -42,6 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
+    log_resolved_defer_timeout,
     parse_moriio_zmq_address,
     pod_index,
     resolve_host_ip,
@@ -417,11 +418,22 @@ class MoRIIOConnectorScheduler:
         # hanging indefinitely waiting for a free notification that never comes.
         # Value: (deadline, transfer_id) for unmapping after mutation.
         self._deferred_send_deadlines: dict[ReqId, tuple[float, TransferId | None]] = {}
-        self._defer_timeout = float(
-            self.kv_transfer_config.kv_connector_extra_config.get(
-                "defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT
-            )
+        self._defer_timeout = log_resolved_defer_timeout(
+            self.kv_transfer_config.kv_connector_extra_config, "scheduler"
         )
+        # Cumulative count of deferred sends reaped because their
+        # finished_sending notification never arrived (see
+        # update_connector_output). Surfaced in the reap WARNING so operators
+        # can track lost-notification events over time. There is no Prometheus
+        # metric pipeline wired for this connector; this in-process counter is
+        # the low-churn observability signal.
+        self._deferred_reap_total = 0
+        # Cumulative count of decode-notify requests that hit the rank-0
+        # fallback because the router failed to pin remote_dp_rank in a
+        # multi-rank (Wide-EP) deployment. This misroute is the most common
+        # cause of a request stalling until the deferred timeout, so it is
+        # surfaced in the fallback WARNING for correlation.
+        self._rank0_fallback_total = 0
         # Buffer for early ACKs that arrive before request_finished.
         self._pending_sent_acks: dict[ReqId, float] = {}
         self.paths: dict[str, zmq.Socket] = {}
@@ -596,7 +608,12 @@ class MoRIIOConnectorScheduler:
         ------------------------------------------------
         Both legs of a disagg pair must agree on a single prefill DP rank,
         otherwise the notify lands on a rank that never handshook and the
-        request hangs until ``VLLM_MORIIO_DEFERRED_TIMEOUT_S``.
+        request's deferred send is reaped only after the resolved defer
+        timeout (see ``resolve_defer_timeout`` /
+        ``kv_connector_extra_config["defer_timeout"]``, default
+        ``MoRIIOConstants.DEFAULT_DEFER_TIMEOUT``; the legacy
+        ``VLLM_MORIIO_DEFERRED_TIMEOUT_S`` env var is now only the
+        highest-precedence override).
 
         The routing authority is the external router/sidecar, NOT the
         connector. The llm-d routing sidecar computes ``H = pickDPRank(uuid,
@@ -700,14 +717,18 @@ class MoRIIOConnectorScheduler:
                     and "remote_dp_rank" not in request.kv_transfer_params
                     and "is_request_leader" not in request.kv_transfer_params
                 ):
+                    self._rank0_fallback_total += 1
                     logger.warning(
                         "MoRI-IO decode notify: remote_dp_size=%d but the router "
                         "did not pin remote_dp_rank for request %s; defaulting to "
-                        "rank 0. The router must set remote_dp_rank (and the "
-                        "X-data-parallel-rank dispatch header) so the prefill and "
-                        "decode legs agree on the same rank.",
+                        "rank 0 (cumulative rank-0 fallbacks=%d). The router must "
+                        "set remote_dp_rank (and the X-data-parallel-rank dispatch "
+                        "header) so the prefill and decode legs agree on the same "
+                        "rank; otherwise the request may stall until the deferred "
+                        "timeout (VLLM_MORIIO_DEFERRED_TIMEOUT_S).",
                         _dp_size,
                         request.request_id,
+                        self._rank0_fallback_total,
                     )
 
                 # Only the owning rank originates notify (exactly-once).
@@ -1027,12 +1048,15 @@ class MoRIIOConnectorScheduler:
         ]
         if expired:
             safe.update(expired)
+            self._deferred_reap_total += len(expired)
             logger.warning(
                 "Reaped %d deferred sends with no finished_sending "
-                "notification after %.0fs. This indicates lost async KV "
+                "notification after %.0fs (VLLM_MORIIO_DEFERRED_TIMEOUT_S; "
+                "cumulative reaped=%d). This indicates lost async KV "
                 "completion notifications from the KV connector.",
                 len(expired),
                 self._defer_timeout,
+                self._deferred_reap_total,
             )
 
         # Finalize the requests we are surfacing: drop their deferral/park
@@ -1233,6 +1257,10 @@ class MoRIIOConnectorWorker:
         # Used by _pop_done_transfers to abort transfers whose RDMA
         # completion is lost, instead of hanging forever.
         self._recving_transfers_start: dict[str, float] = {}
+        # Cumulative count of RDMA recv transfers aborted by
+        # VLLM_MORIIO_TRANSFER_TIMEOUT_S (lost completion). Surfaced in the
+        # timeout ERROR for observability; semantics are unchanged.
+        self._transfer_timeout_total = 0
 
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
@@ -1948,12 +1976,15 @@ class MoRIIOConnectorWorker:
                     # indefinitely on this request.
                     _age = time.monotonic() - self._recving_transfers_start[req_id]
                     if _age > _xfer_timeout:
+                        self._transfer_timeout_total += 1
                         logger.error(
                             "RDMA read TIMED OUT for req %s after %.1fs "
-                            "(VLLM_MORIIO_TRANSFER_TIMEOUT_S=%d)",
+                            "(VLLM_MORIIO_TRANSFER_TIMEOUT_S=%d; cumulative "
+                            "transfer timeouts=%d)",
                             req_id,
                             _age,
                             _xfer_timeout,
+                            self._transfer_timeout_total,
                         )
                         to_remove.append(req_id)
             for req_id in to_remove:
