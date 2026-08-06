@@ -544,6 +544,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             [self.config.audio_token_index],
         )
 
+        # The towers live in their own Hub repos, so the revision of the
+        # Ultravox repo does not apply to them.
         self.secondary_weights = []
         if config.audio_model_id is not None:
             # this prefix is not for initialization, but for loading weights
@@ -551,7 +553,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             self.secondary_weights.append(
                 DefaultModelLoader.Source(
                     model_or_path=config.audio_model_id,
-                    revision=vllm_config.model_config.revision,
+                    revision=None,
                     prefix="audio_tower.",
                 )
             )
@@ -561,7 +563,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             self.secondary_weights.append(
                 DefaultModelLoader.Source(
                     model_or_path=config.text_model_id,
-                    revision=vllm_config.model_config.revision,
+                    revision=None,
                     prefix="language_model.",
                 )
             )
