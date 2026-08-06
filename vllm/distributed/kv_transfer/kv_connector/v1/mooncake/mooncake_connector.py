@@ -622,15 +622,9 @@ class MooncakeConnectorScheduler:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_config = kv_cache_config
-        self._transfer_group_ids = tuple(
-            i
-            for i, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.enable_kv_transfer
-        )
+        self._transfer_group_ids = kv_cache_config.transfer_group_ids
         assert self._transfer_group_ids
-        transfer_groups = [
-            kv_cache_config.kv_cache_groups[i] for i in self._transfer_group_ids
-        ]
+        transfer_groups = kv_cache_config.transfer_groups
 
         assert vllm_config.kv_transfer_config
         self.is_kv_producer: bool = (
@@ -1037,11 +1031,7 @@ class MooncakeConnectorWorker:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
-        self._transfer_groups = tuple(
-            group
-            for group in kv_cache_config.kv_cache_groups
-            if group.enable_kv_transfer
-        )
+        self._transfer_groups = kv_cache_config.transfer_groups
         assert self._transfer_groups
         self.use_mla = self.model_config.use_mla
         self._physical_blocks_per_logical_kv_block = 1

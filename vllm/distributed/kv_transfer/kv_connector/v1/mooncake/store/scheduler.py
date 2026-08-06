@@ -64,12 +64,7 @@ class MooncakeStoreScheduler:
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.client = LookupKeyClient(vllm_config)
         self._all_group_count = len(kv_cache_config.kv_cache_groups)
-        self._transfer_group_ids = tuple(
-            i
-            for i, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.enable_kv_transfer
-        )
-        assert self._transfer_group_ids
+        self._transfer_group_ids = kv_cache_config.transfer_group_ids
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(

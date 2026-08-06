@@ -61,15 +61,9 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
-        self._transfer_group_ids = tuple(
-            i
-            for i, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.enable_kv_transfer
-        )
+        self._transfer_group_ids = kv_cache_config.transfer_group_ids
         assert self._transfer_group_ids
-        transfer_groups = [
-            kv_cache_config.kv_cache_groups[i] for i in self._transfer_group_ids
-        ]
+        transfer_groups = kv_cache_config.transfer_groups
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT

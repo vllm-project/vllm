@@ -1076,6 +1076,22 @@ class KVCacheConfig:
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
+    @property
+    def transfer_group_ids(self) -> tuple[int, ...]:
+        """IDs of cache groups that participate in external KV transfer."""
+        return tuple(
+            group_id
+            for group_id, group in enumerate(self.kv_cache_groups)
+            if group.enable_kv_transfer
+        )
+
+    @property
+    def transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
+        """Cache groups that participate in external KV transfer."""
+        return tuple(
+            self.kv_cache_groups[group_id] for group_id in self.transfer_group_ids
+        )
+
     def __post_init__(self) -> None:
         if not self.num_blocks_by_pool:
             self.num_blocks_by_pool = [self.num_blocks]

@@ -310,12 +310,7 @@ class NixlBaseConnectorWorker:
             )
         )
 
-        self._transfer_groups = tuple(
-            group
-            for group in kv_cache_config.kv_cache_groups
-            if group.enable_kv_transfer
-        )
-        assert self._transfer_groups
+        self._transfer_groups = kv_cache_config.transfer_groups
         self.block_size = math.lcm(
             *(group.kv_cache_spec.block_size for group in self._transfer_groups)
         )

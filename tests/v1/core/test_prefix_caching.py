@@ -280,6 +280,8 @@ def test_prefix_cache_source_rebuilds_ephemeral_groups():
             ),
         ],
     )
+    assert config.transfer_group_ids == (0,)
+    assert config.transfer_groups == (config.kv_cache_groups[0],)
     manager = make_kv_cache_manager(
         config,
         max_model_len=128,

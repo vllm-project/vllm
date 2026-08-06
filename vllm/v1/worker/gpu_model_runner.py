@@ -7781,13 +7781,7 @@ class GPUModelRunner(
                     # -> get_kv_cache_layout() needs the current vLLM config.
                     with set_current_vllm_config(self.vllm_config):
                         indexes = backend.indexes_kv_by_block_stride()
-                    spec = replace(
-                        spec,
-                        indexes_kv_by_block_stride=indexes,
-                        supported_kernel_block_sizes=tuple(
-                            backend.get_supported_kernel_block_sizes()
-                        ),
-                    )
+                    spec = replace(spec, indexes_kv_by_block_stride=indexes)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
