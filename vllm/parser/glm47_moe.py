@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -210,6 +211,13 @@ class Glm47MoeParser(ParserEngine):
         if not self.thinking_enabled:
             return True
         return super().is_reasoning_end(input_ids)
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        if not self.thinking_enabled:
+            return True
+        return super().is_reasoning_end_streaming(input_ids, delta_ids)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self.thinking_enabled:
