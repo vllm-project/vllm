@@ -169,6 +169,12 @@ class SharedOffloadRegion:
         self._views: list[torch.Tensor] = []
         self.is_pinned: bool = False
 
+    @property
+    def base_tensor(self) -> torch.Tensor:
+        if self._base is None:
+            raise RuntimeError("Shared offload region has been released.")
+        return self._base
+
     def create_next_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
 

@@ -70,6 +70,19 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
+def _private_hisparse_parallel_config():
+    return SimpleNamespace(
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        world_size=1,
+        distributed_executor_backend="uni",
+        nnodes_within_dp=1,
+        data_parallel_index=0,
+    )
+
+
 def test_hisparse_memory_usage_keeps_indexer_source_on_host():
     class FixedMemorySpec:
         def __init__(self, size: int):
@@ -131,6 +144,7 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         ),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        parallel_config=_private_hisparse_parallel_config(),
     )
 
     cache_config = kv_cache_utils._get_hisparse_hma_config(
@@ -204,6 +218,7 @@ def test_hisparse_hma_rejects_mixed_hot_page_sizes():
         ),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        parallel_config=_private_hisparse_parallel_config(),
     )
 
     with pytest.raises(ValueError, match="require one page size"):
@@ -280,6 +295,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
         ),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        parallel_config=_private_hisparse_parallel_config(),
     )
 
     cache_config = kv_cache_utils._get_hisparse_hma_config(

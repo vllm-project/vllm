@@ -22,6 +22,7 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
 logger = init_logger(__name__)
@@ -180,12 +181,12 @@ class ResolvedHiSparseConfig:
         )
 
 
-def check_hisparse_host_memory(rank_bytes: int) -> None:
-    """Fail fast when this rank's pinned host pool cannot fit in RAM."""
+def check_hisparse_host_memory(pool_bytes: int) -> None:
+    """Fail fast when the pinned host pool cannot fit in RAM."""
     mem = psutil.virtual_memory()
-    if rank_bytes > mem.available * 0.95:
+    if pool_bytes > mem.available * 0.95:
         raise ValueError(
-            f"HiSparse pinned host pool needs ~{rank_bytes / 2**30:.0f} GiB "
+            f"HiSparse pinned host pool needs ~{pool_bytes / 2**30:.0f} GiB "
             f"but only {mem.available / 2**30:.0f} GiB of RAM is available. "
             "Lower hisparse_config.host_pool_gib or leave headroom for co-tenants."
         )
@@ -201,6 +202,69 @@ def allocate_pinned_host_pool(size: int) -> torch.Tensor:
     pin_tensor(registered)
     _PINNED_HOST_POOLS.append(registered)
     return registered[:size]
+
+
+def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
+    """Whether replicated MLA host KV can share one local mmap."""
+    parallel = vllm_config.parallel_config
+    return (
+        current_platform.is_cuda_alike()
+        and parallel.tensor_parallel_size > 1
+        and parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and parallel.world_size == parallel.tensor_parallel_size
+        and parallel.distributed_executor_backend == "mp"
+        and parallel.nnodes_within_dp == 1
+    )
+
+
+def get_hisparse_host_block_stride(
+    vllm_config: VllmConfig, page_size_bytes: int
+) -> int:
+    if use_shared_hisparse_host_pool(vllm_config):
+        return round_up(page_size_bytes, SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT)
+    return page_size_bytes
+
+
+def allocate_hisparse_host_pools(
+    vllm_config: VllmConfig,
+    tensor_sizes: list[int],
+    num_blocks: int,
+) -> tuple[list[torch.Tensor], SharedOffloadRegion | None]:
+    """Allocate private host tensors or one mmap shared by local TP ranks."""
+    if not use_shared_hisparse_host_pool(vllm_config):
+        check_hisparse_host_memory(sum(tensor_sizes))
+        return [allocate_pinned_host_pool(size) for size in tensor_sizes], None
+
+    page_sizes = []
+    for size in tensor_sizes:
+        if size % num_blocks:
+            raise ValueError(
+                f"HiSparse host tensor size {size} is not divisible by "
+                f"{num_blocks} blocks."
+            )
+        page_sizes.append(size // num_blocks)
+    page_size = sum(page_sizes)
+    region = SharedOffloadRegion(
+        engine_id=(
+            f"hisparse_{vllm_config.instance_id}_"
+            f"dp{vllm_config.parallel_config.data_parallel_index}"
+        ),
+        num_blocks=num_blocks,
+        rank=0,
+        kv_bytes_per_block=get_hisparse_host_block_stride(vllm_config, page_size),
+        cpu_page_size=page_size,
+    )
+    try:
+        pin_tensor(region.base_tensor)
+        region.is_pinned = True
+        pools = [region.create_next_view(page_size) for page_size in page_sizes]
+    except Exception:
+        region.cleanup()
+        raise
+    _SHARED_HOST_REGIONS.append(region)
+    return pools, region
 
 
 def register_indexer_source(
@@ -219,15 +283,28 @@ def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
     return any(
         pool.data_ptr() <= ptr and ptr + nbytes <= pool.data_ptr() + pool.nbytes
         for pool in _PINNED_HOST_POOLS
+    ) or any(
+        region.is_pinned
+        and region.base_tensor.data_ptr() <= ptr
+        and ptr + nbytes <= region.base_tensor.data_ptr() + region.total_size_bytes
+        for region in _SHARED_HOST_REGIONS
     )
 
 
-def release_pinned_state(runtimes: list[HiSparseRuntime]) -> None:
+def release_pinned_state(
+    runtimes: list[HiSparseRuntime],
+    shared_host_region: SharedOffloadRegion | None = None,
+) -> None:
     """Synchronize, unregister host KV pools, and drop global state."""
     global _CURRENT_INDEX_GROUP
 
     _CURRENT_INDEX_GROUP = None
-    if _PINNED_HOST_POOLS:
+    shared_regions = (
+        [shared_host_region]
+        if shared_host_region is not None
+        else list(_SHARED_HOST_REGIONS)
+    )
+    if _PINNED_HOST_POOLS or shared_regions:
         try:
             torch.accelerator.synchronize()
         except RuntimeError as e:
@@ -235,7 +312,7 @@ def release_pinned_state(runtimes: list[HiSparseRuntime]) -> None:
                 "HiSparse: CUDA context unusable at teardown (%s); leaving "
                 "%d host-pool tensors pinned for kernel exit reclaim.",
                 e,
-                len(_PINNED_HOST_POOLS),
+                len(_PINNED_HOST_POOLS) + len(shared_regions),
             )
             return
 
@@ -265,12 +342,16 @@ def release_pinned_state(runtimes: list[HiSparseRuntime]) -> None:
 
     for runtime in runtimes:
         runtime._host_cache = None
+    _INDEXER_SOURCES.clear()
+    for region in shared_regions:
+        if region in _SHARED_HOST_REGIONS:
+            _SHARED_HOST_REGIONS.remove(region)
+        region.cleanup()
     _get_group_plan.cache_clear()
     _get_copy_stream.cache_clear()
     _HOST_WRITE_EVENTS.clear()
     with suppress(RuntimeError):
         torch._C._host_emptyCache()
-    _INDEXER_SOURCES.clear()
 
 
 def wait_for_hisparse_host_writes() -> None:
@@ -360,6 +441,7 @@ class _GroupPlan:
 
 
 _PINNED_HOST_POOLS: list[torch.Tensor] = []
+_SHARED_HOST_REGIONS: list[SharedOffloadRegion] = []
 _INDEXER_SOURCES: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 _HOST_WRITE_EVENTS: dict[str, torch.Event] = {}
 _CURRENT_INDEX_GROUP: tuple[object, HiSparseRuntime | None] | None = None

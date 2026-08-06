@@ -51,6 +51,12 @@ sees only device pools.
 The source group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
+For single-node MP tensor parallelism, every TP worker maps the same pinned host
+pool and uses the same block and layer offsets. MLA source KV is replicated
+across TP ranks, so this stores one physical copy instead of one copy per rank.
+Each rank still submits its own identical DMA to preserve its local CUDA stream
+ordering. Other executor and parallel layouts retain private per-rank pools.
+
 ## Code boundary
 
 ```text
