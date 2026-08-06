@@ -91,6 +91,18 @@ class SessionCreated(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
 
 
+class SessionUpdated(OpenAIBaseModel):
+    """Acknowledgement containing the effective realtime session config."""
+
+    type: Literal["session.updated"] = "session.updated"
+    model: str
+    segment_duration_s: float
+    runtime_patch_id: str
+    max_prefix_tokens: int | None = None
+    realtime_max_tokens: int
+    max_model_len: int
+
+
 class TranscriptionDelta(OpenAIBaseModel):
     """Incremental transcription text"""
 

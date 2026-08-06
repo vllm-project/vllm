@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import os
 from collections import deque
 from collections.abc import AsyncGenerator
 from functools import cached_property
@@ -62,6 +63,8 @@ class OpenAIServingRealtime(GenerateBaseServing):
         input_stream: asyncio.Queue[list[int]],
         session_config: RealtimeSessionConfig | None = None,
         prefix_texts: deque[str] | None = None,
+        request_id: str | None = None,
+        segment_traces: deque[dict] | None = None,
     ) -> AsyncGenerator[StreamingInput, None]:
         """Transform audio stream into StreamingInput for engine.generate().
 
@@ -108,21 +111,58 @@ class OpenAIServingRealtime(GenerateBaseServing):
                 input_stream,
                 model_config,
                 prefix_texts=prefix_texts,
+                request_id=request_id,
+                segment_traces=segment_traces,
                 **kwargs,
             ),
         )
 
-        max_tokens = self.model_cls.realtime_max_tokens
+        max_tokens = (
+            session_config.realtime_max_tokens
+            if session_config is not None
+            and session_config.realtime_max_tokens is not None
+            else self.model_cls.realtime_max_tokens
+        )
         tok_params = TokenizeParams(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=max_tokens,
             add_special_tokens=False,
         )
 
+        segment_id = 0
         async for prompt in stream_input_iter:
+            segment_id += 1
             parsed_prompt = parse_model_prompt(model_config, prompt)
             (engine_input,) = await renderer.render_cmpl_async(
                 [parsed_prompt], tok_params
             )
 
-            yield StreamingInput(prompt=engine_input)
+            prompt_tokens = len(engine_input.get("prompt_token_ids") or ())
+            if prompt_tokens + max_tokens > model_config.max_model_len:
+                raise ValueError(
+                    "QWEN3_ASR_REALTIME_CONTEXT_LIMIT: "
+                    f"segment_id={segment_id}, prompt_tokens={prompt_tokens}, "
+                    f"requested_output_tokens={max_tokens}, "
+                    f"max_model_len={model_config.max_model_len}. "
+                    "The full audio + full text prefix is preserved; increase "
+                    "--max-model-len or start a new realtime session."
+                )
+
+            aut_stable_window_mode = os.environ.get(
+                "QWEN3_ASR_REALTIME_MODE", ""
+            ).strip().lower() == "aut_stable_window_kv"
+            segment_trace = (
+                segment_traces[-1]
+                if aut_stable_window_mode and segment_traces
+                else None
+            )
+            yield StreamingInput(
+                prompt=engine_input,
+                segment_id=segment_id,
+                new_audio_feature_count=(1 if aut_stable_window_mode else 0),
+                final_segment=(
+                    bool(segment_trace.get("aut_window_commit", False))
+                    if segment_trace is not None
+                    else False
+                ),
+            )
