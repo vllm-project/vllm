@@ -55,7 +55,6 @@ def encode_output(harmony_str: str) -> list[int]:
     return get_encoding().encode(harmony_str, allowed_special="all")
 
 
-
 def assistant(content: str, channel: str) -> Message:
     return Message.from_role_and_content(Role.ASSISTANT, content).with_channel(channel)
 
@@ -826,20 +825,17 @@ class TestProcessChunk:
     def test_malformed_token_stream_does_not_raise(self, harmony_parser):
         # Regression test for a malformed model-emitted token stream that made
         # the streaming Harmony parser raise HarmonyError, which escaped the
-        # stream generator and surfaced as an opaque HTTP 500/503. Here the
-        # analysis message is terminated by <|end|> and the next turn is
-        # missing its <|start|>, so the parser sees <|message|> where it
-        # expects start token 200006.
+        # stream generator and surfaced as an opaque HTTP 500/503. Here an
+        # <|end|>-terminated analysis message is followed by <|return|>, which
+        # is not valid at that point, so the parser raises before the next
+        # turn starts.
         malformed = encode_output(
-            "<|channel|>analysis<|message|>think<|end|>"
-            "<|message|><|start|>assistant<|channel|>final<|message|>answer"
-            "<|return|>"
+            "<|channel|>analysis<|message|>think<|end|><|return|>"
+            "<|start|>assistant<|channel|>final<|message|>answer<|return|>"
         )
 
         result = harmony_parser.process_chunk(malformed)
 
-        # The bad tokens are skipped and parsing resumes, so content on both
+        # The bad token is skipped and parsing resumes, so content on both
         # sides of the malformed boundary is surfaced.
-        assert "".join(s.delta for s in result.segments if s.delta) == (
-            "thinkanswer"
-        )
+        assert "".join(s.delta for s in result.segments if s.delta) == "thinkanswer"
