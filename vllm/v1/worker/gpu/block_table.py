@@ -180,20 +180,21 @@ class BlockTables:
         self, num_reqs: int, query_len: int, context_len: int, num_kv_blocks: int
     ) -> int:
         """
-        Give each dummy request a disjoint span of KV blocks.
+        Give each dummy request its own span of KV blocks.
         Used when profiling step cost.
         """
-        for bpk, block_size in zip(self.blocks_per_kv_block, self.kernel_block_sizes):
-            capacity = (num_kv_blocks * bpk // num_reqs) * block_size
-            context_len = min(context_len, capacity - query_len)
-        context_len = max(context_len, 0)
-        for block_table, block_size in zip(
-            self.input_block_tables, self.kernel_block_sizes
+        for block_table, block_size, bpk in zip(
+            self.input_block_tables, self.kernel_block_sizes, self.blocks_per_kv_block
         ):
-            num_blocks = cdiv(context_len + query_len, block_size)
-            block_table[:num_reqs, :num_blocks] = torch.arange(
+            num_blocks = min(
+                cdiv(context_len + query_len, block_size), block_table.shape[1]
+            )
+            # Spans are disjoint until the pool runs out, then they wrap and share
+            # blocks: profiling only needs the reads to be realistic, not distinct.
+            block_ids = torch.arange(
                 num_reqs * num_blocks, dtype=block_table.dtype, device=self.device
-            ).view(num_reqs, num_blocks)
+            ) % (num_kv_blocks * bpk)
+            block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
         return context_len
 
     def compute_slot_mappings(
