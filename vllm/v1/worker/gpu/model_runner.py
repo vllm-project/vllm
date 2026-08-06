@@ -337,30 +337,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
                 if self.use_pp and not supports_aux_hidden_states_over_pp(self.model):
-                    # The drafter runs on the last PP rank but taps layers that
-                    # may live on earlier stages, so the target must forward
-                    # those tensors along with its IntermediateTensors.
                     raise ValueError(
                         f"{self.speculative_config.method} with pipeline parallel "
                         f"is not supported by {type(self.model).__name__}: it does "
                         "not forward auxiliary hidden states across pipeline stages."
-                    )
-                pp_size = self.parallel_config.pipeline_parallel_size
-                if pp_size > 2:
-                    # The aux forwarding itself is size-agnostic: every stage
-                    # derives what it owes downstream from the same rule, and
-                    # the accounting is unit-tested up to pp=8. What has not
-                    # been exercised on hardware is a *middle* stage, which
-                    # pp>2 introduces and which must both adopt upstream taps
-                    # and contribute its own to the same payload. Given that
-                    # the failure mode of this feature is silently degraded
-                    # acceptance rather than a crash, refuse rather than let it
-                    # run unvalidated. Lifting this needs an end-to-end
-                    # acceptance-rate comparison at pp>2, not just a boot test.
-                    raise NotImplementedError(
-                        f"{self.speculative_config.method} with pipeline parallel "
-                        f"is currently supported only up to pipeline_parallel_size=2, "
-                        f"got {pp_size}."
                     )
             if isinstance(self.speculator, DraftModelSpeculator):
                 self.speculator.load_model(self.model)

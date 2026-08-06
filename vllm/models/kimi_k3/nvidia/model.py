@@ -997,8 +997,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
     }
 
-    # Aux taps are carried across pipeline stages in the IntermediateTensors
-    # payload, so EAGLE3-style drafting works under PP for this model.
+    # Local aux taps are sent directly to the last PP rank for EAGLE3 drafting.
     supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1090,19 +1089,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 cdiv(self.start_layer, self.attn_res_block_size),
                 self.config.hidden_size,
             )
-        tensors = {
-            "hidden_states": torch.zeros(
-                (batch_size, self.config.hidden_size), dtype=dtype, device=device
-            ),
-            "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
-        }
-        # Recv buffers for aux taps produced by earlier stages. Must match what
-        # pack_aux_hidden_states puts on the wire, since the PP transport sizes
-        # its buffers from this.
-        self.make_empty_aux_hidden_states(
-            tensors, batch_size, self.config.hidden_size, dtype, device
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+                "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
+            }
         )
-        return IntermediateTensors(tensors)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1127,13 +1121,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             residual = intermediate_tensors["residual"]
         assert hidden_states is not None
 
+        # Remote taps arrive only on the last rank (direct-to-last).
+        remote_aux: list[torch.Tensor] = []
+        if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
+            remote_aux = self.recv_remote_aux_from_producers()
+
         aux_hidden_states: list[torch.Tensor] = []
-        if not get_pp_group().is_first_rank:
-            # A tap at exactly start_layer was computed by the previous stage
-            # and arrives with the intermediate tensors; recomputing it here
-            # would duplicate it.
-            aux_hidden_states = self.unpack_aux_hidden_states(intermediate_tensors)
-        elif self.start_layer in self.aux_hidden_state_layers:
+        if get_pp_group().is_first_rank and self.start_layer in self.aux_hidden_state_layers:
             if self.use_attn_res or residual is None:
                 aux_hidden_states.append(hidden_states)
             else:
@@ -1195,12 +1189,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            tensors = {"hidden_states": hidden_states, "residual": residual}
-            # Forward the aux taps (this stage's plus any inherited from
-            # upstream) instead of dropping them, which is what made
-            # EAGLE3-style drafting impossible under pipeline parallelism.
-            self.pack_aux_hidden_states(tensors, aux_hidden_states)
-            return IntermediateTensors(tensors)
+            self.send_local_aux_to_last(aux_hidden_states)
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
 
         if self.use_attn_res:
             assert prefix_sum is not None
@@ -1226,6 +1218,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
+        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

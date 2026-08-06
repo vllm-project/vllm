@@ -8,10 +8,15 @@ import os
 import torch
 import torch.nn as nn
 from safetensors import safe_open
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.weight_utils import (
+    download_weights_from_hf,
+    maybe_download_from_modelscope,
+)
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
@@ -28,7 +33,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
-    from vllm.model_executor.models.utils import get_draft_quant_config
 
     draft_vllm_config = replace(
         vllm_config,
@@ -46,9 +50,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             else vllm_config.cache_config
         ),
     )
-    # VllmConfig post-init restores the target's quant config because the target
-    # config is retained for DSpark's target-layer metadata, so we must override it.
-    draft_vllm_config.quant_config = get_draft_quant_config(vllm_config)
 
     with set_model_tag("dspark_head"):
         draft_model = get_model(
@@ -65,11 +66,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     target_embed = getattr(target_inner, "embed_tokens", None)
     draft_embed = getattr(draft_inner, "embed_tokens", None)
-    # Under PP the target's vocab embedding lives on the first stage, so on the
-    # last stage -- where the drafter runs -- there is only a PPMissingLayer to
-    # alias. PPMissingLayer.forward returns its input unchanged, which would
-    # feed raw int64 token ids into the draft backbone's norm. Load the real
-    # table from the target checkpoint instead.
+    # Last PP stage only has PPMissingLayer for target embed; load real weights.
     if isinstance(target_embed, PPMissingLayer):
         target_embed = _load_target_embed_tokens_for_pp(vllm_config)
     if target_embed is not None and _should_share(
@@ -92,27 +89,35 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
 
 def _load_target_embed_tokens_for_pp(vllm_config: VllmConfig) -> nn.Module:
-    """Build and load the target's vocab embedding on a non-first PP stage.
-
-    Mirrors the target's own construction (a VocabParallelEmbedding sharded over
-    the TP group) and loads the weight from the target checkpoint, which is
-    present in full on every node's model directory. Costs
-    vocab_size * hidden_size * dtype_size / tp_size bytes, e.g. 0.28 GiB per GPU
-    for a 163840 x 7168 bf16 table at TP8.
-    """
+    """Load target embed_tokens on a non-first PP stage for the DSpark drafter."""
     from vllm.model_executor.layers.vocab_parallel_embedding import (
         VocabParallelEmbedding,
     )
     from vllm.platforms import current_platform
 
     model_config = vllm_config.model_config
+    load_config = vllm_config.load_config
     text_config = model_config.hf_text_config
-    model_dir = model_config.model
 
-    # Locate the embedding tensor: prefer the shard index, else scan the shards.
+    model_name_or_path = model_config.model_weights or model_config.model
+    model_name_or_path = (
+        maybe_download_from_modelscope(model_name_or_path, model_config.revision)
+        or model_name_or_path
+    )
+    if os.path.isdir(model_name_or_path):
+        model_dir = model_name_or_path
+    else:
+        model_dir = download_weights_from_hf(
+            model_name_or_path,
+            load_config.download_dir,
+            allow_patterns=["*.safetensors"],
+            revision=model_config.revision,
+            ignore_patterns=load_config.ignore_patterns,
+        )
+
     key = None
     shard_path = None
-    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    index_path = os.path.join(model_dir, SAFE_WEIGHTS_INDEX_NAME)
     if os.path.isfile(index_path):
         with open(index_path) as f:
             weight_map = json.load(f)["weight_map"]
@@ -124,7 +129,6 @@ def _load_target_embed_tokens_for_pp(vllm_config: VllmConfig) -> nn.Module:
     else:
         for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
             with safe_open(path, framework="pt") as f:
-                # safe_open is not a dict and is not directly iterable.
                 for name in f.keys():  # noqa: SIM118
                     if name.endswith("embed_tokens.weight"):
                         key = name
@@ -138,7 +142,6 @@ def _load_target_embed_tokens_for_pp(vllm_config: VllmConfig) -> nn.Module:
             f"on the last stage, but no *embed_tokens.weight was found in "
             f"{model_dir}"
         )
-    assert shard_path is not None
 
     with torch.device(current_platform.current_device()):
         embed = VocabParallelEmbedding(

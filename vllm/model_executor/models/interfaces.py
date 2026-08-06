@@ -1432,14 +1432,10 @@ class LocalArgmaxMixin:
 class EagleModelMixin:
     aux_hidden_state_layers: tuple[int, ...] = ()
 
-    # Whether this model forwards auxiliary hidden states across pipeline
-    # stages. EAGLE3-style drafting runs on the last PP rank but taps layers
-    # that may live on earlier stages, so those tensors have to ride along with
-    # the IntermediateTensors payload. Models opt in by implementing the
-    # `aux_hidden_states_over_pp` protocol below and setting this to True.
+    # EAGLE3-style drafting runs on the last PP rank but may tap earlier
+    # stages; opted-in models send local taps directly to the last rank.
     supports_aux_hidden_states_over_pp: ClassVar[bool] = False
 
-    # Key prefix for aux tensors carried in the IntermediateTensors payload.
     AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
@@ -1457,66 +1453,79 @@ class EagleModelMixin:
             aux_hidden_states.append(value)
         return aux_hidden_states
 
-    def num_upstream_aux_hidden_states(self) -> int:
-        """How many aux tensors arrive from earlier pipeline stages.
+    @staticmethod
+    def local_aux_tap_ids(
+        start_layer: int,
+        end_layer: int,
+        aux_ids: tuple[int, ...],
+        is_first_rank: bool,
+    ) -> tuple[int, ...]:
+        """Tap ids this stage produces (not inherited from upstream)."""
+        out: list[int] = []
+        if is_first_rank and start_layer in aux_ids:
+            out.append(start_layer)
+        for layer_idx in range(start_layer, end_layer):
+            if (layer_idx + 1) in aux_ids:
+                out.append(layer_idx + 1)
+        return tuple(out)
 
-        Tap ids count *layers computed*, so a tap `a` is produced by the stage
-        whose window satisfies `start_layer < a <= end_layer`. Everything with
-        `a <= start_layer` was therefore produced upstream. Both sides derive
-        the count from the same rule, so send and recv agree with no
-        negotiation.
+    def _flush_pending_aux_send(self) -> None:
+        handles = getattr(self, "_aux_send_handles", None)
+        if handles:
+            for handle in handles:
+                handle.wait()
+        self._aux_send_handles = None
+        self._aux_send_tensors = None
+
+    def send_local_aux_to_last(self, aux_hidden_states: list[torch.Tensor]) -> None:
+        """Async-send this stage's local aux taps to the last PP rank.
+
+        Must not wait before the IntermediateTensors HS handoff: waiting on
+        last-1 would deadlock against last still blocked on the HS recv.
         """
         from vllm.distributed.parallel_state import get_pp_group
 
-        if get_pp_group().is_first_rank:
-            return 0
-        start_layer = getattr(self, "start_layer", 0)
-        return sum(1 for a in self.aux_hidden_state_layers if a <= start_layer)
+        self._flush_pending_aux_send()
+        pp = get_pp_group()
+        if pp.world_size == 1 or pp.is_last_rank or not aux_hidden_states:
+            return
+        tensor_dict = {
+            f"{self.AUX_HIDDEN_STATE_KEY}{i}": t.contiguous()
+            for i, t in enumerate(aux_hidden_states)
+        }
+        # dst is rank-in-group, not the global rank from pp.last_rank.
+        handles = pp.isend_tensor_dict(tensor_dict, dst=pp.world_size - 1)
+        self._aux_send_handles = handles
+        self._aux_send_tensors = list(tensor_dict.values())
 
-    def unpack_aux_hidden_states(
-        self, intermediate_tensors: "IntermediateTensors | None"
-    ) -> list[torch.Tensor]:
-        """Recover the aux tensors produced by earlier pipeline stages."""
-        if intermediate_tensors is None:
+    def recv_remote_aux_from_producers(self) -> list[torch.Tensor]:
+        """Last-rank recv of local taps from every earlier producer stage."""
+        from vllm.distributed.parallel_state import get_pp_group
+        from vllm.distributed.utils import get_pp_indices
+
+        pp = get_pp_group()
+        if not pp.is_last_rank or pp.world_size == 1:
             return []
-        out: list[torch.Tensor] = []
-        # IntermediateTensors has no __contains__, so consult the dict directly.
-        payload = intermediate_tensors.tensors
-        for i in range(self.num_upstream_aux_hidden_states()):
-            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
-            if key not in payload:
-                break
-            out.append(payload[key])
-        return out
-
-    def pack_aux_hidden_states(
-        self,
-        tensors: dict[str, torch.Tensor],
-        aux_hidden_states: list[torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        """Add this stage's aux tensors (its own plus inherited) to the payload."""
-        for i, aux in enumerate(aux_hidden_states):
-            tensors[f"{self.AUX_HIDDEN_STATE_KEY}{i}"] = aux
-        return tensors
-
-    def make_empty_aux_hidden_states(
-        self,
-        tensors: dict[str, torch.Tensor],
-        batch_size: int,
-        hidden_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> dict[str, torch.Tensor]:
-        """Pre-allocate recv buffers for the aux tensors arriving from upstream.
-
-        Must agree with `pack_aux_hidden_states` on the receiving stage, since
-        the PP transport sizes its buffers from this.
-        """
-        for i in range(self.num_upstream_aux_hidden_states()):
-            tensors[f"{self.AUX_HIDDEN_STATE_KEY}{i}"] = torch.zeros(
-                (batch_size, hidden_size), dtype=dtype, device=device
+        num_layers = getattr(getattr(self, "config", None), "num_hidden_layers", None)
+        if num_layers is None:
+            num_layers = getattr(self, "end_layer", None)
+        if num_layers is None:
+            raise RuntimeError(
+                "recv_remote_aux_from_producers needs config.num_hidden_layers "
+                "or end_layer on the model"
             )
-        return tensors
+        out: list[torch.Tensor] = []
+        aux_ids = tuple(self.aux_hidden_state_layers)
+        for rank in range(pp.world_size - 1):
+            start, end = get_pp_indices(num_layers, rank, pp.world_size)
+            n = len(self.local_aux_tap_ids(start, end, aux_ids, rank == 0))
+            if n == 0:
+                continue
+            payload = pp.recv_tensor_dict(src=rank)
+            assert payload is not None
+            for i in range(n):
+                out.append(payload[f"{self.AUX_HIDDEN_STATE_KEY}{i}"])
+        return out
 
 
 @runtime_checkable

@@ -1291,11 +1291,7 @@ class SpeculativeConfig:
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         draft_parallel_config = ParallelConfig(
-            # The drafter is instantiated only on the last pipeline stage and is
-            # never itself pipelined, so it must not inherit the target's PP
-            # size; doing so would require the draft architecture to implement
-            # SupportsPP. This is a no-op for previously working setups, since
-            # speculative decoding under PP > 1 was rejected outright before.
+            # Drafter runs on the last PP stage only; do not inherit target PP.
             pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
