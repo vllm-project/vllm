@@ -10,7 +10,6 @@ CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
 DEFAULT_ROCM_BASE_METADATA_VERSION="2"
 DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE}"
-DEFAULT_ROCM_BASE_CONTENT_ARGS="BASE_IMAGE TRITON_BRANCH TRITON_REPO PYTORCH_BRANCH PYTORCH_REPO PYTORCH_VISION_BRANCH PYTORCH_VISION_REPO PYTORCH_AUDIO_BRANCH PYTORCH_AUDIO_REPO FA_BRANCH FA_REPO AITER_BRANCH AITER_REPO MORI_BRANCH MORI_REPO PYTORCH_ROCM_ARCH PYTHON_VERSION USE_SCCACHE SCCACHE_DOWNLOAD_URL SCCACHE_ENDPOINT SCCACHE_BUCKET_NAME SCCACHE_REGION_NAME SCCACHE_S3_NO_CREDENTIALS"
 
 ROCM_BASE_LAYER_CACHE_REF=""
 ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"
@@ -265,45 +264,6 @@ find_matching_base_content_ref() {
     return 1
 }
 
-resolve_rocm_base_arg_value() {
-    local arg_name="$1"
-    local use_sccache="$2"
-
-    case "${arg_name}" in
-        USE_SCCACHE)
-            printf '%s\n' "${use_sccache}"
-            ;;
-        SCCACHE_DOWNLOAD_URL|SCCACHE_ENDPOINT|SCCACHE_BUCKET_NAME|SCCACHE_REGION_NAME|SCCACHE_S3_NO_CREDENTIALS)
-            if [[ -n "${!arg_name:-}" ]]; then
-                printf '%s\n' "${!arg_name}"
-            else
-                extract_arg_default "${arg_name}"
-            fi
-            ;;
-        *)
-            extract_arg_default "${arg_name}"
-            ;;
-    esac
-}
-
-hash_rocm_base_arg_values() {
-    local use_sccache="$1"
-    local base_image_digest="$2"
-    local arg_name=""
-    local arg_value=""
-    shift 2 || true
-
-    for arg_name in "$@"; do
-        [[ -n "${arg_name}" ]] || continue
-        arg_value=$(resolve_rocm_base_arg_value "${arg_name}" "${use_sccache}")
-        if [[ "${arg_name}" == "BASE_IMAGE" && -n "${arg_value}" ]]; then
-            printf 'arg:%s.digest=%s\n' "${arg_name}" "${base_image_digest:-unknown}"
-        else
-            printf 'arg:%s=%s\n' "${arg_name}" "${arg_value:-<empty>}"
-        fi
-    done
-}
-
 rocm_version_from_base_image() {
     local base_image="$1"
     local version=""
@@ -373,19 +333,34 @@ compute_base_content_hash() {
     local use_sccache="$1"
     local base_image_digest="$2"
     local content_files="${ROCM_BASE_CONTENT_FILES:-${DEFAULT_ROCM_BASE_CONTENT_FILES}}"
-    local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
+    local sccache_arg=""
+    local sccache_value=""
     local -a content_paths=()
-    local -a content_arg_names=()
 
     read -r -a content_paths <<< "${content_files}"
-    read -r -a content_arg_names <<< "${content_args}"
 
     {
         printf 'content-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
         printf 'dockerfile:%s\n' "${DOCKERFILE}"
-        printf 'resolved-build-args:\n'
-        hash_rocm_base_arg_values \
-            "${use_sccache}" "${base_image_digest}" "${content_arg_names[@]}"
+        printf 'base-image-digest:%s\n' "${base_image_digest}"
+        printf 'use-sccache:%s\n' "${use_sccache}"
+        if [[ "${use_sccache}" == "1" ]]; then
+            # These values can change the installed binary or final image
+            # configuration. SCCACHE_ENDPOINT is transport-only and therefore
+            # deliberately excluded from image identity.
+            for sccache_arg in \
+                SCCACHE_DOWNLOAD_URL \
+                SCCACHE_BUCKET_NAME \
+                SCCACHE_REGION_NAME \
+                SCCACHE_S3_NO_CREDENTIALS; do
+                sccache_value="${!sccache_arg:-}"
+                if [[ -z "${sccache_value}" ]]; then
+                    sccache_value=$(extract_arg_default "${sccache_arg}")
+                fi
+                printf 'arg:%s=%s\n' \
+                    "${sccache_arg}" "${sccache_value:-<empty>}"
+            done
+        fi
     } | sha256sum | cut -d' ' -f1
 }
 
@@ -429,6 +404,10 @@ build_base_image() {
         echo "Invalid ROCm base metadata version: ${metadata_version}" >&2
         return 1
     fi
+    if [[ "${use_sccache}" != "0" && "${use_sccache}" != "1" ]]; then
+        echo "ROCm base USE_SCCACHE must be 0 or 1: ${use_sccache}" >&2
+        return 1
+    fi
 
     base_image_arg="$(extract_arg_default BASE_IMAGE)"
     if ! base_image_digest=$(resolve_image_digest "${base_image_arg}"); then
@@ -463,16 +442,18 @@ build_base_image() {
 
     configure_rocm_base_layer_cache
 
-    for env_name in \
-        SCCACHE_DOWNLOAD_URL \
-        SCCACHE_ENDPOINT \
-        SCCACHE_BUCKET_NAME \
-        SCCACHE_REGION_NAME \
-        SCCACHE_S3_NO_CREDENTIALS; do
-        if [[ -n "${!env_name:-}" ]]; then
-            sccache_args+=(--build-arg "${env_name}=${!env_name}")
-        fi
-    done
+    if [[ "${use_sccache}" == "1" ]]; then
+        for env_name in \
+            SCCACHE_DOWNLOAD_URL \
+            SCCACHE_ENDPOINT \
+            SCCACHE_BUCKET_NAME \
+            SCCACHE_REGION_NAME \
+            SCCACHE_S3_NO_CREDENTIALS; do
+            if [[ -n "${!env_name:-}" ]]; then
+                sccache_args+=(--build-arg "${env_name}=${!env_name}")
+            fi
+        done
+    fi
 
     echo "--- :docker: Preparing ROCm base image"
     echo "Dockerfile: ${DOCKERFILE}"

@@ -338,26 +338,21 @@ group "test-rocm-ci-with-artifacts" {
   targets = ["rust-rocm-ci", "csrc-rocm-ci", "export-wheel-rocm"]
 }
 
-# Full test image + wheel export. Kept for fallback/debugging when a pushed
-# per-commit image is useful.
+# Full test image + wheel export. Kept for fallback/debugging when a pushed,
+# build-scoped image is useful.
 group "test-rocm-ci-with-wheel" {
   targets = ["rust-rocm-ci", "csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
 }
 
-# Image tags for the ci_base build. ci-bake-rocm.sh publishes a versioned,
-# content-scoped primary tag plus a unique build-scoped runtime alias. A trusted
-# current-main build separately promotes the stable runtime tag.
+# Primary output tag for the ci_base build. In Buildkite this is a unique,
+# build-scoped tag; ci-bake-rocm.sh validates it before creating content and
+# stable aliases.
 variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
 }
 
-# Unique runtime handoff consumed by native jobs in the same Buildkite build.
-variable "CI_BASE_IMAGE_TAG_BUILD_EXTRA" {
-  default = ""
-}
-
-# Versioned, content-addressed trusted ref. PR builds import it read-only and
-# publish their output to a separately scoped CI_BASE_IMAGE_TAG.
+# Versioned, content-addressed trusted ref. Preview builds import it read-only;
+# the wrapper creates their source-scoped content alias after validation.
 variable "CI_BASE_TRUSTED_CONTENT_REF" {
   default = ""
 }
@@ -412,10 +407,7 @@ target "ci-base-rocm-ci" {
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags = compact([
-    CI_BASE_IMAGE_TAG,
-    CI_BASE_IMAGE_TAG_BUILD_EXTRA,
-  ])
+  tags     = compact([CI_BASE_IMAGE_TAG])
   attest   = ["type=provenance,disabled=true"]
   output   = ["type=registry"]
 }

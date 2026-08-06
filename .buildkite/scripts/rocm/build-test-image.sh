@@ -29,7 +29,7 @@ load_digest_handoff() {
     fi
 
     printf -v "${env_name}" '%s' "${image_ref}"
-    export "${env_name}"
+    export "${env_name?}"
     echo "Using ${description}: ${image_ref}"
 }
 
@@ -52,12 +52,12 @@ main() {
     fi
 
     if ! load_digest_handoff \
-        rocm-ci-base-parent-image BASE_IMAGE "ROCm ci_base parent handoff"; then
+        rocm-base-image BASE_IMAGE "ROCm base handoff"; then
         if [[ "${BUILDKITE:-false}" == "true" ]]; then
-            echo "Required ROCm ci_base parent handoff metadata is missing or invalid" >&2
+            echo "Required ROCm base handoff metadata is missing or invalid" >&2
             return 1
         fi
-        echo "No ROCm ci_base parent handoff metadata found; using the local default"
+        echo "No ROCm base handoff metadata found; using the local default"
     fi
 
     if [[ "$(metadata_get rocm-base-refresh)" == "1" ]]; then

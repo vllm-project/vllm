@@ -3,7 +3,7 @@
 #
 # The wrapper keeps three build concerns separate:
 #   * ci_base builds are content-addressed by vllm.ci_base.content_hash.
-#   * test image builds are commit-addressed by org.opencontainers.image.revision.
+#   * test image contents record the commit while runtime tags stay build-scoped.
 #   * ROCm install artifacts are uploaded only for targets that export wheels.
 #
 # Usage:
@@ -19,9 +19,15 @@ DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirement
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
 DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="3"
+# ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
+# local-source stages rather than unreachable remote-fetch alternatives.
 DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
-DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm_1 fetch_vllm build_vllm_dependencies csrc-build"
+DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies csrc-build"
 DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py tools/install_protoc.sh build_rust.sh"
+DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
+# Docker's 128-character tag limit minus the longest cache prefix
+# ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
+ROCM_CACHE_BRANCH_TAG_MAX_LEN=111
 CI_BASE_WRITE_SCOPE=""
 
 TARGET=""
@@ -89,7 +95,7 @@ compose_cache_branch_tag() {
     local suffix=""
     local prefix=""
     local max_prefix_len=0
-    local max_tag_len=60
+    local max_tag_len="${ROCM_CACHE_BRANCH_TAG_MAX_LEN}"
 
     suffix="$(cache_scope_suffix)"
     prefix="$(clean_docker_tag "${repo_slug}")-$(clean_docker_tag "${branch}")"
@@ -143,10 +149,14 @@ is_trusted_ci_cache_writer() {
 }
 
 ci_base_write_scope() {
+    local identity=""
+    local source_repo="${BUILDKITE_PULL_REQUEST_REPO:-${BUILDKITE_REPO:-local}}"
+
     if is_trusted_ci_cache_writer; then
         return 0
     fi
-    printf 'preview\n'
+    identity=$(printf '%s\n' "${source_repo}" | sha256sum | cut -c1-12)
+    printf 'preview-%s\n' "${identity}"
 }
 
 configure_ci_base_write_scope() {
@@ -155,7 +165,7 @@ configure_ci_base_write_scope() {
     scope=$(ci_base_write_scope)
     if [[ -n "${scope}" ]]; then
         CI_BASE_WRITE_SCOPE=$(clean_docker_tag "${scope}")
-        echo "Non-canonical ci_base writes use shared content scope: ${CI_BASE_WRITE_SCOPE}"
+        echo "Non-canonical cache writes use source scope: ${CI_BASE_WRITE_SCOPE}"
     else
         CI_BASE_WRITE_SCOPE=""
         echo "Trusted main build: publishing canonical ci_base refs"
@@ -196,6 +206,13 @@ hash_string_short() {
     printf '%s' "$1" | sha256sum | cut -c1-16
 }
 
+list_content_files() {
+    # Hash the checkout inputs Docker can intentionally consume, not ignored
+    # compiler/test debris left behind on a reused worker.
+    git ls-files -z --cached --others --exclude-standard -- "$1" \
+        | LC_ALL=C sort -z
+}
+
 hash_content_file() {
     local file="$1"
 
@@ -203,27 +220,84 @@ hash_content_file() {
         printf 'symlink:%s\ntarget:%s\n' "${file}" "$(readlink "${file}")"
         return
     fi
+    if [[ ! -f "${file}" ]]; then
+        printf 'missing:%s\n' "${file}"
+        return
+    fi
     printf 'file:%s\nmode:%s\n' "${file}" "$(stat -c '%a' "${file}")"
     sha256sum "${file}"
 }
 
+hash_content_directory() {
+    if ! list_content_files "$1" | while IFS= read -r -d '' file; do
+        hash_content_file "${file}" || exit $?
+    done; then
+        echo "Failed to hash content under $1" >&2
+        return 1
+    fi
+}
+
 compute_content_hash() {
     local path=""
-    local file=""
 
     for path in "$@"; do
         if [[ -L "${path}" || -f "${path}" ]]; then
             hash_content_file "${path}" || return $?
         elif [[ -d "${path}" ]]; then
-            while IFS= read -r -d '' file; do
-                hash_content_file "${file}" || return $?
-            done < <(
-                find "${path}" \( -type f -o -type l \) -print0 | LC_ALL=C sort -z
-            )
+            hash_content_directory "${path}" || return $?
         else
             printf 'missing:%s\n' "${path}"
         fi
     done | sha256sum | cut -d' ' -f1
+}
+
+normalize_ci_worktree_modes() {
+    local entry=""
+    local metadata=""
+    local mode=""
+    local stage=""
+    local path=""
+    local index_modes_file="${SCRIPT_TMP_DIR}/git-index-modes"
+    local -a regular_files=()
+    local -a executable_files=()
+
+    [[ "${BUILDKITE:-false}" == "true" ]] || return 0
+    [[ "${REMOTE_VLLM:-0}" == "0" ]] || return 0
+    if ! git ls-files --stage -z > "${index_modes_file}"; then
+        echo "Failed to read Git modes for the CI Docker context" >&2
+        return 1
+    fi
+
+    # Some shared workspaces expose 0644/0755 files as 0664/0775. Restore the
+    # index modes so both the identity hash and Docker context are canonical.
+    while IFS= read -r -d '' entry; do
+        metadata="${entry%%$'\t'*}"
+        mode="${metadata%% *}"
+        stage="${metadata##* }"
+        path="${entry#*$'\t'}"
+        if [[ "${stage}" != "0" ]]; then
+            echo "Unmerged Git entry cannot be used as Docker context: ${path}" >&2
+            return 1
+        fi
+        case "${mode}" in
+            100644)
+                regular_files+=("${path}")
+                ;;
+            100755)
+                executable_files+=("${path}")
+                ;;
+            120000|160000)
+                ;;
+            *)
+                echo "Unsupported Git mode ${mode} for ${path}" >&2
+                return 1
+                ;;
+        esac
+    done < "${index_modes_file}"
+
+    ((${#regular_files[@]} == 0)) || chmod 0644 -- "${regular_files[@]}"
+    ((${#executable_files[@]} == 0)) || chmod 0755 -- "${executable_files[@]}"
+    echo "Normalized Git file modes for the CI Docker context"
 }
 
 compose_dependency_cache_key() {
@@ -247,7 +321,7 @@ hash_dockerfile_stages() {
                     wanted[stage_list[idx]] = 1
                 }
             }
-            emit = 1
+            emit = 0
         }
         $1 == "FROM" {
             stage = ""
@@ -495,24 +569,6 @@ pin_base_image() {
     echo "Pinned base image for this build: ${BASE_IMAGE}"
 }
 
-publish_ci_base_parent_ref() {
-    [[ -n "${BASE_IMAGE:-}" ]] || {
-        echo "Cannot publish ci_base parent handoff without a pinned BASE_IMAGE" >&2
-        return 1
-    }
-
-    if command -v buildkite-agent >/dev/null 2>&1; then
-        if ! buildkite-agent meta-data set "rocm-ci-base-parent-image" "${BASE_IMAGE}"; then
-            echo "Could not publish required ci_base parent-image metadata" >&2
-            return 1
-        fi
-    elif [[ "${BUILDKITE:-false}" == "true" ]]; then
-        echo "buildkite-agent not found; cannot publish ci_base parent-image metadata" >&2
-        return 1
-    fi
-    echo "Published pinned ci_base parent image: ${BASE_IMAGE}"
-}
-
 is_ci_base_target() {
     [[ "${TARGET}" == *"ci-base-rocm"* ]]
 }
@@ -528,16 +584,6 @@ should_upload_wheel_artifacts() {
     [[ "${TARGET}" == *"with-wheel"* \
         || "${TARGET}" == *"export-wheel"* \
         || "${TARGET}" == *"artifact"* ]]
-}
-
-set_buildkite_metadata() {
-    local key="$1"
-    local value="$2"
-
-    [[ -n "${value}" ]] || return 0
-    if command -v buildkite-agent >/dev/null 2>&1; then
-        buildkite-agent meta-data set "${key}" "${value}" || true
-    fi
 }
 
 get_remote_image_label() {
@@ -706,7 +752,7 @@ print_header() {
     if is_ci_base_target; then
         echo "Build mode: ci_base"
     elif is_commit_image_target; then
-        echo "Build mode: commit image"
+        echo "Build mode: build-scoped commit image"
     else
         echo "Build mode: generic"
     fi
@@ -753,7 +799,6 @@ compute_ci_base_hash_if_needed() {
     if ! is_ci_base_target; then
         return 0
     fi
-    publish_ci_base_parent_ref
     if [[ "${REMOTE_VLLM:-0}" != "0" ]]; then
         echo "Error: content-addressed ci_base builds require REMOTE_VLLM=0" >&2
         return 1
@@ -821,6 +866,7 @@ configure_ci_base_image_refs() {
     local trusted_content_tag=""
     local content_tag=""
     local build_tag=""
+    local primary_tag=""
 
     if [[ ! "${metadata_version}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,15}$ ]]; then
         echo "Invalid ci_base metadata version: ${metadata_version}" >&2
@@ -864,27 +910,22 @@ configure_ci_base_image_refs() {
     fi
     CI_BASE_IMAGE_TAG_CONTENT_REF="${content_tag}"
     CI_BASE_TRUSTED_CONTENT_REF="${trusted_content_tag}"
+    primary_tag="${build_tag:-${content_tag}}"
 
     # Main writes canonical content refs. Other builds import those refs
-    # read-only and publish into the shared exact-content preview namespace.
-    # Runtime aliases are outputs only and never participate in discovery.
-    # The stable alias is promoted after the build, with a fresh main-tip check.
+    # read-only and publish into a source-scoped preview namespace.
+    # A fresh CI build first publishes its unique runtime tag. Content and
+    # stable aliases are created only after that image passes identity checks.
     CI_BASE_STABLE_PROMOTION_REF="${stable_tag}"
-    CI_BASE_IMAGE_TAG="${content_tag}"
-    if [[ -n "${build_tag}" && "${build_tag}" != "${content_tag}" ]]; then
-        CI_BASE_IMAGE_TAG_BUILD_EXTRA="${build_tag}"
-    else
-        CI_BASE_IMAGE_TAG_BUILD_EXTRA=""
-    fi
+    CI_BASE_IMAGE_TAG="${primary_tag}"
     export CI_BASE_IMAGE_TAG
-    export CI_BASE_IMAGE_TAG_BUILD_EXTRA
     export CI_BASE_IMAGE_TAG_CONTENT_REF
     export CI_BASE_TRUSTED_CONTENT_REF
     export CI_BASE_STABLE_PROMOTION_REF
 
     if is_ci_base_target; then
-        IMAGE_TAG="${content_tag}"
-        CI_BASE_IMAGE="${content_tag}"
+        IMAGE_TAG="${primary_tag}"
+        CI_BASE_IMAGE="${primary_tag}"
         export CI_BASE_IMAGE
         export IMAGE_TAG
 
@@ -899,8 +940,6 @@ configure_ci_base_image_refs() {
             echo "ci_base stable alias will not be pushed for this build"
             echo "Set NIGHTLY=1 on ${CI_BASE_STABLE_BRANCH:-main} to refresh ${stable_tag}"
         fi
-        set_buildkite_metadata "rocm-ci-base-image-content" "${content_tag}"
-        set_buildkite_metadata "rocm-ci-base-image-build" "${build_tag}"
         return 0
     fi
 
@@ -948,9 +987,8 @@ publish_ci_base_handoff_ref() {
 
 ci_base_output_refs() {
     printf '%s\n' \
-        "${IMAGE_TAG:-}" \
-        "${CI_BASE_IMAGE_TAG:-}" \
-        "${CI_BASE_IMAGE_TAG_BUILD_EXTRA:-}" \
+        "${CI_BASE_IMAGE_TAG_CONTENT_REF:-}" \
+        "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" \
         | awk 'NF && !seen[$0]++'
 }
 
@@ -1055,7 +1093,6 @@ promote_stable_ci_base_tag() {
         echo "Promoted ci_base stable tag did not become visible: ${stable_ref}" >&2
         return 1
     fi
-    set_buildkite_metadata "rocm-ci-base-image-stable" "${stable_ref}"
 }
 
 maybe_reuse_matching_ci_base_ref() {
@@ -1211,8 +1248,9 @@ validate_cache_branch_tag() {
     local value="$2"
 
     if [[ -n "${value}" \
-        && ! "${value}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,59}$ ]]; then
-        echo "Invalid ${name}; expected a Docker tag component of at most 60 characters" >&2
+        && (! "${value}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ \
+            || ${#value} -gt ${ROCM_CACHE_BRANCH_TAG_MAX_LEN}) ]]; then
+        echo "Invalid ${name}; expected a Docker tag component of at most ${ROCM_CACHE_BRANCH_TAG_MAX_LEN} characters" >&2
         return 1
     fi
 }
@@ -1496,14 +1534,20 @@ compute_rocm_csrc_content_hash() {
 
 compute_rocm_csrc_content_hash_if_needed() {
     local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+    local write_scope="${CI_BASE_WRITE_SCOPE:-}"
 
     if [[ "${ROCM_CSRC_CONTENT_CACHE:-1}" == "0" ]] || ! uses_rocm_csrc_cache; then
         return 0
     fi
 
     ROCM_CSRC_CONTENT_HASH=$(compute_rocm_csrc_content_hash)
-    ROCM_CSRC_CONTENT_CACHE_REF="${cache_repo}:csrc-rocm-input-${ROCM_CSRC_CONTENT_HASH}"
+    ROCM_CSRC_TRUSTED_CONTENT_CACHE_REF="${cache_repo}:csrc-rocm-input-${ROCM_CSRC_CONTENT_HASH}"
+    ROCM_CSRC_CONTENT_CACHE_REF="${ROCM_CSRC_TRUSTED_CONTENT_CACHE_REF}"
+    if [[ -n "${write_scope}" ]]; then
+        ROCM_CSRC_CONTENT_CACHE_REF="${ROCM_CSRC_CONTENT_CACHE_REF}-${write_scope}"
+    fi
     export ROCM_CSRC_CONTENT_HASH
+    export ROCM_CSRC_TRUSTED_CONTENT_CACHE_REF
     export ROCM_CSRC_CONTENT_CACHE_REF
     echo "ROCm csrc content cache ref: ${ROCM_CSRC_CONTENT_CACHE_REF}"
 }
@@ -1512,27 +1556,17 @@ compute_rocm_rust_content_hash() {
     local bake_dir=""
     local dockerfile_rocm=""
     local content_files="${ROCM_RUST_CONTENT_FILES:-${DEFAULT_ROCM_RUST_CONTENT_FILES}}"
-    local stages="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build"
-    local remote_vllm=""
+    local stages="${ROCM_RUST_DOCKERFILE_STAGES:-${DEFAULT_ROCM_RUST_DOCKERFILE_STAGES}}"
     local -a content_paths=()
     local -a content_args=()
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
     read -r -a content_paths <<< "${content_files}"
-    remote_vllm=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" REMOTE_VLLM)
-    if [[ "${remote_vllm}" == "0" ]]; then
-        mapfile -t content_args < <(
-            get_content_arg_names \
-                "${dockerfile_rocm}" "${stages}" "${ROCM_RUST_CONTENT_ARGS:-}" \
-                | grep -Ev '^(VLLM_REPO|VLLM_BRANCH)$'
-        )
-    else
-        mapfile -t content_args < <(
-            get_content_arg_names \
-                "${dockerfile_rocm}" "${stages}" "${ROCM_RUST_CONTENT_ARGS:-}"
-        )
-    fi
+    mapfile -t content_args < <(
+        get_content_arg_names \
+            "${dockerfile_rocm}" "${stages}" "${ROCM_RUST_CONTENT_ARGS:-}"
+    )
 
     {
         printf 'rust-input-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
@@ -1550,14 +1584,20 @@ compute_rocm_rust_content_hash() {
 
 compute_rocm_rust_content_hash_if_needed() {
     local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+    local write_scope="${CI_BASE_WRITE_SCOPE:-}"
 
     if [[ "${ROCM_RUST_CONTENT_CACHE:-1}" == "0" ]] || ! uses_rocm_rust_cache; then
         return 0
     fi
 
     ROCM_RUST_CONTENT_HASH=$(compute_rocm_rust_content_hash)
-    ROCM_RUST_CONTENT_CACHE_REF="${cache_repo}:rust-rocm-input-${ROCM_RUST_CONTENT_HASH}"
+    ROCM_RUST_TRUSTED_CONTENT_CACHE_REF="${cache_repo}:rust-rocm-input-${ROCM_RUST_CONTENT_HASH}"
+    ROCM_RUST_CONTENT_CACHE_REF="${ROCM_RUST_TRUSTED_CONTENT_CACHE_REF}"
+    if [[ -n "${write_scope}" ]]; then
+        ROCM_RUST_CONTENT_CACHE_REF="${ROCM_RUST_CONTENT_CACHE_REF}-${write_scope}"
+    fi
     export ROCM_RUST_CONTENT_HASH
+    export ROCM_RUST_TRUSTED_CONTENT_CACHE_REF
     export ROCM_RUST_CONTENT_CACHE_REF
     echo "ROCm Rust content cache ref: ${ROCM_RUST_CONTENT_CACHE_REF}"
 }
@@ -1622,7 +1662,10 @@ write_rocm_build_arg_override() {
                 "${dockerfile_rocm}" \
                 "${ROCM_CSRC_DOCKERFILE_STAGES:-${DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES}}" \
                 "${ROCM_CSRC_CONTENT_ARGS:-}"
-            get_content_arg_names "${dockerfile_rocm}" "base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
+            get_content_arg_names \
+                "${dockerfile_rocm}" \
+                "${ROCM_RUST_DOCKERFILE_STAGES:-${DEFAULT_ROCM_RUST_DOCKERFILE_STAGES}}" \
+                "${ROCM_RUST_CONTENT_ARGS:-}"
         } | awk 'NF && !seen[$0]++'
     )
 
@@ -1688,6 +1731,7 @@ validate_content_cache_export_mode() {
 should_export_content_cache_ref() {
     local cache_ref="$1"
     local cache_name="$2"
+    local trusted_ref="${3:-${cache_ref}}"
     local mode="${ROCM_CONTENT_CACHE_EXPORT_MODE:-missing}"
 
     case "${mode}" in
@@ -1700,8 +1744,13 @@ should_export_content_cache_ref() {
             return 1
             ;;
         missing|"")
-            if docker buildx imagetools inspect "${cache_ref}" >/dev/null 2>&1; then
-                echo "${cache_name} content cache exists; not re-exporting ${cache_ref}"
+            if remote_image_exists "${trusted_ref}"; then
+                echo "${cache_name} trusted content cache exists; not exporting ${cache_ref}"
+                return 1
+            fi
+            if [[ "${cache_ref}" != "${trusted_ref}" ]] \
+                && remote_image_exists "${cache_ref}"; then
+                echo "${cache_name} scoped content cache exists; not re-exporting ${cache_ref}"
                 return 1
             fi
             echo "${cache_name} content cache missing; will export ${cache_ref}"
@@ -1746,8 +1795,18 @@ write_rocm_cache_override() {
     echo "ROCm final image cache export mode: ${rocm_cache_to_mode}"
 
     if [[ -n "${ROCM_CSRC_CONTENT_CACHE_REF:-}" ]]; then
-        csrc_content_cache_from+=("type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}")
-        if should_export_content_cache_ref "${ROCM_CSRC_CONTENT_CACHE_REF}" "ROCm csrc"; then
+        csrc_content_cache_from+=(
+            "type=registry,ref=${ROCM_CSRC_TRUSTED_CONTENT_CACHE_REF}"
+        )
+        if [[ "${ROCM_CSRC_CONTENT_CACHE_REF}" != \
+            "${ROCM_CSRC_TRUSTED_CONTENT_CACHE_REF}" ]]; then
+            csrc_content_cache_from+=(
+                "type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}"
+            )
+        fi
+        if should_export_content_cache_ref \
+            "${ROCM_CSRC_CONTENT_CACHE_REF}" "ROCm csrc" \
+            "${ROCM_CSRC_TRUSTED_CONTENT_CACHE_REF}"; then
             csrc_cache_to+=(
                 "type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF},mode=${csrc_cache_to_mode},ignore-error=true"
             )
@@ -1757,8 +1816,18 @@ write_rocm_cache_override() {
     fi
 
     if [[ -n "${ROCM_RUST_CONTENT_CACHE_REF:-}" ]]; then
-        rust_content_cache_from+=("type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF}")
-        if should_export_content_cache_ref "${ROCM_RUST_CONTENT_CACHE_REF}" "ROCm Rust"; then
+        rust_content_cache_from+=(
+            "type=registry,ref=${ROCM_RUST_TRUSTED_CONTENT_CACHE_REF}"
+        )
+        if [[ "${ROCM_RUST_CONTENT_CACHE_REF}" != \
+            "${ROCM_RUST_TRUSTED_CONTENT_CACHE_REF}" ]]; then
+            rust_content_cache_from+=(
+                "type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF}"
+            )
+        fi
+        if should_export_content_cache_ref \
+            "${ROCM_RUST_CONTENT_CACHE_REF}" "ROCm Rust" \
+            "${ROCM_RUST_TRUSTED_CONTENT_CACHE_REF}"; then
             rust_cache_to+=(
                 "type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF},mode=${rust_cache_to_mode},ignore-error=true"
             )
@@ -2186,6 +2255,10 @@ run_bake() {
         "${BAKE_TARGETS[@]}"
 
     if is_ci_base_target; then
+        if ! confirm_remote_image_push "${confirmation_ref}"; then
+            echo "Fresh ci_base image failed identity validation: ${confirmation_ref}" >&2
+            return 1
+        fi
         refresh_ci_base_tags_from_ref "${confirmation_ref}"
     fi
     echo "--- :white_check_mark: Build complete"
@@ -2285,6 +2358,7 @@ main() {
     configure_ci_base_write_scope
     print_header
     validate_inputs
+    normalize_ci_worktree_modes
     load_ci_hcl
     init_bake_files
     compute_ci_base_hash_if_needed

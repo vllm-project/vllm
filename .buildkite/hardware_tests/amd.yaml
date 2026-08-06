@@ -3,7 +3,7 @@ group: Hardware - AMD Build
 # ROCm image flow:
 # 1. Select the content-matching ROCm base, building only on a cache miss.
 # 2. Build ci_base from either the stable base or the newly selected base.
-# 3. Build the per-commit ROCm CI image and smoke-test it before GPU jobs run.
+# 3. Build the build-scoped ROCm CI image and smoke-test it before GPU jobs run.
 steps:
   - label: "AMD: :docker: refresh ROCm base"
     key: refresh-rocm-base-amd
@@ -21,8 +21,6 @@ steps:
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
-          limit: 1
-        - exit_status: 2  # Transient git/registry identity failure
           limit: 1
         - exit_status: -1  # Agent was lost
           limit: 1
@@ -72,8 +70,6 @@ steps:
     commands:
       - bash .buildkite/scripts/rocm/build-test-image.sh
       - bash .buildkite/scripts/rocm/smoke-test-image.sh
-    concurrency: 1
-    concurrency_group: "vllm/rocm/image-build/$BUILDKITE_COMMIT"
     env:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
