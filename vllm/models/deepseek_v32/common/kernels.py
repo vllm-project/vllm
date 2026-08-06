@@ -150,9 +150,13 @@ def _fused_norm_rope_kernel(
     TOPK_BLOCK_SIZE: tl.constexpr,
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
+    USE_PDL: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
     if pid == 3:
         if not HAS_INDEXER:
             # Shared layer: reuse the previous indexer layer's top-k; do not
@@ -474,6 +478,7 @@ def fused_norm_rope(
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
+    use_pdl = current_platform.is_arch_support_pdl()
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
         # Q RMS norm
@@ -532,6 +537,8 @@ def fused_norm_rope(
         TOPK_BLOCK_SIZE=1024,
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
+        USE_PDL=use_pdl,
+        launch_pdl=use_pdl,
     )
     return q_c_out
 
@@ -585,10 +592,14 @@ def _fused_q_kernel(
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     QUANTIZE_MQA: tl.constexpr,
+    USE_PDL: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
     head_idx = tl.program_id(2)
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
 
     if pid == 2:
         # ql_nope quantize + pack into the front of mqa_q_fp8. On the bf16
@@ -857,6 +868,7 @@ def fused_q(
         )
         return index_q_fp8, index_weights_out, mqa_q
 
+    use_pdl = current_platform.is_arch_support_pdl()
     _fused_q_kernel[(3, num_tokens, grid_heads)](
         positions,
         q_pe,
@@ -898,6 +910,8 @@ def fused_q(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
+        USE_PDL=use_pdl,
+        launch_pdl=use_pdl,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
