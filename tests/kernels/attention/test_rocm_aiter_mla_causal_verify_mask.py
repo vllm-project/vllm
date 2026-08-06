@@ -1,21 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression test for causal masking in the AITER MLA verify flatten.
+"""Regression test for native causal AITER MLA verification.
 
-When ``num_heads < 16`` the ROCm AITER MLA backend cannot use the ASM decode
-kernel for a multi-token block, so ``AiterMLAImpl.forward_mqa`` flattens a
-``1 + num_speculative_tokens`` verify block into that many single-token Gluon
-decodes. Every resulting row used to be handed its request's entire paged-KV
-range. ``paged_kv_indptr`` is the cumulative sum of ``seq_lens``, which counts
-the tokens scheduled in the current step, so that range already spans the
-verify block: each verify position could attend to the draft tokens after it,
-which are the tokens it is supposed to be checking. Nothing crashes and nothing
-warns, so the only way to catch it is to look at the KV window per row.
-
-The test drives the real builder and the real ``forward_mqa`` over a
-multi-token decode batch, intercepts the ``(page_table, seq_info)`` actually
-handed to the Gluon kernel, and pins verify row ``t`` of request ``r`` to the
-``context_r + t + 1`` entries of that request's ascending slice.
+Gluon accepts a uniform multi-token query as ``[batch, qlen, heads, dim]`` and
+applies the causal tail internally. Keep the query dimension intact and pass
+the builder's per-request KV metadata through unchanged; flattening the query
+to independent decode rows loses those causal semantics.
 """
 
 import types
@@ -32,18 +22,15 @@ def _on_rocm_with_aiter() -> bool:
     return current_platform.is_rocm() and is_aiter_found()
 
 
-# Unlike the fp8 persistent-decode metadata this file's neighbour guards, the
-# verify flatten is not gfx950-only: it is selected by head count alone and is
-# reached on any ROCm AITER MLA deployment with fewer than 16 heads per rank.
-# The Gluon kernel is replaced by a spy here, so nothing below needs it to be
-# runnable either.
+# This path is selected by head count rather than architecture. The Gluon
+# kernel is replaced by a spy, so the test only requires AITER to construct the
+# real backend and metadata.
 pytestmark = pytest.mark.skipif(
     not _on_rocm_with_aiter(),
-    reason="ROCM_AITER_MLA verify flatten requires ROCm and AITER",
+    reason="ROCM_AITER_MLA native verification requires ROCm and AITER",
 )
 
-# Below the 16-head threshold that selects the flatten. DeepSeek-V3 / R1 at
-# TP=16 and Kimi-K3 at TP=8 both land here.
+# Below the 16-head threshold that selects Gluon. Kimi-K3 TP8 lands here.
 NUM_QUERY_HEADS = 12
 KV_LORA_RANK = 512
 QK_NOPE_HEAD_DIM = 128
@@ -53,14 +40,12 @@ HEAD_SIZE = KV_LORA_RANK + QK_ROPE_HEAD_DIM
 
 # 1 + num_speculative_tokens, i.e. the verify block length.
 QLEN = 8
-# Committed context per request, including a fresh request at zero context
-# where the whole KV range is the verify block itself.
+# Committed context per request, including a fresh request at zero context.
 CONTEXT_LENS = [0, 1, 37, 512]
-# A cudagraph padding request: seq_len 0, so every one of its rows must clamp
-# to an empty window.
+# Include one cudagraph padding request.
 PADDING_ROWS = 1
 
-# The Gluon path flattens the KV cache to one page per token.
+# Gluon uses one cache page per token.
 PAGE_SIZE = 1
 MAX_MODEL_LEN = 1024
 MAX_NUM_SEQS = 8
@@ -70,16 +55,10 @@ def _seq_lens() -> list[int]:
     return [c + QLEN for c in CONTEXT_LENS] + [0] * PADDING_ROWS
 
 
-def _expected_row_lens() -> list[int]:
-    """Causal row lengths: row r*QLEN + t sees seq_len_r - (QLEN - 1) + t."""
-    return [max(0, s - (QLEN - 1) + t) for s in _seq_lens() for t in range(QLEN)]
-
-
 def _run_verify_block():
     """Drive the real builder + forward_mqa over one multi-token verify block.
 
-    Returns ``(metadata, captured)`` where ``captured`` holds the ``page_table``,
-    ``seq_info`` and ``min_kv_seq_len`` the backend passed to the Gluon kernel.
+    Returns the metadata and the arguments passed to the Gluon kernel.
     """
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -139,9 +118,7 @@ def _run_verify_block():
     captured: dict = {}
 
     def spy(**kwargs):
-        captured["page_table"] = kwargs["page_table"].detach().clone()
-        captured["seq_info"] = kwargs["seq_info"].detach().clone()
-        captured["min_kv_seq_len"] = kwargs["min_kv_seq_len"]
+        captured.update(kwargs)
 
     with set_current_vllm_config(vllm_config):
         builder = builder_cls(spec, [layer_name], vllm_config, device)
@@ -184,8 +161,7 @@ def _run_verify_block():
         num_gpu_blocks, PAGE_SIZE, HEAD_SIZE, dtype=dtype, device=device
     )
 
-    # The Gluon kernel only reads the metadata this test is about, so a spy in
-    # its place keeps the assertions independent of the AITER build.
+    # A spy keeps the dispatch assertions independent of Gluon numerics.
     with patch(
         "vllm.v1.attention.backends.mla.rocm_aiter_mla._get_mla_gluon",
         lambda: spy,
@@ -195,63 +171,35 @@ def _run_verify_block():
     return metadata, captured
 
 
-def test_verify_flatten_rows_are_causal():
-    """Verify row t must see the committed prefix plus tokens 0..t, and no more.
-
-    Regression guard: before the fix every row of a request got that request's
-    whole paged-KV range, so verify position t attended to the draft tokens
-    after it. Fails on unmodified upstream.
-    """
+def test_verify_uses_native_causal_gluon():
     metadata, captured = _run_verify_block()
 
     decode = metadata.decode
     assert decode is not None, "batch was not classified as a decode"
     assert decode.max_qo_len == QLEN, (
         f"expected a {QLEN}-token verify block, got max_qo_len="
-        f"{decode.max_qo_len}; the flatten under test was not reached"
+        f"{decode.max_qo_len}; native verification was not reached"
     )
     assert captured, "forward_mqa did not reach the Gluon kernel"
-
-    seq_lens = _seq_lens()
-    indptr = captured["seq_info"].tolist()
-    page_table = captured["page_table"]
-    got_row_lens = [indptr[i + 1] - indptr[i] for i in range(len(indptr) - 1)]
-    want_row_lens = _expected_row_lens()
-
-    assert got_row_lens == want_row_lens, (
-        "AITER MLA verify flatten is not causal: verify row r*qlen+t must get "
-        f"seq_len_r - {QLEN - 1} + t KV entries.\n"
-        f"  seq_lens   {seq_lens}\n"
-        f"  got        {got_row_lens}\n"
-        f"  expected   {want_row_lens}\n"
-        "Rows longer than expected let a verify position attend to the draft "
-        "tokens it is supposed to be checking."
+    num_reqs = len(_seq_lens())
+    assert captured["q_nope"].shape == (
+        num_reqs,
+        QLEN,
+        NUM_QUERY_HEADS,
+        KV_LORA_RANK,
     )
-
-    # arange_block_indices lays request r's pages out ascending from
-    # r * max_blocks, so each causal window must be that slice's prefix.
-    max_blocks = max(seq_lens)
-    for r, seq_len in enumerate(seq_lens):
-        for t in range(QLEN):
-            row = r * QLEN + t
-            window = page_table[indptr[row] : indptr[row + 1]].tolist()
-            n = max(0, seq_len - (QLEN - 1) + t)
-            want = [r * max_blocks + j for j in range(n)]
-            assert window == want, (
-                f"request {r} (seq_len {seq_len}) verify token {t} reads KV "
-                f"pages {window}, expected the ascending causal prefix {want}"
-            )
-
-    padding_rows = got_row_lens[len(CONTEXT_LENS) * QLEN :]
-    assert padding_rows == [0] * (PADDING_ROWS * QLEN), (
-        f"cudagraph padding requests (seq_len 0) must clamp to empty windows, "
-        f"got {padding_rows}"
+    assert captured["q_pe"].shape == (
+        num_reqs,
+        QLEN,
+        NUM_QUERY_HEADS,
+        QK_ROPE_HEAD_DIM,
     )
-
-    # min_kv_seq_len tells Gluon how short the shortest row is, so it must be
-    # the minimum over the causal rows actually submitted, not over the
-    # per-request lengths they were cut from.
-    assert captured["min_kv_seq_len"] == min(want_row_lens), (
-        f"min_kv_seq_len={captured['min_kv_seq_len']} does not match the "
-        f"shortest submitted row ({min(want_row_lens)})"
+    assert captured["o"].shape == (
+        num_reqs,
+        QLEN,
+        NUM_QUERY_HEADS,
+        KV_LORA_RANK,
     )
+    assert captured["page_table"] is decode.paged_kv_indices
+    assert captured["seq_info"] is decode.paged_kv_indptr
+    assert captured["min_kv_seq_len"] == decode.min_kv_seq_len
