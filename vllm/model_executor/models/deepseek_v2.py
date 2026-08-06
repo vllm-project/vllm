@@ -33,6 +33,7 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -49,13 +50,14 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, RSWAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    DCPGroupColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
@@ -108,6 +110,7 @@ from .interfaces import (
 from .utils import (
     PPMissingLayer,
     get_pp_missing_layer_names,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -279,7 +282,9 @@ class DeepseekV2MoE(nn.Module):
         config: DeepseekV2Config | DeepseekV3Config,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
         prefix: str = "",
+        apply_routed_scale_to_output: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -305,9 +310,7 @@ class DeepseekV2MoE(nn.Module):
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            params_dtype=self.router_dtype,
             out_dtype=self.router_dtype,
-            force_fp32_compute=self.router_dtype == torch.float32,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
@@ -358,7 +361,7 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -372,13 +375,13 @@ class DeepseekV2MoE(nn.Module):
             topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
-            # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
+            apply_routed_scale_to_output=apply_routed_scale_to_output,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            reduce_results=reduce_results,
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
@@ -848,11 +851,16 @@ def _try_load_fp8_indexer_wk(
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
-    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+    if scale_inv.ndim == 1:
+        # Per-channel scale: one scale per row of [out, in]
+        group_shape = GroupShape(1, weight_fp8.shape[1])
+    else:
+        block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+        group_shape = GroupShape(block_size, block_size)
     weight_bf16 = scaled_dequantize(
         weight_fp8,
         scale_inv,
-        group_shape=GroupShape(block_size, block_size),
+        group_shape=group_shape,
         out_dtype=torch.bfloat16,
     )
 
@@ -975,6 +983,7 @@ class DeepseekV2MLAAttention(nn.Module):
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
         reduce_results: bool = True,
+        non_causal_multi_token_decode: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -1014,9 +1023,17 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
 
+        qrep_enabled = (
+            envs.VLLM_DCP_Q_REPLICATE
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.prefill_context_parallel_size <= 1
+        )
+        q_proj_cls = (
+            DCPGroupColumnParallelLinear if qrep_enabled else ColumnParallelLinear
+        )
         if self.q_lora_rank is not None:
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
+            self.q_b_proj = q_proj_cls(
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
@@ -1024,7 +1041,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.q_b_proj",
             )
         else:
-            self.q_proj = ColumnParallelLinear(
+            self.q_proj = q_proj_cls(
                 proj_input_size,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
@@ -1156,7 +1173,16 @@ class DeepseekV2MLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
-            skip_topk=_skip_topk,
+            # MTP layers must never start with skip_topk=True: their indexer
+            # computes indices at draft step 0, and the runtime toggle
+            # (set_skip_topk, index_share_for_mtp_iteration) only exists in
+            # the V1 proposer. A frozen True would leave the draft reading a
+            # never-written topk buffer.
+            skip_topk=_skip_topk and not is_mtp_layer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
+            # Do not skip scoring for MTP layers: their top-k buffer may be
+            # reused by later draft iterations through index sharing.
+            allow_short_prefill_indexer_scoring_skip=not is_mtp_layer,
         )
 
     def forward(
@@ -1246,6 +1272,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                # aiter applies routed_scaling_factor internally
+                apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -1455,8 +1483,6 @@ class DeepseekV2Model(nn.Module):
                 hidden_states, residual = combined_states.split(
                     [self.hidden_size, self.hidden_size], dim=-1
                 )
-                # fused_add_rms_norm requires a contiguous residual
-                residual = residual.contiguous()
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
                 if aux_hidden_state.shape[0] != positions.shape[0]:
@@ -1481,8 +1507,6 @@ class DeepseekV2Model(nn.Module):
             hidden_states, residual = combined_states.split(
                 [self.hidden_size, self.hidden_size], dim=-1
             )
-            # fused_add_rms_norm requires a contiguous residual
-            residual = residual.contiguous()
 
         if self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states + residual)
@@ -1911,21 +1935,3 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
     pass
-
-
-# Compatibility with
-# https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/configuration_deepseek.py
-def get_spec_layer_idx_from_weight_name(
-    config: DeepseekV2Config | DeepseekV3Config, weight_name: str
-) -> int | None:
-    if (
-        hasattr(config, "num_nextn_predict_layers")
-        and config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(
-                f"model.layers.{layer_idx + i}."
-            ) or weight_name.startswith(f"layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None

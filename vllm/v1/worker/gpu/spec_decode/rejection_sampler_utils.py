@@ -108,6 +108,8 @@ def _compute_global_target_argmax(
         mask=blocks_mask,
         other=float("-inf"),
     )
+    # See _insert_resampled_kernel: NaN breaks tl.argmax index bounds.
+    local_max = tl.where(local_max != local_max, float("-inf"), local_max)
     max_block_idx = tl.argmax(local_max, axis=0)
     return tl.load(
         target_local_argmax_ptr + logit_idx * target_local_argmax_stride + max_block_idx
@@ -121,6 +123,7 @@ def _compute_global_logprobs_and_logsumexp(
     logit_idx,
     req_state_idx,
     draft_step,
+    temp,
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
@@ -158,14 +161,18 @@ def _compute_global_logprobs_and_logsumexp(
     )
     target_log_prob = target_logit - target_lse
     if HAS_DRAFT_LOGITS:
-        draft_logit = tl.load(
-            draft_logits_ptr
-            + req_state_idx * draft_logits_stride_0
-            + draft_step * draft_logits_stride_1
-            + token,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
+        # draft_logits is stored pre-temperature, so apply scale first.
+        draft_logit = (
+            tl.load(
+                draft_logits_ptr
+                + req_state_idx * draft_logits_stride_0
+                + draft_step * draft_logits_stride_1
+                + token,
+                mask=mask,
+                other=float("-inf"),
+            ).to(tl.float32)
+            / temp
+        )
         draft_lse = _compute_global_logsumexp(
             draft_local_max_ptr,
             draft_local_max_stride,
@@ -270,15 +277,19 @@ def _compute_local_logits_stats_kernel(
             target_sumexp,
         )
         if HAS_DRAFT_LOGITS:
-            # Get local draft max and summed exponentials.
-            draft_logits = tl.load(
-                draft_logits_ptr
-                + req_state_idx * draft_logits_stride_0
-                + draft_step_idx * draft_logits_stride_1
-                + block_offsets,
-                mask=mask,
-                other=float("-inf"),
-            ).to(tl.float32)
+            # Get local draft max and summed exponentials. draft_logits is
+            # stored pre-temperature, so apply scale first.
+            draft_logits = (
+                tl.load(
+                    draft_logits_ptr
+                    + req_state_idx * draft_logits_stride_0
+                    + draft_step_idx * draft_logits_stride_1
+                    + block_offsets,
+                    mask=mask,
+                    other=float("-inf"),
+                ).to(tl.float32)
+                / temp
+            )
             draft_max, draft_sumexp = _compute_max_and_sumexp(draft_logits)
             tl.store(
                 draft_local_max_ptr + logit_idx * draft_local_max_stride + block_idx,
@@ -346,6 +357,7 @@ def _compute_cumulative_log_p_kernel(
             logit_idx,
             req_state_idx,
             step,
+            temp,
             target_logits_ptr,
             target_logits_stride,
             target_local_max_ptr,
@@ -427,6 +439,7 @@ def _compute_local_residual_mass_kernel(
         logit_idx,
         req_state_idx,
         draft_step_idx,
+        temp,
         target_logits_ptr,
         target_logits_stride,
         target_local_max_ptr,
@@ -597,6 +610,7 @@ def _rejection_kernel(
                         logit_idx,
                         req_state_idx,
                         i,
+                        temp,
                         target_logits_ptr,
                         target_logits_stride,
                         target_local_max_ptr,
@@ -722,14 +736,18 @@ def _resample_kernel(
         # Bonus token (no rejections). Directly use the target logits.
         residual_logits = target_logits
     elif HAS_DRAFT_LOGITS:
-        draft_logits = tl.load(
-            draft_logits_ptr
-            + req_state_idx * draft_logits_stride_0
-            + resample_idx * draft_logits_stride_1
-            + block,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
+        # draft_logits is stored pre-temperature, so apply scale first.
+        draft_logits = (
+            tl.load(
+                draft_logits_ptr
+                + req_state_idx * draft_logits_stride_0
+                + resample_idx * draft_logits_stride_1
+                + block,
+                mask=mask,
+                other=float("-inf"),
+            ).to(tl.float32)
+            / temp
+        )
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
         target_log_probs = target_logits - target_lse
@@ -782,9 +800,9 @@ def _resample_kernel(
         temp_ptr,
         seed_ptr,
         pos_ptr,
-        None,  # processed_logits_ptr
-        0,  # processed_logits_stride
-        None,  # processed_logits_col_ptr
+        None,  # logits_cache_ptr
+        0,  # logits_cache_stride
+        None,  # logits_cache_col_ptr
         vocab_size,
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
@@ -849,6 +867,14 @@ def _insert_resampled_kernel(
         mask=mask,
         other=float("-inf"),
     )
+    # NaN max values (from NaN target logits) make tl.argmax return an
+    # out-of-range block index (into the padded region), causing an OOB read
+    # of resampled_local_argmax. Map NaN to -inf so argmax stays in range.
+    resampled_local_max = tl.where(
+        resampled_local_max != resampled_local_max,
+        float("-inf"),
+        resampled_local_max,
+    )
     resampled_max_block_idx = tl.argmax(resampled_local_max, axis=0)
     resampled = tl.load(
         resampled_local_argmax_ptr
@@ -888,6 +914,10 @@ def rejection_sample(
     use_fp64: bool = False,
     use_block_verification: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
+    assert draft_logits is None or (
+        draft_logits.ndim == 3 and draft_logits.stride(-1) == 1
+    )
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     draft_logits_stride_0 = 0

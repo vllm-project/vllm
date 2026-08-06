@@ -1,55 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Weight-layout normalization for the FlashInfer CuTeDSL NVFP4 MoE backend."""
 
-from types import SimpleNamespace
-
+import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    reorder_w13_for_flashinfer_cutedsl,
+    reorder_w13_to_w31_for_flashinfer_cutedsl,
 )
 
-
-def test_reorder_w13_for_flashinfer_cutedsl_swigluoai_interleaved():
-    gate = torch.tensor([[[1], [2], [3], [4]]])
-    up = torch.tensor([[[10], [20], [30], [40]]])
-    w13 = torch.empty(1, 8, 1, dtype=gate.dtype)
-    w13[:, 0::2] = gate
-    w13[:, 1::2] = up
-    w13_scale = w13 + 100
-
-    layer = SimpleNamespace(activation=MoEActivation.SWIGLUOAI)
-    out, out_scale = reorder_w13_for_flashinfer_cutedsl(layer, w13, w13_scale)
-
-    expected = torch.cat([up, gate], dim=1)
-    torch.testing.assert_close(out, expected)
-    torch.testing.assert_close(out_scale, expected + 100)
+_GATE = torch.tensor([[[1], [2], [3], [4]]])
+_UP = torch.tensor([[[10], [20], [30], [40]]])
+_EXPECTED = torch.cat([_UP, _GATE], dim=1)
 
 
-def test_reorder_w13_for_flashinfer_cutedsl_packed_layouts():
-    gate = torch.tensor([[[1], [2], [3], [4]]])
-    up = torch.tensor([[[10], [20], [30], [40]]])
-    w13 = torch.cat([gate, up], dim=1)
-    w13_scale = w13 + 100
+def test_reorder_w13_swigluoai_interleaved():
+    """gpt-oss w13 is [gate0, up0, gate1, ...] rather than packed [gate; up]."""
+    w13 = torch.empty(1, 8, 1, dtype=_GATE.dtype)
+    w13[:, 0::2] = _GATE
+    w13[:, 1::2] = _UP
 
-    for activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE):
-        layer = SimpleNamespace(activation=activation)
-        out, out_scale = reorder_w13_for_flashinfer_cutedsl(layer, w13, w13_scale)
+    out, out_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
+        MoEActivation.SWIGLUOAI, w13, w13 + 100
+    )
 
-        expected = torch.cat([up, gate], dim=1)
-        torch.testing.assert_close(out, expected)
-        torch.testing.assert_close(out_scale, expected + 100)
+    torch.testing.assert_close(out, _EXPECTED)
+    torch.testing.assert_close(out_scale, _EXPECTED + 100)
 
 
-def test_reorder_w13_for_flashinfer_cutedsl_relu2_no_mul_noop():
-    w13 = torch.tensor([[[1], [2], [3], [4]]])
-    w13_scale = w13 + 100
+@pytest.mark.parametrize(
+    "activation", [MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE]
+)
+def test_reorder_w13_packed_layouts(activation: MoEActivation):
+    w13 = torch.cat([_GATE, _UP], dim=1)
 
-    layer = SimpleNamespace(activation=MoEActivation.RELU2_NO_MUL)
-    out, out_scale = reorder_w13_for_flashinfer_cutedsl(layer, w13, w13_scale)
+    out, out_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
+        activation, w13, w13 + 100
+    )
 
-    assert out is w13
-    assert out_scale is w13_scale
-    torch.testing.assert_close(out, w13)
-    torch.testing.assert_close(out_scale, w13_scale)
+    torch.testing.assert_close(out, _EXPECTED)
+    torch.testing.assert_close(out_scale, _EXPECTED + 100)

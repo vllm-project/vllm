@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
     align_trtllm_fp4_moe_hidden_dim_for_fi,
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
 __all__ = [
     "reorder_w1w3_to_w3w1",
 ]
@@ -32,18 +32,35 @@ __all__ = [
 def reorder_w1w3_to_w3w1(
     weight: torch.Tensor, scale: torch.Tensor, dim: int = -2
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Re-order the concatenated `[w1, w3]` tensors to `[w3, w1]`"""
+    """Re-order concatenated `[w1, w3]` tensors to `[w3, w1]` in-place.
+
+    `weight` and `scale` must be contiguous; they remain contiguous on return.
+    """
+    assert weight.is_contiguous(), "weight must be contiguous"
+    assert scale.is_contiguous(), "scale must be contiguous"
     size = weight.size(dim)
     assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
     half = size // 2
+    d = dim % weight.dim()
 
-    w1, w3 = weight.split(half, dim=dim)
-    s1, s3 = scale.split(half, dim=dim)
-
-    return (
-        torch.cat([w3, w1], dim=dim).contiguous(),
-        torch.cat([s3, s1], dim=dim).contiguous(),
+    # 64 MB transient cap
+    bytes_per_row = max(
+        weight.numel() // size * weight.element_size(),
+        scale.numel() // size * scale.element_size(),
     )
+    chunk = max(1, min(half, (64 << 20) // max(bytes_per_row, 1)))
+
+    fa, fb = [slice(None)] * weight.dim(), [slice(None)] * weight.dim()
+    for off in range(0, half, chunk):
+        end = min(off + chunk, half)
+        fa[d], fb[d] = slice(off, end), slice(half + off, half + end)
+        a, b = tuple(fa), tuple(fb)
+        for t in (weight, scale):
+            tmp = t[b].clone()
+            t[b] = t[a]
+            t[a] = tmp
+
+    return weight, scale
 
 
 def interleave_linear_and_gate(
@@ -64,20 +81,14 @@ def interleave_linear_and_gate(
     return x
 
 
-def reorder_w13_for_flashinfer_cutedsl(
-    layer: "RoutedExperts",
+def reorder_w13_to_w31_for_flashinfer_cutedsl(
+    activation: MoEActivation,
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Normalize gated w13 rows to the [up; gate] order used by FlashInfer."""
-    if not layer.activation.is_gated:
-        return w13, w13_scale
-
-    activation_value = getattr(getattr(layer, "activation", None), "value", None)
-    if activation_value == "swigluoai":
-        # GPT-OSS stores w13 as [gate0, up0, gate1, up1, ...].  The
-        # FlashInfer CuTe DSL kernel expects the accumulator order [up, gate]
-        # before its group-64 interleave transform.
+    if activation == MoEActivation.SWIGLUOAI:
+        # gpt-oss checkpoints store w13 interleaved as [gate0, up0, gate1, ...].
         gate, up = w13[:, 0::2], w13[:, 1::2]
         gate_scale, up_scale = w13_scale[:, 0::2], w13_scale[:, 1::2]
         return (
@@ -85,8 +96,6 @@ def reorder_w13_for_flashinfer_cutedsl(
             torch.cat([up_scale, gate_scale], dim=1).contiguous(),
         )
 
-    # Standard gated layout, including swigluoai_uninterleave, is packed
-    # [gate; up].  Convert to [up; gate] for FlashInfer.
     half = w13.shape[1] // 2
     return (
         torch.cat([w13[:, half:], w13[:, :half]], dim=1).contiguous(),
@@ -116,18 +125,21 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
 ]:
     """Prepare weights for the CuteDSL wrapper-based NvFP4 MoE backend.
 
-    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper.
-    For gated activations, also interleaves w13 gate/linear rows.
+    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper,
+    and interleaves w13 gate/linear rows for gated activations. Non-gated
+    activations use a single w13 projection and keep its row order unchanged.
     """
     from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
 
     # Global scaling factors (same as other FlashInfer backends).
     num_experts = w13.shape[0]
-    a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
-    a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+    a13_scale = a13_scale.max().to(torch.float32).repeat(num_experts)
+    a2_scale = a2_scale.max().to(torch.float32).repeat(num_experts)
 
     if layer.activation.is_gated:
-        w13, w13_scale = reorder_w13_for_flashinfer_cutedsl(layer, w13, w13_scale)
+        w13, w13_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
+            layer.activation, w13, w13_scale
+        )
 
         # Interleave up/gate rows for w13 weights and scales.
         w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
@@ -351,8 +363,8 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     # For some FI kernels, the input scales are shared by all experts.
     if is_global_sf_supported_for_nvfp4_backend(backend):
         num_experts = w13.shape[0]
-        a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
-        a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+        a13_scale = a13_scale.max().to(torch.float32).repeat(num_experts)
+        a2_scale = a2_scale.max().to(torch.float32).repeat(num_experts)
     else:
         a13_scale = a13_scale.max(dim=1).values.to(torch.float32)
 
@@ -366,7 +378,13 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         layer.moe_config.hidden_dim = padded_hidden
 
         # Align weights for FI NVFP4 MoE kernels.
-        min_alignment = 16 if is_gated else 128
+        # FlashInfer's TRT-LLM block-scale shuffle asserts the gate/up row dim
+        # (= up_mult * padded_intermediate, up_mult=2 when gated) is a multiple of
+        # 128. So gated needs padded_intermediate % 64 (2*64=128); the old value 16
+        # left 2*intermediate a multiple of only 32, so an NVFP4 MoE whose rank-local
+        # intermediate is not 128-aligned at TP>1 (e.g. Gemma-4-26B-A4B at tp4) hit
+        # `assert M % 128 == 0`. Padded rows are zero -> outputs unchanged.
+        min_alignment = 64 if is_gated else 128
         w13, w13_scale, w2, w2_scale, padded_intermediate = (
             align_fp4_moe_weights_for_fi(
                 w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment

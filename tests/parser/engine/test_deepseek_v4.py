@@ -920,3 +920,45 @@ class TestDelegatingParserLargeDelta:
         assert output.tool_calls[0]["name"] == "get_weather"
         args = json.loads(output.tool_calls[0]["arguments"])
         assert args == {"location": "Berlin"}
+
+    @pytest.mark.parametrize(
+        "chunk_size",
+        [1, 2, 3, 5, None],
+        ids=lambda c: f"chunk={c}",
+    )
+    def test_eos_not_leaked_when_reasoning_never_ends(self, chunk_size):
+        """EOS must not leak into reasoning_content when the model never
+        emits </think> (generation ends while still in REASONING state)."""
+        eos_text = "<｜end▁of▁sentence｜>"
+        eos_id = 128801
+        vocab = {
+            **_DSV4_FULL_VOCAB,
+            eos_text: eos_id,
+        }
+
+        reasoning_text = "Good morning! How can I help you today?"
+        tokens: list[tuple[int, str]] = []
+        tid = 100
+        for word in reasoning_text.split(" "):
+            prefix = " " if tokens else ""
+            tokens.append((tid, prefix + word))
+            tid += 1
+        tokens.append((eos_id, eos_text))
+
+        tokenizer = MockTokenizer(vocab=vocab, tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer,
+            chat_template_kwargs={"thinking": True},
+        )
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+        )
+        output = collect_output(deltas)
+
+        assert reasoning_text in output.reasoning
+        assert eos_text not in output.reasoning
+        assert output.content == ""
+        assert output.tool_calls == []

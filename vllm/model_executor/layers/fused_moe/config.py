@@ -891,6 +891,9 @@ def int4_w4a16_moe_quant_config(
     block_shape: list[int] | None = None,
     a1_gscale: torch.Tensor | None = None,
     a2_gscale: torch.Tensor | None = None,
+    gemm1_clamp_limit: float | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int4 weights.
@@ -901,6 +904,9 @@ def int4_w4a16_moe_quant_config(
         _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
         _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp, w1_bias),
         _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp, w2_bias),
+        gemm1_clamp_limit=gemm1_clamp_limit,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
     )
 
 
@@ -954,6 +960,9 @@ def int8_w8a16_moe_quant_config(
     block_shape: list[int] | None = None,
     a1_gscale: torch.Tensor | None = None,
     a2_gscale: torch.Tensor | None = None,
+    gemm1_clamp_limit: float | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int8 weights.
@@ -964,6 +973,9 @@ def int8_w8a16_moe_quant_config(
         _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
         _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp, w1_bias),
         _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp, w2_bias),
+        gemm1_clamp_limit=gemm1_clamp_limit,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
     )
 
 
@@ -1042,7 +1054,9 @@ class FusedMoEParallelConfig:
 
     @property
     def use_all2all_kernels(self):
-        return self.use_ep and (self.dp_size > 1 or self.is_sequence_parallel)
+        return self.use_ep and (
+            self.dp_size > 1 or self.pcp_size > 1 or self.is_sequence_parallel
+        )
 
     @property
     def use_deepep_ht_kernels(self):
@@ -1124,9 +1138,9 @@ class FusedMoEParallelConfig:
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
-            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
-            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
+            tp_size_ (int): `tp_size` passed into the FusedMoEFactory constructor.
+            pcp_size_ (int): `pcp_size` passed into the FusedMoEFactory constructor.
+            dp_size_ (int): `dp_size` passed into the FusedMoEFactory constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 
@@ -1304,6 +1318,10 @@ class FusedMoEConfig:
     swiglu_alpha: float | None = None
     swiglu_beta: float | None = None
 
+    # SituGLU parameters used by Kimi sit(u/v2) activations.
+    activation_situ_beta: float | None = None
+    activation_situ_linear_beta: float | None = None
+
     max_capture_size: int = 0
 
     # Set by __post_init__
@@ -1360,6 +1378,11 @@ class FusedMoEConfig:
     @property
     def is_act_and_mul(self) -> bool:
         return self.activation.is_gated
+
+    @property
+    def w13_num_shards(self) -> int:
+        """Number of shards fused into w13: gate and up for gated, up only."""
+        return 2 if self.is_act_and_mul else 1
 
     @property
     def tp_size(self):

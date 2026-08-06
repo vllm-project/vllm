@@ -9,7 +9,6 @@ import contextlib
 import functools
 import importlib
 import importlib.util
-import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -311,30 +310,6 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
 
 
 @functools.cache
-def has_flashinfer_cutedsl_moe_nvfp4_activation_type() -> bool:
-    """Return ``True`` if CuteDSL NvFP4 MoE accepts activation kwargs."""
-    if not has_flashinfer_cutedsl_moe_nvfp4():
-        return False
-    mod = _get_submodule("flashinfer")
-    if mod is None:
-        return False
-    fn = getattr(mod, "cute_dsl_fused_moe_nvfp4", None)
-    if fn is None:
-        return False
-    try:
-        params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
-    return all(
-        name in params
-        for name in ("activation_type", "swiglu_alpha", "swiglu_beta", "swiglu_limit")
-    )
-
-
-has_flashinfer_cutedsl_moe_nvfp4_oai = has_flashinfer_cutedsl_moe_nvfp4_activation_type
-
-
-@functools.cache
 def has_flashinfer_b12x_gemm() -> bool:
     """Return True if FlashInfer b12x FP4 GEMM backend is available (SM120+)."""
     if not has_flashinfer_cutedsl():
@@ -464,11 +439,13 @@ def use_trtllm_attention(
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
 
-    # Decode context parallel is not supported
+    # TRTLLM prefill attends only the DCP-local KV shard and has no
+    # cross-rank LSE combine, so it cannot be used with DCP; fall back to
+    # FlashInfer's DCP prefill path. TRTLLM decode under DCP is selected
+    # separately (all-gathered query heads + LSE combine in forward).
     if dcp_world_size > 1:
         logger.warning_once(
-            "Trtllm does not support returning LSE and as a result "
-            "does not support DCP, reverting to FlashInfer"
+            "TRTLLM prefill does not support DCP, reverting to FlashInfer"
         )
         return False
 
@@ -641,14 +618,16 @@ if has_flashinfer():
     )
     def flashinfer_mxfp4_quantize(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import mxfp4_quantize as _mxfp4_quantize
 
-        return _mxfp4_quantize(a)
+        return _mxfp4_quantize(a, backend=backend)
 
     @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
     def flashinfer_mxfp4_quantize_fake(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         m, k = a.shape
         sf_vec_size = 32
@@ -1065,7 +1044,6 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
-    "has_flashinfer_cutedsl_moe_nvfp4_activation_type",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",

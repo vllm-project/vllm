@@ -8,7 +8,10 @@ import torch.nn as nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed import (
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -16,6 +19,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -32,10 +38,15 @@ from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
     maybe_prefix,
 )
+from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .kernels import fused_eh_norm
+from .glm52_low_latency_gemm import (
+    build_glm52_plan,
+    enable_glm52_low_latency_gemm,
+    run_glm52_plan,
+)
 from .model import DeepseekV32DecoderLayer
 
 
@@ -50,6 +61,11 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self._eh_plan = (
+            build_glm52_plan(self.eh_proj.weight, vllm_config.model_config.dtype)
+            if config.model_type == "glm_moe_dsa"
+            else None
+        )
 
         topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -85,14 +101,16 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             self.hnorm.weight,
             self.enorm.variance_epsilon,
         )
-        hidden_states = self.eh_proj(eh_input)
+        hidden_states = run_glm52_plan(self._eh_plan, eh_input, self.eh_proj.weight)
+        if hidden_states is None:
+            hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
-        # main model fuses that all-reduce into the next norm, but here the
-        # recycle hidden is consumed directly, so reduce it now.
-        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        is_sequence_parallel = self.mtp_block.use_sequence_parallel_moe
+        if not is_sequence_parallel:
+            # Without sequence parallelism, the MoE output is left un-reduced.
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
         # exactly once, and the result is returned for both tuple positions:
@@ -104,6 +122,9 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # the legacy proposer (model_returns_tuple is True for the
         # DeepSeekMTPModel architecture).
         hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+        if is_sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[0]]
         return hidden_states, hidden_states
 
 
@@ -190,6 +211,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.model = DeepseekV32MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if self.config.model_type == "glm_moe_dsa":
+            enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
@@ -408,7 +431,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint."

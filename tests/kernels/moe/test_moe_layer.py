@@ -36,10 +36,17 @@ from vllm.distributed import (
     get_eplb_group,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    gpu_p2p_access_check,
+)
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE, MoERunner, fused_experts
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    MoERunner,
+    fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
@@ -77,7 +84,7 @@ NUM_EXPERTS = [8, 64]
 TOP_KS = [2, 6]
 
 # dp_size, tp_size, use_ep
-# Note: DP+TP is not yet supported in the FusedMoE layer.
+# Note: DP+TP is not yet supported in the FusedMoEFactory layer.
 PARALLEL_COMBOS = [
     [1, 2, False],
     [1, 4, False],
@@ -105,6 +112,8 @@ if has_deep_ep():
 
 if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
+
+DEEPEP_BACKENDS = {"deepep_high_throughput", "deepep_low_latency"}
 
 QUANT_METHODS = [
     None,
@@ -414,6 +423,22 @@ def generate_valid_test_configs(
             print(f"Skipping invalid config {config} - {reason}")
 
     return configs
+
+
+@functools.cache
+def visible_devices_have_peer_access(world_size: int) -> bool:
+    if not current_platform.is_cuda():
+        return True
+
+    try:
+        return all(
+            gpu_p2p_access_check(src, dst)
+            for src in range(world_size)
+            for dst in range(world_size)
+            if src != dst
+        )
+    except RuntimeError:
+        return False
 
 
 # TODO: break this up into sections
@@ -1002,7 +1027,7 @@ def make_fused_moe_layer(
         kwargs["routed_input_transform"] = routed_input_transform
         kwargs["routed_output_transform"] = routed_output_transform
 
-    layer = FusedMoE(
+    layer = FusedMoEFactory(
         num_experts=global_num_experts,
         top_k=top_k,
         hidden_size=hidden_size,
@@ -1246,7 +1271,7 @@ def _test_body_eplb(
     ):
         output_before = sp_wrapper(moe_layer)(hidden_states, router_logits)
 
-    # Create a fresh FusedMoE layer with enable_eplb=True
+    # Create a fresh MoERunner layer with enable_eplb=True
     # Delete the original layer's registration so the constructor can
     # re-use the same "from_forward_context" prefix
     cc = vllm_config.compilation_config
@@ -1380,7 +1405,8 @@ def _run_one_config(
 
     - When is_sequence_parallel=True (EP + sequence splitting):
       * ep_size: Number of expert parallel ranks (equals dp_size * tp_size)
-      * tp_size: Number of ranks to split sequence across (becomes sp_size in FusedMoE)
+      * tp_size: Number of ranks to split sequence across (becomes sp_size in
+        MoERunner)
       * Weights are chunked by ep_size (experts) but NOT by tp_size
       * Input sequences are chunked by tp_size (via sp_wrapper)
     """
@@ -1455,8 +1481,8 @@ def _run_one_config(
         torch.accelerator.empty_cache()
 
         with set_current_vllm_config(vllm_config):
-            # Chunk weights for EP BEFORE creating FusedMoE
-            # FusedMoE uses EP-chunked weights and handles reductions internally
+            # Chunk weights for EP BEFORE creating MoERunner.
+            # MoERunner uses EP-chunked weights and handles reductions internally.
             if ep_size > 1:
                 # Split experts across ranks (dimension 0 is the expert dimension)
                 # When EP is enabled, use EP group rank and ep_size for chunking
@@ -1801,6 +1827,9 @@ def test_moe_layer(
 
     if enable_eplb and not use_ep:
         pytest.skip("EPLB requires EP.")
+
+    if backend in DEEPEP_BACKENDS and not visible_devices_have_peer_access(world_size):
+        pytest.skip("DeepEP backends require peer access between visible GPUs.")
 
     verbosity = pytestconfig.getoption("verbose")
 

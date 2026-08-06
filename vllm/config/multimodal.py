@@ -3,14 +3,20 @@
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict, final
+from typing import Any, Literal, TypeAlias, TypedDict, cast, final
 
+import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
-from vllm.config.utils import config
+import vllm.envs as envs
+from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.utils import config, get_from_deprecated_env_if_set
+from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -60,7 +66,25 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
+VideoPruningMethod = Literal["evs", "vidcom2"]
 MMTensorIPC = Literal["direct_rpc", "torch_shm"]
+MMHasherAlgorithm = Literal["blake3", "sha256", "sha512"]
+MMProcessorDevice: TypeAlias = str
+"""`"auto"`, `"cpu"`, or the platform's own accelerator name
+(`current_platform.device_type`, e.g. `"cuda"` on CUDA and ROCm,
+`"xpu"` on XPU). Validated against that set by the CLI."""
+
+
+def _get_mm_hasher_algorithm() -> MMHasherAlgorithm:
+    env_value = get_from_deprecated_env_if_set(
+        "VLLM_MM_HASHER_ALGORITHM",
+        "v0.27",
+        "mm_hasher_algorithm",
+    )
+    env_value = "blake3" if env_value is None else env_value
+    return cast(MMHasherAlgorithm, env_value.lower())
+
+
 MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
 """
 A dictionary containing an entry for each modality type of dummy data.
@@ -132,6 +156,11 @@ class MultiModalConfig:
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    mm_hasher_algorithm: MMHasherAlgorithm = Field(
+        default_factory=_get_mm_hasher_algorithm
+    )
+    """Hash algorithm to use for multi-modal input caching. Use `"sha256"` or
+    `"sha512"` for FIPS-compliant deployments."""
     mm_shm_cache_max_object_size_mb: int = Field(default=128, ge=0)
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
@@ -188,15 +217,34 @@ class MultiModalConfig:
     estimating the peak memory usage of the activation of multimodal encoder and
     embedding cache."""
     video_pruning_rate: float | None = Field(default=None, ge=0.0, lt=1.0)
-    """Sets pruning rate for video pruning via Efficient Video Sampling.
-    Value sits in range [0;1) and determines fraction of media tokens
-    from each video to be pruned.
+    """Fraction of video tokens to prune from each video. Value sits in range
+    [0;1); pruning is enabled when it is greater than 0. The pruning algorithm
+    is selected by `video_pruning_method`.
+    """
+    video_pruning_method: VideoPruningMethod = "evs"
+    """Video token pruning algorithm applied when `video_pruning_rate` > 0:
+    - "evs": Efficient Video Sampling.
+    - "vidcom2": Video Compression Commander.
     """
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
+    mm_embeds_from_ec_connector: bool = False
+    """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.
+
+    In an encode/prefill/decode (EPD) deployment the encoder instance publishes
+    embeddings through the EC connector, so the request that reaches the
+    prefill/decode instance only needs to carry the grid/size metadata that
+    sizes the placeholder range — the embeddings themselves come from the
+    connector, keyed by `mm_hash`.
+
+    Derived, not user-settable: `VllmConfig.__post_init__` sets this to True
+    exactly on EC consumers. Everywhere else it stays False so that a request
+    which forgets its embeddings still fails fast in the frontend, with a clear
+    error, rather than deep inside the model."""
+
     mm_ipc_gpu_memory_gb: float = Field(default=0, ge=0)
     """Amount of GPU memory (in GiB) sequestered on the engine's device for
     GPU-side multimodal work in the API-server (frontend) process, such as
@@ -294,6 +342,119 @@ class MultiModalConfig:
                 )
         return self
 
+    @staticmethod
+    def fold_mm_processor_device(
+        mm_processor_kwargs: dict[str, Any] | None,
+        mm_processor_device: MMProcessorDevice | None,
+    ) -> dict[str, Any] | None:
+        """Fold the `mm_processor_device` convenience flag into the kwargs.
+
+        The flag keeps no state of its own: `mm_processor_kwargs["device"]` is
+        the only representation of where the processor runs, so an explicit
+        `device` there always wins and `"auto"` stays unresolved for
+        `VllmConfig`, which is where the EC role needed to resolve it lives.
+
+        Args:
+            mm_processor_kwargs: The kwargs as given, or None.
+            mm_processor_device: The flag's value, or None when unset.
+
+        Returns:
+            The kwargs to build the config with, unchanged unless the flag adds
+            a `device`.
+        """
+        if mm_processor_device in (None, "auto"):
+            return mm_processor_kwargs
+        if (mm_processor_kwargs or {}).get("device") is not None:
+            return mm_processor_kwargs
+
+        from vllm.platforms import current_platform
+
+        # Any explicit value other than "cpu" means "the accelerator", so a
+        # programmatically-set "cuda" still works on a platform whose device type
+        # is named differently ("xpu"), and degrades to CPU where there is none.
+        device = (
+            "cpu"
+            if mm_processor_device == "cpu"
+            else (current_platform.device_type or "cpu")
+        )
+        return {**(mm_processor_kwargs or {}), "device": device}
+
+    def get_mm_processor_device_type(self) -> str | None:
+        """The torch device type `mm_processor_kwargs["device"]` names.
+
+        `mm_processor_kwargs` is untyped, so `device` may be any form torch
+        accepts -- `"cuda"`, `"cuda:1"`, `torch.device(...)`, or a bare index.
+        Normalising through torch rather than parsing the string keeps the
+        non-string forms from slipping past a caller's comparison.
+
+        Returns:
+            The device type, or None when no device is requested.
+
+        Raises:
+            ValueError: If `device` is not something `torch.device` accepts.
+                `validate_mm_processor_device` is what surfaces this during
+                startup, so the value is only parsed once.
+        """
+        device = (self.mm_processor_kwargs or {}).get("device")
+        if device is None:
+            return None
+        try:
+            return torch.device(device).type  # type: ignore[arg-type]
+        except (RuntimeError, TypeError, ValueError):
+            raise ValueError(
+                f'Invalid "device" in mm_processor_kwargs: {device!r}. Expected a '
+                'torch device such as "cpu", "cuda" or "cuda:0".'
+            ) from None
+
+    def validate_mm_processor_device(self, ec_config: ECTransferConfig | None) -> None:
+        """Check `mm_processor_kwargs["device"]` for this deployment.
+
+        The only place the requested device is validated, so it runs even on a
+        CPU-only platform: the value is parsed before any early return.
+
+        Args:
+            ec_config: The deployment's EC config, or None when it is not an
+                encode/prefill/decode deployment. Passed in because it is not
+                reachable from here, and because a field assigned after
+                construction would not re-trigger this config's validators.
+
+        Raises:
+            ValueError: If the requested device is not a torch device, or if it
+                is the accelerator on an instance that also runs the language
+                model.
+        """
+        from vllm.platforms import current_platform
+
+        device_type = self.get_mm_processor_device_type()
+        accelerator = current_platform.device_type
+        if device_type is None or accelerator in ("", "cpu"):
+            return
+        if device_type != accelerator:
+            return
+
+        if ec_config is None or not ec_config.is_encode_only:
+            raise ValueError(
+                f"Cannot run the multi-modal processor on {device_type!r}: this "
+                "instance also runs the language model. The processor would "
+                "share the device with the model's forward pass, so its "
+                "transform kernels contend with that compute, and because it "
+                "runs in the API-server process its allocations are outside the "
+                "memory the engine profiled for its KV cache -- risking OOM or "
+                "a silently shrunken cache.\n"
+                "Accelerator preprocessing is only supported on an encode-only "
+                "instance of an encode/prefill/decode deployment (an EC "
+                "producer that is not also a consumer), which runs no forward "
+                "pass and allocates no KV cache.\n"
+                'Use --mm-processor-device=cpu, or drop "device" from '
+                "--mm-processor-kwargs."
+            )
+
+        logger.info_once(
+            "Running the multi-modal processor on %s. Override with "
+            "--mm-processor-device=cpu.",
+            device_type,
+        )
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -344,5 +505,26 @@ class MultiModalConfig:
         kwargs = self.mm_processor_kwargs or {}
         return kwargs | dict(inference_kwargs)
 
+    def use_gpu_video_backend(self) -> bool:
+        """Return whether the configured video loader or codec uses the GPU."""
+        from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
+
+        video_kwargs = self.media_io_kwargs.get("video", {})
+        video_loader_backend = (
+            video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+        )
+        codec_backend = video_kwargs.get("backend")
+        return VIDEO_LOADER_REGISTRY.backend_requires_gpu(video_loader_backend) or (
+            codec_backend is not None
+            and VIDEO_LOADER_REGISTRY.backend_requires_gpu(codec_backend)
+        )
+
     def is_multimodal_pruning_enabled(self):
-        return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+        return self.get_video_pruning_spec() is not None
+
+    def get_video_pruning_spec(self) -> tuple[VideoPruningMethod, float] | None:
+        """Return `(method, rate)` when video pruning is enabled, else None.
+        `rate` is the fraction of video tokens to prune."""
+        if self.video_pruning_rate is not None and self.video_pruning_rate > 0:
+            return (self.video_pruning_method, float(self.video_pruning_rate))
+        return None

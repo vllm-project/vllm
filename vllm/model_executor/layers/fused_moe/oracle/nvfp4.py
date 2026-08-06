@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.utils.flashinfer import has_flashinfer_cutedsl_moe_nvfp4_activation_type
 
 logger = init_logger(__name__)
 
@@ -191,10 +190,11 @@ def select_nvfp4_moe_backend(
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.HUMMING,
     }
-    if has_flashinfer_cutedsl_moe_nvfp4_activation_type():
-        NVFP4_BACKENDS_WITH_CLAMP.add(NvFp4MoeBackend.FLASHINFER_CUTEDSL)
 
     if config.swiglu_limit is not None:
         AVAILABLE_BACKENDS = [
@@ -258,16 +258,12 @@ def select_nvfp4_moe_backend(
             config.swiglu_limit is not None
             and requested_backend not in NVFP4_BACKENDS_WITH_CLAMP
         ):
-            cutedsl_hint = (
-                " or flashinfer_cutedsl"
-                if has_flashinfer_cutedsl_moe_nvfp4_activation_type()
-                else ""
-            )
             raise ValueError(
                 f"Model sets swiglu_limit={config.swiglu_limit}, but the "
                 f"explicitly requested moe_backend={runner_backend!r} does "
-                "not apply the SwiGLU clamp. Use "
-                f"'flashinfer_trtllm'{cutedsl_hint} instead."
+                f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm', "
+                f"'flashinfer_cutlass', 'flashinfer_cutedsl', 'cutlass', "
+                f"'marlin', or 'humming' instead."
             )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
@@ -543,6 +539,7 @@ def make_nvfp4_moe_kernel(
     backend: NvFp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     layer: torch.nn.Module | None = None,
+    per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -560,6 +557,8 @@ def make_nvfp4_moe_kernel(
     if backend == NvFp4MoeBackend.HUMMING:
         assert layer is not None
         extra_kwargs = {"layer": layer}
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
+        extra_kwargs["per_token_activation"] = True
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:

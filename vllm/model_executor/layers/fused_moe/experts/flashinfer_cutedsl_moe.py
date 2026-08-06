@@ -25,7 +25,6 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cute_dsl_fused_moe_nvfp4,
     has_flashinfer_cutedsl_moe_nvfp4,
-    has_flashinfer_cutedsl_moe_nvfp4_activation_type,
 )
 
 
@@ -83,7 +82,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return has_flashinfer_cutedsl_moe_nvfp4_activation_type()
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -97,16 +96,11 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        if activation == MoEActivation.SILU:
-            return True
-        return (
-            activation
-            in (
-                MoEActivation.SWIGLUOAI,
-                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-                MoEActivation.RELU2_NO_MUL,
-            )
-            and has_flashinfer_cutedsl_moe_nvfp4_activation_type()
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
         )
 
     @staticmethod
@@ -162,45 +156,22 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         # a1q_scale is (M, K//16) float8_e4m3fn from fp4_quantize.
         # The functional API expects x_sf with trailing dim: (M, K//16, 1).
         x_sf = a1q_scale.unsqueeze(-1)
-        activation_kwargs: dict[str, object] = {}
-        has_activation_type = has_flashinfer_cutedsl_moe_nvfp4_activation_type()
-        if has_activation_type:
-            activation_kwargs["activation_type"] = activation_to_flashinfer_int(
-                activation
-            )
-        elif activation != MoEActivation.SILU:
-            raise RuntimeError(
-                "FlashInfer CuteDSL NvFP4 MoE does not support activation_type kwargs."
-            )
 
-        swiglu_params: tuple[float | None, float | None, float | None] | None = None
+        # The kernel defaults swiglu_{alpha,beta,limit} to the plain-SwiGLU
+        # values, so only forward the ones the model actually sets.
+        swiglu_params: dict[str, float | None] = {}
         if activation == MoEActivation.SILU:
-            swiglu_params = (None, None, self.gemm1_clamp_limit)
+            swiglu_params = {"swiglu_limit": self.gemm1_clamp_limit}
         elif activation in (
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ):
-            swiglu_params = (
-                self.gemm1_alpha,
-                self.gemm1_beta,
-                self.gemm1_clamp_limit,
-            )
-        elif activation != MoEActivation.RELU2_NO_MUL:
-            raise ValueError(f"Unsupported FlashInfer CuteDSL activation: {activation}")
-
-        if swiglu_params is not None and any(
-            param is not None for param in swiglu_params
-        ):
-            if not has_activation_type:
-                raise RuntimeError(
-                    "FlashInfer CuteDSL NvFP4 MoE does not support activation_type "
-                    "and SwiGLU parameter kwargs."
-                )
-            for name, param in zip(
-                ("swiglu_alpha", "swiglu_beta", "swiglu_limit"), swiglu_params
-            ):
-                if param is not None:
-                    activation_kwargs[name] = param
+            swiglu_params = {
+                "swiglu_alpha": self.gemm1_alpha,
+                "swiglu_beta": self.gemm1_beta,
+                "swiglu_limit": self.gemm1_clamp_limit,
+            }
+        swiglu_kwargs = {k: v for k, v in swiglu_params.items() if v is not None}
 
         flashinfer_cute_dsl_fused_moe_nvfp4(
             x=hidden_states,
@@ -219,5 +190,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.local_num_experts,
             local_expert_offset=self.local_expert_offset,
             moe_output=output,
-            **activation_kwargs,
+            activation_type=activation_to_flashinfer_int(activation),
+            **swiglu_kwargs,
         )
