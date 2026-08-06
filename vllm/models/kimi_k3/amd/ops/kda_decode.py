@@ -9,10 +9,6 @@ conv1d update, the recurrent delta-rule step, and the gated output RMSNorm.
 
 The kernel wants a width-major conv weight and an fp32 norm weight, so both are
 staged once at load time by the weight loaders below.
-
-Like its CUDA counterpart the kernel has no ``NULL_BLOCK_ID`` short circuit: it
-is only reached for a pure non-speculative decode batch, where every entry of
-``state_indices`` names a live cache slot.
 """
 
 from collections.abc import Callable

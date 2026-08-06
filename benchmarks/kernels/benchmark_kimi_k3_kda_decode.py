@@ -141,9 +141,7 @@ def _gated_rmsnorm(
 
 
 def _triton_gated_norm(inp: Inputs, core_attn_out: torch.Tensor) -> torch.Tensor:
-    from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
-        rms_norm_gated,
-    )
+    from vllm.third_party.flash_linear_attention.ops.kda import rms_norm_gated
 
     return rms_norm_gated(
         core_attn_out,
@@ -267,7 +265,7 @@ def main() -> None:
                 )
                 inp = layers[0]
                 del layers
-                torch.cuda.empty_cache()
+                torch.accelerator.empty_cache()
             else:
                 inp = Inputs(num_tokens, num_heads)
                 eager_ms = bench(functools.partial(triton_chain, inp, False))

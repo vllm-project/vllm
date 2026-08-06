@@ -1134,7 +1134,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # HIP counterpart of the FUSED_KDA_DECODE block above: same `fused_kda_decode`
   # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Only
   # measured on gfx950, so it is only built when gfx950 is in the arch list.
-  # A multi-arch build that includes gfx950 still emits this source for every 
+  # A multi-arch build that includes gfx950 still emits this source for every
   # arch in that list. The runtime gate in kda_decode.py keeps the kernel off
   # non-gfx950 devices.
   if(VLLM_GPU_LANG STREQUAL "HIP")

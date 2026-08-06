@@ -488,8 +488,8 @@ void launch_kda_decode_raw(
           reinterpret_cast<const bf16_t*>(g), dt_bias,
           reinterpret_cast<const bf16_t*>(beta),
           reinterpret_cast<const bf16_t*>(onorm_g), onorm_weight,
-          ssm_state_indices, state, reinterpret_cast<bf16_t*>(out),
-          lower_bound, scale, onorm_eps, strides);
+          ssm_state_indices, state, reinterpret_cast<bf16_t*>(out), lower_bound,
+          scale, onorm_eps, strides);
 }
 
 struct KdaDecodeLaunchParams {
@@ -527,12 +527,12 @@ struct KdaDecodeLaunchParams {
 template <int kHeads, bool kApplyOnorm, bool kUseLowerBound,
           bool kApplyBetaSigmoid>
 void dispatch_kda_decode_conv(const KdaDecodeLaunchParams& p) {
-#define LAUNCH_KDA_DECODE(UPDATE_CONV)                                       \
-  launch_kda_decode_raw<kHeads, kApplyOnorm, UPDATE_CONV, kUseLowerBound,    \
-                        kApplyBetaSigmoid>(                                  \
-      p.x_q, p.x_k, p.x_v, p.w_q_t, p.w_k_t, p.w_v_t, p.bias_q, p.bias_k,    \
-      p.bias_v, p.cs_q, p.cs_k, p.cs_v, p.a_log, p.g, p.dt_bias, p.beta,     \
-      p.onorm_g, p.onorm_weight, p.ssm_state_indices, p.state, p.out, p.B,   \
+#define LAUNCH_KDA_DECODE(UPDATE_CONV)                                     \
+  launch_kda_decode_raw<kHeads, kApplyOnorm, UPDATE_CONV, kUseLowerBound,  \
+                        kApplyBetaSigmoid>(                                \
+      p.x_q, p.x_k, p.x_v, p.w_q_t, p.w_k_t, p.w_v_t, p.bias_q, p.bias_k,  \
+      p.bias_v, p.cs_q, p.cs_k, p.cs_v, p.a_log, p.g, p.dt_bias, p.beta,   \
+      p.onorm_g, p.onorm_weight, p.ssm_state_indices, p.state, p.out, p.B, \
       p.lower_bound, p.scale, p.onorm_eps, p.strides, p.stream)
   if (p.update_conv_cache) {
     LAUNCH_KDA_DECODE(true);
