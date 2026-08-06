@@ -89,7 +89,8 @@ $ curl -X POST http://localhost:8000/stop_profile
 [Proton](https://github.com/triton-lang/triton/tree/main/third_party/proton)
 is Triton's GPU profiler. It can collect a low-overhead aggregate tree or a
 Chrome trace and works through the same vLLM profiling controls as the PyTorch
-and CUDA profilers. Proton currently requires eager execution.
+and CUDA profilers. Proton currently supports NVIDIA GPUs through CUPTI and
+requires eager execution.
 
 Start a server with a local output directory:
 
@@ -116,7 +117,7 @@ The Proton-specific options are:
 
 - `proton_context`: `shadow` (default) or `python`
 - `proton_data`: `tree` (default) or `trace`
-- `proton_backend`: `cupti`, `rocprofiler`, or automatic
+- `proton_backend`: `cupti` or automatic
 - `proton_mode`: an optional backend mode string
 - `proton_hook`: `triton` to record Triton launch metadata, or unset
 - `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
@@ -127,19 +128,16 @@ The Proton-specific options are:
 errors are returned by `/start_profile`. CUDA graph profiling is not yet
 supported, so `--enforce-eager` is required for every Proton mode.
 
-Automatic backend selection is recommended. `cupti` is for NVIDIA GPUs and
-`rocprofiler` requires a ROCm installation. vLLM does not expose Proton's
-experimental instrumentation backend because current upstream Triton builds
-can produce profiles without timing metrics. Backend-specific modes, including
-`pcsampling`, can be selected with `proton_mode`.
+Automatic backend selection is recommended. vLLM currently supports Proton's
+`cupti` backend on NVIDIA GPUs. ROCm support is not yet available. vLLM does not
+expose Proton's experimental instrumentation backend because current upstream
+Triton builds can produce profiles without timing metrics. Backend-specific
+modes, including `pcsampling`, can be selected with `proton_mode`.
 
 Triton 3.6 supports explicit `hatchet` and `chrome_trace` output. The
 `hatchet_msgpack` format and `periodic_flushing` mode require Triton 3.7 or
-newer, while the `rocprofiler` backend requires Triton 3.8 or newer; vLLM
-rejects these options with the detected version before starting a session. On
-AMD, Proton requires
-`ROCR_VISIBLE_DEVICES`; `HIP_VISIBLE_DEVICES` and `CUDA_VISIBLE_DEVICES` must be
-unset.
+newer; vLLM rejects these options with the detected version before starting a
+session.
 
 Inspect tree profiles with:
 

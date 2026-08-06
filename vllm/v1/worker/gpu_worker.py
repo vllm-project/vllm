@@ -918,6 +918,8 @@ class Worker(WorkerBase):
             return nullcontext()
 
         self.profiler.step()
+        if not self.profiler.is_running:
+            return nullcontext()
 
         iteration_details = compute_iteration_details(scheduler_output)
 

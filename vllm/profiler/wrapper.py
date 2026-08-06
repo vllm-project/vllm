@@ -23,7 +23,6 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _TRITON_PROTON_3_7_VERSION = Version("3.7.0")
-_TRITON_PROTON_3_8_VERSION = Version("3.8.0")
 
 
 class WorkerProfiler(ABC):
@@ -50,6 +49,11 @@ class WorkerProfiler(ABC):
         # Track when the profiler is actually running
         self._profiling_for_iters = 0
         self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the underlying profiler is currently collecting data."""
+        return self._running
 
     @abstractmethod
     def _start(self) -> None:
@@ -357,6 +361,11 @@ class ProtonProfilerWrapper(WorkerProfiler):
     ) -> None:
         super().__init__(profiler_config)
 
+        if torch.version.hip is not None:
+            raise RuntimeError(
+                "The Proton profiler currently supports NVIDIA GPUs only."
+            )
+
         try:
             self._proton = importlib.import_module("triton.profiler")
             triton = importlib.import_module("triton")
@@ -419,33 +428,8 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._require_triton_version(
                 "periodic flushing", _TRITON_PROTON_3_7_VERSION
             )
-        if self._backend == "rocprofiler":
-            self._require_triton_version(
-                "rocprofiler backend", _TRITON_PROTON_3_8_VERSION
-            )
-
-    @staticmethod
-    def _validate_amd_environment() -> None:
-        if torch.version.hip is None:
-            return
-        rocr_visible_devices = os.environ.get("ROCR_VISIBLE_DEVICES")
-        conflicting = [
-            name
-            for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
-            if name in os.environ
-        ]
-        if conflicting:
-            raise RuntimeError(
-                "Proton on AMD requires ROCR_VISIBLE_DEVICES; unset "
-                f"{', '.join(conflicting)} before profiling."
-            )
-        if not rocr_visible_devices:
-            raise RuntimeError(
-                "Proton on AMD requires a non-empty ROCR_VISIBLE_DEVICES value."
-            )
 
     def _create_session(self, output_path: str) -> int:
-        self._validate_amd_environment()
         os.makedirs(self._output_dir, exist_ok=True)
         session_id = self._proton.start(
             name=output_path,
