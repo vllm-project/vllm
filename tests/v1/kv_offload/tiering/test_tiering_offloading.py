@@ -461,7 +461,7 @@ class TestTieringOffloadingManager:
         for block in blocks:
             self.secondary_tier1.blocks[block] = True
 
-        def submit_partial(job_metadata: JobMetadata) -> None:
+        def submit_partial(job_metadata: TransferJob) -> None:
             successful_keys = (
                 None
                 if successful_indices is None
