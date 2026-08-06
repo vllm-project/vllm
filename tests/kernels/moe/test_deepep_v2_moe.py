@@ -19,7 +19,11 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+    HummingGroupedExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
@@ -38,6 +42,19 @@ requires_deep_ep_v2 = pytest.mark.skipif(
     not has_deep_ep_v2(),
     reason="Requires DeepEP v2 (ElasticBuffer)",
 )
+
+
+def _build_expert_map(
+    pgi: ProcessGroupInfo,
+    num_experts: int,
+    num_local_experts: int,
+) -> torch.Tensor:
+    expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
+    start = pgi.rank * num_local_experts
+    expert_map[start : start + num_local_experts] = torch.arange(
+        num_local_experts, dtype=torch.int32
+    )
+    return expert_map.to(device=pgi.device)
 
 
 def assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
@@ -164,14 +181,6 @@ def deepep_v2_moe_impl(
 ) -> torch.Tensor:
     num_local_experts = w1.size(0)
 
-    def build_expert_map():
-        expert_map = torch.full((num_experts,), fill_value=-1, dtype=torch.int32)
-        s = pgi.rank * num_local_experts
-        e = s + num_local_experts
-        expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-        device = torch.accelerator.current_device_index()
-        return expert_map.to(device=device, dtype=torch.int32)
-
     is_quantized = w1.dtype == torch.float8_e4m3fn
     q_dtype = torch.float8_e4m3fn if is_quantized else None
 
@@ -207,7 +216,7 @@ def deepep_v2_moe_impl(
         topk_ids=test_tensors.topk,
         activation=MoEActivation.SILU,
         global_num_experts=num_experts,
-        expert_map=build_expert_map(),
+        expert_map=_build_expert_map(pgi, num_experts, num_local_experts),
         apply_router_weight_on_input=False,
     )
 
@@ -653,4 +662,318 @@ def test_deep_ep_v2_moe_backends(
         config,
         use_cudagraph,
         experts_backend,
+    )
+
+
+def _make_humming_experts(
+    moe_config: FusedMoEConfig,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    block_shape: list[int],
+) -> tuple[HummingGroupedExperts, FusedMoEQuantConfig, torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.utils import humming
+
+    layer = torch.nn.Module()
+    layer.layer_name = "test_deep_ep_v2_humming"
+    layer.moe_config = moe_config
+    layer.params_dtype = torch.bfloat16
+    layer.local_num_experts = moe_config.num_local_experts
+    layer.global_num_experts = moe_config.num_experts
+    layer.hidden_size = moe_config.hidden_dim
+    layer.intermediate_size_per_partition = moe_config.intermediate_size_per_partition
+    layer.weight_block_size = block_shape
+    for name, tensor in (
+        ("w13_weight", w1),
+        ("w2_weight", w2),
+        ("w13_weight_scale", w1_scale),
+        ("w2_weight_scale", w2_scale),
+    ):
+        if name.endswith("_weight"):
+            tensor = tensor.view(torch.int32)
+        layer.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+
+    weight_schema = humming.HummingWeightSchema(
+        b_dtype=humming.dtypes.float8e4m3,
+        bs_dtype=humming.dtypes.float32,
+        weight_scale_group_size=block_shape[1],
+        weight_scale_group_size_n=block_shape[0],
+    )
+    input_schema = humming.HummingInputSchema(
+        a_dtype=humming.dtypes.float8e4m3,
+        input_scale_group_size=block_shape[1],
+    )
+    humming_utils.convert_to_humming_moe_kernel_format(
+        layer,
+        weight_schema=weight_schema,
+        input_schema=input_schema,
+    )
+    quant_config = humming_utils.get_humming_moe_quant_config(layer)
+    experts = HummingGroupedExperts(
+        layer=layer,
+        moe_config=moe_config,
+        quant_config=quant_config,
+    )
+    return experts, quant_config, layer.w13_weight, layer.w2_weight
+
+
+def _deep_ep_v2_moe_cudagraph(
+    pgi: ProcessGroupInfo,
+    dp_size: int,
+    config: TestConfig,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    moe_backend: str,
+):
+    """Verify DeepEP v2 with an explicit FP8 expert backend."""
+    import tempfile
+
+    from vllm.distributed import (
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
+    pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    set_random_seed(7 + pgi.rank)
+    test_tensors = TestTensors.make(config)
+    num_local_experts = config.num_experts // pgi.world_size
+    hidden_size = config.k
+
+    # All ranks must use the same global weights before taking their EP slice.
+    w1_bf16 = (
+        torch.randn(
+            (config.num_experts, 2 * config.n, config.k),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        / 15
+    )
+    w2_bf16 = (
+        torch.randn(
+            (config.num_experts, config.k, config.n),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        / 15
+    )
+    torch.distributed.broadcast(w1_bf16, src=0, group=pg)
+    torch.distributed.broadcast(w2_bf16, src=0, group=pg)
+
+    # Round-trip through FP8 before constructing the reference and kernel weights.
+    w1_fp8 = w1_bf16.to(torch.float8_e4m3fn)
+    w2_fp8 = w2_bf16.to(torch.float8_e4m3fn)
+    w1_ref = w1_fp8.to(torch.bfloat16)
+    w2_ref = w2_fp8.to(torch.bfloat16)
+
+    from vllm.config import KernelConfig
+
+    vllm_cfg = VllmConfig()
+    vllm_cfg.kernel_config = KernelConfig(moe_backend=moe_backend)
+
+    with set_current_vllm_config(vllm_cfg):
+        # Initialize vLLM parallel state (needed by MoERunner layer)
+        temp_file = tempfile.mktemp()
+        init_distributed_environment(
+            world_size=pgi.world_size,
+            rank=pgi.rank,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=pgi.local_rank,
+            backend="nccl",
+        )
+        initialize_model_parallel(tensor_model_parallel_size=1)
+        # Mirror production weight processing: quantize, EP-slice, then
+        # convert to the selected expert format.
+        from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+            Fp8MoeBackend,
+            convert_to_fp8_moe_kernel_format,
+        )
+
+        block_shape = [128, 128]
+        qw = _quantize_fp8_halves(w1_ref, w2_ref, block_shape)
+        assert qw.w13_weight_scale is not None
+        assert qw.w2_weight_scale is not None
+
+        # Reference MoE using the same blockwise FP8 quantization scheme as
+        # the production kernel. torch_experts quantizes activations before
+        # both GEMMs and dequantizes the operands for the reference matmuls.
+        reference_topk_weights = test_tensors.topk_weights.to(torch.bfloat16).to(
+            torch.float32
+        )
+        torch_combined = torch_experts(
+            test_tensors.rank_tokens,
+            qw.w13_weight,
+            qw.w2_weight,
+            reference_topk_weights,
+            test_tensors.topk,
+            w1_scale=qw.w13_weight_scale,
+            w2_scale=qw.w2_weight_scale,
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=block_shape,
+        )
+
+        # EP-slice before format conversion
+        e_start = num_local_experts * pgi.rank
+        e_end = e_start + num_local_experts
+        w1_ep = qw.w13_weight[e_start:e_end]
+        w2_ep = qw.w2_weight[e_start:e_end]
+        w1_scale_ep = qw.w13_weight_scale[e_start:e_end]
+        w2_scale_ep = qw.w2_weight_scale[e_start:e_end]
+
+        moe_config = make_dummy_moe_config(
+            num_experts=config.num_experts,
+            num_local_experts=num_local_experts,
+            experts_per_token=config.topk,
+            hidden_dim=hidden_size,
+            intermediate_size=config.n,
+        )
+        moe_parallel_config = dataclasses.replace(
+            moe_config.moe_parallel_config,
+            ep_size=pgi.world_size,
+            ep_rank=pgi.rank,
+            use_ep=True,
+            all2all_backend="deepep_v2",
+        )
+        moe_config = dataclasses.replace(
+            moe_config,
+            moe_parallel_config=moe_parallel_config,
+        )
+
+        if moe_backend == "humming":
+            fused_experts, quant_config, w1_ep, w2_ep = _make_humming_experts(
+                moe_config,
+                w1_ep,
+                w2_ep,
+                w1_scale_ep,
+                w2_scale_ep,
+                block_shape,
+            )
+        else:
+            assert moe_backend == "flashinfer_trtllm"
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+                TrtLlmFp8ExpertsModular,
+            )
+
+            class _MockLayer:
+                weight_block_size = block_shape
+
+                class moe_config:
+                    is_act_and_mul = True
+                    intermediate_size_per_partition = config.n
+
+                class activation:
+                    is_gated = True
+
+            w1_ep, w2_ep, w1_scale_ep, w2_scale_ep = convert_to_fp8_moe_kernel_format(
+                fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
+                layer=_MockLayer(),
+                w13=w1_ep,
+                w2=w2_ep,
+                w13_scale=w1_scale_ep,
+                w2_scale=w2_scale_ep,
+                w13_input_scale=None,
+                w2_input_scale=None,
+            )
+            quant_config = FusedMoEQuantConfig.make(
+                torch.float8_e4m3fn,
+                block_shape=block_shape,
+                w1_scale=w1_scale_ep,
+                w2_scale=w2_scale_ep,
+            )
+            fused_experts = TrtLlmFp8ExpertsModular(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            )
+
+        v2_args = DeepEPV2Args(
+            num_local_experts=num_local_experts,
+            num_experts=config.num_experts,
+            num_topk=config.topk,
+            hidden_size=hidden_size,
+            max_tokens_per_rank=8192,
+            use_fp8_dispatch=False,
+        )
+        a2a = make_deepep_v2_a2a(
+            pg=pg,
+            pgi=pgi,
+            dp_size=dp_size,
+            v2_args=v2_args,
+            use_cudagraph=True,
+        )
+        mk_kernel = FusedMoEKernel(
+            prepare_finalize=a2a,
+            fused_experts=fused_experts,
+        )
+        expert_map = _build_expert_map(pgi, config.num_experts, num_local_experts)
+
+        with set_forward_context(None, vllm_cfg):
+            for _ in range(3):
+                out = mk_kernel.apply(
+                    hidden_states=test_tensors.rank_tokens,
+                    w1=w1_ep,
+                    w2=w2_ep,
+                    topk_weights=test_tensors.topk_weights,
+                    topk_ids=test_tensors.topk,
+                    activation=MoEActivation.SILU,
+                    global_num_experts=config.num_experts,
+                    expert_map=expert_map,
+                    apply_router_weight_on_input=False,
+                )
+
+        if moe_backend == "humming":
+            assert_fp8_close(torch_combined, out)
+        else:
+            torch.testing.assert_close(
+                torch_combined,
+                out,
+                atol=6e-2,
+                rtol=6e-2,
+            )
+
+
+@pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
+@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("topk", [6])
+@pytest.mark.parametrize("world_dp_size", [(2, 1)])
+@pytest.mark.parametrize("moe_backend", ["flashinfer_trtllm", "humming"])
+@multi_gpu_test(num_gpus=2)
+@requires_deep_ep_v2
+def test_deep_ep_v2_moe_cudagraph(
+    m: int,
+    n: int,
+    k: int,
+    num_experts: int,
+    topk: int,
+    world_dp_size: tuple[int, int],
+    moe_backend: str,
+    workspace_init,
+):
+    set_random_seed(7)
+    world_size, dp_size = world_dp_size
+    config = TestConfig(
+        dtype=torch.float8_e4m3fn,
+        topk=topk,
+        m=m,
+        k=k,
+        n=n,
+        num_experts=num_experts,
+    )
+
+    parallel_launch(
+        world_size,
+        _deep_ep_v2_moe_cudagraph,
+        dp_size,
+        config,
+        None,  # weights created inside worker
+        None,
+        None,
+        None,
+        moe_backend,
     )

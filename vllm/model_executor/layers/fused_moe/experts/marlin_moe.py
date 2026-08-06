@@ -1000,26 +1000,18 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             act: MoEActivation,
             act_output: torch.Tensor,
             act_input: torch.Tensor,
-            **kwargs,
+            *,
+            topk_ids: torch.Tensor | None = None,
+            expert_map: torch.Tensor | None = None,
         ) -> None:
-            if act != MoEActivation.SITU:
-                self.activation(
-                    act,
-                    act_output,
-                    act_input,
-                    **kwargs,
-                )
-                return
-
             num_experts, max_num_tokens = hidden_states.shape[:2]
-            beta = self.activation_config.activation_situ_beta
-            linear_beta = self.activation_config.activation_situ_linear_beta
-            torch.ops._C.masked_situ_and_mul(
+            self.activation(
+                act,
                 act_output.view(num_experts, max_num_tokens, -1),
                 act_input.view(num_experts, max_num_tokens, -1),
-                expert_tokens_meta.expert_num_tokens,
-                1.0 if beta is None else beta,
-                -1.0 if linear_beta is None else linear_beta,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
+                valid_token_counts=expert_tokens_meta.expert_num_tokens,
             )
 
         return batched_fused_marlin_moe(
