@@ -6,7 +6,12 @@ from unittest.mock import MagicMock, call
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_mamba_hybrid_kv_cache_config,
+    _make_vllm_config,
+)
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    MockOffloadingSpec,
     generate_store_output,
     to_keys,
 )
@@ -15,6 +20,9 @@ from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -26,7 +34,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     get_sliding_window_size_in_chunks,
     is_store_reachable_swa_chunk,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -34,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
+    GPULoadStoreSpec,
     LookupResult,
     Medium,
     OffloadingEvent,
@@ -42,10 +52,34 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     get_offload_block_hash,
+    get_offload_group_idx,
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
+
+
+def _make_partial_tail_scheduler() -> OffloadingConnectorScheduler:
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.prefix_match_unit = 4
+    vllm_config.speculative_config = None
+    kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+
+def _make_partial_tail_request(
+    scheduler: OffloadingConnectorScheduler,
+) -> MagicMock:
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.num_prompt_tokens = 30
+    request.num_tokens = 30
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
+    request.is_finished.return_value = False
+    scheduler.on_new_request(request)
+    return request
 
 
 def _reduce_kv_connector_stats(runner):
@@ -59,6 +93,79 @@ def _reduce_kv_connector_stats(runner):
         for key, value in stats.reduce().items():
             reduced[key] = reduced.get(key, 0) + value
     return reduced
+
+
+def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(partial_tail_offloads={"req": [(1, 99, 28)]})
+    jobs = scheduler._build_partial_tail_store_jobs(output)
+
+    assert len(jobs) == 1
+    [job_id] = jobs
+    src_spec = jobs[job_id].src_spec
+    assert isinstance(src_spec, GPULoadStoreSpec)
+    assert src_spec.block_ids.tolist() == [12, 99]
+    assert src_spec.group_sizes == [1, 1]
+    assert src_spec.block_indices == [1, 1]
+    assert scheduler._block_id_to_pending_jobs == {
+        12: {job_id},
+        99: {job_id},
+    }
+
+
+def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert scheduler._lookup(req_status) == 28
+
+    assert req_status.partial_tail_boundary == 28
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=28,
+    )
+    [load_job] = scheduler._current_batch_load_jobs.values()
+    dst_spec = load_job.dst_spec
+    assert isinstance(dst_spec, GPULoadStoreSpec)
+    assert dst_spec.block_ids.tolist() == [31, 32, 41]
+    assert dst_spec.group_sizes == [2, 1]
+    assert dst_spec.block_indices == [0, 1]
+    assert req_status.partial_tail_boundary is None
+
+
+def test_partial_lookup_requires_every_cache_group():
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+
+    def lookup(key, req_context):
+        if get_offload_group_idx(key) == 1 and get_offload_block_hash(key) != b"h3":
+            return LookupResult.MISS
+        return LookupResult.HIT
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler._lookup(req_status) == 16
+    assert req_status.partial_tail_boundary is None
 
 
 def test_scheduler_reports_allocation_failure(request_runner):
@@ -2143,7 +2250,7 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     # Now prepare_store succeeds.
     # Without the fix, the request would try to offload the stale block_id
     # at position 0 (now reused at position 3), causing a duplicate in
-    # sliding_window_block_ids and eventually a KeyError.
+    # fenced_block_ids and eventually a KeyError.
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
@@ -2970,7 +3077,7 @@ class TestEagle:
 def test_request_finished_with_pending_stores_populates_fence(request_runner):
     """When a request finishes with in-flight store jobs, the fence index
     (_block_id_to_pending_jobs) is correctly populated with the store jobs'
-    non_sliding_window_block_ids.
+    deferred_fence_block_ids.
 
     This prevents data corruption when a subsequent request reuses the same
     GPU blocks before the store completes.
@@ -3004,7 +3111,7 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
         )
         for js in runner.connector_scheduler._jobs.values():
             if js.is_store:
-                job_block_ids.update(js.non_sliding_window_block_ids or [])
+                job_block_ids.update(js.deferred_fence_block_ids or [])
 
     # Run 1: create store job, finish request, populate fence.
     # With non-blocking drain (#45595), the job stays in-flight.
@@ -3106,7 +3213,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     request_runner,
 ):
     """With both FullAttention and SlidingWindow groups, a single store job
-    has both non_sliding_window_block_ids and sliding_window_block_ids.
+    has both deferred_fence_block_ids and fenced_block_ids.
 
     request_finished only registers non-SW blocks in the fence.
     SW blocks were already registered at store creation time.
@@ -3162,8 +3269,8 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
         )
         for js in runner.connector_scheduler._jobs.values():
             if js.is_store:
-                sw_block_ids.update(js.sliding_window_block_ids or [])
-                non_sw_block_ids.update(js.non_sliding_window_block_ids or [])
+                sw_block_ids.update(js.fenced_block_ids or [])
+                non_sw_block_ids.update(js.deferred_fence_block_ids or [])
 
     # Run 1: create store job, finish request, populate fence.
     runner.run(
