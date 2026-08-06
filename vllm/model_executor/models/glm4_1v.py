@@ -1285,24 +1285,24 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             extract_t = int(effective_duration * target_fps * temporal_patch_size)
             extract_t = min(extract_t, MAX_FRAME_COUNT_DYNAMIC)
 
-            duration_per_frame = 1 / video_fps
-            timestamps = [i * duration_per_frame for i in range(meta_frames)]
-            max_second = int(duration)
-
-            if meta_frames < extract_t:
+            if meta_frames < extract_t or duration > effective_duration:
                 frame_indices = np.linspace(
                     0, meta_frames - 1, extract_t, dtype=int
                 ).tolist()
             else:
-                frame_indices = []
-                current_second = 0.0
-                inv_fps = 1 / (temporal_patch_size * target_fps)
-                for frame_index in range(meta_frames):
-                    if timestamps[frame_index] >= current_second:
-                        current_second += inv_fps
-                        frame_indices.append(frame_index)
-                        if current_second >= max_second:
-                            break
+                frame_indices = [
+                    min(
+                        max_frame_idx,
+                        int(
+                            math.ceil(
+                                frame_idx
+                                * video_fps
+                                / (temporal_patch_size * target_fps)
+                            )
+                        ),
+                    )
+                    for frame_idx in range(extract_t)
+                ]
 
             if len(frame_indices) < extract_t:
                 if len(frame_indices) == 0:
@@ -1360,23 +1360,22 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             extract_t = int(duration * target_fps)
             extract_t = min(extract_t, max_frames)
 
-            duration_per_frame = 1 / video_fps
-            timestamps = [i * duration_per_frame for i in range(meta_frames)]
-
             if meta_frames < extract_t:
                 frame_indices = [
                     math.floor(i * meta_frames / extract_t) for i in range(extract_t)
                 ]
+            elif int(duration * target_fps) > max_frames:
+                frame_indices = np.linspace(
+                    0, meta_frames - 1, extract_t, dtype=int
+                ).tolist()
             else:
-                frame_indices = []
-                current_second = 0.0
-                inv_fps = 1 / target_fps
-                for frame_index in range(meta_frames):
-                    if timestamps[frame_index] >= current_second:
-                        current_second += inv_fps
-                        frame_indices.append(frame_index)
-                        if current_second >= duration - inv_fps:
-                            break
+                frame_indices = [
+                    min(
+                        max_frame_idx,
+                        int(math.ceil(frame_idx * video_fps / target_fps)),
+                    )
+                    for frame_idx in range(extract_t)
+                ]
 
             if len(frame_indices) < extract_t:
                 if len(frame_indices) == 0:
