@@ -238,6 +238,22 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 
 
 @functools.cache
+def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool:
+    """Return whether FlashInfer ships an SM120 DSV4 decode specialization.
+
+    The public sparse MLA API predates some DSV4 shapes, so checking only that
+    the callable exists can select a package that later aborts or rejects a
+    valid vLLM configuration. Inspect FlashInfer's dispatch table until it
+    exposes a public capability query.
+    """
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
+    dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
+    return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
