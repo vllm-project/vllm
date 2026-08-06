@@ -133,7 +133,6 @@ def shard_sequence_parallel_mlp(
     hidden_size: int,
     intermediate_size: int,
     use_sequence_parallel: bool,
-    eligible: bool,
 ) -> bool:
     """Whether to TP-shard a sequence-parallel MLP instead of replicating it.
 
@@ -141,7 +140,7 @@ def shard_sequence_parallel_mlp(
     the trade-off and :mod:`vllm.envs` for when it is worth enabling.
     """
     enabled = envs.VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT
-    if not (use_sequence_parallel and eligible and enabled):
+    if not (use_sequence_parallel and enabled):
         return False
     tp_size = get_tensor_model_parallel_world_size()
     return (
@@ -173,7 +172,6 @@ class KimiMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         use_sequence_parallel: bool = False,
-        can_shard_sequence_parallel: bool = False,
         prefix: str = "",
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
@@ -184,7 +182,6 @@ class KimiMLP(nn.Module):
             hidden_size,
             intermediate_size,
             use_sequence_parallel,
-            can_shard_sequence_parallel,
         )
         replicate = use_sequence_parallel and not self.shard_sequence_parallel
 
@@ -497,7 +494,7 @@ class KimiMoE(nn.Module):
         min_moe_intermediate_per_partition = getattr(
             config, "min_moe_intermediate_per_partition", 256
         )
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not vllm_config.parallel_config.enable_expert_parallel:
             moe_intermediate_per_partition = moe_intermediate_size // self.tp_size
             if moe_intermediate_per_partition < min_moe_intermediate_per_partition:
                 self.padded_moe_intermediate_size = (
@@ -532,10 +529,6 @@ class KimiMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 use_sequence_parallel=use_sequence_parallel,
-                # Only the MegaMoE path calls the shared experts directly; the
-                # FusedMoE path below hands them to the runner, which fuses
-                # their reduction and assumes the replicated layout.
-                can_shard_sequence_parallel=self.use_mega_moe,
                 prefix=f"{prefix}.shared_experts",
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -846,7 +839,6 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 use_sequence_parallel=self.use_sequence_parallel,
-                can_shard_sequence_parallel=True,
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
             )
@@ -1126,13 +1118,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             residual = intermediate_tensors["residual"]
         assert hidden_states is not None
 
-        aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
-            if self.use_attn_res or residual is None:
-                aux_hidden_states.append(hidden_states)
-            else:
-                aux_hidden_states.append(hidden_states + residual)
-
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
@@ -1142,6 +1127,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 )
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
+
+        # sharded aux hidden states when sp is enabled
+        aux_hidden_states: list[torch.Tensor] = []
+        if self.start_layer in self.aux_hidden_state_layers:
+            if self.use_attn_res or residual is None:
+                aux_hidden_states.append(hidden_states)
+            else:
+                aux_hidden_states.append(hidden_states + residual)
 
         prefix_sum = None
         if self.use_attn_res:
@@ -1174,11 +1167,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                     assert residual is not None
                     aux_hidden_state = hidden_states + residual
 
-                if self.use_sequence_parallel:
-                    # Gather SP-sharded aux hidden states.
-                    # TODO: Optimize this.
-                    aux_hidden_state = sp_all_gather(aux_hidden_state)
-                    aux_hidden_state = aux_hidden_state[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
 
         assert hidden_states is not None
@@ -1211,9 +1199,19 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = hidden_states + residual
 
         if self.use_sequence_parallel:
-            # Gather SP-sharded hidden states.
-            hidden_states = sp_all_gather(hidden_states)
-            hidden_states = hidden_states[:full_num_tokens]
+            if aux_hidden_states:
+                hidden_size = hidden_states.shape[-1]
+                packed_hidden_states = torch.cat(
+                    [hidden_states, *aux_hidden_states], dim=-1
+                )
+                packed_hidden_states = sp_all_gather(packed_hidden_states)
+                packed_hidden_states = packed_hidden_states[:full_num_tokens]
+                hidden_states, *aux_hidden_states = packed_hidden_states.split(
+                    hidden_size, dim=-1
+                )
+            else:
+                hidden_states = sp_all_gather(hidden_states)
+                hidden_states = hidden_states[:full_num_tokens]
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
