@@ -208,6 +208,40 @@ def test_take_events_forwards_locality_to_placeholder_store():
     assert events[0].locality == "REMOTE"
 
 
+def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
+    tracker = _tracker()
+    group_config = _group_config(block_size=16, blocks_per_chunk=1)._replace(
+        hashes_per_chunk=4
+    )
+    req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    key = make_offload_key(req.block_hashes[6], group_config.group_idx)
+
+    tracker.record_partial_store(req, group_config, 28, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(i)) for i in range(4, 7)]
+    assert event.parent_block_hash == _wire_hash(_hash(3))
+    assert event.token_ids == list(range(17, 29))
+    assert event.block_size == 4
+
+
+def test_partial_tail_lookup_does_not_overwrite_store_metadata():
+    tracker = _tracker()
+    group_config = _group_config()
+    stored_req = _request(block_hashes=[_hash(0)], token_count=4)
+    lookup_req = _request(block_hashes=[_hash(0)], token_count=4)
+    lookup_req.all_token_ids = [9, 9, 9, 9]
+    key = make_offload_key(stored_req.block_hashes[0], group_config.group_idx)
+
+    tracker.record_partial_store(stored_req, group_config, 4, key)
+    tracker.record_partial_lookup(lookup_req, group_config, 4, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.token_ids == [1, 2, 3, 4]
+
+
 def test_take_events_forwards_locality_to_remove():
     tracker = _tracker()
     req = _request(block_hashes=[_hash(0)], token_count=4)

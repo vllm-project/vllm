@@ -16,6 +16,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -58,9 +59,12 @@ from vllm.v1.request import RequestStatus
 
 
 def _make_partial_tail_scheduler() -> OffloadingConnectorScheduler:
-    vllm_config = _make_vllm_config()
+    vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = 4
     vllm_config.speculative_config = None
+    vllm_config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="null"
+    )
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
     return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
@@ -75,6 +79,8 @@ def _make_partial_tail_request(
     request.num_prompt_tokens = 30
     request.num_tokens = 30
     request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
+    request.all_token_ids = list(range(30))
+    request.lora_request = None
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
     return request
@@ -117,6 +123,26 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         12: {job_id},
         99: {job_id},
     }
+    assert scheduler.config.supports_partial_tail
+
+    events = list(
+        scheduler._events_tracker.take_events(
+            [
+                OffloadingEvent(
+                    keys=list(scheduler._jobs[job_id].keys),
+                    medium=Medium.CPU,
+                    removed=False,
+                )
+            ]
+        )
+    )
+    assert len(events) == 2
+    assert all(isinstance(event, BlockStored) for event in events)
+    assert {event.group_idx for event in events} == {0, 1}
+    assert all(event.block_size == 4 for event in events)
+    assert all(event.token_ids == list(range(16, 28)) for event in events)
+    assert all(len(event.block_hashes) == 3 for event in events)
+    assert all(event.parent_block_hash is not None for event in events)
 
 
 def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
