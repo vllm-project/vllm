@@ -710,7 +710,10 @@ class EngineArgs:
         CacheConfig, "kv_cache_dtype_skip_layers"
     )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
-    mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
+    # ``None`` preserves whether the user passed this option. The model
+    # config may resolve ``auto`` later, so the platform must not infer
+    # explicit BF16 intent from the resolved dtype.
+    mamba_ssm_cache_dtype: MambaDType | None = None
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
@@ -1206,6 +1209,7 @@ class EngineArgs:
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
+        cache_kwargs["mamba_ssm_cache_dtype"]["default"] = None
         cache_group = parser.add_argument_group(
             title="CacheConfig",
             description=CacheConfig.__doc__,
@@ -2003,6 +2007,7 @@ class EngineArgs:
             "enable_prefix_caching must be set by this point"
         )
 
+        requested_mamba_ssm_cache_dtype = self.mamba_ssm_cache_dtype
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -2017,7 +2022,7 @@ class EngineArgs:
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
-            mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            mamba_ssm_cache_dtype=requested_mamba_ssm_cache_dtype or "auto",
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
@@ -2025,6 +2030,9 @@ class EngineArgs:
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+        )
+        cache_config.user_specified_mamba_ssm_cache_dtype = (
+            requested_mamba_ssm_cache_dtype not in (None, "auto")
         )
 
         if resolved_cache_dtype.startswith("turboquant_"):

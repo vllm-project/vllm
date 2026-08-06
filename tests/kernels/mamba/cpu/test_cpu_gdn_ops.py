@@ -19,21 +19,6 @@ if not current_platform.is_cpu():
 
 set_random_seed(12345)
 
-NUM_HEADS = [
-    (2, 4),
-    (4, 4),
-]
-HEAD_DIMS = [
-    (32, 32),
-    (64, 32),
-]
-# chunk_gated_delta_rule_cpu (the chunked-prefill kernel) only supports
-# head_dim == head_dim_v in {64, 128}; the decode-path update kernel above
-# has no such restriction and keeps using the wider HEAD_DIMS list.
-CHUNK_HEAD_DIMS = [
-    (64, 64),
-    (128, 128),
-]
 CHUNK_SIZE = 64
 CONV_DIM = 128
 CONV_KERNEL = 4
@@ -47,7 +32,6 @@ PREFILL_SEQ_LENS = [
     [2 * CHUNK_SIZE - 1, 2 * CHUNK_SIZE, 2 * CHUNK_SIZE + 1],
     [4 * CHUNK_SIZE + 17],
 ]
-DECODE_BATCH_SIZES = [1, 3, 5]
 
 
 @functools.lru_cache(maxsize=128, typed=False)
@@ -91,6 +75,8 @@ def ref_gated_delta_rule(
     initial_state: torch.Tensor,
     cu_seqlens: torch.Tensor,
     use_qk_l2norm_in_kernel: bool = False,
+    state_dtype: torch.dtype = torch.float32,
+    state_write_interval: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     g, beta = ref_gdn_gating(A_log, a, b, dt_bias)
     out = torch.empty_like(value)
@@ -144,6 +130,10 @@ def ref_gated_delta_rule(
             delta = (v_t - kv_mem) * beta_t
             state = state + delta.unsqueeze(-1) * k_t.unsqueeze(-2)
             out_seq[:, :, token_idx] = (state * q_t.unsqueeze(-2)).sum(dim=-1)
+            if state_dtype != torch.float32 and (
+                (token_idx + 1) % state_write_interval == 0 or token_idx + 1 == seq_len
+            ):
+                state = state.to(state_dtype).float()
 
         out[:, begin:end] = out_seq.transpose(1, 2).contiguous().to(initial_dtype)
         final_state[seq_idx] = state.squeeze(0)
@@ -201,14 +191,16 @@ def test_fused_gdn_gating_cpu(
 
 
 # decode path
-@pytest.mark.parametrize("batch_size", DECODE_BATCH_SIZES)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_dims", HEAD_DIMS)
+@pytest.mark.parametrize("batch_size", [1, 3])
+@pytest.mark.parametrize("num_heads", [(2, 4)])
+@pytest.mark.parametrize("head_dims", [(32, 32), (64, 32)])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_fused_sigmoid_gating_delta_rule_update_cpu(
     batch_size: int,
     num_heads: tuple[int, int],
     head_dims: tuple[int, int],
+    state_dtype: torch.dtype,
 ) -> None:
     q, k, v, a, b, A_log, dt_bias = gdn_inputs(
         num_tokens=batch_size,
@@ -221,7 +213,7 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu(
     cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32)
     state_shape = (batch_size, num_v_heads, head_dim, v_head_dim)
     state = tensor_cache(
-        batch_size * num_v_heads * head_dim * v_head_dim, torch.float32
+        batch_size * num_v_heads * head_dim * v_head_dim, state_dtype
     ).view(state_shape)
     state_ref = state[state_indices].transpose(-1, -2).contiguous()
 
@@ -236,6 +228,7 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu(
         initial_state=state_ref,
         cu_seqlens=cu_seqlens,
         use_qk_l2norm_in_kernel=True,
+        state_dtype=state_dtype,
     )
     out_ref = out_ref.transpose(0, 1).contiguous()
 
@@ -256,22 +249,56 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu(
 
     torch.testing.assert_close(out, out_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(
-        state_out[state_indices].transpose(-1, -2),
-        final_state_ref,
+        state_out[state_indices].transpose(-1, -2).float(),
+        final_state_ref.float(),
         atol=1e-2,
         rtol=1e-2,
     )
 
 
+def _padded_gdn_state_case() -> tuple[torch.Tensor, ...]:
+    q, k, v, a, b, A_log, dt_bias = gdn_inputs(
+        num_tokens=1,
+        num_heads=(2, 4),
+        head_dims=(32, 32),
+    )
+    padded_state = torch.zeros(1, 4, 32, 33, dtype=torch.float32)[..., :32]
+    return q, k, v, a, b, A_log, dt_bias, padded_state
+
+
+@torch.inference_mode()
+def test_fused_sigmoid_gating_delta_rule_update_cpu_rejects_padded_inner_state() -> (
+    None
+):
+    q, k, v, a, b, A_log, dt_bias, padded_state = _padded_gdn_state_case()
+
+    with pytest.raises(RuntimeError, match="contiguous per pool slot"):
+        ops.fused_sigmoid_gating_delta_rule_update_cpu(
+            A_log=A_log,
+            dt_bias=dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            initial_state_source=padded_state,
+            initial_state_indices=torch.zeros(1, dtype=torch.int32),
+            cu_seqlens=torch.tensor([0, 1], dtype=torch.int32),
+            use_qk_l2norm_in_kernel=True,
+        )
+
+
 # prefill path
 @pytest.mark.parametrize("seq_lens", PREFILL_SEQ_LENS)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_dims", CHUNK_HEAD_DIMS)
+@pytest.mark.parametrize("num_heads", [(2, 4)])
+@pytest.mark.parametrize("head_dims", [(64, 64)])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_chunk_gated_delta_rule_cpu(
     seq_lens: list[int],
     num_heads: tuple[int, int],
     head_dims: tuple[int, int],
+    state_dtype: torch.dtype,
 ) -> None:
     total_tokens = sum(seq_lens)
     q, k, v, a, b, A_log, dt_bias = gdn_inputs(
@@ -286,7 +313,7 @@ def test_chunk_gated_delta_rule_cpu(
     )
     initial_state_shape = (len(seq_lens), num_v_heads, head_dim, v_head_dim)
     initial_state = tensor_cache(
-        len(seq_lens) * num_v_heads * head_dim * v_head_dim, torch.float32
+        len(seq_lens) * num_v_heads * head_dim * v_head_dim, state_dtype
     ).view(initial_state_shape)
     initial_state_ref = initial_state.transpose(-1, -2).contiguous()
 
@@ -301,6 +328,8 @@ def test_chunk_gated_delta_rule_cpu(
         initial_state=initial_state_ref,
         cu_seqlens=cu_seqlens,
         use_qk_l2norm_in_kernel=True,
+        state_dtype=state_dtype,
+        state_write_interval=CHUNK_SIZE,
     )
 
     g, beta = ref_gdn_gating(A_log, a, b, dt_bias)
@@ -320,8 +349,8 @@ def test_chunk_gated_delta_rule_cpu(
 
     torch.testing.assert_close(out, out_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(
-        final_state.transpose(-1, -2),
-        final_state_ref,
+        final_state.transpose(-1, -2).float(),
+        final_state_ref.float(),
         atol=1e-2,
         rtol=1e-2,
     )
@@ -339,14 +368,16 @@ TWO_CALL_SPLITS = [
 
 
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_dims", CHUNK_HEAD_DIMS)
+@pytest.mark.parametrize("num_heads", [(2, 4)])
+@pytest.mark.parametrize("head_dims", [(64, 64)])
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_chunk_gated_delta_rule_cpu_two_call_split(
     total_tokens: int,
     split: int,
     num_heads: tuple[int, int],
     head_dims: tuple[int, int],
+    state_dtype: torch.dtype,
 ) -> None:
     """A prefill split into two calls (the second seeded with the first's
     ``final_state`` and a rebased ``cu_seqlens``) must match the single-call
@@ -365,7 +396,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
     g = g.unsqueeze(0)  # [1, T, HV]
     beta = beta.unsqueeze(0)
 
-    zero_state = torch.zeros(1, num_v_heads, head_dim, v_head_dim, dtype=torch.float32)
+    zero_state = torch.zeros(1, num_v_heads, head_dim, v_head_dim, dtype=state_dtype)
 
     # Reference: whole sequence in one call, no initial state.
     out_full, final_full = ops.chunk_gated_delta_rule_cpu(
@@ -405,7 +436,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
         value=v[:, split:],
         g=g[:, split:],
         beta=beta[:, split:],
-        initial_state=state1.to(torch.float32),
+        initial_state=state1,
         output_final_state=True,
         cu_seqlens=torch.tensor([0, tail], dtype=torch.int32),
         head_first=False,
@@ -416,8 +447,249 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
     out_split = torch.cat([out1, out2], dim=1)
 
     # State must be near-exact; output allows a looser bound for the bf16 round-trip.
-    torch.testing.assert_close(state2, final_full, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(state2.float(), final_full.float(), atol=1e-3, rtol=1e-3)
     torch.testing.assert_close(out_split, out_full, atol=2e-2, rtol=2e-2)
+
+
+def _ref_spec_gdn(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state: torch.Tensor,
+    state_indices: torch.Tensor,
+    accepted_counts: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    state_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    g, beta = ref_gdn_gating(A_log, a, b, dt_bias)
+    out = torch.empty_like(v)
+    state_out = state.clone()
+    num_q_heads = q.shape[1]
+    num_v_heads = v.shape[1]
+    group_size = num_v_heads // num_q_heads
+    scale = q.shape[-1] ** -0.5
+
+    for batch_idx in range(cu_seqlens.numel() - 1):
+        start = int(cu_seqlens[batch_idx])
+        end = int(cu_seqlens[batch_idx + 1])
+        accepted = int(accepted_counts[batch_idx])
+        previous_slot = int(state_indices[batch_idx, max(accepted - 1, 0)])
+        recurrent_state = state_out[previous_slot].float().transpose(-1, -2)
+        for token in range(start, end):
+            q_token = ref_l2norm(q[token].float(), dim=-1)
+            k_token = ref_l2norm(k[token].float(), dim=-1)
+            q_token = q_token.repeat_interleave(group_size, dim=0)
+            k_token = k_token.repeat_interleave(group_size, dim=0)
+            q_token = q_token * scale
+            k_token = k_token
+            v_token = v[token].float()
+            recurrent_state = recurrent_state * g[token].exp()[:, None, None]
+            kv_mem = (recurrent_state * k_token.unsqueeze(-2)).sum(dim=-1)
+            delta = (v_token - kv_mem) * beta[token].float()[:, None]
+            recurrent_state = recurrent_state + delta.unsqueeze(-1) * k_token.unsqueeze(
+                -2
+            )
+            out[token] = ((recurrent_state * q_token.unsqueeze(-2)).sum(dim=-1)).to(
+                out.dtype
+            )
+            current_slot = int(state_indices[batch_idx, token - start])
+            state_out[current_slot] = recurrent_state.transpose(-1, -2).to(state_dtype)
+            previous_slot = current_slot
+
+    return out, state_out
+
+
+def _run_spec_gdn_validation(
+    spec_state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    state_dtype: torch.dtype = torch.float32,
+) -> None:
+    total_tokens = 4
+    q, k, v, a, b, A_log, dt_bias = gdn_inputs(
+        num_tokens=total_tokens,
+        num_heads=(2, 4),
+        head_dims=(32, 32),
+    )
+    state = torch.zeros(8, 4, 32, 32, dtype=state_dtype)
+    ops.fused_sigmoid_gating_delta_rule_update_spec_cpu(
+        A_log=A_log,
+        dt_bias=dt_bias,
+        q=q.squeeze(0),
+        k=k.squeeze(0),
+        v=v.squeeze(0),
+        a=a,
+        b=b,
+        initial_state_source=state,
+        spec_state_indices=spec_state_indices,
+        num_accepted_tokens=torch.ones(cu_seqlens.numel() - 1, dtype=torch.int32),
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("spec_state_indices", "cu_seqlens", "error"),
+    [
+        (
+            torch.zeros(2, dtype=torch.int32),
+            torch.tensor([0, 1, 2], dtype=torch.int32),
+            "2D tensor",
+        ),
+        (
+            torch.zeros(2, 2, dtype=torch.int64),
+            torch.tensor([0, 1, 2], dtype=torch.int32),
+            "int32 CPU tensor",
+        ),
+        (
+            torch.zeros(1, 2, dtype=torch.int32),
+            torch.tensor([0, 1, 2], dtype=torch.int32),
+            "first dimension",
+        ),
+        (
+            torch.zeros(2, 1, dtype=torch.int32),
+            torch.tensor([0, 2, 4], dtype=torch.int32),
+            "at least the longest",
+        ),
+        (
+            torch.zeros(2, 4, dtype=torch.int32)[:, ::2],
+            torch.tensor([0, 1, 2], dtype=torch.int32),
+            "last dimension",
+        ),
+        (
+            torch.zeros(2, 2, dtype=torch.int32),
+            torch.tensor([0, 2, 1], dtype=torch.int32),
+            "non-decreasing",
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_fused_sigmoid_gating_delta_rule_update_spec_cpu_rejects_invalid_metadata(
+    spec_state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    error: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=error):
+        _run_spec_gdn_validation(spec_state_indices, cu_seqlens)
+
+
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_fused_sigmoid_gating_delta_rule_update_spec_cpu(
+    state_dtype: torch.dtype,
+) -> None:
+    num_heads = (2, 4)
+    head_dim = v_head_dim = 32
+    seq_lens = [2, 3]
+    total_tokens = sum(seq_lens)
+    q, k, v, a, b, A_log, dt_bias = gdn_inputs(
+        num_tokens=total_tokens,
+        num_heads=num_heads,
+        head_dims=(head_dim, v_head_dim),
+    )
+    q = q.squeeze(0)
+    k = k.squeeze(0)
+    v = v.squeeze(0)
+    a = a
+    b = b
+    state_indices = torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.int32)
+    accepted_counts = torch.tensor([1, 2], dtype=torch.int32)
+    cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+    state = tensor_cache(6 * num_heads[1] * head_dim * v_head_dim, state_dtype).view(
+        6, num_heads[1], head_dim, v_head_dim
+    )
+
+    out_ref, state_ref = _ref_spec_gdn(
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        state=state,
+        state_indices=state_indices,
+        accepted_counts=accepted_counts,
+        cu_seqlens=cu_seqlens,
+        state_dtype=state_dtype,
+    )
+    state_out = state.clone()
+    out = ops.fused_sigmoid_gating_delta_rule_update_spec_cpu(
+        A_log=A_log,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        initial_state_source=state_out,
+        spec_state_indices=state_indices,
+        num_accepted_tokens=accepted_counts,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    torch.testing.assert_close(out, out_ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        state_out.float(), state_ref.float(), atol=1e-2, rtol=1e-2
+    )
+
+
+@torch.inference_mode()
+def test_spec_gdn_cpu_rejects_padded_inner_state() -> None:
+    q, k, v, a, b, A_log, dt_bias, padded_state = _padded_gdn_state_case()
+
+    with pytest.raises(RuntimeError, match="contiguous per pool slot"):
+        ops.fused_sigmoid_gating_delta_rule_update_spec_cpu(
+            A_log=A_log,
+            dt_bias=dt_bias,
+            q=q.squeeze(0),
+            k=k.squeeze(0),
+            v=v.squeeze(0),
+            a=a,
+            b=b,
+            initial_state_source=padded_state,
+            spec_state_indices=torch.zeros(1, 1, dtype=torch.int32),
+            num_accepted_tokens=torch.ones(1, dtype=torch.int32),
+            cu_seqlens=torch.tensor([0, 1], dtype=torch.int32),
+            use_qk_l2norm_in_kernel=True,
+        )
+
+
+@torch.inference_mode()
+def test_spec_gdn_cpu_rejects_unsupported_state_dtype() -> None:
+    with pytest.raises(RuntimeError, match="state dtype must be float32 or bfloat16"):
+        _run_spec_gdn_validation(
+            spec_state_indices=torch.zeros(2, 2, dtype=torch.int32),
+            cu_seqlens=torch.tensor([0, 2, 4], dtype=torch.int32),
+            state_dtype=torch.float16,
+        )
+
+
+@torch.inference_mode()
+def test_gdn_cpu_rejects_unsupported_state_dtype() -> None:
+    q, k, v, a, b, A_log, dt_bias = gdn_inputs(
+        num_tokens=1,
+        num_heads=(2, 4),
+        head_dims=(32, 32),
+    )
+    with pytest.raises(RuntimeError, match="state dtype must be float32 or bfloat16"):
+        ops.fused_sigmoid_gating_delta_rule_update_cpu(
+            A_log=A_log,
+            dt_bias=dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            a=a,
+            b=b,
+            initial_state_source=torch.zeros(1, 4, 32, 32, dtype=torch.float16),
+            initial_state_indices=torch.zeros(1, dtype=torch.int32),
+            cu_seqlens=torch.tensor([0, 1], dtype=torch.int32),
+            use_qk_l2norm_in_kernel=True,
+        )
 
 
 def _conv_inputs(total_tokens: int):

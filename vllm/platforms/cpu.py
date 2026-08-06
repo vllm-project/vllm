@@ -31,6 +31,37 @@ else:
     VllmConfig = None
 
 
+def _cpu_mamba_backend(model_config) -> str:
+    """Return the CPU state backend selected by the model configuration."""
+    if model_config is None:
+        return "none"
+
+    hf_config = getattr(model_config, "hf_text_config", None)
+    model_type = str(getattr(hf_config, "model_type", "")).lower()
+    architecture = str(getattr(model_config, "architecture", "")).lower()
+    supported_gdn = (
+        "qwen3_5" in model_type
+        or "qwen3_next" in model_type
+        or "olmo_hybrid" in model_type
+        or "qwen3_5" in architecture
+        or "qwen3next" in architecture
+        or "olmo_hybrid" in architecture
+    )
+    layer_types = getattr(hf_config, "layer_types", None) or ()
+    has_linear_attention = "linear_attention" in layer_types
+
+    try:
+        has_inner_state = bool(model_config.has_inner_state)
+    except (AttributeError, RuntimeError):
+        has_inner_state = False
+
+    if not (has_inner_state or has_linear_attention):
+        return "none"
+    if supported_gdn and has_linear_attention:
+        return "gdn"
+    return model_type or architecture or "unknown"
+
+
 def get_max_threads(pid=0):
     if hasattr(os, "sched_getaffinity"):
         return len(os.sched_getaffinity(pid))
@@ -181,16 +212,47 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
-        # Accelerated GDN (AMX tiles or AVX-512BF16 VDPBF16PS) requires
-        # float32 SSM state.
+        # Accelerated GDN uses AMX tiles or AVX-512BF16 VDPBF16PS.
         if (
             torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
-            cache_config.mamba_ssm_cache_dtype = "float32"
-            logger.warning(
-                "Reset SSM cache type to float32 for accelerated GDN mamba attention."
-            )
+            mamba_backend = _cpu_mamba_backend(model_config)
+            if (
+                cache_config.mamba_ssm_cache_dtype == "bfloat16"
+                and mamba_backend == "gdn"
+            ):
+                source = (
+                    "explicit user request"
+                    if cache_config.user_specified_mamba_ssm_cache_dtype
+                    else "model configuration"
+                )
+                logger.info(
+                    "Using bfloat16 SSM state storage selected by %s for the CPU "
+                    "AMX GDN backend.",
+                    source,
+                )
+            elif not cache_config.user_specified_mamba_ssm_cache_dtype:
+                cache_config.mamba_ssm_cache_dtype = "float32"
+                logger.warning(
+                    "Reset model-selected SSM cache type to float32 for AMX "
+                    "mamba backend '%s'; the backend does not support the "
+                    "model-selected dtype.",
+                    mamba_backend,
+                )
+            elif mamba_backend != "none":
+                raise ValueError(
+                    f"AMX CPU Mamba state dtype "
+                    f"'{cache_config.mamba_ssm_cache_dtype}' is unsupported for "
+                    f"backend '{mamba_backend}'. "
+                    "Use --mamba-ssm-cache-dtype float32, or use explicit bfloat16 "
+                    "only with the CPU GDN backend."
+                )
+            else:
+                cache_config.mamba_ssm_cache_dtype = "float32"
+                logger.warning(
+                    "Reset SSM cache type to float32 for AMX mamba attention."
+                )
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
