@@ -9,7 +9,7 @@ vLLM's parallel linear layers, MLA kernel, KDA kernel and fused MoE loader.
 """
 
 import copy
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -75,7 +75,6 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
     fused_recurrent_kda_fwd,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
@@ -136,7 +135,7 @@ def _is_kda_layer(
 
 def _get_kda_state_shape_for_config(
     vllm_config: VllmConfig,
-) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+) -> tuple[tuple[int, int], tuple[int, int, int]]:
     config = vllm_config.model_config.hf_config
     num_spec = (
         vllm_config.speculative_config.num_speculative_tokens
@@ -205,7 +204,7 @@ class BailingMoeV3MLP(nn.Module):
         intermediate_size: int,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        reduce_results: bool | None = True,
+        reduce_results: bool = True,
         prefix: str = "",
         swiglu_limit: float | None = None,
     ) -> None:
@@ -226,9 +225,7 @@ class BailingMoeV3MLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = (
-            SwigluStepAndMul(limit=swiglu_limit)
-            if swiglu_limit not in (None, 0)
-            else SiluAndMul()
+            SwigluStepAndMul(limit=swiglu_limit) if swiglu_limit else SiluAndMul()
         )
 
     def forward(self, x):
@@ -264,6 +261,8 @@ class BailingMoeV3MLAAttention(nn.Module):
         self.num_local_heads = self.num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
 
+        self.q_proj: ColumnParallelLinear | None
+        self.kv_a_proj_with_mqa: ReplicatedLinear | None
         if self.q_lora_rank is None:
             self.q_proj = ColumnParallelLinear(
                 self.hidden_size,
@@ -400,7 +399,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
 
     def get_state_dtype(
         self,
-    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
@@ -409,7 +408,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
@@ -579,12 +578,12 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         core_attn_out: torch.Tensor,
     ) -> None:
         forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if attn_metadata is None:
+        attn_metadata_map = forward_context.attn_metadata
+        if attn_metadata_map is None:
             return
 
-        assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata_map, dict)
+        attn_metadata = attn_metadata_map[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -825,6 +824,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             assert q is not None and k is not None and v is not None
             assert g1_non_spec is not None and beta_non_spec is not None
             assert state_indices is not None
+            assert has_initial_state is not None
             zero_idx = state_indices[~has_initial_state]
             recurrent_state[zero_idx] = 0
             initial_state = recurrent_state_active[state_indices].contiguous()
@@ -846,6 +846,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
             assert q is not None and k is not None and v is not None
             assert g1_non_spec is not None and beta_non_spec is not None
             assert state_indices is not None
+            assert query_start_loc is not None
             out, _ = fused_recurrent_kda(
                 q=q,
                 k=k,
@@ -1205,13 +1206,13 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         return _get_kda_state_shape_for_config(vllm_config)
 
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
-    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
@@ -1243,7 +1244,9 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             if name not in params_dict or is_pp_missing_parameter(name, self):
                 return False
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader: Callable[..., None] = getattr(
+                param, "weight_loader", default_weight_loader
+            )
             if shard_id is None:
                 weight_loader(param, tensor)
             elif isinstance(shard_id, int):
@@ -1268,10 +1271,10 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             if name is None:
                 continue
             loaded = False
-            for param_suf, weight_suf, shard_id in stacked_mappings:
+            for param_suf, weight_suf, stacked_shard_id in stacked_mappings:
                 if weight_suf in name:
                     mapped = name.replace(weight_suf, param_suf)
-                    if load_param(mapped, weight, shard_id):
+                    if load_param(mapped, weight, stacked_shard_id):
                         loaded = True
                         break
             if loaded:

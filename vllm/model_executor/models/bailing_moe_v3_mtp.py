@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Bailing MoE v3 MTP model."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
@@ -233,11 +233,12 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        assert hidden_states is not None
         del intermediate_tensors
         return self.model(
             input_ids,
@@ -280,14 +281,17 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
             loaded_weight: torch.Tensor,
             shard_id=None,
         ) -> bool:
-            name = maybe_remap_kv_scale_name(name, params_dict)
-            if name is None:
+            remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+            if remapped_name is None:
                 return False
+            name = remapped_name
             if name not in params_dict or is_pp_missing_parameter(name, self):
                 return False
 
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader: Callable[..., None] = getattr(
+                param, "weight_loader", default_weight_loader
+            )
             if shard_id is None:
                 weight_loader(param, loaded_weight)
             elif isinstance(shard_id, int):
@@ -347,13 +351,13 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
             name = normalize_name(name)
 
             loaded = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 if "mlp.experts." in name and name not in params_dict:
                     continue
                 mapped_name = name.replace(weight_name, param_name)
-                if load_param(mapped_name, loaded_weight, shard_id):
+                if load_param(mapped_name, loaded_weight, stacked_shard_id):
                     loaded = True
                     break
             if loaded:
