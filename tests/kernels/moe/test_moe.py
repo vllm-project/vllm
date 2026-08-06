@@ -1347,7 +1347,44 @@ def test_humming_rejects_invalid_gemm_type(monkeypatch: pytest.MonkeyPatch):
         get_humming_moe_gemm_type()
 
 
-def test_humming_permute_scratch_accounts_for_dp(monkeypatch: pytest.MonkeyPatch):
+def test_humming_rejects_deepep_low_latency(monkeypatch: pytest.MonkeyPatch):
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        BatchedHummingGroupedExperts,
+        HummingExpertsBase,
+    )
+
+    monkeypatch.setattr(
+        mk.FusedMoEExpertsModular,
+        "is_supported_config",
+        lambda *args: (True, None),
+    )
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_parallel_config.dp_size = 2
+    moe_config.moe_parallel_config.use_ep = True
+    moe_config.moe_parallel_config.all2all_backend = "deepep_low_latency"
+
+    supported, reason = HummingExpertsBase.is_supported_config(
+        BatchedHummingGroupedExperts,
+        moe_config,
+        None,
+        None,
+        mk.FusedMoEActivationFormat.BatchedExperts,
+    )
+
+    assert not supported
+    assert reason == "DeepEP low-latency does not support deferred input quantization"
+
+
+@pytest.mark.parametrize(
+    ("runtime_topk", "max_num_tokens"),
+    [(6, 1024), (1, 6144)],
+)
+def test_humming_permute_scratch_accounts_for_layout_and_dp(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_topk: int,
+    max_num_tokens: int,
+):
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -1357,14 +1394,15 @@ def test_humming_permute_scratch_accounts_for_dp(monkeypatch: pytest.MonkeyPatch
     scratch_type = Mock(return_value=scratch)
     monkeypatch.setattr(humming, "moe_permute_unpermute_supported", lambda: True)
     monkeypatch.setattr(humming, "MoEPermuteScratch", scratch_type)
-    moe_config = make_dummy_moe_config(max_num_tokens=512)
+    moe_config = make_dummy_moe_config(max_num_tokens=512, experts_per_token=6)
     moe_config.moe_parallel_config.dp_size = 2
-    experts = SimpleNamespace(_permute_scratch=None, moe_config=moe_config)
+    experts = SimpleNamespace(_permute_scratch={}, moe_config=moe_config)
 
-    result = humming.HummingExpertsBase._get_permute_scratch(experts)
+    result = humming.HummingExpertsBase._get_permute_scratch(experts, runtime_topk)
 
     assert result is scratch
-    assert scratch_type.call_args.kwargs["max_num_tokens"] == 1024
+    assert scratch_type.call_args.kwargs["max_num_tokens"] == max_num_tokens
+    assert scratch_type.call_args.kwargs["topk"] == runtime_topk
 
 
 def test_humming_clamped_silu_delegates_to_shared_activation():

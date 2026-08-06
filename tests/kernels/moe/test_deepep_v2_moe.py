@@ -62,6 +62,22 @@ def assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     )
 
 
+def dequantize_mxfp4(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    lookup = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        device=weight.device,
+        dtype=torch.float32,
+    )
+    packed = weight.view(torch.uint8)
+    indices = torch.stack((packed & 0xF, (packed >> 4) & 0xF), dim=-1).flatten(-2)
+    values = lookup[indices.long()]
+    scale_float = (scale.view(torch.uint8).to(torch.int32) << 23).view(torch.float32)
+    return values * scale_float.repeat_interleave(32, dim=-1)
+
+
 @dataclasses.dataclass
 class TestConfig:
     dtype: torch.dtype
@@ -97,12 +113,19 @@ class TestTensors:
             rank_token_scales = None
             intermediate_scales = None
 
-        topk = torch.stack(
-            [
-                torch.randperm(config.num_experts, device="cuda")[: config.topk]
-                for _ in range(config.m)
-            ]
-        ).to(dtype=torch.int64)
+        if config.m == 0:
+            topk = torch.empty(
+                (0, config.topk),
+                device="cuda",
+                dtype=torch.int64,
+            )
+        else:
+            topk = torch.stack(
+                [
+                    torch.randperm(config.num_experts, device="cuda")[: config.topk]
+                    for _ in range(config.m)
+                ]
+            ).to(dtype=torch.int64)
         topk_weights = torch.randn(topk.shape, dtype=torch.float32, device="cuda")
         return TestTensors(
             rank_tokens=rank_tokens,
@@ -415,6 +438,55 @@ def _make_humming_experts(
     return experts, quant_config, layer.w13_weight, layer.w2_weight
 
 
+def _make_mxfp4_humming_experts(
+    moe_config: FusedMoEConfig,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[HummingGroupedExperts, FusedMoEQuantConfig, torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.utils import humming
+
+    layer = torch.nn.Module()
+    layer.layer_name = "test_deep_ep_v2_mxfp4_humming"
+    layer.moe_config = moe_config
+    layer.params_dtype = torch.bfloat16
+    layer.local_num_experts = moe_config.num_local_experts
+    layer.global_num_experts = moe_config.num_experts
+    layer.hidden_size = moe_config.hidden_dim
+    layer.intermediate_size_per_partition = moe_config.intermediate_size_per_partition
+    for name, tensor in (
+        ("w13_weight", w1),
+        ("w2_weight", w2),
+        ("w13_weight_scale", w1_scale),
+        ("w2_weight_scale", w2_scale),
+    ):
+        layer.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+
+    weight_schema = humming.HummingWeightSchema(
+        b_dtype=humming.dtypes.float4e2m1,
+        bs_dtype=humming.dtypes.float8e8m0,
+        weight_scale_group_size=32,
+    )
+    input_schema = humming.HummingInputSchema()
+    humming_utils.convert_to_humming_moe_kernel_format(
+        layer,
+        weight_schema=weight_schema,
+        input_schema=input_schema,
+    )
+    quant_config = humming_utils.get_humming_moe_quant_config(
+        layer,
+        gemm1_clamp_limit=moe_config.swiglu_limit,
+    )
+    experts = HummingGroupedExperts(
+        layer=layer,
+        moe_config=moe_config,
+        quant_config=quant_config,
+    )
+    return experts, quant_config, layer.w13_weight, layer.w2_weight
+
+
 def _deep_ep_v2_moe_cudagraph(
     pgi: ProcessGroupInfo,
     dp_size: int,
@@ -425,8 +497,11 @@ def _deep_ep_v2_moe_cudagraph(
     w2_scale: torch.Tensor | None,
     moe_backend: str,
     activation: MoEActivation,
+    use_cudagraph: bool,
+    tokens_per_rank: tuple[int, ...],
+    weight_format: str,
 ):
-    """Verify DeepEP v2 with an explicit FP8 expert backend."""
+    """Verify DeepEP v2 with an explicit expert backend and weight format."""
     import tempfile
 
     from vllm.distributed import (
@@ -438,7 +513,9 @@ def _deep_ep_v2_moe_cudagraph(
     init_workspace_manager(device)
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
-    test_tensors = TestTensors.make(config)
+    test_tensors = TestTensors.make(
+        dataclasses.replace(config, m=tokens_per_rank[pgi.rank])
+    )
     num_local_experts = config.num_experts // pgi.world_size
     hidden_size = config.k
 
@@ -462,15 +539,13 @@ def _deep_ep_v2_moe_cudagraph(
     torch.distributed.broadcast(w1_bf16, src=0, group=pg)
     torch.distributed.broadcast(w2_bf16, src=0, group=pg)
 
-    # Round-trip through FP8 before constructing the reference and kernel weights.
-    w1_fp8 = w1_bf16.to(torch.float8_e4m3fn)
-    w2_fp8 = w2_bf16.to(torch.float8_e4m3fn)
-    w1_ref = w1_fp8.to(torch.bfloat16)
-    w2_ref = w2_fp8.to(torch.bfloat16)
-
     from vllm.config import KernelConfig
 
     vllm_cfg = VllmConfig()
+    vllm_cfg.parallel_config.data_parallel_size = dp_size
+    vllm_cfg.parallel_config.data_parallel_rank = pgi.rank
+    vllm_cfg.parallel_config.data_parallel_rank_local = pgi.local_rank
+    vllm_cfg.parallel_config.enable_expert_parallel = True
     vllm_cfg.kernel_config = KernelConfig(moe_backend=moe_backend)
 
     with set_current_vllm_config(vllm_cfg):
@@ -484,45 +559,72 @@ def _deep_ep_v2_moe_cudagraph(
             backend="nccl",
         )
         initialize_model_parallel(tensor_model_parallel_size=1)
-        # Mirror production weight processing: quantize, EP-slice, then
-        # convert to the selected expert format.
-        from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
-        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-            Fp8MoeBackend,
-            convert_to_fp8_moe_kernel_format,
-        )
+        if weight_format == "fp8":
+            from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
 
-        block_shape = [128, 128]
-        qw = _quantize_fp8_halves(w1_ref, w2_ref, block_shape)
-        assert qw.w13_weight_scale is not None
-        assert qw.w2_weight_scale is not None
+            block_shape = [128, 128]
+            qw = _quantize_fp8_halves(
+                w1_bf16.to(torch.float8_e4m3fn).to(torch.bfloat16),
+                w2_bf16.to(torch.float8_e4m3fn).to(torch.bfloat16),
+                block_shape,
+            )
+            assert qw.w13_weight_scale is not None
+            assert qw.w2_weight_scale is not None
+            w1_kernel = qw.w13_weight
+            w2_kernel = qw.w2_weight
+            w1_scale = qw.w13_weight_scale
+            w2_scale = qw.w2_weight_scale
+            w1_ref = w1_kernel
+            w2_ref = w2_kernel
+        else:
+            assert weight_format == "mxfp4"
+            assert moe_backend == "humming"
+            from vllm.utils import humming
 
-        # Reference MoE using the same blockwise FP8 quantization scheme as
-        # the production kernel. torch_experts quantizes activations before
-        # both GEMMs and dequantizes the operands for the reference matmuls.
+            w1_kernel, w1_scale, _, _ = humming.quantize_weight(
+                w1_bf16,
+                humming.dtypes.float4e2m1,
+                humming.dtypes.float8e8m0,
+                32,
+                pack=True,
+            )
+            w2_kernel, w2_scale, _, _ = humming.quantize_weight(
+                w2_bf16,
+                humming.dtypes.float4e2m1,
+                humming.dtypes.float8e8m0,
+                32,
+                pack=True,
+            )
+            assert w1_scale is not None and w2_scale is not None
+            w1_ref = dequantize_mxfp4(w1_kernel, w1_scale).to(torch.bfloat16)
+            w2_ref = dequantize_mxfp4(w2_kernel, w2_scale).to(torch.bfloat16)
+
         reference_topk_weights = test_tensors.topk_weights.to(torch.bfloat16).to(
             torch.float32
         )
-        torch_combined = torch_experts(
-            test_tensors.rank_tokens,
-            qw.w13_weight,
-            qw.w2_weight,
-            reference_topk_weights,
-            test_tensors.topk,
-            w1_scale=qw.w13_weight_scale,
-            w2_scale=qw.w2_weight_scale,
-            quant_dtype=torch.float8_e4m3fn,
-            block_shape=block_shape,
-            activation=activation,
-        )
+        if test_tensors.rank_tokens.size(0) == 0:
+            torch_combined = torch.empty_like(test_tensors.rank_tokens)
+        else:
+            torch_combined = torch_experts(
+                test_tensors.rank_tokens,
+                w1_ref,
+                w2_ref,
+                reference_topk_weights,
+                test_tensors.topk,
+                w1_scale=w1_scale if weight_format == "fp8" else None,
+                w2_scale=w2_scale if weight_format == "fp8" else None,
+                quant_dtype=(torch.float8_e4m3fn if weight_format == "fp8" else None),
+                block_shape=block_shape if weight_format == "fp8" else None,
+                activation=activation,
+            )
 
         # EP-slice before format conversion
         e_start = num_local_experts * pgi.rank
         e_end = e_start + num_local_experts
-        w1_ep = qw.w13_weight[e_start:e_end]
-        w2_ep = qw.w2_weight[e_start:e_end]
-        w1_scale_ep = qw.w13_weight_scale[e_start:e_end]
-        w2_scale_ep = qw.w2_weight_scale[e_start:e_end]
+        w1_ep = w1_kernel[e_start:e_end]
+        w2_ep = w2_kernel[e_start:e_end]
+        w1_scale_ep = w1_scale[e_start:e_end]
+        w2_scale_ep = w2_scale[e_start:e_end]
 
         moe_config = make_dummy_moe_config(
             num_experts=config.num_experts,
@@ -537,10 +639,14 @@ def _deep_ep_v2_moe_cudagraph(
                 moe_config,
                 activation_situ_beta=1.0,
             )
+        if weight_format == "mxfp4":
+            moe_config = dataclasses.replace(moe_config, swiglu_limit=10.0)
         moe_parallel_config = dataclasses.replace(
             moe_config.moe_parallel_config,
             ep_size=pgi.world_size,
             ep_rank=pgi.rank,
+            dp_size=dp_size,
+            dp_rank=pgi.rank,
             use_ep=True,
             all2all_backend="deepep_v2",
         )
@@ -549,7 +655,15 @@ def _deep_ep_v2_moe_cudagraph(
             moe_parallel_config=moe_parallel_config,
         )
 
-        if moe_backend == "humming":
+        if moe_backend == "humming" and weight_format == "mxfp4":
+            fused_experts, quant_config, w1_ep, w2_ep = _make_mxfp4_humming_experts(
+                moe_config,
+                w1_ep,
+                w2_ep,
+                w1_scale_ep,
+                w2_scale_ep,
+            )
+        elif moe_backend == "humming":
             fused_experts, quant_config, w1_ep, w2_ep = _make_humming_experts(
                 moe_config,
                 w1_ep,
@@ -560,8 +674,13 @@ def _deep_ep_v2_moe_cudagraph(
             )
         else:
             assert moe_backend == "flashinfer_trtllm"
+            assert weight_format == "fp8"
             from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
                 TrtLlmFp8ExpertsModular,
+            )
+            from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+                Fp8MoeBackend,
+                convert_to_fp8_moe_kernel_format,
             )
 
             class _MockLayer:
@@ -608,7 +727,7 @@ def _deep_ep_v2_moe_cudagraph(
             pgi=pgi,
             dp_size=dp_size,
             v2_args=v2_args,
-            use_cudagraph=True,
+            use_cudagraph=use_cudagraph,
         )
         mk_kernel = FusedMoEKernel(
             prepare_finalize=a2a,
@@ -616,7 +735,17 @@ def _deep_ep_v2_moe_cudagraph(
         )
         expert_map = _build_expert_map(pgi, config.num_experts, num_local_experts)
 
-        with set_forward_context(None, vllm_cfg):
+        num_tokens_across_dp = torch.tensor(
+            tokens_per_rank,
+            device="cpu",
+            dtype=torch.int,
+        )
+        with set_forward_context(
+            None,
+            vllm_cfg,
+            num_tokens=test_tensors.rank_tokens.size(0),
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
             for _ in range(3):
                 out = mk_kernel.apply(
                     hidden_states=test_tensors.rank_tokens,
@@ -630,7 +759,9 @@ def _deep_ep_v2_moe_cudagraph(
                     apply_router_weight_on_input=False,
                 )
 
-        if moe_backend == "humming":
+        if torch_combined.numel() == 0:
+            assert out.shape == torch_combined.shape
+        elif moe_backend == "humming":
             assert_fp8_close(torch_combined, out)
         else:
             torch.testing.assert_close(
@@ -644,17 +775,80 @@ def _deep_ep_v2_moe_cudagraph(
 @pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
-@pytest.mark.parametrize("world_dp_size", [(2, 1)])
+@pytest.mark.parametrize("world_dp_size", [(2, 2)])
 @pytest.mark.parametrize(
-    ("moe_backend", "activation"),
+    (
+        "moe_backend",
+        "activation",
+        "use_cudagraph",
+        "tokens_per_rank",
+        "weight_format",
+    ),
     [
         pytest.param(
             "flashinfer_trtllm",
             MoEActivation.SILU,
-            id="flashinfer_trtllm-silu",
+            True,
+            (32, 32),
+            "fp8",
+            id="flashinfer_trtllm-silu-padded",
         ),
-        pytest.param("humming", MoEActivation.SILU, id="humming-silu"),
-        pytest.param("humming", MoEActivation.SITU, id="humming-situ"),
+        pytest.param(
+            "humming",
+            MoEActivation.SILU,
+            True,
+            (32, 32),
+            "fp8",
+            id="humming-silu-padded",
+        ),
+        pytest.param(
+            "humming",
+            MoEActivation.SILU,
+            False,
+            (32, 32),
+            "fp8",
+            id="humming-silu-expanded",
+        ),
+        pytest.param(
+            "humming",
+            MoEActivation.SILU,
+            True,
+            (32, 0),
+            "fp8",
+            id="humming-silu-padded-idle-rank",
+        ),
+        pytest.param(
+            "humming",
+            MoEActivation.SILU,
+            False,
+            (32, 0),
+            "fp8",
+            id="humming-silu-expanded-idle-rank",
+        ),
+        pytest.param(
+            "humming",
+            MoEActivation.SITU,
+            True,
+            (32, 32),
+            "fp8",
+            id="humming-situ-padded",
+        ),
+        pytest.param(
+            "humming",
+            MoEActivation.SILU,
+            True,
+            (32, 0),
+            "mxfp4",
+            id="humming-mxfp4-clamped-silu-padded-idle-rank",
+        ),
+        pytest.param(
+            "humming",
+            MoEActivation.SILU,
+            False,
+            (32, 0),
+            "mxfp4",
+            id="humming-mxfp4-clamped-silu-expanded-idle-rank",
+        ),
     ],
 )
 @multi_gpu_test(num_gpus=2)
@@ -668,6 +862,9 @@ def test_deep_ep_v2_moe_cudagraph(
     world_dp_size: tuple[int, int],
     moe_backend: str,
     activation: MoEActivation,
+    use_cudagraph: bool,
+    tokens_per_rank: tuple[int, ...],
+    weight_format: str,
     workspace_init,
 ):
     set_random_seed(7)
@@ -692,4 +889,7 @@ def test_deep_ep_v2_moe_cudagraph(
         None,
         moe_backend,
         activation,
+        use_cudagraph,
+        tokens_per_rank,
+        weight_format,
     )

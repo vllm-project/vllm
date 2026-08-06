@@ -124,7 +124,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        self._permute_scratch: MoEPermuteScratch | None = None
+        self._permute_scratch: dict[int, MoEPermuteScratch] = {}
 
     def init_humming_moe(self):
         from vllm.utils.humming import get_heuristics_config
@@ -194,20 +194,28 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             **kwargs,
         )
 
-    def _get_permute_scratch(self) -> MoEPermuteScratch | None:
-        if self._permute_scratch is None and moe_permute_unpermute_supported():
-            self._permute_scratch = MoEPermuteScratch(
-                max_num_tokens=(
-                    self.moe_config.max_num_tokens * self.moe_config.dp_size
-                ),
-                topk=self.moe_config.experts_per_token,
+    def _get_permute_scratch(self, topk: int) -> MoEPermuteScratch | None:
+        if not moe_permute_unpermute_supported():
+            return None
+
+        scratch = self._permute_scratch.get(topk)
+        if scratch is None:
+            max_expanded_rows = (
+                self.moe_config.max_num_tokens
+                * self.moe_config.dp_size
+                * self.moe_config.experts_per_token
+            )
+            scratch = MoEPermuteScratch(
+                max_num_tokens=math.ceil(max_expanded_rows / topk),
+                topk=topk,
                 num_experts=self.moe_config.num_experts,
                 num_local_experts=self.moe_config.num_local_experts,
                 device=torch.device(self.moe_config.device),
                 hidden_size=self.moe_config.hidden_dim,
                 hidden_dtype=self.moe_config.in_dtype,
             )
-        return self._permute_scratch
+            self._permute_scratch[topk] = scratch
+        return scratch
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
         num_tokens = topk_ids.size(0)
@@ -543,6 +551,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             activation_format,
         )
 
+        if supported and moe_config.use_deepep_ll_kernels:
+            supported = False
+            reason = "DeepEP low-latency does not support deferred input quantization"
+
         if supported:
             assert hasattr(cls, "humming_gemm_type")
             gemm_type = cls.humming_gemm_type().value.lower()
@@ -793,7 +805,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             n_expert=global_num_experts,
             n_local_expert=self.num_experts,
             expert_map=expert_map,
-            scratch=self._get_permute_scratch(),
+            scratch=self._get_permute_scratch(topk_ids.size(1)),
         )
 
         inputs, input_scale = self.quantize_input(
