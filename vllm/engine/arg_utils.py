@@ -90,6 +90,7 @@ from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
     MMHasherAlgorithm,
+    MMProcessorDevice,
     MMTensorIPC,
 )
 from vllm.config.observability import DetailedTraceModules
@@ -596,6 +597,7 @@ class EngineArgs:
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
+    mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     # LoRA fields
     enable_lora: bool = False
@@ -1354,6 +1356,30 @@ class EngineArgs:
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
         multimodal_group.add_argument(
+            "--mm-processor-device",
+            choices=["auto", "cpu"]
+            + (
+                [current_platform.device_type]
+                if current_platform.device_type not in ("", "cpu")
+                else []
+            ),
+            default="auto",
+            help="Device the HF multi-modal processor runs the image/video "
+            "transform on. Convenience for `--mm-processor-kwargs "
+            "'{\"device\": ...}'`: the value is resolved here and stored there, "
+            "it is not kept as separate state. Only takes effect for HF "
+            '"fast" (torchvision-backed) processors, which accept a `device` '
+            "argument; the others ignore it and stay on CPU.\n\n"
+            '"auto" uses the accelerator on encoder instances of an '
+            "encode/prefill/decode deployment -- an EC producer that is not "
+            "also a consumer allocates no KV cache, so its accelerator is not "
+            "contended by the language model -- and then only when "
+            "`--mm-tensor-ipc=torch_shm` can carry device tensors, since every "
+            "other transport would copy the result back to the host and that "
+            'copy costs more than it saves. "auto" resolves to "cpu" '
+            "everywhere else.",
+        )
+        multimodal_group.add_argument(
             "--mm-ipc-gpu-memory-gb",
             **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
         )
@@ -1743,6 +1769,7 @@ class EngineArgs:
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
+            mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
         )
