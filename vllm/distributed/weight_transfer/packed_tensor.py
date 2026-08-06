@@ -373,6 +373,45 @@ def packed_ipc_producer(
         )
 
 
+class PackedBufferImporter:
+    """One-slot cache for the consumer-side mapping of a packed IPC buffer.
+
+    torch's cross-process refcount pairs one ``reduce_tensor`` export with
+    one consumer rebuild-release cycle. The producer exports its buffer once
+    and ships the same args with every chunk, so rebuilding and releasing
+    per chunk decrements the counter once per chunk, drives it negative,
+    and the dropped buffer is then never reclaimable by ``ipc_collect`` on
+    the producer side (it leaks one buffer per transfer). Caching the
+    rebuilt buffer keyed by the rebuild args restores the pairing: chunks
+    of one transfer reuse the mapping (it aliases producer memory, so it
+    always reads the current chunk's bytes), and replacing the entry when
+    the next export arrives — or ``close()`` — releases the previous
+    mapping exactly once.
+
+    The importer that consumes a multi-chunk transfer must be one object
+    reused across chunks; a fresh importer per chunk reintroduces the
+    per-chunk release. ``IPCWeightTransferEngine`` owns one instance per
+    engine and closes it on shutdown.
+    """
+
+    def __init__(self) -> None:
+        self._entry: tuple[tuple, torch.Tensor] | None = None
+
+    def rebuild(self, list_args: list) -> torch.Tensor:
+        from torch.multiprocessing.reductions import rebuild_cuda_tensor
+
+        key = tuple(list_args)
+        if self._entry is not None and self._entry[0] == key:
+            return self._entry[1]
+        packed = rebuild_cuda_tensor(*list_args)
+        self._entry = (key, packed)
+        return packed
+
+    def close(self) -> None:
+        """Release the held mapping (one producer-side refcount decrement)."""
+        self._entry = None
+
+
 def packed_ipc_consumer(
     ipc_handle: dict[str, tuple],
     names: list[str],
@@ -380,6 +419,7 @@ def packed_ipc_consumer(
     dtype_names: list[str],
     tensor_sizes: list[int],
     device_index: int,
+    importer: "PackedBufferImporter | None" = None,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
@@ -402,9 +442,11 @@ def packed_ipc_consumer(
         dtype_names: Parameter dtype name strings (e.g. "float16")
         tensor_sizes: Size in bytes of each parameter in the packed buffer
         device_index: Local CUDA device index
+        importer: Import cache that must be shared across all chunks of one
+            export so the buffer mapping is opened and released exactly once
+            (see ``PackedBufferImporter``). ``None`` builds an ephemeral one,
+            which is only safe for single-chunk consumption.
     """
-    from torch.multiprocessing.reductions import rebuild_cuda_tensor
-
     props = torch.cuda.get_device_properties(device_index)
     physical_gpu_id = str(props.uuid)
 
@@ -417,7 +459,9 @@ def packed_ipc_consumer(
     args = ipc_handle[physical_gpu_id]
     list_args = list(args)
     list_args[6] = device_index
-    packed = rebuild_cuda_tensor(*list_args)
+    if importer is None:
+        importer = PackedBufferImporter()
+    packed = importer.rebuild(list_args)
 
     content_size = sum(tensor_sizes)
     packed = packed[:content_size]
