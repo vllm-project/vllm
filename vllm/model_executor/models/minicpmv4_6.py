@@ -456,11 +456,6 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object):
-        # MiniCPM-V 4.6 keeps the native transformers MiniCPMV4_6Processor:
-        # this model has its own image/video handling and prompt-update logic
-        # below, so it does not need (and is incompatible with) the vendored
-        # MiniCPMVProcessor used by 2.x/4.0/4.5, whose __init__ assumes a
-        # legacy `image_processor.version` attribute that 4.6 no longer has.
         hf_processor = self.ctx.get_hf_processor(**kwargs)
 
         # NumPy arrays are considered as Iterable but not Sequence in
