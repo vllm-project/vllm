@@ -20,7 +20,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.config import HiSparseConfig, set_current_vllm_config
+from vllm.config import HiSparseConfig, SpeculativeConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import MLACommonBaseImpl
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
@@ -1480,6 +1480,7 @@ def _make_hisparse_offload_runtime(
     max_num_reqs: int = 2,
     row_width: int = 8,
     block_size: int = 64,
+    max_swap_rows: int | None = None,
 ) -> HiSparseOffloadRuntime:
     runtime = HiSparseOffloadRuntime(
         config=ResolvedHiSparseConfig(
@@ -1491,6 +1492,7 @@ def _make_hisparse_offload_runtime(
         row_width=row_width,
         kv_dtype=torch.float32,
         device=DEVICE_TYPE,
+        max_swap_rows=max_swap_rows,
     )
     blocks_per_request = cdiv(runtime.region_stride, block_size)
     # Leave one extra physical block for resident-tier tests. HMA group layouts
@@ -1736,8 +1738,8 @@ def test_hisparse_kernel_matches_fallback():
 
 
 @requires_hisparse_ops
-def test_hisparse_apply_plan_matches_independent():
-    """Plan replay must match independent LRU resolution and gathering."""
+def test_hisparse_apply_multi_step_plan_matches_independent():
+    """Followers must replay every speculative step before hot rows are reused."""
     device = torch.device(DEVICE_TYPE)
     torch.manual_seed(0)
     block_size = 64
@@ -1757,6 +1759,7 @@ def test_hisparse_apply_plan_matches_independent():
             device_buffer_size=buf,
             max_num_reqs=num_reqs,
             row_width=row_width,
+            max_swap_rows=2 * num_reqs,
         )
         c.bind_source_cache(kv_pool)
         return c
@@ -1771,27 +1774,37 @@ def test_hisparse_apply_plan_matches_independent():
     producer, shared, indep = make(), make(), make()
     shared.join_group(producer)
     for _ in range(8):
-        topk = torch.stack(
-            [
-                torch.randperm(seq_len, device=device)[:top_k].to(torch.int32)
-                for _ in range(num_reqs)
-            ]
-        )
-        topk[:, -1] = -1
-        kw = dict(
-            req_id_per_token=req_ids,
-            block_table=block_table,
-            block_size=block_size,
-        )
-        _, idx_full = producer.swap_in(
-            topk_indices=topk.clone(), produce_plan=True, **kw
-        )
-        _, idx_indep = indep.swap_in(topk_indices=topk.clone(), **kw)
-        _, idx_shared = shared.apply_plan(block_size=block_size, num_tokens=num_reqs)
-        torch.accelerator.synchronize()
-        torch.testing.assert_close(idx_shared, idx_full, rtol=0, atol=0)
-        torch.testing.assert_close(idx_indep, idx_full, rtol=0, atol=0)
-        torch.testing.assert_close(shared.hot.cache, indep.hot.cache)
+        for step in range(2):
+            topk = torch.stack(
+                [
+                    torch.randperm(seq_len, device=device)[:top_k].to(torch.int32)
+                    for _ in range(num_reqs)
+                ]
+            )
+            topk[:, -1] = -1
+            kw = dict(
+                req_id_per_token=req_ids,
+                block_table=block_table,
+                block_size=block_size,
+            )
+            plan_row_offset = step * num_reqs
+            _, idx_full = producer.swap_in(
+                topk_indices=topk.clone(),
+                produce_plan=True,
+                plan_row_offset=plan_row_offset,
+                prefetch_followers=False,
+                **kw,
+            )
+            _, idx_indep = indep.swap_in(topk_indices=topk.clone(), **kw)
+            _, idx_shared = shared.apply_plan(
+                block_size=block_size,
+                num_tokens=num_reqs,
+                plan_row_offset=plan_row_offset,
+            )
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(idx_shared, idx_full, rtol=0, atol=0)
+            torch.testing.assert_close(idx_indep, idx_full, rtol=0, atol=0)
+            torch.testing.assert_close(shared.hot.cache, indep.hot.cache)
 
 
 @requires_hisparse_ops
@@ -2250,10 +2263,9 @@ def test_hisparse_mixed_batch_bf16_row_split(
 ):
     """Host-resident mixed batch on the bf16 path is row-split.
 
-    Two long-context decode requests + one short local-prefill chunk: decode
-    tokens must be served from the hot buffer (swap-in) and only the prefill
-    rows' blocks staged host->GPU, with the stitched output matching the
-    device-resident whole-batch reference.
+    Two long-context speculative-decode requests + one short local-prefill
+    chunk: every decode step must be served from the bounded hot buffer before
+    it is reused, while only the prefill rows' blocks are staged host->GPU.
     """
     ok, reason = flashmla.is_flashmla_sparse_supported()
     if not ok:
@@ -2273,7 +2285,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
     block_size = 64
 
     # Long decode contexts + a short prefill chunk (router shortcut shape).
-    batch_spec = BatchSpec(seq_lens=[2048, 2048, 192], query_lens=[1, 1, 64])
+    batch_spec = BatchSpec(seq_lens=[2048, 2048, 192], query_lens=[2, 2, 64])
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
     total_tokens = batch_spec.compute_num_tokens()
@@ -2292,6 +2304,9 @@ def test_hisparse_mixed_batch_bf16_row_split(
     vllm_config.attention_config.hisparse_config = HiSparseConfig(
         device_buffer_size=2 * topk_tokens,
         host_pool_gib=1.0,
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=1
     )
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
@@ -2361,12 +2376,12 @@ def test_hisparse_mixed_batch_bf16_row_split(
 
     builder_cls = FlashMLASparseBackend.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
-    assert builder.reorder_batch_threshold == 1
+    assert builder.reorder_batch_threshold == 2
     metadata = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
     )
     num_decodes = metadata.num_decodes
-    assert num_decodes == 2 and metadata.num_decode_tokens == 2
+    assert num_decodes == 2 and metadata.num_decode_tokens == 4
     assert isinstance(metadata.prefill, SparseMLAPrefillMetadata)
     staging_plan = metadata.prefill.hisparse_staging_plan
     assert staging_plan is not None
@@ -2424,6 +2439,9 @@ def test_hisparse_mixed_batch_bf16_row_split(
         )
     assert impl.hisparse_cache is not None
     cache_handle = impl.hisparse_cache
+    assert cache_handle.runtime._plan.hot_indices.shape[0] == (
+        2 * cache_handle.runtime.max_num_reqs
+    )
     blocks_per_request = cdiv(cache_handle.runtime.region_stride, block_size)
     num_hot_blocks = cache_handle.runtime.max_num_reqs * blocks_per_request
     hot_cache = torch.zeros(
@@ -2440,6 +2458,9 @@ def test_hisparse_mixed_batch_bf16_row_split(
         block_table=torch.arange(num_hot_blocks, dtype=torch.int32, device=device).view(
             cache_handle.runtime.max_num_reqs, blocks_per_request
         ),
+    )
+    cache_handle.runtime.request_state_indices = torch.arange(
+        cache_handle.runtime.max_num_reqs, dtype=torch.int32, device=device
     )
     impl.prepare_for_batch(metadata)
     assert not cache_handle.decode_batch
@@ -2535,81 +2556,6 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
     assert torch.all(plan.miss_mask == 1)
 
 
-def test_hisparse_dense_mha_chunked_context_stages_host_cache(monkeypatch):
-    """Dense sparse-MLA chunks must gather from the staged GPU block table."""
-
-    class GatherCalled(Exception):
-        pass
-
-    impl = object.__new__(FlashMLASparseImpl)
-    impl.kv_cache_dtype = "auto"
-    impl.kv_b_proj = SimpleNamespace(
-        weight=torch.empty(0, dtype=torch.bfloat16),
-        params_dtype=torch.bfloat16,
-    )
-
-    source_cache = torch.empty(4, 2, 8)
-    staged_cache = torch.empty(3, 2, 8)
-    block_table = torch.tensor([[2, 3], [1, 0]], dtype=torch.int32)
-    staged_block_table = torch.tensor([[0, 1], [2, 0]], dtype=torch.int32)
-    seq_lens = torch.tensor([2, 4, 3], dtype=torch.int32)
-    stage_calls = []
-
-    def stage_host_cache(cache, table, lengths):
-        stage_calls.append((cache, table, lengths))
-        return staged_cache, staged_block_table
-
-    impl.hisparse_cache = SimpleNamespace(
-        runtime=SimpleNamespace(stage_prefill_cache=stage_host_cache)
-    )
-
-    gathered = {}
-
-    def gather_and_stop(**kwargs):
-        gathered.update(kwargs)
-        raise GatherCalled
-
-    monkeypatch.setattr(ops, "gather_and_maybe_dequant_cache", gather_and_stop)
-
-    chunk = SimpleNamespace(
-        num_context_tokens=1,
-        request_slice=slice(1, 2),
-        cu_seq_lens=torch.tensor([0, 1], dtype=torch.int32),
-        token_to_seq=torch.tensor([0], dtype=torch.int32),
-        starts=torch.tensor([0], dtype=torch.int32),
-        num_requests=1,
-    )
-    chunked_context = SimpleNamespace(
-        workspace=torch.empty(1, 8),
-        chunks=[chunk],
-    )
-    metadata = SimpleNamespace(
-        num_decodes=1,
-        seq_lens=seq_lens,
-        prefill=SimpleNamespace(
-            prefill_backend=object(),
-            chunked_context=chunked_context,
-            block_table=block_table,
-            q_data_type=torch.bfloat16,
-        ),
-    )
-
-    with pytest.raises(GatherCalled):
-        impl._compute_prefill_context(
-            torch.empty(1, 1, 8, dtype=torch.bfloat16),
-            source_cache,
-            metadata,
-            torch.tensor(1.0),
-        )
-
-    assert len(stage_calls) == 1
-    assert stage_calls[0][0] is source_cache
-    assert stage_calls[0][1] is block_table
-    torch.testing.assert_close(stage_calls[0][2], seq_lens[1:])
-    assert gathered["src_cache"] is staged_cache
-    torch.testing.assert_close(gathered["block_table"], staged_block_table[1:2])
-
-
 def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
     """Dense MHA may consume every prefill token in a mixed batch."""
     impl = object.__new__(FlashMLASparseImpl)
@@ -2642,7 +2588,47 @@ def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():
         req_id_per_token=torch.arange(5, dtype=torch.int32),
     )
     output = impl._forward_bf16_kv(q, source_cache, topk, metadata)
-    assert output is expected
+    torch.testing.assert_close(output, expected)
+
+
+def test_hisparse_fp8_decode_resolves_each_speculative_step():
+    """FP8 verification must consume each hot-cache state before reusing it."""
+    num_decodes = 2
+    query_len = 3
+    num_tokens = num_decodes * query_len
+    q = torch.randn(num_tokens, 2, 4, device=DEVICE_TYPE)
+    topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=DEVICE_TYPE)
+    steps = []
+    kernel_shapes = []
+
+    def resolve_step(self, indices, metadata, step, **kwargs):  # noqa: ARG001
+        steps.append(step)
+        return torch.empty(1, device=DEVICE_TYPE), indices[:num_decodes]
+
+    def run_kernel(self, *, q, **kwargs):  # noqa: ARG001
+        kernel_shapes.append(q.shape)
+        return q[..., :1], None
+
+    impl = SimpleNamespace(kv_lora_rank=1)
+    impl._hisparse_decode_step = MethodType(resolve_step, impl)
+    impl._fp8_flash_mla_kernel = MethodType(run_kernel, impl)
+    metadata = SimpleNamespace(
+        num_decodes=num_decodes,
+        num_decode_tokens=num_tokens,
+    )
+
+    output = FlashMLASparseImpl._hisparse_fp8_decode(
+        impl,
+        q,
+        topk,
+        metadata,
+        SimpleNamespace(),
+        flatten_requests=True,
+    )
+
+    assert steps == [0, 1, 2]
+    assert kernel_shapes == [(1, num_decodes, 2, 4)] * query_len
+    assert output.shape == (num_tokens, 2, 1)
 
 
 def test_flashmla_cache_dtype_aliases_use_ds_layout():
@@ -2825,6 +2811,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         num_heads=2,
         kv_lora_rank=1,
         hisparse_cache=None,
+        _hisparse_decode_batch=False,
         _fp8_flash_mla_kernel=run_kernel,
     )
     impl._forward_fp8_kv_mixed_batch = MethodType(

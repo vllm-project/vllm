@@ -245,7 +245,7 @@ class FlashMLASparseMetadataBuilder(
             threshold = 1
         self._init_reorder_batch_threshold(
             threshold,
-            supports_spec_as_decode=not self.use_hisparse,
+            supports_spec_as_decode=True,
         )
 
         sm_count = num_compute_units(device.index)
@@ -603,17 +603,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_c_and_k_pe_cache.device.type == "cpu":
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
-                hot_cache, decode_topk, decode_topk_length = self._hisparse_swap_in(
+                decode_out = self._hisparse_bf16_decode(
+                    q[:num_decode_tokens],
                     topk_indices,
                     attn_metadata,
-                    num_decode_tokens=num_decode_tokens,
-                    return_valid_counts=True,
-                )
-                decode_out = self._bf16_flash_mla_kernel(
-                    q[:num_decode_tokens],
-                    hot_cache,
-                    decode_topk,
-                    decode_topk_length,
                 )
                 if num_decode_tokens == q.shape[0]:
                     return decode_out
@@ -659,17 +652,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             "FP8 sparse MLA expects either the decode subset or the full batch"
         )
 
-        decode_cache = kv_c_and_k_pe_cache
         decode_topk: torch.Tensor | None = None
         use_hisparse = self.hisparse_cache is not None
         if use_hisparse and num_decode_tokens > 0:
-            decode_cache, decode_topk = self._hisparse_swap_in(
-                topk_indices,
-                attn_metadata,
-                num_decode_tokens=(
-                    None if fp8_metadata.num_prefill_tokens == 0 else num_decode_tokens
-                ),
-            )
+            decode_topk = topk_indices[:num_decode_tokens]
 
         prefill_request_ids = None
         prefill_workspace_starts = None
@@ -707,6 +693,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q: torch.Tensor,
             topk_indices: torch.Tensor,
         ) -> torch.Tensor:
+            assert fp8_metadata.decode is not None
+            if use_hisparse:
+                return self._hisparse_fp8_decode(
+                    q,
+                    topk_indices,
+                    attn_metadata,
+                    fp8_metadata.decode.kernel_metadata,
+                )
             # Reshape q: (num_decode_tokens, num_heads, head_dim)
             #         -> (num_decodes, seq_len, num_heads, head_dim)
             q = reshape_query_for_spec_decode(q, num_decodes)
@@ -714,10 +708,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             # Reshape topk_indices: (num_decode_tokens, topk)
             #                    -> (num_decodes, seq_len, topk)
             topk_indices = topk_indices.view(num_decodes, seq_len, -1)
-            assert fp8_metadata.decode is not None
             attn_out, _ = self._fp8_flash_mla_kernel(
                 q=q,
-                kv_c_and_k_pe_cache=decode_cache,
+                kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
                 topk_indices=topk_indices,
                 kernel_metadata=fp8_metadata.decode.kernel_metadata,
             )
@@ -835,11 +828,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         if kv_c_and_k_pe_cache.device.type == "cpu":
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
-                decode_cache, decode_topk = self._hisparse_swap_in(
-                    topk_indices,
-                    attn_metadata,
-                    num_decode_tokens=num_decode_tokens,
-                )
                 if num_decode_tokens < attn_metadata.num_actual_tokens:
                     assert isinstance(
                         fp8_metadata,
@@ -853,13 +841,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                         FlashMLASparseMetadata.FP8KernelMetadata,
                     )
                     decode_metadata = fp8_metadata
-                _decode_out, _ = self._fp8_flash_mla_kernel(
-                    q=q[:num_decode_tokens].unsqueeze(0),
-                    kv_c_and_k_pe_cache=decode_cache,
-                    topk_indices=decode_topk.unsqueeze(0),
-                    kernel_metadata=decode_metadata,
+                decode_out = self._hisparse_fp8_decode(
+                    q[:num_decode_tokens],
+                    topk_indices,
+                    attn_metadata,
+                    decode_metadata,
+                    flatten_requests=True,
                 )
-                decode_out = _decode_out.squeeze(0)
                 if num_decode_tokens == q.shape[0]:
                     return decode_out
                 q = q[num_decode_tokens:]
@@ -929,6 +917,42 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         return out, lse
 
+    def _hisparse_fp8_decode(
+        self,
+        q: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+        kernel_metadata: FlashMLASparseMetadata.FP8KernelMetadata,
+        *,
+        flatten_requests: bool = False,
+    ) -> torch.Tensor:
+        num_decodes = attn_metadata.num_decodes
+        q_by_request = reshape_query_for_spec_decode(q, num_decodes)
+        step_outputs = []
+        for step in range(q_by_request.shape[1]):
+            hot_cache, step_topk = self._hisparse_decode_step(
+                topk_indices,
+                attn_metadata,
+                step,
+            )
+            step_q = q_by_request[:, step : step + 1]
+            step_topk = step_topk.unsqueeze(1)
+            if flatten_requests:
+                step_q = step_q.transpose(0, 1)
+                step_topk = step_topk.transpose(0, 1)
+            step_output, _ = self._fp8_flash_mla_kernel(
+                q=step_q,
+                kv_c_and_k_pe_cache=hot_cache,
+                topk_indices=step_topk,
+                kernel_metadata=kernel_metadata,
+            )
+            if flatten_requests:
+                step_output = step_output.transpose(0, 1)
+            step_outputs.append(step_output[:, 0])
+        if len(step_outputs) == 1:
+            return step_outputs[0]
+        return reshape_attn_output_for_spec_decode(torch.stack(step_outputs, dim=1))
+
     def _bf16_flash_mla_kernel(
         self,
         q: torch.Tensor,
@@ -964,6 +988,34 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         output = output[:, : self.num_heads, :]
         return output
+
+    def _hisparse_bf16_decode(
+        self,
+        q: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+    ) -> torch.Tensor:
+        num_decodes = attn_metadata.num_decodes
+        q_by_request = reshape_query_for_spec_decode(q, num_decodes)
+        step_outputs = []
+        for step in range(q_by_request.shape[1]):
+            hot_cache, step_topk, step_lengths = self._hisparse_decode_step(
+                topk_indices,
+                attn_metadata,
+                step,
+                return_valid_counts=True,
+            )
+            step_outputs.append(
+                self._bf16_flash_mla_kernel(
+                    q_by_request[:, step],
+                    hot_cache,
+                    step_topk,
+                    step_lengths,
+                )
+            )
+        if len(step_outputs) == 1:
+            return step_outputs[0]
+        return reshape_attn_output_for_spec_decode(torch.stack(step_outputs, dim=1))
 
     def forward_mqa(
         self,

@@ -387,6 +387,7 @@ class HiSparseOffloadRuntime:
         device: torch.device | str,
         storage_block_size: int | None = None,
         row_value_bytes: int | None = None,
+        max_swap_rows: int | None = None,
     ) -> None:
         if not _has_hisparse_ops():
             raise RuntimeError(
@@ -440,7 +441,9 @@ class HiSparseOffloadRuntime:
         # leader's misses), so the leader's counter covers the whole group.
         self._swap_stats = torch.zeros(2, dtype=torch.uint64, device=self.device)
         self.stats_row_bytes = row_bytes
-        self._plan = _get_group_plan(self.device, max_num_reqs, config.top_k)
+        self._plan = _get_group_plan(
+            self.device, max_swap_rows or max_num_reqs, config.top_k
+        )
         self.followers: list[HiSparseOffloadRuntime] = []
         self.leader: HiSparseOffloadRuntime | None = None
         self._prefetch_event: torch.Event | None = None
@@ -628,6 +631,8 @@ class HiSparseOffloadRuntime:
         block_size: int,
         return_valid_counts: bool = False,
         produce_plan: bool = False,
+        plan_row_offset: int = 0,
+        prefetch_followers: bool = True,
     ) -> HiSparseTopKResult:
         """Resolve top-k positions against resident, hot, then host storage."""
         num_tokens = topk_indices.shape[0]
@@ -642,20 +647,21 @@ class HiSparseOffloadRuntime:
 
         relative_indices = topk_indices[:num_tokens].contiguous()
 
-        hot_indices = self._plan.hot_indices[:num_tokens]
+        plan_rows = slice(plan_row_offset, plan_row_offset + num_tokens)
+        hot_indices = self._plan.hot_indices[plan_rows]
         valid_counts = (
-            self._plan.valid_counts[:num_tokens] if return_valid_counts else None
+            self._plan.valid_counts[plan_rows] if return_valid_counts else None
         )
         if produce_plan:
-            compact_miss_globals = self._plan.miss_global_indices[:num_tokens]
-            compact_miss_hots = self._plan.miss_hot_indices[:num_tokens]
-            compact_miss_counts = self._plan.miss_counts[:num_tokens]
+            compact_miss_globals = self._plan.miss_global_indices[plan_rows]
+            compact_miss_hots = self._plan.miss_hot_indices[plan_rows]
+            compact_miss_counts = self._plan.miss_counts[plan_rows]
         else:
             compact_miss_globals = None
             compact_miss_hots = None
             compact_miss_counts = None
 
-        attention_indices = self._plan.attention_indices[:num_tokens]
+        attention_indices = self._plan.attention_indices[plan_rows]
 
         # Padded rows are skipped by the kernel (request_state_indices) and must
         # come out as -1 so the attention kernel masks them.
@@ -689,26 +695,27 @@ class HiSparseOffloadRuntime:
             self.row_value_bytes or 0,
         )
 
-        if produce_plan and self.followers:
-            self._prefetch_group(num_tokens)
+        if produce_plan and self.followers and prefetch_followers:
+            self._prefetch_group(num_tokens, plan_row_offset)
 
         if not return_valid_counts:
             return self.hot.attention_cache, attention_indices
         assert valid_counts is not None
         return self.hot.attention_cache, attention_indices, valid_counts
 
-    def _gather_plan_into(self, num_tokens: int) -> None:
+    def _gather_plan_into(self, num_tokens: int, plan_row_offset: int = 0) -> None:
         assert self.hot is not None
+        plan_rows = slice(plan_row_offset, plan_row_offset + num_tokens)
         torch.ops._C_cache_ops.hisparse_gather_compact(
             self._host_cache,
             self.hot.cache,
-            self._plan.miss_global_indices[:num_tokens],
-            self._plan.miss_hot_indices[:num_tokens],
-            self._plan.miss_counts[:num_tokens],
+            self._plan.miss_global_indices[plan_rows],
+            self._plan.miss_hot_indices[plan_rows],
+            self._plan.miss_counts[plan_rows],
             self.row_value_bytes or 0,
         )
 
-    def _prefetch_group(self, num_tokens: int) -> None:
+    def _prefetch_group(self, num_tokens: int, plan_row_offset: int = 0) -> None:
         compute = torch.accelerator.current_stream(self.device)
         self._copy_stream.wait_stream(compute)
         with self._copy_stream:
@@ -716,7 +723,7 @@ class HiSparseOffloadRuntime:
                 if follower._host_cache is None:
                     follower._prefetch_event = None
                     continue
-                follower._gather_plan_into(num_tokens)
+                follower._gather_plan_into(num_tokens, plan_row_offset)
                 if follower._prefetch_event is None:
                     follower._prefetch_event = torch.Event()
                 follower._prefetch_event.record(self._copy_stream)
@@ -727,6 +734,7 @@ class HiSparseOffloadRuntime:
         block_size: int,
         num_tokens: int,
         return_valid_counts: bool = False,
+        plan_row_offset: int = 0,
     ) -> HiSparseTopKResult:
         """Replay the leader's swap plan for an index-sharing follower."""
         n = num_tokens
@@ -734,19 +742,20 @@ class HiSparseOffloadRuntime:
         assert self.hot is not None and self.hot.block_size == block_size
         assert self.leader.hot is not None
         assert self.hot.attention_block_stride == self.leader.hot.attention_block_stride
-        attention_indices = self._plan.attention_indices[:n]
+        plan_rows = slice(plan_row_offset, plan_row_offset + n)
+        attention_indices = self._plan.attention_indices[plan_rows]
         if self._prefetch_event is not None:
             torch.accelerator.current_stream(self.device).wait_event(
                 self._prefetch_event
             )
             self._prefetch_event = None
         else:
-            self._gather_plan_into(num_tokens)
+            self._gather_plan_into(num_tokens, plan_row_offset)
         if return_valid_counts:
             return (
                 self.hot.attention_cache,
                 attention_indices,
-                self._plan.valid_counts[:n],
+                self._plan.valid_counts[plan_rows],
             )
         return self.hot.attention_cache, attention_indices
 
@@ -849,6 +858,8 @@ class HiSparseCacheHandle:
         *,
         block_size: int,
         return_valid_counts: bool = False,
+        plan_row_offset: int = 0,
+        prefetch_followers: bool = True,
     ) -> HiSparseTopKResult:
         num_tokens = topk_indices.shape[0]
         if self.fully_resident:
@@ -872,6 +883,7 @@ class HiSparseCacheHandle:
                 block_size=block_size,
                 num_tokens=num_tokens,
                 return_valid_counts=return_valid_counts,
+                plan_row_offset=plan_row_offset,
             )
         return self.runtime.swap_in(
             resident=self,
@@ -881,6 +893,8 @@ class HiSparseCacheHandle:
             block_size=block_size,
             return_valid_counts=return_valid_counts,
             produce_plan=bool(self.runtime.followers),
+            plan_row_offset=plan_row_offset,
+            prefetch_followers=prefetch_followers,
         )
 
 
@@ -901,6 +915,21 @@ def create_hisparse_cache_handle(
         return None
 
     max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+    # Each speculative step needs its own replayable plan rows even though the
+    # per-request hot state is reused between steps.
+    max_decode_query_len = 1
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is not None
+        and speculative_config.num_speculative_tokens is not None
+    ):
+        max_decode_query_len += speculative_config.num_speculative_tokens * (
+            2 if speculative_config.parallel_drafting else 1
+        )
+    max_swap_rows = min(
+        vllm_config.scheduler_config.max_num_batched_tokens,
+        max_num_reqs * max_decode_query_len,
+    )
     if device is None:
         device = torch.device(
             current_platform.device_type, torch.accelerator.current_device_index()
@@ -909,6 +938,7 @@ def create_hisparse_cache_handle(
     runtime = HiSparseOffloadRuntime(
         config=config,
         max_num_reqs=max_num_reqs,
+        max_swap_rows=max_swap_rows,
         row_width=row_width,
         kv_dtype=kv_dtype,
         device=device,

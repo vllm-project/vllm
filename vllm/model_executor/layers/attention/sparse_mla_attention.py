@@ -634,20 +634,53 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         attn_metadata: Any,
         num_decode_tokens: int | None = None,
         return_valid_counts: bool = False,
+        req_id_per_token: torch.Tensor | None = None,
+        plan_row_offset: int = 0,
+        prefetch_followers: bool = True,
     ):
         assert self.hisparse_cache is not None
-        pure_decode = num_decode_tokens is None
-        n = topk_indices.shape[0] if pure_decode else num_decode_tokens
-        assert n is not None
-        assert pure_decode or n == attn_metadata.num_decodes, (
-            "HiSparse requires one token per mixed-batch decode request."
-        )
+        n = topk_indices.shape[0] if num_decode_tokens is None else num_decode_tokens
+        if req_id_per_token is None:
+            assert num_decode_tokens is None or n == attn_metadata.num_decodes, (
+                "Multi-token HiSparse decode must resolve one speculative step "
+                "at a time."
+            )
+            req_id_per_token = attn_metadata.req_id_per_token[:n]
         return self.hisparse_cache.resolve_topk(
-            attn_metadata.req_id_per_token[:n],
+            req_id_per_token,
             block_table=attn_metadata.block_table,
             topk_indices=topk_indices[:n],
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
+            plan_row_offset=plan_row_offset,
+            prefetch_followers=prefetch_followers,
+        )
+
+    def _hisparse_decode_step(
+        self,
+        topk_indices: torch.Tensor,
+        attn_metadata: Any,
+        step: int,
+        *,
+        return_valid_counts: bool = False,
+    ):
+        num_decodes = attn_metadata.num_decodes
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        assert num_decodes > 0 and num_decode_tokens % num_decodes == 0
+        query_len = num_decode_tokens // num_decodes
+        topk_by_request = topk_indices[:num_decode_tokens].view(
+            num_decodes, query_len, -1
+        )
+        req_ids = attn_metadata.req_id_per_token[:num_decode_tokens].view(
+            num_decodes, query_len
+        )
+        return self._hisparse_swap_in(
+            topk_by_request[:, step].contiguous(),
+            attn_metadata,
+            return_valid_counts=return_valid_counts,
+            req_id_per_token=req_ids[:, step].contiguous(),
+            plan_row_offset=step * num_decodes,
+            prefetch_followers=query_len == 1,
         )
 
     def _hisparse_decode_cache(
