@@ -6,7 +6,7 @@ import lm_eval
 import openai
 
 BASE_URL = "http://localhost:8192/v1"
-NUM_CONCURRENT = 100
+NUM_CONCURRENT = int(os.getenv("NUM_CONCURRENT", "100"))
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 # TODO(#43186): Widened from 0.03 to absorb chunk_scan/SSU numeric jitter
