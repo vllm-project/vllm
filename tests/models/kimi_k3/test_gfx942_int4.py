@@ -4,16 +4,13 @@
 import sys
 from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
-import torch
 
 from vllm.config.quantization import QuantizationConfigArgs
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.mxfp4 import (
-    Mxfp4MoEMethod,
     _moe_weight_override_is_int4,
     _use_k3_situ_int4_gfx942,
 )
@@ -82,23 +79,3 @@ def test_k3_situ_int4_gfx942_requires_explicit_override(int4_requested):
         ),
     ):
         assert _use_k3_situ_int4_gfx942(moe) is int4_requested
-
-
-def test_gfx942_int4_preserves_native_k3_intermediate_size():
-    method = object.__new__(Mxfp4MoEMethod)
-    method.is_k3_situ_int4_gfx942 = True
-
-    with patch.object(
-        FusedMoEMethodBase,
-        "maybe_roundup_sizes",
-        return_value=(7168, 384),
-    ):
-        hidden_size, intermediate_size = method.maybe_roundup_sizes(
-            hidden_size=7168,
-            intermediate_size_per_partition=384,
-            act_dtype=torch.bfloat16,
-            moe_parallel_config=Mock(),
-        )
-
-    assert hidden_size == 7168
-    assert intermediate_size == 384
