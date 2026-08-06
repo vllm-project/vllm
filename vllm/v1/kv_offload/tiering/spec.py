@@ -185,6 +185,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             TieringOffloadingManager instance
         """
         if not self._manager:
+            if int(self.extra_config.get("store_threshold", 0)) >= 2:
+                raise ValueError(
+                    "store_threshold is not supported for TieringOffloadingSpec"
+                )
+
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
             scheduler_mmap = SharedOffloadRegion(
@@ -261,10 +266,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
             )
-            if int(self.extra_config.get("store_threshold", 0)) >= 2:
-                raise ValueError(
-                    "store_threshold is not supported for TieringOffloadingSpec"
-                )
             self._manager = tiering_manager
 
             logger.info(
