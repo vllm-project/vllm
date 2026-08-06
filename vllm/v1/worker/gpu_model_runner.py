@@ -50,14 +50,13 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     graph_capture,
     is_global_first_rank,
-    prepare_communication_buffer_for_model,
 )
 from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -231,7 +230,7 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import is_residual_scattered_for_sp, raise_if_nan_logits
 from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
@@ -250,6 +249,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
+
+
+def _get_parameter_for_reload(model: nn.Module, name: str) -> nn.Parameter:
+    """Resolve checkpoint names without changing the model's module tree."""
+    module_name, _, parameter_name = name.rpartition(".")
+    module = model.get_submodule(module_name)
+    if isinstance(module, BaseLayerWithLoRA):
+        module = module.base_layer
+    return module.get_parameter(parameter_name)
+
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -5387,12 +5396,7 @@ class GPUModelRunner(
             format_gib(self.model_memory_usage),
             time_after_load - time_before_load,
         )
-        if not load_dummy_weights:
-            prepare_communication_buffer_for_model(self.model)
-            if (drafter := getattr(self, "drafter", None)) and (
-                drafter_model := getattr(drafter, "model", None)
-            ):
-                prepare_communication_buffer_for_model(drafter_model)
+
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
@@ -5541,7 +5545,10 @@ class GPUModelRunner(
             )
 
         model = self.get_model()
-        weights_to_load = {name for name, _ in model.named_parameters()}
+        weights_to_load = {
+            name.replace(".base_layer.", ".") if self.lora_config else name
+            for name, _ in model.named_parameters()
+        }
         counter_before_reloading = time.perf_counter()
 
         # load weights from disk if none are provided
@@ -5553,7 +5560,10 @@ class GPUModelRunner(
                 )
 
             if weights_path is not None:
+                # The revision belongs to the model we are reloading away from,
+                # so it must not be carried over to the new path.
                 self.model_config.model = weights_path
+                self.model_config.revision = None
             weights_iterator = model_loader.get_all_weights(self.model_config, model)
             weights_iterator = cast(
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
@@ -5575,9 +5585,11 @@ class GPUModelRunner(
             )
             loaded_weights = set()
             for name, loaded_weight in weights_iterator:
-                param = model.get_parameter(name)  # TODO: buffers?
+                param = _get_parameter_for_reload(model, name)  # TODO: buffers?
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
+
+        self.reset_lora_state()
 
         # logging and validation
         counter_after_reloading = time.perf_counter()
@@ -5723,6 +5735,8 @@ class GPUModelRunner(
                     if num_nans_for_index is not None and req_index < logits.shape[0]
                     else 0
                 )
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(num_nans_in_logits)
             return num_nans_in_logits
         except IndexError:
             return {}
