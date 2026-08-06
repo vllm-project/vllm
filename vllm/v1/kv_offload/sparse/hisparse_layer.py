@@ -28,7 +28,6 @@ logger = init_logger(__name__)
 
 # fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
 FP8_DS_MLA_ROW_BYTES = 656
-HISPARSE_KERNEL_BLOCK_SIZE = 64
 HiSparseTopKResult = (
     tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 )
@@ -133,6 +132,7 @@ class ResolvedHiSparseConfig:
         cls,
         vllm_config: VllmConfig,
         model_top_k: int,
+        block_size: int | None = None,
     ) -> ResolvedHiSparseConfig | None:
         config = vllm_config.attention_config.hisparse_config
         if config is None:
@@ -142,7 +142,7 @@ class ResolvedHiSparseConfig:
         # boundary entries thrash between steps.
         configured_size = config.device_buffer_size
         if configured_size is None:
-            device_buffer_size = round_up(2 * model_top_k, HISPARSE_KERNEL_BLOCK_SIZE)
+            device_buffer_size = 2 * model_top_k
         else:
             device_buffer_size = configured_size
 
@@ -160,8 +160,8 @@ class ResolvedHiSparseConfig:
                 f"limit: got {device_buffer_size}, maximum is "
                 f"{max_device_buffer_size}."
             )
-        if configured_size is not None:
-            padding = -device_buffer_size % HISPARSE_KERNEL_BLOCK_SIZE
+        if configured_size is not None and block_size is not None:
+            padding = -device_buffer_size % block_size
             if padding:
                 logger.warning(
                     "HiSparse device_buffer_size=%d is not aligned to the "
@@ -169,7 +169,7 @@ class ResolvedHiSparseConfig:
                     "padding rows per hot group. Use %d to use all allocated "
                     "rows.",
                     device_buffer_size,
-                    HISPARSE_KERNEL_BLOCK_SIZE,
+                    block_size,
                     padding,
                     device_buffer_size + padding,
                 )

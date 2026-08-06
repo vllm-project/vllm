@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.utils.torch_utils import np_to_pinned_tensor
+from vllm.v1.attention.block_size import MultipleOf
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -44,13 +45,6 @@ class AttentionType(str, Enum):
     """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
-
-
-class MultipleOf:
-    base: int
-
-    def __init__(self, base: int):
-        self.base = base
 
 
 class AttentionBackend(ABC):

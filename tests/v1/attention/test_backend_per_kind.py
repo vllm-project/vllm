@@ -76,7 +76,9 @@ def test_hisparse_config_resolves_model_constraints():
             hisparse_config=HiSparseConfig(host_pool_gib=1.0)
         )
     )
-    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    resolved = ResolvedHiSparseConfig.from_vllm_config(
+        vllm_config, model_top_k=128, block_size=32
+    )
     assert resolved is not None
     assert resolved.device_buffer_size == 256
 
@@ -102,11 +104,13 @@ def test_hisparse_config_warns_about_block_padding(caplog: pytest.LogCaptureFixt
         )
     )
 
-    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    resolved = ResolvedHiSparseConfig.from_vllm_config(
+        vllm_config, model_top_k=128, block_size=32
+    )
 
     assert resolved is not None
     assert resolved.device_buffer_size == 257
-    assert "allocates 63 unused padding rows" in caplog.text
+    assert "allocates 31 unused padding rows" in caplog.text
 
 
 def test_hisparse_config_rejects_slot_indices_larger_than_int16():

@@ -93,20 +93,32 @@ def test_hisparse_memory_usage_keeps_indexer_source_on_host():
     assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == 50
 
 
-@pytest.mark.parametrize("block_size", [64, 128, 256])
-def test_hisparse_hma_splits_scheduler_blocks_into_kernel_blocks(block_size):
+@pytest.mark.parametrize(
+    ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
+    [
+        (64, (64,), (64,), 64),
+        (128, (64,), (64,), 64),
+        (256, (64,), (64,), 64),
+        (64, (32, 64), (16, 32), 32),
+    ],
+)
+def test_hisparse_hma_uses_backend_gpu_block_size(
+    block_size, main_sizes, indexer_sizes, gpu_block_size
+):
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
+            supported_kernel_block_sizes=main_sizes,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
+            supported_kernel_block_sizes=indexer_sizes,
         ),
     }
     group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
@@ -134,7 +146,7 @@ def test_hisparse_hma_splits_scheduler_blocks_into_kernel_blocks(block_size):
     assert host_group.block_pool_id is None
     assert indexer_group.block_pool_id == 0
     assert host_group.kv_cache_spec.block_size == block_size
-    assert indexer_group.kv_cache_spec.block_size == 64
+    assert indexer_group.kv_cache_spec.block_size == gpu_block_size
     resident_groups = [
         group
         for group in auxiliary_groups
@@ -148,9 +160,14 @@ def test_hisparse_hma_splits_scheduler_blocks_into_kernel_blocks(block_size):
     assert resident_groups
     assert all(isinstance(group.kv_cache_spec, HiSparseHotSpec) for group in hot_groups)
     assert len(resident_groups) == len(hot_groups)
-    assert all(group.kv_cache_spec.block_size == 64 for group in resident_groups)
-    assert all(group.kv_cache_spec.block_size == 64 for group in hot_groups)
-    assert all(group.kv_cache_spec.blocks_per_request == 4 for group in hot_groups)
+    assert all(
+        group.kv_cache_spec.block_size == gpu_block_size for group in resident_groups
+    )
+    assert all(group.kv_cache_spec.block_size == gpu_block_size for group in hot_groups)
+    assert all(
+        group.kv_cache_spec.blocks_per_request == 256 // gpu_block_size
+        for group in hot_groups
+    )
 
 
 def test_hisparse_hma_rejects_mixed_hot_page_sizes():
@@ -160,18 +177,21 @@ def test_hisparse_hma_rejects_mixed_hot_page_sizes():
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
+            supported_kernel_block_sizes=(64,),
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
             block_size=64,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
+            supported_kernel_block_sizes=(64,),
         ),
         "model.layers.1.self_attn": MLAAttentionSpec(
             block_size=64,
             num_kv_heads=1,
             head_size=640,
             dtype=torch.bfloat16,
+            supported_kernel_block_sizes=(64,),
         ),
     }
     group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
@@ -210,6 +230,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
             compress_ratio=4,
             model_version="deepseek_v4",
             alignment=576,
+            supported_kernel_block_sizes=(256,),
         ),
         c4_indexer: MLAAttentionSpec(
             block_size=256,
@@ -217,6 +238,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
             head_size=132,
             dtype=torch.uint8,
             compress_ratio=4,
+            supported_kernel_block_sizes=(256,),
         ),
         c128_main: MLAAttentionSpec(
             block_size=256,
@@ -227,6 +249,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
             compress_ratio=128,
             model_version="deepseek_v4",
             alignment=576,
+            supported_kernel_block_sizes=(256,),
         ),
         c128_indexer: MLAAttentionSpec(
             block_size=256,
@@ -234,6 +257,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
             head_size=132,
             dtype=torch.uint8,
             compress_ratio=128,
+            supported_kernel_block_sizes=(256,),
         ),
     }
     full_uniform = UniformTypeKVCacheSpecs.from_specs(full_specs)

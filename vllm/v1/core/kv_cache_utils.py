@@ -19,6 +19,7 @@ from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.block_size import select_common_block_size_from_constraints
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -38,10 +39,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-from vllm.v1.kv_offload.sparse.hisparse_layer import (
-    HISPARSE_KERNEL_BLOCK_SIZE,
-    ResolvedHiSparseConfig,
-)
+from vllm.v1.kv_offload.sparse.hisparse_layer import ResolvedHiSparseConfig
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -1462,17 +1460,26 @@ def _get_hisparse_hma_config(
     block_sizes = {spec.block_size for spec in specs.values()}
     assert len(block_sizes) == 1, "HiSparse HMA requires one scheduler block size."
     block_size = block_sizes.pop()
-    if block_size % HISPARSE_KERNEL_BLOCK_SIZE != 0:
-        raise ValueError(
-            "HiSparse scheduler block size must be divisible by its "
-            f"{HISPARSE_KERNEL_BLOCK_SIZE}-token kernel block size, got "
-            f"{block_size}."
+    constraints = [
+        spec.supported_kernel_block_sizes
+        for spec in specs.values()
+        if isinstance(spec, AttentionSpec)
+    ]
+    try:
+        gpu_block_size = select_common_block_size_from_constraints(
+            block_size, constraints
         )
+    except ValueError as error:
+        raise ValueError(
+            "HiSparse requires a GPU block size supported by every sparse "
+            f"attention and indexer backend: {error}"
+        ) from error
     config = ResolvedHiSparseConfig.from_vllm_config(
-        vllm_config, vllm_config.model_config.hf_config.index_topk
+        vllm_config,
+        vllm_config.model_config.hf_config.index_topk,
+        gpu_block_size,
     )
     assert config is not None
-    gpu_block_size = block_size if is_deepseek_v4 else HISPARSE_KERNEL_BLOCK_SIZE
 
     source_specs = {
         (

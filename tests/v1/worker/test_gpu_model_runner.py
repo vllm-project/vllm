@@ -1027,6 +1027,7 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
     kv_cache_spec = runner.get_kv_cache_spec()
     assert len(kv_cache_spec) == 2
     assert len(runner.shared_kv_cache_layers) == 0
+    assert all(spec.supported_kernel_block_sizes for spec in kv_cache_spec.values())
 
     available_memory = 20 * GiB_bytes
     # page size for layer 0's kv_cache_spec is 32KB

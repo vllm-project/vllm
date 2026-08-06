@@ -23,7 +23,8 @@ class HiSparseConfig:
     device_buffer_size: int | None = Field(default=None, gt=0)
     """Total per-request GPU hot-buffer rows, including the newest-token slot.
 
-    Defaults to twice the model top-k, rounded up to the cache block size.
+    Defaults to twice the model top-k. The physical allocation is rounded up
+    to the GPU cache block size selected from the active backends.
     """
 
 
