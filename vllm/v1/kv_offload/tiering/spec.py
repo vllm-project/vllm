@@ -236,7 +236,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 )
                 self._manager = tiering_manager
             except Exception:
-                logger.exception("Failed to initialize tiering offloading manager")
                 for tier in reversed(secondary_tiers):
                     try:
                         tier.shutdown()
