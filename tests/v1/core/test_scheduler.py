@@ -5065,6 +5065,53 @@ def test_cross_attn_zero_blocks_without_encoder_inputs():
     )
 
 
+def test_encoder_decoder_decode_steps_preserve_encoder_cache_budget():
+    """Decoding must not inflate the encoder cache budget.
+
+    `_free_encoder_inputs` runs on every step once an encoder-decoder request
+    has produced a token. When the release is not idempotent, `num_free_slots`
+    grows past `cache_size` and `can_allocate` stops rejecting oversized
+    encoder inputs.
+    """
+    scheduler = _create_encoder_decoder_scheduler()
+    encoder_cache_manager = scheduler.encoder_cache_manager
+    encoder_cache_size = encoder_cache_manager.cache_size
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=20,
+        max_tokens=20,
+        mm_hashes_list=[["enc_hash"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=1500)]],
+        req_ids=["req_enc_dec"],
+    )[0]
+    scheduler.add_request(request)
+
+    for _ in range(5):
+        output = scheduler.schedule()
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[100]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+        assert encoder_cache_manager.num_free_slots <= encoder_cache_size
+
+    oversized = create_requests(
+        num_requests=1,
+        num_tokens=20,
+        mm_hashes_list=[["enc_hash_big"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=encoder_cache_size + 1)]],
+        req_ids=["req_oversized"],
+    )[0]
+    assert not encoder_cache_manager.can_allocate(oversized, 0, int(1e9), 0)
+
+
 def test_eagle3_mm_encoder_cache_with_shift():
     """Test EAGLE3 encoder scheduling accounts for shift_computed_tokens.
 
