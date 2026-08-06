@@ -7,7 +7,6 @@ from typing import Any
 import torch
 from torch import nn
 
-import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -291,9 +290,7 @@ class KimiMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
-            runner_cls=ROCmLatentMoERunner
-            if self.use_latent_moe and envs.VLLM_ROCM_USE_LATENT_MOE_RUNNER
-            else None,
+            runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
         )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
