@@ -1,7 +1,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack
+from typing import Any
+
 import pytest
+
+
+@pytest.fixture
+def vllm_runner_factory(vllm_runner) -> Iterator[Callable[..., Any]]:
+    """Create context-managed runners that are closed after each test.
+
+    Some entrypoint tests need a runner for the entire test body, or several
+    live runners at once. Tracking them in one ``ExitStack`` keeps those tests
+    concise while still guaranteeing the complete ``VllmRunner.__exit__``
+    cleanup path when a test fails partway through.
+    """
+    runners: list[Any] = []
+    defer_rocm_memory_wait = False
+    with ExitStack() as stack:
+
+        def settle_after_runners() -> None:
+            # This callback is registered before the runner exits, so the
+            # ExitStack invokes it last. Drop the runner wrappers before
+            # waiting as their ``llm`` attributes have already been deleted.
+            runners.clear()
+            if defer_rocm_memory_wait:
+                from tests.utils import wait_for_rocm_memory_to_settle
+
+                wait_for_rocm_memory_to_settle()
+
+        stack.callback(settle_after_runners)
+
+        def create_runner(*args: Any, **kwargs: Any) -> Any:
+            nonlocal defer_rocm_memory_wait
+            if runners:
+                # Every runner created by this fixture remains alive until
+                # fixture teardown. Once runners coexist, no individual
+                # runner can wait for baseline VRAM while the others are
+                # still using it; defer one wait until all have exited.
+                for active_runner in runners:
+                    active_runner.wait_for_rocm_memory = False
+                kwargs["wait_for_rocm_memory"] = False
+                defer_rocm_memory_wait = True
+
+            runner = vllm_runner(*args, **kwargs)
+            defer_rocm_memory_wait |= not runner.wait_for_rocm_memory
+            runners.append(runner)
+            return stack.enter_context(runner)
+
+        yield create_runner
 
 
 @pytest.fixture

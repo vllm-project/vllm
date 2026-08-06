@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import weakref
-
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "distilbert/distilgpt2"
 
@@ -26,22 +23,15 @@ TOKEN_IDS = [
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
         max_num_batched_tokens=4096,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.10,
         enforce_eager=True,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+    ) as runner:
+        yield runner.llm
 
 
 @pytest.mark.skip_global_cleanup
@@ -97,14 +87,14 @@ def test_single_prompt_priority(llm: LLM):
     assert len(outputs) == 1
 
 
-def test_max_model_len():
+def test_max_model_len(vllm_runner_factory):
     max_model_len = 20
-    llm = LLM(
-        model=MODEL_NAME,
+    llm = vllm_runner_factory(
+        MODEL_NAME,
         max_model_len=max_model_len,
         gpu_memory_utilization=0.10,
         enforce_eager=True,  # reduce test time
-    )
+    ).llm
     sampling_params = SamplingParams(max_tokens=max_model_len + 10)
     outputs = llm.generate(PROMPTS, sampling_params)
     for output in outputs:
@@ -117,13 +107,13 @@ def test_max_model_len():
         assert num_total_tokens <= max_model_len
 
 
-def test_log_stats():
-    llm = LLM(
-        model=MODEL_NAME,
+def test_log_stats(vllm_runner_factory):
+    llm = vllm_runner_factory(
+        MODEL_NAME,
         disable_log_stats=False,
         gpu_memory_utilization=0.10,
         enforce_eager=True,  # reduce test time
-    )
+    ).llm
     outputs = llm.generate(PROMPTS, sampling_params=None)
 
     # disable_log_stats is False, every output should have metrics
