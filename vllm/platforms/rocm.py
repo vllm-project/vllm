@@ -448,6 +448,7 @@ def flash_attn_triton_available() -> bool:
 def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
+    use_kv_connector: bool = False,
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
@@ -467,6 +468,10 @@ def _get_backend_priorities(
             ]
 
     backends = []
+    # Keep ROCM_ATTN disabled for KV connectors until connector transfer
+    # semantics are validated for its asymmetric native K/V cache views.
+    if not use_kv_connector:
+        backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
@@ -547,6 +552,7 @@ class RocmPlatform(Platform):
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
+            attn_selector_config.use_kv_connector,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -576,19 +582,14 @@ class RocmPlatform(Platform):
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
-            if selected_backend == AttentionBackendEnum.ROCM_ATTN:
-                invalid_reasons = [
-                    "ROCM_ATTN does not support standardized packed KV caches"
-                ]
-            else:
-                try:
-                    backend_class = selected_backend.get_class()
-                    invalid_reasons = backend_class.validate_configuration(
-                        device_capability=device_capability,
-                        **attn_selector_config._asdict(),
-                    )
-                except ImportError:
-                    invalid_reasons = ["ImportError"]
+            try:
+                backend_class = selected_backend.get_class()
+                invalid_reasons = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
             if invalid_reasons:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "

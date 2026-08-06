@@ -296,14 +296,23 @@ def chunked_prefill_paged_decode(
         sliding_window = 0
 
     if max_query_len > 1:
+        # context_attention_fwd's paged kernel keeps its historical x-packed
+        # addressing: K as [B, H, hs//x, N, x] and V as [B, H, hs, N]. Both
+        # are pure permuted views of the standardized [B, H, N, hs] halves
+        # (the kernel threads every dim's stride), so no bytes move and no
+        # kernel changes are needed.
+        x = 16 // key_cache.element_size()
+        head_size = key_cache.shape[3]
+        k_cache_x = key_cache.unflatten(-1, (head_size // x, x)).permute(0, 1, 3, 2, 4)
+        v_cache_t = value_cache.permute(0, 1, 3, 2)
         context_attention_fwd(
             q=query,
             k=key,
             v=value,
             o=output,
             kv_cache_dtype=kv_cache_dtype,
-            k_cache=key_cache,
-            v_cache=value_cache,
+            k_cache=k_cache_x,
+            v_cache=v_cache_t,
             b_loc=block_table,
             b_start_loc=query_start_loc,
             b_seq_len=seq_lens,
