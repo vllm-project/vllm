@@ -420,9 +420,10 @@ class Glm5NextDecoderLayer(nn.Module):
         # Self Attention
         residual = x
         post, comb, x = self.hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base,
+            norm_weight=self.input_layernorm.weight.data,
+            norm_eps=self.input_layernorm.variance_epsilon,
         )
-        x = self.input_layernorm(x)
 
         x = self.self_attn(
             hidden_states=x,
@@ -433,11 +434,12 @@ class Glm5NextDecoderLayer(nn.Module):
 
         residual = x
         post, comb, x = self.hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base,
+            norm_weight=self.post_attention_layernorm.weight.data,
+            norm_eps=self.post_attention_layernorm.variance_epsilon,
         )
 
         # Fully Connected
-        x = self.post_attention_layernorm(x)
         x = self.mlp(x)
 
         x = self.hc_post(x, residual, post, comb)
@@ -454,6 +456,8 @@ class Glm5NextDecoderLayer(nn.Module):
         hc_fn: torch.Tensor,
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ):
         post_mix, res_mix, layer_input = self.mhc_pre_op(
             residual=x,
@@ -465,6 +469,8 @@ class Glm5NextDecoderLayer(nn.Module):
             hc_sinkhorn_eps=self.hc_eps,
             hc_post_mult_value=self.mhc_post_mult_value,
             sinkhorn_repeat=self.mhc_sinkhorn_iterations,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
         )
         return post_mix, res_mix, layer_input
 
