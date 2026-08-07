@@ -127,7 +127,7 @@ def should_bundle_tcmalloc() -> bool:
     return (
         VLLM_TARGET_DEVICE == "cpu"
         and sys.platform.startswith("linux")
-        and platform.machine() in ("aarch64", "x86_64")
+        and platform.machine() in ("aarch64", "x86_64", "s390x")
     )
 
 
@@ -1272,7 +1272,7 @@ setup(
         "zen": ["zentorch==2.11.0.0"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.3.2"],
+        "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.1.9"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
@@ -1291,7 +1291,7 @@ setup(
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.1.0"],
+        "helion": ["helion==1.4.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing

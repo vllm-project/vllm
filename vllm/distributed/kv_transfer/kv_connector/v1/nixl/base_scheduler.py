@@ -453,6 +453,10 @@ class NixlBaseConnectorScheduler:
             self._build_save_meta(meta, scheduler_output)
 
         meta.reqs_to_send = self._reqs_need_send
+        # Clock reference for reqs_to_send: deadlines above are in this
+        # process's perf_counter domain; workers (possibly on other nodes,
+        # where perf_counter has a different epoch) rebase against this.
+        meta.scheduler_clock = time.perf_counter()
         meta.reqs_in_batch = self._reqs_in_batch
         meta.reqs_not_processed = self._reqs_not_processed
 
