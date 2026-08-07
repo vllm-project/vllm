@@ -1332,6 +1332,74 @@ def test_hybrid_attention_mamba_tensor_shapes():
             assert torch.equal(actual_ssm, expected_ssm)
 
 
+def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch):
+    runner = object.__new__(GPUModelRunner)
+    runner.vllm_config = SimpleNamespace(reasoning_config=None)
+    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=16)
+    runner.cache_config = SimpleNamespace(use_replayssm=False)
+    runner.model_config = SimpleNamespace(get_vocab_size=lambda: 32)
+    runner.max_model_len = 64
+    runner.max_encoder_len = 0
+    runner.max_num_reqs = 1
+    runner.max_num_tokens = 64
+    runner.num_spec_tokens = 0
+    runner.device = torch.device("cpu")
+    runner.is_pooling_model = False
+    runner._init_block_sizes = [16]
+    runner._init_kernel_block_sizes = [16]
+    runner._init_max_num_blocks = [4]
+    runner._init_slot_mapping_modes = [
+        gpu_model_runner_module.SlotMappingMode.TOKEN_TO_KV_SLOT
+    ]
+    runner.cp_kv_cache_interleave_size = 1
+    runner.input_batch = SimpleNamespace(
+        logitsprocs=None,
+        logitsprocs_need_output_token_ids=False,
+    )
+
+    spec = SimpleNamespace(
+        block_size=16,
+        max_num_blocks_per_req=lambda *_: 4,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]
+    )
+    input_batch_cls = Mock(return_value=SimpleNamespace())
+    monkeypatch.setattr(gpu_model_runner_module, "InputBatch", input_batch_cls)
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_kv_cache_spec_kind",
+        lambda _: gpu_model_runner_module.KVCacheSpecKind.FULL_ATTENTION,
+    )
+
+    runner.may_reinitialize_input_batch(kv_cache_config, [16])
+
+    assert input_batch_cls.call_count == 1
+    assert input_batch_cls.call_args.kwargs["cp_kv_cache_interleave_size"] == 16
+
+
+def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
+    from vllm.v1.worker.gpu import model_runner as v2_model_runner_module
+
+    runner = object.__new__(v2_model_runner_module.GPUModelRunner)
+    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=16)
+    runner.cp_interleave = 1
+
+    class StopInitialization(Exception):
+        pass
+
+    monkeypatch.setattr(
+        v2_model_runner_module,
+        "deepcopy",
+        Mock(side_effect=StopInitialization),
+    )
+
+    with pytest.raises(StopInitialization):
+        runner.initialize_kv_cache(SimpleNamespace())
+
+    assert runner.cp_interleave == 16
+
+
 def test_hybrid_block_table_initialization():
     """Test hybrid block table with different kernel and kvcache_manager block
     sizes."""

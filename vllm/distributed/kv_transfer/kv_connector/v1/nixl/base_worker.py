@@ -217,6 +217,17 @@ class NixlBaseConnectorWorker:
                     handle.append((addr + p_idx * chunk, chunk, dev))
             yield handle
 
+    def _needs_split_local_xfer_handles(self, tp_ratio: int, plan: TPMapping) -> bool:
+        """Whether reads need per-source slices of the local KV region.
+
+        Pure MLA attention is replicated across TP ranks and writes the whole
+        local region. Multiple physical remote workers may still participate
+        because DCP assigns them disjoint blocks, but that does not require
+        splitting the local region. Hybrid MLA+SSM is different: its mapping
+        contains multiple source ranks for the sharded SSM state.
+        """
+        return tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1)
+
     def _fa_desc_replicated(self, num_fa_descs: int) -> list[bool]:
         """Per-FA-descriptor replicate flag, in _build_fa_local emission order
         (region-major; one desc per block, with K/V packed). Length ``num_fa_descs``.
@@ -363,6 +374,14 @@ class NixlBaseConnectorWorker:
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
+
+        # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
+        # replicated or fully sharded. A DCP rank is always derivable this way.
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.dcp_rank = self.tp_rank % self.dcp_size
+        if self._has_mamba and self.dcp_size > 1:
+            # Prefix-cache-aware DCP slicing isn't implemented for the Mamba group.
+            raise ValueError("DCP is not supported for hybrid MLA+Mamba models.")
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
@@ -525,9 +544,10 @@ class NixlBaseConnectorWorker:
         self.compat_hash: str | None = None
         self.transfer_topo: TransferTopology | None = None
 
-        # With heterogeneous TP, P must wait for all assigned D TP workers to
-        # finish reading before safely freeing the blocks.
+        # With heterogeneous TP (or DCP), P must wait for all assigned D
+        # workers to finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        self.expected_consumer_notifications_by_req: dict[ReqId, int] = {}
         self.xfer_stats = NixlKVConnectorStats()
 
         self._physical_blocks_per_logical_kv_block = 1
@@ -538,7 +558,6 @@ class NixlBaseConnectorWorker:
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.kv_cache_groups
         )
-
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
@@ -580,6 +599,7 @@ class NixlBaseConnectorWorker:
         port: int,
         remote_tp_size: int,
         expected_engine_id: str,
+        remote_dcp_size: int = 1,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
@@ -603,7 +623,9 @@ class NixlBaseConnectorWorker:
         # local rank will read from. Note that With homogeneous TP,
         # this happens to be the same single rank_i.
         assert self.transfer_topo is not None
-        p_remote_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
+        p_remote_ranks = self.transfer_topo.handshake_target_ranks(
+            remote_tp_size, remote_dcp_size
+        )
         remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
         path = make_zmq_path("tcp", host, port)
         # Clock offset to the peer, estimated from the handshake round-trip.
@@ -705,11 +727,11 @@ class NixlBaseConnectorWorker:
                 # Register Remote agent.
                 if notif_agents_only:
                     remote_agent_name = self._add_notif_only_remote_agent(
-                        metadata, remote_tp_size
+                        metadata, remote_tp_size, metadata.dcp_size
                     )
                 else:
                     remote_agent_name = self.add_remote_agent(
-                        metadata, remote_rank, remote_tp_size
+                        metadata, remote_rank, remote_tp_size, metadata.dcp_size
                     )
                 setup_agent_time = time.perf_counter()
                 logger.debug(
@@ -724,7 +746,7 @@ class NixlBaseConnectorWorker:
         return remote_rank_to_agent_name, best_offset
 
     def _add_notif_only_remote_agent(
-        self, metadata: NixlAgentMetadata, remote_tp_size: int
+        self, metadata: NixlAgentMetadata, remote_tp_size: int, remote_dcp_size: int = 1
     ) -> str:
         """Load a remote agent for notifs only on the push-mode decode side.
 
@@ -740,6 +762,7 @@ class NixlBaseConnectorWorker:
                 remote_physical_blocks_per_logical=(
                     metadata.physical_blocks_per_logical_kv_block
                 ),
+                remote_dcp_size=remote_dcp_size,
             ),
         )
         return self.nixl_wrapper.add_remote_agent(metadata.agent_metadata)
@@ -856,6 +879,7 @@ class NixlBaseConnectorWorker:
         host: str,
         port: int,
         tp_size: int,
+        dcp_size: int = 1,
         pp_size: int = 1,
         notif_agents_only: bool = False,
     ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
@@ -881,6 +905,7 @@ class NixlBaseConnectorWorker:
                 port,
                 tp_size,
                 engine_id,
+                dcp_size,
                 pp_size,
                 notif_agents_only,
             )
@@ -918,6 +943,8 @@ class NixlBaseConnectorWorker:
             meta.remote.host,
             meta.remote.port,
             meta.tp_size,
+            meta.dcp_size,
+            meta.pp_size,
         )
         if fut is None:
             # Already handshaked — only happens if caller does not pre-check.
@@ -967,8 +994,11 @@ class NixlBaseConnectorWorker:
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            total_num_kv_heads=1
+            if self.use_mla
+            else self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
+            dcp_size=self.dcp_size,
             tensor_shape=None,
             is_mamba=self._has_mamba,
         )
@@ -1026,6 +1056,7 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            dcp_size=self.dcp_size,
         )
         assert self.compat_hash is not None
         encoder = msgspec.msgpack.Encoder()
@@ -1057,8 +1088,11 @@ class NixlBaseConnectorWorker:
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            total_num_kv_heads=1
+            if self.use_mla
+            else self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
+            dcp_size=self.dcp_size,
             # SSM States come in tuples (ssm, conv)
             tensor_shape=next(iter(kv_caches.values())).shape
             if not self._has_mamba
@@ -1267,6 +1301,7 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            dcp_size=self.dcp_size,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1492,6 +1527,7 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         remote_tp_rank: int = 0,
         remote_tp_size: int = 1,
+        remote_dcp_size: int = 1,
     ) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
@@ -1575,6 +1611,7 @@ class NixlBaseConnectorWorker:
             remote_block_size=nixl_agent_meta.block_size,
             remote_block_len=nixl_agent_meta.block_lens[0],
             remote_physical_blocks_per_logical=physical_blocks_per_logical,
+            remote_dcp_size=remote_dcp_size,
         )
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
@@ -1583,6 +1620,7 @@ class NixlBaseConnectorWorker:
             transfer_topology=transfer_topo,
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
+            remote_dcp_size=remote_dcp_size,
         )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -1605,7 +1643,9 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
             nixl_agent_meta.kv_caches_base_addr
         )
-        self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
+        self._validate_remote_agent_handshake(
+            nixl_agent_meta, remote_tp_size, remote_dcp_size
+        )
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
@@ -1635,10 +1675,8 @@ class NixlBaseConnectorWorker:
 
         ### (Optional) Register local agent memory regions. MLA is not split.
         split_key = (tp_ratio, remote_block_size)
-        if (
-            tp_ratio < 0
-            and (not self.use_mla or len(plan.all_source_ranks) > 1)
-            and split_key not in self.src_xfer_handles_by_tp_ratio
+        if self._needs_split_local_xfer_handles(tp_ratio, plan) and (
+            split_key not in self.src_xfer_handles_by_tp_ratio
         ):
             # Remote tp_size > local tp_size: read from multiple remote ranks.
             # Logically "split" own regions into per-source chunks. Hybrid
@@ -1696,7 +1734,10 @@ class NixlBaseConnectorWorker:
         return remote_agent_name
 
     def _validate_remote_agent_handshake(
-        self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_tp_size: int,
+        remote_dcp_size: int = 1,
     ):
         """
         Validate the remote agent handshake metadata ensuring the
@@ -1707,6 +1748,15 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         remote_info = self.transfer_topo.get_engine_info(remote_engine_id)
         assert remote_info.remote_tp_size == remote_tp_size
+        assert remote_info.remote_dcp_size == remote_dcp_size
+        # DCP sizes must divide one another; this is what keeps the
+        # read-slicing math in pull_worker a closed form.
+        assert (
+            self.dcp_size % remote_dcp_size == 0 or remote_dcp_size % self.dcp_size == 0
+        ), (
+            f"DCP sizes must divide one another: local={self.dcp_size}, "
+            f"remote={remote_dcp_size} (engine {remote_engine_id})."
+        )
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
@@ -2150,6 +2200,7 @@ class NixlBaseConnectorWorker:
             if now < expires:
                 break
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
+            self.expected_consumer_notifications_by_req.pop(req_id, None)
             self.xfer_stats.record_kv_expired_req()
             logger.warning(
                 "Releasing expired KV blocks for request %s which were "
@@ -2285,6 +2336,7 @@ class NixlBaseConnectorWorker:
                     hb_info.host,
                     hb_info.port,
                     hb_info.tp_size,
+                    hb_info.dcp_size,
                     hb_info.pp_size,
                     self._hb_handshake_notif_only and hb_info.pp_size > 1,
                 )
@@ -2370,7 +2422,7 @@ class NixlBaseConnectorWorker:
         This is required when the logical block size (the one set by the user)
         does not match the one required by the attn backend.
         `ratio` is the number of physical blocks per logical block.
-        We always receive logical blocks from the engine, so we expand them here eg:
+        We always receive logical blocks from the engine, so we expand them here eg:
         logical block ids: [(SW-clipped) [1], (FA) [2, 3]], ratio=2
         physical block ids: [(SW-clipped) [2, 3], (FA) [4, 5, 6, 7]]
         """
@@ -2394,6 +2446,80 @@ class NixlBaseConnectorWorker:
                     ).tolist()
                 )
         return physical_block_ids
+
+    def _apply_dcp_prefix_caching(
+        self,
+        local_ids: list[int],
+        remote_ids: list[int],
+        remote_rank: int,
+        local_dcp_size: int,
+        local_dcp_rank: int,
+        remote_dcp_size: int,
+        local_num_computed_blocks: int,
+    ) -> tuple[list[int], list[int]]:
+        """Handle DCP prefix cache hit for asymmetric DCP configurations.
+
+        Scoped to MLA with `dcp_size in (1, tp_size)`: a side is either fully
+        replicated (holds the whole sequence) or fully sharded (one every
+        `dcp_size` blocks). The examples below number blocks by their *global*
+        sequence position purely to explain the modulo arithmetic, in practice
+        they have independent block tables.
+
+        ``local_ids`` only carries the blocks still to be filled: the scheduler
+        already dropped the ``local_num_computed_blocks`` prefix-cached ones. The
+        count is passed separately because it fixes where this side's slice starts
+        in global position space, which is what the remote offset must line up
+        with.
+
+            local_dcp_size=4, local_dcp_rank=1
+            owns:       [1, 5, 9, 13, ...]
+            cached:     [1, 5]
+            next fetch: [9, 13, ...]
+
+        A given ``remote_rank`` can also drop out entirely: when the computed
+        slice lands past the end of the other side's list, the result is empty
+        (see the caller, which turns that into a notification-only read).
+
+            local_dcp_size=2, local_dcp_rank=0
+            owns:       [0, 2, 4, 6]
+            cached:     [0, 2, 4]
+            local_ids:  [6]
+
+            P0 owns:    [0, 4]
+            P2 owns:    [2, 6]
+
+            vs P0: start_local = (0-3) % 2 = 1  ->  [6][1::2] = []   (skip)
+            vs P2: start_local = (1-3) % 2 = 0  ->  [6][0::2] = [6]  (read)
+
+        When both sides interleave identically (including the non-sharded,
+        dcp_size=1 case), the remote list still starts at sequence position 0,
+        so skipping ``local_num_computed_blocks`` off its front is all that's
+        needed. Either way, the result is truncated to the shorter of the two
+        matched slices, so a subsequent, unconditional call to
+        ``_apply_prefix_caching`` is a guaranteed no-op on these lists.
+        """
+        local_size, remote_size = local_dcp_size, remote_dcp_size
+
+        if local_size == remote_size:
+            local_slice = local_ids
+            remote_slice = remote_ids[local_num_computed_blocks:]
+        elif local_size < remote_size:
+            k = remote_size // local_size
+            p = (remote_rank - local_dcp_rank) // local_size
+            start_local = (p - local_num_computed_blocks) % k
+            start_remote = (local_num_computed_blocks + start_local - p) // k
+            local_slice = local_ids[start_local::k]
+            remote_slice = remote_ids[start_remote:]
+        else:
+            k = local_size // remote_size
+            remote_dcp_rank = remote_rank % remote_size
+            c = (local_dcp_rank - remote_dcp_rank) // remote_size
+            start_remote = c + local_num_computed_blocks * k
+            local_slice = local_ids
+            remote_slice = remote_ids[start_remote::k]
+
+        matched_blocks = min(len(local_slice), len(remote_slice))
+        return local_slice[:matched_blocks], remote_slice[:matched_blocks]
 
     def _apply_prefix_caching(
         self,

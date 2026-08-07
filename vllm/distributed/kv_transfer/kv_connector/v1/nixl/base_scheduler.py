@@ -104,7 +104,9 @@ class NixlBaseConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._reqs_need_recv: dict[
+            ReqId, tuple[Request, BlockIds, tuple[int, ...]]
+        ] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
@@ -199,6 +201,7 @@ class NixlBaseConnectorScheduler:
         host = params.get("remote_host")
         port = params.get("remote_port")
         tp_size = params.get("tp_size")
+        dcp_size = params.get("dcp_size", 1)
         pp_size = params.get("pp_size", 1)
         if (
             remote_engine_id is None
@@ -214,6 +217,7 @@ class NixlBaseConnectorScheduler:
                 host=host,
                 port=port,
                 tp_size=tp_size,
+                dcp_size=dcp_size,
                 pp_size=pp_size,
             )
         self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
@@ -441,12 +445,13 @@ class NixlBaseConnectorScheduler:
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, block_ids) in self._reqs_need_recv.items():
+        for req_id, (req, block_ids, cached) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req_to_recv(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
+                local_num_computed_blocks=cached,
             )
 
         if self.use_host_buffer:
