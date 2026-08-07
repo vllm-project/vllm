@@ -206,6 +206,8 @@ def _get_gcn_arch() -> str:
     except Exception as e:
         logger.debug("Failed to get GCN arch via amdsmi: %s", e)
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
+    if not torch.cuda.is_available():
+        return ""    
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
 
