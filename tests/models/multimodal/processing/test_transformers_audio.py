@@ -135,7 +135,7 @@ def _process_granite_speech(separator: str):
 
 def test_audio_multiple_inputs():
     """Multiple audios per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers backend."""
+    and multi-modal item by the Transformers modelling backend."""
     result = _process_granite_speech(separator=" and ")
 
     assert len(result["mm_placeholders"]["audio"]) == 2
@@ -143,11 +143,7 @@ def test_audio_multiple_inputs():
 
 
 def test_audio_fields_not_claimed_by_image():
-    """Audio fields survive when the image branch is also active.
-
-    Both branches used to map every processor output key, so whichever ran last
-    took ownership of the other's tensors.
-    """
+    """Audio fields survive when the image branch is also active."""
     model_id = "ibm-granite/granite-speech-3.3-2b"
     model_config = ModelConfig(model=model_id, model_impl="transformers")
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
@@ -159,12 +155,21 @@ def test_audio_fields_not_claimed_by_image():
     assert owned["image"] == []
 
 
-def test_audio_adjacent_inputs():
-    """Adjacent audios are rejected rather than silently merged into one placeholder.
+def test_unclaimed_fields_warn_rather_than_raise():
+    """Keys no sub-processor declares are dropped with a warning, not an error."""
+    model_id = "ibm-granite/granite-speech-3.3-2b"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
-    Placeholders are located by finding contiguous runs of the audio token, which
-    cannot separate two audios with no text between them. HF processors expose no
-    generic per-item token count to split the run with.
-    """
+    owned = mm_processor._partition_keys_by_modality(
+        ["input_features", "surprise_field"], ["audio", "image"]
+    )
+
+    assert owned["audio"] == ["input_features"]
+    assert owned["image"] == []
+
+
+def test_audio_adjacent_inputs():
+    """Adjacent audios are rejected rather than silently merged into one placeholder."""
     with pytest.raises(ValueError, match="told apart"):
         _process_granite_speech(separator="")

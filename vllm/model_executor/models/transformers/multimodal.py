@@ -233,17 +233,17 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def _get_modality_field_names(self, modality: str) -> set[str]:
         """Field names the sub-processor for `modality` produces."""
+        # TODO: use else branch only once huggingface/transformers#44394 lands.
         if modality == "audio":
             sub_processor = self.info._get_audio_processor()
         else:
-            sub_processor = getattr(
-                self.info.get_hf_processor(), f"{modality}_processor", None
-            )
+            processor = self.info.get_hf_processor()
+            sub_processor = getattr(processor, f"{modality}_processor", None)
 
         # Pre-computed embeddings bypass the sub-processor entirely
         names = {f"{modality}_embeds"}
         for name in getattr(sub_processor, "model_input_names", None) or ():
-            # Companion masks are emitted but not declared
+            # Companion masks are emitted but not always declared
             names.update((name, f"{name}_mask"))
         return names
 
@@ -273,8 +273,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 "Unable to attribute %s to any of the modalities %s, so they "
                 "will not be passed to the model. Add them to the relevant "
                 "sub-processor's `model_input_names` to fix this.",
-                unclaimed,
-                modalities,
+                tuple(unclaimed),
+                tuple(modalities),
             )
 
         return owned
@@ -346,13 +346,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         padded = torch.cat([torch.tensor([False]), is_audio, torch.tensor([False])])
         transitions = padded.int().diff()
-        starts = torch.where(transitions == 1)[0]
-        ends = torch.where(transitions == -1)[0]
-        lengths = ends - starts
+        offsets = torch.where(transitions == 1)[0]
+        lengths = torch.where(transitions == -1)[0] - offsets
 
-        if len(starts) != num_audios:
+        if len(offsets) != num_audios:
             raise ValueError(
-                f"Found {len(starts)} run(s) of the audio token in the prompt but "
+                f"Found {len(offsets)} run(s) of the audio token in the prompt but "
                 f"{num_audios} audio item(s) were passed. The Transformers backend "
                 "locates audio placeholders by finding contiguous runs of the audio "
                 "token, so placeholders with no text between them cannot yet be told "
@@ -360,8 +359,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
 
         ranges = [
-            PlaceholderRange(offset=start.item(), length=length.item())
-            for start, length in zip(starts, lengths)
+            PlaceholderRange(offset=offset.item(), length=length.item())
+            for offset, length in zip(offsets, lengths)
         ]
         processed_data["num_audio_tokens"] = lengths
         return {"audio": ranges}
@@ -374,6 +373,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         mm_token_type_ids: torch.Tensor | None,
     ) -> dict[str, list[PlaceholderRange]]:
+        # Placeholders can't be located without them, so give up rather than guess
         if mm_token_type_ids is None:
             return {}
 
@@ -464,15 +464,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_token_type_ids = processed_data.pop("token_type_ids", None)
         mm_token_type_ids = processed_data.pop("mm_token_type_ids", mm_token_type_ids)
 
-        # Guard on item count, not capability: text-only prompts still get type ids
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
-        if self.info._is_audio_model() and (
-            num_audios := mm_items.get_count("audio", strict=False)
-        ):
+        if num_audios := mm_items.get_count("audio", strict=False):
             mm_placeholders.update(
                 self._apply_audio(prompt_ids, processed_data, num_audios)
             )
-        if self.info._is_image_model() and mm_items.get_count("image", strict=False):
+        if mm_items.get_count("image", strict=False):
             mm_placeholders.update(
                 self._apply_vision(
                     prompt_ids,

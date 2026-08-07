@@ -135,12 +135,6 @@ def get_model_ids_to_test():
 
 
 def get_transformers_backend_model_ids_to_test():
-    """Model IDs that `get_model_ids_to_test` excludes from the vLLM-native sweep.
-
-    They are covered here with `model_impl="transformers"` instead, so that the
-    Transformers modeling backend's processor gets the same cached-vs-uncached
-    correctness checks as every other multi-modal processor.
-    """
     return sorted(
         {
             model_id
@@ -509,11 +503,6 @@ def test_processing_correctness_transformers(
     num_batches: int,
     simplify_rate: float,
 ):
-    """`test_processing_correctness`, but forcing the Transformers modeling backend.
-
-    This is its only coverage under a populated multi-modal processor cache;
-    the dedicated suites build their processors with `cache=None`.
-    """
     _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,

@@ -76,7 +76,7 @@ def _process_two_images(separator: str):
 
 def test_image_multiple_inputs():
     """Multiple images per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers backend."""
+    and multi-modal item by the Transformers modelling backend."""
     result = _process_two_images(separator="\n and ")
 
     assert len(result["mm_placeholders"]["image"]) == 2
