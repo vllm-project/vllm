@@ -75,6 +75,12 @@ class BlockStored(KVCacheEvent):
     kv_cache_spec_sliding_window: int | None = None
     locality: str | None = None
     """LOCAL or REMOTE relative to the publisher; None means unspecified."""
+    session_id: str | None = None
+    """Session that triggered this store or reuse report.
+
+    This identifies the request context that emitted the event, not exclusive
+    ownership of the underlying block, which may be shared across sessions.
+    """
 
     def __hash__(self) -> int:
         return hash(
@@ -90,6 +96,7 @@ class BlockStored(KVCacheEvent):
                 self.kv_cache_spec_kind,
                 self.kv_cache_spec_sliding_window,
                 self.locality,
+                self.session_id,
             )
         )
 
