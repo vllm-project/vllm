@@ -451,17 +451,27 @@ class SingleTypeKVCacheManager(ABC):
         # Token boundaries whose reachable tail must be retained under sparse
         # retention: the replay boundary (``num_prompt - 1``, capped by
         # ``get_computed_blocks``) and any detected shared-prefix junction.
-        replay_boundary = request.num_prompt_tokens - 1
         if self.use_eagle:
-            aligned = (
-                replay_boundary // self.scheduler_block_size * self.scheduler_block_size
+            # Eagle proves a boundary by matching one aligned unit past it and
+            # dropping back, so a boundary is only reachable when that unit
+            # exists. A prompt ending within one unit of its last aligned
+            # boundary cannot supply it -- SWA's `shift` block falls outside
+            # the prompt, and mamba has no shift at all (draft models have no
+            # recurrent layers), leaving nothing to prove it. Rewind one unit
+            # unconditionally rather than detect the case per group: it costs
+            # one unit of hit length when the unit does exist, and avoids
+            # retaining a boundary that nothing can reach. Mirrors
+            # `last_cache_position` in Scheduler._mamba_block_aligned_split,
+            # which is where these states get materialized.
+            replay_boundary = max(
+                request.num_prompt_tokens
+                // self.scheduler_block_size
+                * self.scheduler_block_size
+                - self.scheduler_block_size,
+                0,
             )
-            # Eagle matches one block past the boundary and drops it back, so
-            # the boundary is only reachable when that lookahead block fits in
-            # the prompt, so back off one unit to a state that is reachable.
-            if aligned + self.block_size > request.num_prompt_tokens:
-                aligned = max(aligned - self.scheduler_block_size, 0)
-            replay_boundary = aligned
+        else:
+            replay_boundary = request.num_prompt_tokens - 1
         reachable_boundaries = [replay_boundary]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
