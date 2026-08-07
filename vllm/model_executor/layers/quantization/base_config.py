@@ -12,6 +12,9 @@ from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
     from vllm.model_executor.models.utils import WeightsMapper
 else:
     QuantizationMethods = str
@@ -103,7 +106,7 @@ class QuantizationConfig(ABC):
         super().__init__()
         # mapping is updated by models as they initialize
         self.packed_modules_mapping: dict[str, list[str]] = dict()
-        self.online_quant_config: Any | None = None
+        self.online_quant_config: OnlineQuantizationConfig | None = None
 
     @abstractmethod
     def get_name(self) -> QuantizationMethods:
@@ -216,34 +219,29 @@ class QuantizationConfig(ABC):
             LinearBase,
             UnquantizedLinearMethod,
         )
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
 
-        checkpoint_method = self.get_quant_method(layer, prefix)
+        base_quant_method = self.get_quant_method(layer, prefix)
         if self.online_quant_config is None:
-            return checkpoint_method
+            return base_quant_method
         if not isinstance(layer, (LinearBase, RoutedExperts)):
-            return checkpoint_method
-
-        assert isinstance(self.online_quant_config, OnlineQuantizationConfig)
+            return base_quant_method
 
         self.online_quant_config.packed_modules_mapping = self.packed_modules_mapping
         online_method = self.online_quant_config.get_quant_method(layer, prefix)
-        checkpoint_is_quantized = checkpoint_method is not None and not isinstance(
-            checkpoint_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
+        checkpoint_is_quantized = base_quant_method is not None and not isinstance(
+            base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
         online_is_quantized = online_method is not None and not isinstance(
             online_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
         if checkpoint_is_quantized and online_is_quantized:
             raise ValueError(
-                "Cannot apply requested online quantization to checkpoint-quantized "
-                f"layer {prefix!r}: {type(checkpoint_method).__name__} was selected "
+                "Cannot apply requested online quantization {online_method} to "
+                f"pre-quantized layer {prefix}: {base_quant_method} was selected "
                 "by the checkpoint quantization config."
             )
         if not online_is_quantized:
-            return checkpoint_method
+            return base_quant_method
         return online_method
 
     @staticmethod
