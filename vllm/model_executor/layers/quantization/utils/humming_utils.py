@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -295,7 +296,18 @@ def _humming_input_schema_to_quant_key(
     gs = schema.input_scale_group_size
     group_shape = GroupShape(row=1, col=gs) if gs > 0 else GroupShape.PER_TOKEN
 
-    scale_dtype = MXFP_SCALE_DTYPE if gs > 0 else torch.float32
+    # Pick the scale dtype the Humming kernel actually consumes. An explicit
+    # input_scale_dtype always wins. Otherwise infer from the grouping: MX
+    # microscale activations (group size 32, e.g. MXFP8) carry an e8m0 (uint8)
+    # scale, while block-FP8 (group size 128) and per-token FP8/int8 carry a
+    # float32 scale. Getting this right lets a grouped FP8 activation match
+    # kFp8Dynamic128Sym instead of an unmatchable uint8-scaled key.
+    if schema.input_scale_dtype is not None:
+        scale_dtype = _HUMMING_TO_SCALE_DTYPE[schema.input_scale_dtype]
+    elif gs == 32:
+        scale_dtype = MXFP_SCALE_DTYPE
+    else:
+        scale_dtype = torch.float32
 
     scale = ScaleDesc(dtype=scale_dtype, static=False, group_shape=group_shape)
 
@@ -521,6 +533,7 @@ def make_humming_moe_quant_config(
     quant_dtype: torch.dtype | str | None,
     weight_dtype: torch.dtype | str | None,
     weight_group_shape: GroupShape | None = None,
+    activation_group_shape: GroupShape | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
     w1_zp: torch.Tensor | None = None,
@@ -535,7 +548,20 @@ def make_humming_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     if quant_dtype is None:
         a_quant_desc = FusedMoEQuantDesc(dtype=None)
+    elif activation_group_shape is not None:
+        # Pre-dispatch quantization path: the prepare/finalize step quantizes
+        # activations with vLLM's moe_kernel_quantize_input *before* the EP
+        # all-to-all (so FP8 rather than BF16 crosses the interconnect), and
+        # Humming consumes the result as-is. That kernel needs a real torch
+        # dtype and the true group shape (e.g. block-FP8 group-128), so the
+        # caller passes both here. See
+        # HummingExpertsBase.expects_unquantized_inputs.
+        a_quant_desc = FusedMoEQuantDesc(
+            dtype=quant_dtype, shape=activation_group_shape
+        )
     else:
+        # Deferred path: Humming quantizes the activation internally, so the
+        # descriptor only needs a non-None dtype to mark it as quantized.
         shape = GroupShape(row=1, col=-1)
         a_quant_desc = FusedMoEQuantDesc(dtype=quant_dtype, shape=shape)
 
@@ -582,6 +608,22 @@ def get_humming_moe_quant_config(
     else:
         q_dtype = str(input_schema.a_dtype)
 
+    # Block-FP8 (group-128) activations are quantized *before* the EP all-to-all
+    # dispatch (so FP8 rather than BF16 crosses the interconnect) and consumed by
+    # Humming as-is. Surface the real torch dtype + group shape so the
+    # prepare/finalize step performs the block-FP8 quantization. Every other
+    # scheme leaves activation_group_shape=None and keeps deferring quantization
+    # to Humming (see HummingExpertsBase.expects_unquantized_inputs).
+    activation_group_shape: GroupShape | None = None
+    input_scale_group_size = getattr(input_schema, "input_scale_group_size", 0) or 0
+    if (
+        q_dtype is not None
+        and q_dtype.startswith("float8")
+        and input_scale_group_size == 128
+    ):
+        q_dtype = _HUMMING_TO_QUANT_DTYPE.get(input_schema.a_dtype, FP8_DTYPE)
+        activation_group_shape = GroupShape(row=1, col=input_scale_group_size)
+
     weight_scale_group_size = weight_schema.weight_scale_group_size
     weight_scale_group_size_n = weight_schema.weight_scale_group_size_n
     weight_group_shape: tuple[int, ...] = ()
@@ -599,6 +641,7 @@ def get_humming_moe_quant_config(
         quant_dtype=q_dtype,
         weight_dtype=str(weight_schema.b_dtype),
         weight_group_shape=weight_group_shape,
+        activation_group_shape=activation_group_shape,
         w1_scale=getattr(layer, "w13_weight_scale", None),
         w1_gscale=getattr(layer, "w13_global_scale", None),
         w1_zp=getattr(layer, "w13_zero_point", None),
@@ -1006,14 +1049,37 @@ def convert_to_humming_moe_kernel_format(
     layer.weight_schemas = {}
     layer.input_schemas = {}
 
+    # Block-FP8 (group-128) activations are quantized *before* the EP all-to-all
+    # dispatch, so only the dispatched activation -- the w13 (gate/up) input --
+    # actually arrives block-quantized ([M, K // 128] float32 scale, consumed by
+    # Humming as-is). The w2 (down) input is produced locally inside the experts
+    # and quantized by Humming's may_quant_input(), which emits a per-token
+    # scale. Compiling the w2 kernel for block-128 would make it demand a
+    # [M, K // 128] scale and crash in the launcher ("as.size(1) != "
+    # "expected_shape[1] => 1 != <K//128>"). Keep block-128 only for w13 and
+    # fall back to per-token FP8 for every other sublayer.
+    dispatch_group_size = getattr(input_schema, "input_scale_group_size", 0) or 0
+    prequantizes_dispatch = (
+        dispatch_group_size == 128
+        and getattr(input_schema, "a_dtype", None) is not None
+        and str(input_schema.a_dtype).startswith("float8")
+    )
+
     for sublayer_name, configs in sublayer_configs.items():
+        sublayer_input_schema = input_schema
+        if prequantizes_dispatch and sublayer_name != "w13":
+            # Per-token FP8 (input_scale_group_size=0) for non-dispatched GEMMs.
+            sublayer_input_schema = dataclasses.replace(
+                input_schema, input_scale_group_size=0
+            )
+
         final_weight_schema, final_input_schema = _process_single_sublayer(
             layer=layer,
             sublayer_name=sublayer_name,
             shape_n=configs["shape_n"],
             shape_k=configs["shape_k"],
             weight_schema=weight_schema,
-            input_schema=input_schema,
+            input_schema=sublayer_input_schema,
             has_bias=has_bias,
             num_experts=num_experts,
             param_dtype=param_dtype,
