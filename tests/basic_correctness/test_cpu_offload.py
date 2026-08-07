@@ -56,7 +56,6 @@ def test_mrv2_weight_offloading(
     vllm_runner, monkeypatch, offload_kwargs, offloader_type
 ):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     envs.disable_envs_cache()
     original_offloader = get_offloader()
 
