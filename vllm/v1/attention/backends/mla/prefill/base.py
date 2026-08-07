@@ -57,6 +57,13 @@ class MLAPrefillBackend(ABC):
         return dtype in cls.supported_dtypes
 
     @classmethod
+    def supports_mla_dimensions(cls, mla_dimensions: MLADimensions) -> bool:
+        return (
+            not cls.supported_mla_dimensions
+            or mla_dimensions in cls.supported_mla_dimensions
+        )
+
+    @classmethod
     def is_available(cls) -> bool:
         return True
 
@@ -64,6 +71,17 @@ class MLAPrefillBackend(ABC):
         """Whether `run_prefill_new_tokens` can write quantized output
         directly (fused) for the given quant key, skipping the post-quant
         pass. Overridden by backends that support it."""
+        return False
+
+    def supports_out(self) -> bool:
+        """Whether `run_prefill_new_tokens` honors a caller-provided `out`
+        tensor of shape `[num_tokens, num_heads, v_head_dim]`, writing the
+        final result into it in place.
+
+        When True, callers may pass `out` and skip the post-hoc
+        slice/flatten/copy. False for backends that ignore `out` or emit a
+        padded (`qk_head_dim`) output. Overridden by backends that support it.
+        """
         return False
 
     @classmethod
@@ -86,15 +104,20 @@ class MLAPrefillBackend(ABC):
         if not cls.is_available():
             invalid_reasons.append("required dependencies not available")
 
-        if (
-            cls.supported_mla_dimensions
-            and selector_config.mla_dimensions not in cls.supported_mla_dimensions
-        ):
-            supported = ", ".join(str(dims) for dims in cls.supported_mla_dimensions)
-            invalid_reasons.append(
-                "Model does not have supported MLA dimensions "
-                f"(got {selector_config.mla_dimensions}; supported: {supported})"
+        mla_dimensions = selector_config.mla_dimensions
+        if not cls.supports_mla_dimensions(mla_dimensions):
+            reason = (
+                f"Model does not have supported MLA dimensions (got {mla_dimensions}"
             )
+            if (
+                cls.supported_mla_dimensions
+                and mla_dimensions not in cls.supported_mla_dimensions
+            ):
+                supported = ", ".join(
+                    str(dims) for dims in cls.supported_mla_dimensions
+                )
+                reason += f"; supported: {supported}"
+            invalid_reasons.append(reason + ")")
 
         return invalid_reasons
 
@@ -115,6 +138,17 @@ class MLAPrefillBackend(ABC):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.vllm_config = vllm_config
+
+    def clone(self) -> "MLAPrefillBackend":
+        return self.__class__(
+            num_heads=self.num_heads,
+            scale=self.scale,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            vllm_config=self.vllm_config,
+        )
 
     def prepare_metadata(  # noqa: B027
         self,
@@ -141,7 +175,7 @@ class MLAPrefillBackend(ABC):
     @abstractmethod
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,

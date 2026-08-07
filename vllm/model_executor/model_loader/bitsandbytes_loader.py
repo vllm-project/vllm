@@ -467,7 +467,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             elif isinstance(module, RoutedExperts) and hasattr(
                 module.quant_method, "quant_config"
             ):
-                # TODO: support FusedMoE with prequant and 8bit.
+                # TODO: support RoutedExperts with prequant and 8bit.
                 if self.pre_quant and self.load_8bit:
                     raise ValueError(
                         "Prequant BitsAndBytes 8bit models with RoutedExperts "
@@ -567,12 +567,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
-            if not self.expert_params_mapping:
-                raise AttributeError(
-                    f"MoE Model {type(model).__name__} does not support "
-                    "BitsAndBytes quantization yet. Ensure this model has "
-                    "'get_expert_mapping' method."
-                )
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
         if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):

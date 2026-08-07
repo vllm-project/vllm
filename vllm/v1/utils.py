@@ -600,14 +600,18 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         timeout = 5.0
 
     logger.debug(
-        "[shutdown] Process manager: start process_count=%d timeout=%ss",
+        "[shutdown] Process manager: start process_count=%d timeout=%ss names=%s",
         len(procs),
         timeout,
+        (",").join([proc.name for proc in procs]),
     )
 
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
+            logger.info(
+                "[shutdown] Process manager: send sigterm to process %s", proc.name
+            )
             proc.terminate()
 
     # Allow time for remaining procs to terminate.
@@ -619,15 +623,22 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         if proc.is_alive():
             proc.join(remaining)
 
-    remaining_pids = [
-        proc.pid for proc in procs if proc.is_alive() and proc.pid is not None
+    remaining_procs = [
+        (proc.pid, proc.name)
+        for proc in procs
+        if proc.is_alive() and proc.pid is not None
     ]
-    if remaining_pids:
+    if remaining_procs:
         logger.warning(
             "[shutdown] Process manager: force killing remaining processes count=%d",
-            len(remaining_pids),
+            len(remaining_procs),
         )
-    for pid in remaining_pids:
+    for pid, proc_name in remaining_procs:
+        logger.warning(
+            "[shutdown] Process manager: force killing remaining process %s pid %d",
+            proc_name,
+            pid,
+        )
         kill_process_tree(pid)
 
     logger.debug_once("[shutdown] Process manager: complete")
@@ -689,8 +700,15 @@ def report_usage_stats(
         else None
     )
 
+    if model_config.using_transformers_backend():
+        backend_cls = model_config._model_info.architecture
+        # Show what was wrapped e.g. TransformersForCausalLM(Starcoder2ForCausalLM)
+        architecture = f"{backend_cls}({model_config.architectures[0]})"
+    else:
+        architecture = get_architecture_class_name(model_config)
+
     usage_message.report_usage(
-        get_architecture_class_name(model_config),
+        architecture,
         usage_context,
         extra_kvs={
             # Common configuration
@@ -775,12 +793,16 @@ class IterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
 
     def __repr__(self) -> str:
         return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
                  num_ctx_tokens={self.num_ctx_tokens}, \
                  num_generation_requests={self.num_generation_requests}, \
-                 num_generation_tokens={self.num_generation_tokens})"
+                 num_generation_tokens={self.num_generation_tokens}, \
+                 num_encoder_inputs={self.num_encoder_inputs}, \
+                 num_encoder_output_tokens={self.num_encoder_output_tokens})"
 
 
 def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
@@ -811,9 +833,18 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
         else:
             num_generation_requests += 1
             num_generation_tokens += num_tokens
+    scheduled_encoder_input_stats = scheduler_output.scheduled_encoder_input_stats
+    num_encoder_inputs = 0
+    num_encoder_output_tokens = 0
+    if scheduled_encoder_input_stats is not None:
+        num_encoder_inputs = scheduled_encoder_input_stats.num_inputs
+        num_encoder_output_tokens = scheduled_encoder_input_stats.output_tokens
+
     return IterationDetails(
         num_context_requests,
         num_context_tokens,
         num_generation_requests,
         num_generation_tokens,
+        num_encoder_inputs,
+        num_encoder_output_tokens,
     )

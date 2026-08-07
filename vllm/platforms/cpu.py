@@ -78,12 +78,19 @@ class CpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
-        if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
-            logger.info("Cannot use %s backend on CPU.", selected_backend)
-        if attn_selector_config.use_mla:
-            raise NotImplementedError("MLA is not supported on CPU.")
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
+        if attn_selector_config.use_mla:
+            # Reference MLA implementation on CPU. Performance is not the
+            # goal here; the backend simply wires the CPU decode kernel
+            # (`mla_decode_kvcache`) and an SDPA-based prefill together with
+            # the shared MLA scaffolding so that DeepSeek-style models can
+            # execute on CPU.
+            if selected_backend and selected_backend != AttentionBackendEnum.CPU_MLA:
+                logger.info("Cannot use %s backend on CPU.", selected_backend)
+            return AttentionBackendEnum.CPU_MLA.get_path()
+        if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
+            logger.info("Cannot use %s backend on CPU.", selected_backend)
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod
@@ -116,14 +123,37 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
-        if not cache_config.user_specified_block_size:
+        # The CPU MLA decode kernel only compiles with block_size=16 today
+        # (see csrc/cpu/mla_decode.cpp). If the model uses MLA we override
+        # the default block size regardless of user preference to avoid a
+        # runtime kernel dispatch failure.
+        cpu_mla_enabled = model_config is not None and getattr(
+            model_config, "use_mla", False
+        )
+        if cpu_mla_enabled:
+            if cache_config.user_specified_block_size and cache_config.block_size != 16:
+                logger.warning(
+                    "CPU MLA backend requires block_size=16, overriding "
+                    "user-specified block_size=%s.",
+                    cache_config.block_size,
+                )
+            cache_config.block_size = 16
+        elif not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
-        if cache_config.block_size % 32 != 0:
+        if not cpu_mla_enabled and cache_config.block_size % 32 != 0:
             logger.warning(
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
             )
+
+        # AMX GDN requires float32 state
+        if (
+            torch.cpu._is_amx_tile_supported()
+            and cache_config.mamba_ssm_cache_dtype != "float32"
+        ):
+            cache_config.mamba_ssm_cache_dtype = "float32"
+            logger.warning("Reset SSM cache type to float32 for AMX mamba attention.")
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
@@ -193,6 +223,18 @@ class CpuPlatform(Platform):
             and "-gelu" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+gelu")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_tanh" not in compilation_config.custom_ops
+            and "-gelu_tanh" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_tanh")
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu_and_mul" not in compilation_config.custom_ops
+            and "-gelu_and_mul" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu_and_mul")
 
         vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
@@ -227,7 +269,12 @@ class CpuPlatform(Platform):
         if (
             platform.system() == "Linux"
             and cpu_architecture
-            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC, CpuArchEnum.X86)
+            in (
+                CpuArchEnum.ARM,
+                CpuArchEnum.POWERPC,
+                CpuArchEnum.X86,
+                CpuArchEnum.S390X,
+            )
             and not (
                 "libomp" in ld_preload_str
                 or "libgomp" in ld_preload_str
@@ -265,7 +312,8 @@ class CpuPlatform(Platform):
         # memory allocation overhead
         if (
             platform.system() == "Linux"
-            and cpu_architecture in (CpuArchEnum.ARM, CpuArchEnum.X86)
+            and cpu_architecture
+            in (CpuArchEnum.ARM, CpuArchEnum.X86, CpuArchEnum.S390X)
             and "libtcmalloc" not in ld_preload_str
         ):
             vllm_pkg = os.path.dirname(os.path.dirname(__file__))
@@ -295,6 +343,7 @@ class CpuPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.cache_config.enable_prefix_caching = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
@@ -436,11 +485,7 @@ class CpuPlatform(Platform):
     @classmethod
     def pack_kv_cache(
         cls,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        block_ids: list[int],
+        kv_cache: torch.Tensor,
         indices: torch.Tensor,
     ) -> None:
         """
@@ -451,15 +496,33 @@ class CpuPlatform(Platform):
         from vllm._custom_ops import cpu_attn_reshape_and_cache
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 
+        # MLA uses a single latent cache of shape [N, block_size, head_size],
+        # so the classic key/value split does not apply. The MLA backend
+        # writes the cache itself via `concat_and_cache_mla` inside
+        # `do_kv_cache_update`, so there is nothing to pack here.
+        if kv_cache.dim() == 3:
+            return
+
+        num_blocks, num_kv_heads, block_size, fused_head_size = kv_cache.shape
+        head_size = fused_head_size // 2
+
+        # Fused path used by heterogeneous NIXL CPU_ATTN post-processing.
+        blocks_to_update = kv_cache.index_select(0, indices)
+        key = blocks_to_update[..., :head_size]
+        value = blocks_to_update[..., head_size:]
+
+        key_cache, value_cache = kv_cache.view(
+            num_blocks, num_kv_heads, block_size * 2, head_size
+        ).chunk(2, dim=2)
+
         dtype = key.dtype
         # For CPU_ATTN, the shape is [N, num_kv_heads, block_size, head_size]
-        _, _, block_size, head_size = key_cache.shape
         key = key.permute(0, 2, 1, 3).flatten(0, 1)
         value = value.permute(0, 2, 1, 3).flatten(0, 1)
 
         isa = _get_attn_isa(dtype, block_size, head_size)
         block_offsets = torch.arange(block_size, device="cpu", dtype=torch.long)
-        num_blocks = len(block_ids)
+        num_blocks = indices.numel()
         slot_mapping = (
             block_offsets.reshape(1, block_size)
             + indices.reshape(num_blocks, 1) * block_size

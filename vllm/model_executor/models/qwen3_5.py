@@ -24,8 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 import torch
 from torch import nn
@@ -37,12 +36,7 @@ from vllm.distributed import (
     get_pp_group,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.layernorm import (
-    GemmaRMSNorm as Qwen3_5RMSNorm,
-)
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -57,16 +51,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_5 import (
-    Qwen3_5Config,
-    Qwen3_5TextConfig,
-)
+from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
 from vllm.transformers_utils.configs.qwen3_5_moe import (
     Qwen3_5MoeConfig,
     Qwen3_5MoeTextConfig,
@@ -89,6 +77,7 @@ from .qwen3_next import (
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
+    _is_shared_expert_fse_compatible,
 )
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
@@ -100,11 +89,12 @@ from .qwen3_vl import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_fuse_shared_experts,
     maybe_prefix,
 )
 
@@ -118,7 +108,11 @@ class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
 
 class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen3_5MoeConfig)
+        # transformers 5.x renames the top-level Qwen3.5-MoE config class to
+        # Qwen3_5MoeTextConfig for text-only models, while transformers ≤4.x
+        # returns Qwen3_5MoeConfig (the multimodal wrapper).  Accept both so
+        # that vLLM works regardless of which transformers version is installed.
+        return self.ctx.get_hf_config((Qwen3_5MoeConfig, Qwen3_5MoeTextConfig))
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -133,10 +127,17 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         config = vllm_config.model_config.hf_text_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
+        parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
+        is_moe_layer = config.model_type == "qwen3_5_moe_text"
+        self.use_attn_reduce_scatter_for_moe = (
+            parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+            and is_moe_layer
+        )
 
         if self.layer_type == "linear_attention":
             self.linear_attn = QwenGatedDeltaNetAttention(
@@ -144,6 +145,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
+                reduce_results=not self.use_attn_reduce_scatter_for_moe,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -152,6 +154,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
+                reduce_results=not self.use_attn_reduce_scatter_for_moe,
             )
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
@@ -210,6 +213,17 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
     }
 )
 class Qwen3_5Model(Qwen3NextModel):
+    # Qwen3.5 ships the GDN in_proj checkpoints separately (qwen3-next
+    # pre-fuses them); fuse them on top of the qwen3-next QKV/gate_up mapping.
+    hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_stacked={
+            ".in_proj_qkv": (".in_proj_qkvz", (0, 1, 2)),
+            ".in_proj_z": (".in_proj_qkvz", 3),
+            ".in_proj_b": (".in_proj_ba", 0),
+            ".in_proj_a": (".in_proj_ba", 1),
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3NextModel, self).__init__()
 
@@ -222,6 +236,7 @@ class Qwen3_5Model(Qwen3NextModel):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
+        self.quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
 
@@ -251,217 +266,27 @@ class Qwen3_5Model(Qwen3NextModel):
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
-    def load_fused_expert_weights(
-        self,
-        name: str,
-        params_dict: dict,
-        loaded_weight: torch.Tensor,
-        shard_id: str,
-        num_experts: int,
-    ) -> bool:
-        param = params_dict[name]
-        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-        loaded_local_expert = False
-        for expert_id in range(num_experts):
-            curr_expert_weight = loaded_weight[expert_id]
-            success = weight_loader(
-                param,
-                curr_expert_weight,
-                name,
-                shard_id=shard_id,
-                expert_id=expert_id,
-                return_success=True,
-            )
-            if success:
-                loaded_local_expert = True
-
-        return loaded_local_expert
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            # GDN
-            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-            ("in_proj_qkvz", "in_proj_z", 3),
-            # self attention
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            # mlp
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-            ("in_proj_ba", "in_proj_b", 0),
-            ("in_proj_ba", "in_proj_a", 1),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-        is_fused_expert = False
-        fused_expert_params_mapping: list[tuple[str, str, int, str]] = []
-        for param_name, ckpt_name, _, shard_id in fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_up_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="gate_up_proj",
-            num_experts=1,
-        ):
-            if shard_id == "w3":
-                continue
-            parts = ckpt_name.split(".")
-            fused_expert_params_mapping.append(
-                (f"{param_name}weight", f"{parts[0]}.{parts[2]}", 0, shard_id)
+        # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the
+        # shared expert into the extra fused slot only when AITER FSE is both
+        # requested and compatible with the quant spec.
+        if "moe" in self.config.model_type:
+            weights = maybe_fuse_shared_experts(
+                weights,
+                enabled=rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+                and _is_shared_expert_fse_compatible(self.quant_config),
+                n_routed_experts=self.config.num_experts,
+                n_shared_experts=1,
+                ckpt_prefix="mlp.shared_expert",
             )
-        num_experts = (
-            self.config.num_experts if hasattr(self.config, "num_experts") else 0
-        )
-        from vllm.config import get_current_vllm_config
-
-        from .qwen3_next import _is_shared_expert_fse_compatible
-
-        is_fse = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-            and _is_shared_expert_fse_compatible(get_current_vllm_config().quant_config)
-        )
-
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            if name.startswith("mtp."):
-                continue
-
-            # Remapping the name of FP8 kv-scale.
-            if name.endswith("scale"):
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-            # FSE: remap shared_expert weights to fused expert slot
-            if is_fse and "mlp.shared_expert." in name:
-                name = name.replace(
-                    "mlp.shared_expert.",
-                    f"mlp.experts.{num_experts}.",
-                )
-                is_fused_expert = False
-                expert_params_mapping = self.get_expert_mapping()
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if "experts.gate_up_proj" in name or "experts.down_proj" in name:
-                    is_fused_expert = True
-                    expert_params_mapping = fused_expert_params_mapping
-
-                if weight_name not in name:
-                    continue
-
-                if "mlp.experts" in name:
-                    continue
-
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                # name = apply_attn_prefix(name, params_dict)
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    if is_fused_expert:
-                        # qwen3.5 no need to transpose
-                        # loaded_weight = loaded_weight.transpose(-1, -2)
-                        if "experts.gate_up_proj" in name:
-                            loaded_weight = loaded_weight.chunk(2, dim=-2)
-                            success_w1 = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight[0],
-                                "w1",
-                                num_experts,
-                            )
-                            success_w3 = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight[1],
-                                "w3",
-                                num_experts,
-                            )
-                            success = success_w1 and success_w3
-                        else:
-                            # down_proj
-                            success = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight,
-                                shard_id,
-                                num_experts,
-                            )
-                        if success:
-                            name = name_mapped
-                            break
-                    else:
-                        # Skip loading extra bias for GPTQ models.
-                        if (
-                            name_mapped.endswith(".bias")
-                            or name_mapped.endswith("_bias")
-                        ) and name_mapped not in params_dict:
-                            continue
-                        param = params_dict[name_mapped]
-                        weight_loader = param.weight_loader
-                        success = weight_loader(
-                            param,
-                            loaded_weight,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                            return_success=True,
-                        )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        # We've checked that this is an expert weight
-                        # However it's not mapped locally to this rank
-                        # So we simply skip it
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        logger.warning_once(
-                            f"Parameter {name} not found in params_dict, skip loading"
-                        )
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    IsHybrid,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -477,6 +302,13 @@ class Qwen3_5ForCausalLMBase(
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
+
+    # Some community text-only checkpoints keep the extraneous
+    # `model.language_model.` prefix inherited from the VL training stack.
+    # Strip it so both prefixed and clean checkpoints load correctly.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.language_model.": "model."},
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
@@ -541,6 +373,45 @@ class Qwen3_5ForCausalLMBase(
 
         return hidden_states
 
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_text_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            tp_size,
+            hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads,
+            hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim,
+            hf_config.linear_conv_kernel_dim,
+            num_spec,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(
+        cls,
+    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -552,7 +423,7 @@ class Qwen3_5ForCausalLMBase(
             self,
             skip_prefixes=["mtp."],
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
@@ -566,9 +437,6 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
         # set MoE hyperparameters
         self.set_moe_parameters()
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return self.model.get_expert_mapping()
-
 
 ########################################################
 # Qwen3_5-Dense
@@ -581,8 +449,7 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
-    # Qwen3.5 does not support multimodal pruning (EVS).
-    supports_multimodal_pruning = False
+    supports_multimodal_pruning = True
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -600,8 +467,21 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        # Qwen3.5 does not support multimodal pruning (EVS).
-        self.is_multimodal_pruning_enabled = False
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
+        self.video_pruning_rate = self.multimodal_config.video_pruning_rate
+        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+
+        # attributes needed by EVS-related functions inherited from Qwen3-VL
+        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+        self.deepstack_num_level = (
+            len(config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
@@ -645,12 +525,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         )
 
         return inputs_embeds
-
-    def recompute_mrope_positions(self, *args, **kwargs):
-        raise NotImplementedError(
-            "Qwen3.5 does not support multimodal pruning (EVS). "
-            "recompute_mrope_positions should never be called."
-        )
 
     def forward(
         self,
@@ -812,8 +686,21 @@ class Qwen3_5MoeForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        # Qwen3.5 does not support multimodal pruning (EVS).
-        self.is_multimodal_pruning_enabled = False
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
+        self.video_pruning_rate = self.multimodal_config.video_pruning_rate
+        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+
+        # attributes needed by EVS-related functions inherited from Qwen3-VL
+        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
+        self.deepstack_num_level = (
+            len(config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(

@@ -17,6 +17,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 QUESTION = "What is the content of each image?"
@@ -70,39 +71,6 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereLabs/aya-vision-8b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -1420,7 +1388,6 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
 
 model_example_map = {
     "aria": load_aria,
-    "aya_vision": load_aya_vision,
     "bee": load_bee,
     "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
@@ -1477,6 +1444,8 @@ def run_generate(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
@@ -1518,6 +1487,8 @@ def run_chat(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = (

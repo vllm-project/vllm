@@ -14,6 +14,10 @@ import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -26,7 +30,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -55,7 +58,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class ServingTokens(OpenAIServing):
+class ServingTokens(GenerateBaseServing):
     """Provides Tokens IN <> Tokens OUT functionality to vLLM API."""
 
     def __init__(
@@ -212,6 +215,7 @@ class ServingTokens(OpenAIServing):
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        session_id = self._get_session_id_from_headers(raw_request)
 
         result_generator = self.engine_client.generate(
             engine_input,
@@ -221,6 +225,7 @@ class ServingTokens(OpenAIServing):
             trace_headers=trace_headers,
             priority=request.priority,
             data_parallel_rank=data_parallel_rank,
+            session_id=session_id,
         )
 
         assert result_generator is not None
@@ -320,13 +325,14 @@ class ServingTokens(OpenAIServing):
         request_metadata.final_usage_info = usage
 
         response = GenerateResponse(
-            id=request_id,
+            request_id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             kv_transfer_params=final_res.kv_transfer_params,
+            ec_transfer_params=final_res.ec_transfer_params,
         )
 
         # Log complete response if output logging is enabled

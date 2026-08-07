@@ -20,19 +20,29 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    _parse_tier_filter,
+)
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
+    Medium,
     OffloadingCounterMetadata,
+    OffloadingEvent,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
+    TierFilter,
+    TierMatcher,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
     SecondaryTierManager,
+    TieringOffloadingMetrics,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -231,14 +241,33 @@ class TestTieringOffloadingManager:
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
         )
 
-    def _simulate_on_schedule_end(self):
+    def _simulate_on_schedule_end(self, new_req_ids: list[str] | None = None):
         """Simulate end of scheduler step: lifecycle flush + drain events."""
-        self.manager.on_schedule_end()
+        ctx = ScheduleEndContext(new_req_ids=new_req_ids or [], preempted_req_ids=())
+        self.manager.on_schedule_end(ctx)
         list(self.manager.take_events())
 
     def _start_request(self, req_context: ReqContext = _CTX):
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
+
+    def test_take_events_aggregates_tier_owned_events(self, manager_setup):
+        primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
+        secondary_event1 = OffloadingEvent(to_keys([2]), Medium.STORAGE, removed=False)
+        secondary_event2 = OffloadingEvent(to_keys([3]), Medium.STORAGE, removed=True)
+
+        self.primary_tier.take_events = MagicMock(return_value=[primary_event])
+        self.secondary_tier1.take_events = MagicMock(return_value=[secondary_event1])
+        self.secondary_tier2.take_events = MagicMock(return_value=[secondary_event2])
+
+        assert list(self.manager.take_events()) == [
+            primary_event,
+            secondary_event1,
+            secondary_event2,
+        ]
+        self.primary_tier.take_events.assert_called_once_with()
+        self.secondary_tier1.take_events.assert_called_once_with()
+        self.secondary_tier2.take_events.assert_called_once_with()
 
     def test_basic_store_to_primary(self, manager_setup):
         """Test basic store operation to primary tier."""
@@ -373,6 +402,134 @@ class TestTieringOffloadingManager:
 
         # Next lookup should succeed
         assert count_hits(self.manager, blocks) == 3
+
+    @pytest.mark.parametrize(
+        ("successful_indices", "expected_results"),
+        [
+            (
+                (0, 2),
+                [LookupResult.HIT, LookupResult.MISS, LookupResult.HIT],
+            ),
+            (
+                None,
+                [LookupResult.MISS, LookupResult.MISS, LookupResult.MISS],
+            ),
+        ],
+        ids=["partial", "legacy-full-failure"],
+    )
+    def test_failed_promotion_keeps_only_successful_blocks(
+        self, manager_setup, successful_indices, expected_results
+    ):
+        blocks = to_keys(range(3))
+        for block in blocks:
+            self.secondary_tier1.blocks[block] = True
+
+        def submit_partial(job_metadata: JobMetadata) -> None:
+            successful_keys = (
+                None
+                if successful_indices is None
+                else tuple(blocks[i] for i in successful_indices)
+            )
+            self.secondary_tier1.completed_jobs.append(
+                JobResult(
+                    job_id=job_metadata.job_id,
+                    success=False,
+                    successful_keys=successful_keys,
+                )
+            )
+
+        self.secondary_tier1.submit_load = submit_partial
+
+        for block in blocks:
+            assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        assert [
+            self.primary_tier.lookup(block, _CTX) for block in blocks
+        ] == expected_results
+
+    def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
+        """Resolved lookups report one sync delay sample on allocation."""
+        self._start_request()
+        blocks = to_keys(range(2))
+
+        # No tier has these blocks: they resolve immediately as misses.
+        for block in blocks:
+            assert self.manager.lookup(block, _CTX) is LookupResult.MISS
+
+        stats = self.manager.get_stats()
+        if stats is not None:
+            assert f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count" not in (
+                stats.reduce()
+            )
+
+        self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
+        assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in reduced
+
+    def test_lookup_reports_async_delay_across_promotion(self, manager_setup):
+        """A new request reports async delay at schedule end."""
+        self._start_request()
+        block = to_keys(range(1))[0]
+        self.secondary_tier1.blocks[block] = True
+
+        # First lookup finds the block in a secondary tier and defers.
+        assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+
+        # The first scheduler step reports async delay for the new request.
+        self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count"] == 1
+
+        # Promotion completes on the next scheduler step.
+        self._simulate_on_schedule_end()
+
+        # Next lookup resolves via the now-promoted primary-tier block.
+        assert self.manager.lookup(block, _CTX) is LookupResult.HIT
+
+        stats = self.manager.get_stats()
+        if stats is not None:
+            assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in (
+                stats.reduce()
+            )
+
+    def test_lookup_reports_async_delay_on_request_finish(self, manager_setup):
+        """Never-allocated lookup delays flush at teardown."""
+        ctx = ReqContext(req_id="req_lookup_finish")
+        self._start_request(ctx)
+        block = to_keys(range(1))[0]
+        self.secondary_tier1.blocks[block] = True
+
+        # Lookup finds the block in a secondary tier and defers.
+        assert self.manager.lookup(block, ctx) is LookupResult.RETRY
+
+        self._simulate_on_schedule_end()
+        stats = self.manager.get_stats()
+        if stats is not None:
+            assert f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count" not in (
+                stats.reduce()
+            )
+            assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in (
+                stats.reduce()
+            )
+
+        # Request finishes before the deferred lookup is ever resolved.
+        self.manager.on_request_finished(ctx)
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count"] == 1
 
     def test_partial_lookup(self, manager_setup):
         """Test lookup with partial hits."""
@@ -870,6 +1027,56 @@ class TestTieringOffloadingManager:
         self.secondary_tier2.drain_jobs.assert_called_once()
         assert self.manager._transfer_jobs == {}
 
+    @pytest.mark.parametrize(
+        "load_tier_filter",
+        [
+            TierFilter(matchers=(TierMatcher(medium=Medium.STORAGE),)),
+            TierFilter(matchers=()),
+        ],
+        ids=["non_matching_medium", "empty_no_load"],
+    )
+    def test_tier_filter_skips_filtered_secondary(
+        self, manager_setup, load_tier_filter
+    ):
+        """Filter excluding secondary medium returns MISS from secondaries
+        even when they hold the block; primary is unaffected."""
+        blocks = to_keys(range(2))
+        # Put one block in primary, one only in secondary
+        self._start_request()
+        self.manager.prepare_store(blocks[:1], _CTX)
+        self.manager.complete_store(blocks[:1], _CTX, success=True)
+        self.secondary_tier1.blocks[blocks[1]] = True
+
+        # Secondaries have medium=CPU, so load_tier_filter skips them.
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+
+        ctx = ReqContext(req_id="r1", load_tier_filter=load_tier_filter)
+        assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT
+        assert self.manager.lookup(blocks[1], ctx) is LookupResult.MISS
+        self.secondary_tier1.lookup.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "load_tier_filter",
+        [
+            TierFilter.ALL,
+            TierFilter(matchers=(TierMatcher(medium=Medium.CPU),)),
+            TierFilter(matchers=(TierMatcher(),)),
+        ],
+        ids=["all", "explicit_cpu", "unconstrained_matcher"],
+    )
+    def test_tier_filter_allows_matching_secondary(
+        self, manager_setup, load_tier_filter
+    ):
+        """Filter that matches the secondary's medium allows lookup."""
+        blocks = to_keys(range(1))
+        self.secondary_tier1.blocks[blocks[0]] = True
+
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+
+        ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
+        assert self.manager.lookup(blocks[0], ctx) is LookupResult.RETRY
+        self.secondary_tier1.lookup.assert_called()
+
 
 class TestTieringOffloadingWithoutSecondaryTiers:
     """Test TieringOffloadingManager with no secondary tiers (backward compat)."""
@@ -894,6 +1101,82 @@ class TestTieringOffloadingWithoutSecondaryTiers:
         manager.complete_store(blocks, _CTX, success=True)
 
         assert count_hits(manager, blocks) == 3
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (
+            [{"medium": "storage"}],
+            TierFilter(matchers=(TierMatcher(medium=Medium.STORAGE),)),
+        ),
+        (
+            [{"medium": "CPU"}],
+            TierFilter(matchers=(TierMatcher(medium=Medium.CPU),)),
+        ),
+        (
+            [{}],
+            TierFilter(matchers=(TierMatcher(),)),
+        ),
+        (
+            [{"medium": "storage", "locality": "local"}],
+            TierFilter(
+                matchers=(TierMatcher(medium=Medium.STORAGE, locality=Locality.LOCAL),)
+            ),
+        ),
+        (
+            [{"medium": "cpu"}, {"medium": "storage"}],
+            TierFilter(
+                matchers=(
+                    TierMatcher(medium=Medium.CPU),
+                    TierMatcher(medium=Medium.STORAGE),
+                )
+            ),
+        ),
+        (
+            [],
+            TierFilter(matchers=()),
+        ),
+    ],
+    ids=[
+        "medium_storage",
+        "medium_cpu_uppercase",
+        "unconstrained",
+        "with_locality",
+        "multiple_matchers",
+        "empty_list_deny_all",
+    ],
+)
+def test_parse_tier_filter_valid(raw, expected):
+    assert _parse_tier_filter(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not a list",
+        [{"medium": "unknown"}],
+        [{"locality": "nowhere"}],
+    ],
+    ids=["non_list", "invalid_medium", "invalid_locality"],
+)
+def test_parse_tier_filter_invalid_returns_all(raw):
+    assert _parse_tier_filter(raw) is TierFilter.ALL
+
+
+def test_parse_tier_filter_skips_bad_entries():
+    result = _parse_tier_filter(
+        [
+            {"medium": "storage"},
+            "not a dict",
+            {"medium": "bogus"},
+            {"medium": "cpu"},
+        ]
+    )
+    assert result.matchers == (
+        TierMatcher(medium=Medium.STORAGE),
+        TierMatcher(medium=Medium.CPU),
+    )
 
 
 if __name__ == "__main__":

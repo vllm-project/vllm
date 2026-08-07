@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.fla.ops.layernorm_guard import (
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     layer_norm_fwd,
     layernorm_fn,
     rms_norm_ref,

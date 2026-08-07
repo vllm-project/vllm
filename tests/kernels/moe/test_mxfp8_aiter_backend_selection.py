@@ -19,8 +19,16 @@ if not current_platform.is_rocm():
     pytest.skip("This test can only run on ROCm.", allow_module_level=True)
 
 from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
+from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (  # noqa: E402
+    _AITER_SWIGLU_ALPHA,
+    _AITER_SWIGLU_BETA,
     AiterMxfp8Experts,
+)
+from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (  # noqa: E402
+    Mxfp8EmulationTritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (  # noqa: E402
     FusedMoEActivationFormat,
@@ -33,6 +41,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (  # noqa: E402
     _SUPPORTED_BACKENDS,
     _mxfp8_backend_to_kernel_cls,
     _select_kernel_cls,
+    select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
     kMxfp8Dynamic,
@@ -43,7 +52,17 @@ _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
 
 
 def _config(ep_size: int = 1):
-    cfg = make_dummy_moe_config(num_experts=128, experts_per_token=4, hidden_dim=6144)
+    # AiterMxfp8Experts hardcodes SwiGLU-OAI: match its required activation and
+    # alpha/beta so is_supported_config doesn't reject the config on those grounds.
+    cfg = make_dummy_moe_config(
+        num_experts=128,
+        experts_per_token=4,
+        hidden_dim=6144,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    )
+    cfg = dataclasses.replace(
+        cfg, swiglu_alpha=_AITER_SWIGLU_ALPHA, swiglu_beta=_AITER_SWIGLU_BETA
+    )
     if ep_size != 1:
         cfg = dataclasses.replace(
             cfg,
@@ -79,12 +98,6 @@ def test_aiter_mxfp8_registered():
         assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8) == [
             AiterMxfp8Experts
         ]
-
-
-def test_triton_selectable():
-    assert _BACKEND_NAME_MAP["triton"] is Fp8MoeBackend.TRITON_MXFP8
-    # Not auto-selected (only reachable explicitly), so FlyDSL still wins auto.
-    assert Fp8MoeBackend.TRITON_MXFP8 not in _SUPPORTED_BACKENDS
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
@@ -138,3 +151,24 @@ def test_explicit_moe_backend_aiter():
         pytest.raises(ValueError, match="flydsl package"),
     ):
         _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
+
+
+def test_gfx950_picks_aiter():
+    """Auto-select on real ROCm hardware with flydsl usable -> FlyDSL wins."""
+    # NOTE: Fp8MoeBackend.AITER_MXFP8 does not require VLLM_ROCM_USE_AITER=1
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=True),
+        _flydsl_installed(True),
+    ):
+        backend, experts_cls = select_mxfp8_moe_backend(_config())
+    assert backend is Fp8MoeBackend.AITER_MXFP8
+    assert experts_cls is AiterMxfp8Experts
+
+
+def test_gfx942_picks_emulation():
+    """flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
+    dot_scaled backend wins instead."""
+    with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
+        backend, experts_cls = select_mxfp8_moe_backend(_config())
+    assert backend is Fp8MoeBackend.EMULATION
+    assert experts_cls is Mxfp8EmulationTritonExperts

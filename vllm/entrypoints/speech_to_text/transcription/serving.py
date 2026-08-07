@@ -14,10 +14,11 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 
-from ..base.serving import OpenAISpeechToText
+from ..base.serving import SpeechToTextBaseServing
 from .protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
+    TranscriptionResponseDiarized,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionStreamResponse,
@@ -26,7 +27,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class OpenAIServingTranscription(OpenAISpeechToText):
+class OpenAIServingTranscription(SpeechToTextBaseServing):
     """Handles transcription requests."""
 
     def __init__(
@@ -55,6 +56,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     ) -> (
         TranscriptionResponse
         | TranscriptionResponseVerbose
+        | TranscriptionResponseDiarized
         | AsyncGenerator[str, None]
         | ErrorResponse
     ):
@@ -70,6 +72,8 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             response_class=(
                 TranscriptionResponseVerbose
                 if request.response_format == "verbose_json"
+                else TranscriptionResponseDiarized
+                if request.response_format == "diarized_json"
                 else TranscriptionResponse
             ),
             stream_generator_method=self.transcription_stream_generator,

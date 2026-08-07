@@ -12,10 +12,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+# Ordered by priority.
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
     Fp8MoeBackend.DEEPGEMM,
@@ -25,6 +25,9 @@ _SUPPORTED_BACKENDS = (
     # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
     # devices / no flydsl / EP it is skipped and native is used.
     Fp8MoeBackend.AITER_MXFP8,
+    Fp8MoeBackend.HUMMING,
+    Fp8MoeBackend.TRITON_MXFP8,
+    Fp8MoeBackend.EMULATION,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
@@ -34,6 +37,7 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "xpu": Fp8MoeBackend.XPU,
     "aiter": Fp8MoeBackend.AITER_MXFP8,
     "triton": Fp8MoeBackend.TRITON_MXFP8,
+    "humming": Fp8MoeBackend.HUMMING,
 }
 
 
@@ -65,15 +69,12 @@ def _mxfp8_backend_to_kernel_cls(
 
         return [FlydslEmulationExperts]
     if backend == Fp8MoeBackend.TRITON_MXFP8:
-        # Explicit ``--moe-backend triton``: the Triton mxfp8 path, i.e.
-        # dot_scaled on MX-capable HW (gfx950) and BF16 emulation otherwise.
-        # Mirrors the ROCm auto-fallback in ``_select_rocm_mxfp8_backend``.
-        if current_platform.supports_mx():
-            from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
-                Mxfp8NativeTritonExperts,
-            )
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
+        )
 
-            return [Mxfp8NativeTritonExperts]
+        return [Mxfp8NativeTritonExperts]
+    if backend == Fp8MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
             Mxfp8EmulationTritonExperts,
         )
@@ -109,35 +110,6 @@ def _select_kernel_cls(
     )
 
 
-def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
-    """ROCm fallback when no auto-selected MXFP8 backend is available.
-
-    The aiter FlyDSL backend (``AITER_MXFP8``) is auto-picked earlier by
-    ``select_mxfp8_moe_backend`` via ``_SUPPORTED_BACKENDS`` when usable, or
-    explicitly via ``--moe-backend aiter``; this fallback handles the rest
-    (native dot_scaled on gfx950, else BF16 emulation).
-    """
-
-    if current_platform.supports_mx():
-        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
-            Mxfp8NativeTritonExperts,
-        )
-
-        logger.info_once("Using native CDNA4 (gfx950) MXFP8 dot_scaled MoE backend.")
-        return Fp8MoeBackend.TRITON_MXFP8, Mxfp8NativeTritonExperts
-
-    from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
-        Mxfp8EmulationTritonExperts,
-    )
-
-    logger.info_once(
-        "No native MXFP8 MoE backend available on this device; "
-        "MXFP8 weights will be dequantized to BF16 once at load time and the "
-        "MoE will run in BF16 (no per-step dequant)."
-    )
-    return Fp8MoeBackend.EMULATION, Mxfp8EmulationTritonExperts
-
-
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
@@ -171,8 +143,5 @@ def select_mxfp8_moe_backend(
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
         return backend, experts_cls
 
-    # simplify the logic for rocm, refactor later when more backends are supported
-    if current_platform.is_rocm():
-        return _select_rocm_mxfp8_backend()
-
+    # TODO: add debug log with reason.
     raise ValueError("No MXFP8 MoE backends available.")

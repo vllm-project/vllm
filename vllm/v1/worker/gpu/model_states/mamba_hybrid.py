@@ -9,10 +9,6 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    get_conv_copy_spec,
-    is_conv_state_dim_first,
-)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -100,12 +96,13 @@ class MambaHybridModelState(DefaultModelState):
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
+        # Must reset the speculative acceptance count in this idx which could be stale.
+        self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
-            self._mamba_state_idx_gpu[req_index] = (
-                new_req_data.num_computed_tokens - 1
-            ) // self.cache_config.block_size
-            self.num_accepted_tokens_gpu[req_index] = 1
+            self._mamba_state_idx_gpu[req_index].fill_(
+                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+            )
 
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig
@@ -132,14 +129,11 @@ class MambaHybridModelState(DefaultModelState):
     ) -> MambaSpecDecodeGPUContext:
         if self._mamba_ctx is None:
             copy_funcs = self.model.get_mamba_state_copy_func()
-            # The fused copy kernels shift conv windows assuming the SD layout;
-            # the DS layout cannot express a >0 spec-decode shift as a single
-            # contiguous copy (mirrors get_conv_copy_spec's NotImplementedError).
-            if get_conv_copy_spec in copy_funcs and is_conv_state_dim_first():
-                assert self.vllm_config.speculative_config is None, (
-                    "DS conv state layout does not support mamba align state "
-                    "copies with speculative decoding"
-                )
+            # Both SD and DS conv layouts support a >0 spec-decode shift: the
+            # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
+            # ``token_bias = num_accepted - 1`` window shift per conv layout
+            # (SD: contiguous slice; DS: per-dim-row strided slice), matching
+            # the V1 ``get_conv_copy_spec`` semantics.
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,
@@ -246,7 +240,7 @@ class MambaHybridModelState(DefaultModelState):
         # compute them during actual (non-capture) forward execution.
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
-        if not for_capture:
+        if not for_capture and self.vllm_config.num_speculative_tokens > 0:
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
                 input_batch.idx_mapping
@@ -255,11 +249,16 @@ class MambaHybridModelState(DefaultModelState):
             # GDN uses >= 0 to select spec-decode rows, so non-decode rows
             # need the -1 sentinel rather than a raw zero draft count.
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
-            if input_batch.num_draft_tokens_per_req is not None:
-                has_draft_tokens = input_batch.num_draft_tokens_per_req > 0
-                spec_decode_mask = has_draft_tokens & ~input_batch.is_prefilling_np
+            num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+            if num_draft_tokens_per_req is not None:
+                # A row is a spec-decode row only when its whole prompt is already
+                # computed, i.e. exactly one non-draft (decode) token is scheduled.
+                is_decode = (
+                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+                )
+                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask, input_batch.num_draft_tokens_per_req, -1
+                    spec_decode_mask, num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
@@ -295,18 +294,20 @@ class MambaHybridModelState(DefaultModelState):
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
+        num_reqs = idx_mapping.shape[0]
+        if not num_reqs:
+            return
+
         if not isinstance(num_sampled, int):
             # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
             # kernel skips them rather than scattering with a host-side gather.
-            n = idx_mapping.shape[0]
-            if n:
-                _scatter_num_accepted_kernel[(n,)](
-                    idx_mapping, num_sampled, self.num_accepted_tokens_gpu
-                )
+            _scatter_num_accepted_kernel[(num_reqs,)](
+                idx_mapping, num_sampled, self.num_accepted_tokens_gpu
+            )
         else:
             # Fill with single value.
-            self.num_accepted_tokens_gpu.index_fill_(
-                0, idx_mapping, max(num_sampled, 1)
+            _fill_num_accepted_kernel[(num_reqs,)](
+                idx_mapping, self.num_accepted_tokens_gpu, max(num_sampled, 1)
             )
 
         # Align: save the running state to the block-aligned position when
@@ -318,15 +319,13 @@ class MambaHybridModelState(DefaultModelState):
             and num_computed_tokens is not None
             and self._mamba_ctx is not None
         ):
-            num_reqs = idx_mapping.shape[0]
-            if num_reqs:
-                self._mamba_ctx.run_fused_postprocess_align(
-                    num_reqs,
-                    self.num_accepted_tokens_gpu,
-                    self._mamba_state_idx_gpu,
-                    num_computed_tokens,
-                    idx_mapping,
-                )
+            self._mamba_ctx.run_fused_postprocess_align(
+                num_reqs,
+                self.num_accepted_tokens_gpu,
+                self._mamba_state_idx_gpu,
+                num_computed_tokens,
+                idx_mapping,
+            )
 
 
 @triton.jit
@@ -341,3 +340,16 @@ def _scatter_num_accepted_kernel(
         return
     num_sampled = tl.load(num_sampled_ptr + row)
     tl.store(num_accepted_ptr + req_state_idx, tl.maximum(num_sampled, 1))
+
+
+@triton.jit
+def _fill_num_accepted_kernel(
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    num_accepted_ptr,  # [max_num_reqs]
+    num_sampled,
+):
+    row = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + row)
+    if req_state_idx < 0:
+        return
+    tl.store(num_accepted_ptr + req_state_idx, num_sampled)

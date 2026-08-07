@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -67,6 +71,7 @@ async fn main() -> Result<()> {
         language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
+        limit_mm_per_prompt: HashMap::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
         api_server_options: ApiServerOptions::default(),
@@ -77,6 +82,7 @@ async fn main() -> Result<()> {
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
         keep_alive_timeout: Duration::from_secs(5),
+        profiler: None,
     };
 
     let bind_address = format!("127.0.0.1:{port}");

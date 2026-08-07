@@ -73,6 +73,32 @@ DTYPES = [torch.float32, torch.half, torch.bfloat16]
 all_case_info: list[tuple] = []
 
 
+@pytest.mark.parametrize("merge_fn", [merge_attn_states_cuda, merge_attn_states_triton])
+@pytest.mark.parametrize("output_dtype", [torch.float32, torch.half, torch.bfloat16])
+def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
+    """When a token is empty on both sides (both LSE -inf), the 0/0 softmax
+    scales must not surface as NaN in the merged output."""
+    num_tokens, num_heads, head_size = 6, 8, 128
+    prefix_output = torch.zeros(
+        num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype
+    )
+    prefix_lse = torch.randn(num_heads, num_tokens, device="cuda")
+    suffix_output = torch.zeros(
+        num_tokens, num_heads, head_size, device="cuda", dtype=output_dtype
+    )
+    suffix_lse = torch.randn(num_heads, num_tokens, device="cuda")
+
+    # Tokens 2 and 3 are empty on both sides.
+    empty = slice(2, 4)
+    prefix_lse[:, empty] = float("-inf")
+    suffix_lse[:, empty] = float("-inf")
+
+    output = torch.empty_like(prefix_output)
+    merge_fn(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
+
+    assert not output.isnan().any()
+
+
 def generate_markdown_table():
     global all_case_info
     table_header = (
