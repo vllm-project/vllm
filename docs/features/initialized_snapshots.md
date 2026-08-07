@@ -24,6 +24,9 @@ Snapshots currently require all of the following:
   CRIU CUDA plugin installed on the host.
 - `criu`, `cuda-checkpoint`, and `nvidia-smi` available on `PATH`.
 - Either root execution or passwordless `sudo` for CRIU.
+- `kernel.io_uring_disabled=2` set before snapshot creation. CRIU cannot dump
+  active `io_uring` descriptors. This setting is host-wide and disables
+  `io_uring` for every process on the machine.
 - An installed vLLM build or a clean editable Git checkout. Snapshot creation
   and restore reject tracked or untracked source changes because a commit SHA
   alone cannot identify their contents.

@@ -4,6 +4,7 @@
 
 import argparse
 import builtins
+import os
 import subprocess
 import sys
 import types
@@ -127,6 +128,7 @@ def parse_snapshot(*argv: str):
 def test_snapshot_restore_dispatches_without_runtime_imports(monkeypatch):
     dispatched: list[list[str]] = []
     snapshot_module = types.ModuleType("vllm_cli.snapshot")
+    snapshot_module.capture_snapshot_environment = lambda _env: None  # type: ignore[attr-defined]
     snapshot_module.main = lambda argv: dispatched.append(argv)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "vllm_cli.snapshot", snapshot_module)
 
@@ -161,6 +163,32 @@ def test_non_snapshot_commands_use_the_existing_vllm_cli(monkeypatch):
     assert received_argv == [
         [sys.argv[0], "serve", "Qwen/Qwen3-0.6B"],
     ]
+
+
+def test_snapshot_environment_is_captured_before_runtime_imports(monkeypatch):
+    from vllm_cli.snapshot import (
+        capture_snapshot_environment,
+        snapshot_environment,
+    )
+
+    prior_environment = snapshot_environment()
+    monkeypatch.setenv("VLLM_USER_SETTING", "configured")
+    monkeypatch.delenv("TRITON_CACHE_AUTOTUNING", raising=False)
+
+    def fake_vllm_main() -> None:
+        os.environ["TRITON_CACHE_AUTOTUNING"] = "1"
+
+    monkeypatch.setattr("vllm.entrypoints.cli.main.main", fake_vllm_main)
+
+    from vllm_cli.main import main
+
+    try:
+        main(["snapshot", "create", "Qwen/Qwen3-0.6B"])
+
+        assert snapshot_environment()["VLLM_USER_SETTING"] == "configured"
+        assert "TRITON_CACHE_AUTOTUNING" not in snapshot_environment()
+    finally:
+        capture_snapshot_environment(prior_environment)
 
 
 def test_snapshot_restore_parser_stays_lightweight(monkeypatch, tmp_path: Path):

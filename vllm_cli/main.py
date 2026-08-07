@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import sys
 
 
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["snapshot"]:
+        from vllm_cli.snapshot import capture_snapshot_environment
+
+        capture_snapshot_environment(os.environ)
     if args[:2] == ["snapshot", "restore"]:
         from vllm_cli.snapshot import main as snapshot_main
 

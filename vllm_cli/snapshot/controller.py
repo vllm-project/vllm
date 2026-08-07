@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from vllm_cli.snapshot import snapshot_environment
 from vllm_cli.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
@@ -385,24 +386,36 @@ class LocalSnapshotTools:
             sorted({int(line.strip()) for line in output.splitlines() if line.strip()})
         )
 
+    def _descriptor_targets(self, pid: int) -> tuple[str, ...]:
+        descriptor_dir = Path("/proc") / str(pid) / "fd"
+        try:
+            descriptors = tuple(descriptor_dir.iterdir())
+        except FileNotFoundError as error:
+            raise SnapshotCreateError(
+                f"snapshot process exited during descriptor inventory: {pid}"
+            ) from error
+        targets: list[str] = []
+        for descriptor in descriptors:
+            try:
+                targets.append(os.readlink(descriptor))
+            except FileNotFoundError:
+                continue
+        return tuple(targets)
+
     def _socket_inodes(self, process_tree: tuple[int, ...]) -> set[int]:
         inodes: set[int] = set()
         for pid in process_tree:
-            descriptor_dir = Path("/proc") / str(pid) / "fd"
-            try:
-                descriptors = tuple(descriptor_dir.iterdir())
-            except FileNotFoundError as error:
-                raise SnapshotCreateError(
-                    f"snapshot process exited during socket inventory: {pid}"
-                ) from error
-            for descriptor in descriptors:
-                try:
-                    target = os.readlink(descriptor)
-                except FileNotFoundError:
-                    continue
+            for target in self._descriptor_targets(pid):
                 if target.startswith("socket:[") and target.endswith("]"):
                     inodes.add(int(target[len("socket:[") : -1]))
         return inodes
+
+    def _io_uring_pids(self, process_tree: tuple[int, ...]) -> tuple[int, ...]:
+        return tuple(
+            pid
+            for pid in process_tree
+            if "anon_inode:[io_uring]" in self._descriptor_targets(pid)
+        )
 
     def _tcp_records(self) -> tuple[_TcpSocketRecord, ...]:
         records: list[_TcpSocketRecord] = []
@@ -429,6 +442,13 @@ class LocalSnapshotTools:
         cuda_holders = tuple(pid for pid in self._cuda_pids() if pid in process_tree)
         if not cuda_holders:
             raise SnapshotCreateError("snapshot tree has no CUDA-holding process")
+        io_uring_pids = self._io_uring_pids(process_tree)
+        if io_uring_pids:
+            raise SnapshotCreateError(
+                "snapshot tree owns io_uring state that CRIU cannot dump; set "
+                "kernel.io_uring_disabled=2 before starting vLLM "
+                f"(pids: {', '.join(map(str, io_uring_pids))})"
+            )
         sockets = _validate_tcp_connections(
             self._tcp_records(), self._socket_inodes(process_tree)
         )
@@ -710,7 +730,7 @@ class LocalSnapshotTools:
         selected = tuple(
             sorted(
                 (key, value)
-                for key, value in os.environ.items()
+                for key, value in snapshot_environment().items()
                 if key.startswith(prefixes) and key not in {"VLLM_SNAPSHOT_TIMEOUT_S"}
             )
         )

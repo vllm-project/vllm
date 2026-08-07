@@ -502,6 +502,18 @@ def test_tcp_inventory_rejects_an_external_established_connection():
         _validate_tcp_connections(records, {41})
 
 
+def test_inventory_rejects_io_uring_state_before_criu(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101))
+    monkeypatch.setattr(tools, "_cuda_pids", lambda: (101,))
+    monkeypatch.setattr(tools, "_io_uring_pids", lambda _process_tree: (101,))
+
+    with pytest.raises(SnapshotCreateError, match="kernel.io_uring_disabled=2"):
+        tools.inventory(100)
+
+
 def test_manifest_records_installed_binary_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
