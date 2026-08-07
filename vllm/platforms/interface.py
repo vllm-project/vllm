@@ -186,6 +186,18 @@ class Platform:
         # when encountering unsupported dtypes in "auto" dtype.
         return [torch.bfloat16, torch.float16, torch.float32]
 
+    def get_supported_kv_cache_dtypes(self) -> list[str]:
+        """The ``--kv-cache-dtype`` values supported on this platform.
+
+        Defaults to all known kv-cache dtypes; platforms may override this to
+        restrict the set or add platform-specific dtypes.
+        """
+        from typing import get_args
+
+        from vllm.config.cache import CacheDType
+
+        return list(get_args(CacheDType))
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
