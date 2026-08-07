@@ -54,6 +54,19 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             device=self.device,
         )
 
+    # Hook points for model-specific optimizations. A CUDA graph records the
+    # branch Python took while capturing, so every pair fires in `capture` as
+    # well as in `propose`, around the matching region. Keeping both paths
+    # symmetric means a hook can toggle state that selects a code path without
+    # having to reason about which phase gets captured first.
+    def on_prefill_begin(self, num_reqs: int) -> None: ...
+
+    def on_prefill_end(self, num_reqs: int) -> None: ...
+
+    def on_multi_step_decode_begin(self, num_reqs: int) -> None: ...
+
+    def on_multi_step_decode_end(self, num_reqs: int) -> None: ...
+
     @property
     def advance_draft_positions(self) -> bool:
         """
@@ -104,6 +117,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+        self.on_prefill_begin(self.max_num_reqs)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
             self.model_state,
@@ -113,6 +127,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
+        self.on_prefill_end(self.max_num_reqs)
 
         if self.num_speculative_steps == 1:
             return
@@ -120,6 +135,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # Capture the decode draft generation routine (model forward +
         # sample + update_draft_inputs) for a single
         # step.
+        self.on_multi_step_decode_begin(self.max_num_reqs)
         assert self.decode_cudagraph_manager is not None
         self.decode_cudagraph_manager.capture(
             self._generate_draft,
@@ -130,6 +146,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             progress_bar_desc="Capturing decode CUDA graphs",
         )
+        self.on_multi_step_decode_end(self.max_num_reqs)
 
     @torch.inference_mode()
     def propose(
@@ -223,6 +240,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self._prepare_eplb_forward(input_batch.num_tokens)
 
+        self.on_prefill_begin(num_reqs)
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
@@ -240,6 +258,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
             )
+
+        self.on_prefill_end(num_reqs)
 
         if self.num_speculative_steps == 1:
             # Early exit.
@@ -269,6 +289,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
         # Generate the remaining num_speculative_steps - 1 draft tokens.
+        self.on_multi_step_decode_begin(num_reqs)
         self._multi_step_decode(
             num_reqs,
             dummy_run and skip_attn_for_dummy_run,
@@ -276,6 +297,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp,
             input_batch.seq_lens_cpu_upper_bound,
         )
+        self.on_multi_step_decode_end(num_reqs)
 
         return self.draft_tokens[:num_reqs]
 

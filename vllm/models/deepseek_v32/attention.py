@@ -318,6 +318,17 @@ class DeepseekV32Attention(MLAAttention):
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
 
+    @property
+    def _active_indexer(self) -> "DeepseekV32Indexer | None":
+        """The lightning indexer to run this step, or ``None`` to skip it.
+
+        ``skip_topk`` is the index_share_for_mtp_iteration reuse mode: MTP draft
+        step 0 writes the top-k into the shared buffer and steps 1+ reuse it, so
+        they skip the indexer's two GEMMs and its op. Returning the indexer
+        rather than a bool is also what lets the call sites narrow it.
+        """
+        return None if self.skip_topk else self.indexer
+
     def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
@@ -329,10 +340,10 @@ class DeepseekV32Attention(MLAAttention):
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        if self.indexer is not None and not self.skip_topk:
-            kw = self.indexer.wk_weights_proj(hidden_states)[0]
-            index_k = kw[:, : self.indexer.head_dim]
-            index_weights = kw[:, self.indexer.head_dim :]
+        if (indexer := self._active_indexer) is not None:
+            kw = indexer.wk_weights_proj(hidden_states)[0]
+            index_k = kw[:, : indexer.head_dim]
+            index_weights = kw[:, indexer.head_dim :]
         else:
             index_k = None
             index_weights = None
@@ -372,15 +383,15 @@ class DeepseekV32Attention(MLAAttention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
-        if self.indexer is not None and not self.skip_topk:
+        if (indexer := self._active_indexer) is not None:
             has_indexer = True
-            indexer_k_norm_w = self.indexer.k_norm.weight
-            indexer_k_norm_bias = self.indexer.k_norm.bias
-            indexer_k_norm_eps = self.indexer.k_norm.eps
+            indexer_k_norm_w = indexer.k_norm.weight
+            indexer_k_norm_bias = indexer.k_norm.bias
+            indexer_k_norm_eps = indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
-            indexer_k_cache = self.indexer.k_cache.kv_cache
-            indexer_softmax_scale = self.indexer.softmax_scale
-            indexer_n_head_scale = self.indexer.n_head**-0.5
+            indexer_k_cache = indexer.k_cache.kv_cache
+            indexer_softmax_scale = indexer.softmax_scale
+            indexer_n_head_scale = indexer.n_head**-0.5
         else:
             has_indexer = False
             indexer_k_norm_w = None
@@ -430,9 +441,9 @@ class DeepseekV32Attention(MLAAttention):
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
-        if self.indexer is not None and not self.skip_topk:
-            index_q = self.indexer.wq_b(q_c)[0]
-            index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
+        if (indexer := self._active_indexer) is not None:
+            index_q = indexer.wq_b(q_c)[0]
+            index_q = index_q.view(-1, indexer.n_head, indexer.head_dim)
         else:
             index_q = None
 
@@ -452,21 +463,21 @@ class DeepseekV32Attention(MLAAttention):
             quantize_mqa=self._fp8_query,
         )
 
-        if self.indexer is not None and not self.skip_topk:
+        if (indexer := self._active_indexer) is not None:
             sparse_attn_indexer(
                 q_c,
-                self.indexer.k_cache.prefix,
-                self.indexer.k_cache.kv_cache,
+                indexer.k_cache.prefix,
+                indexer.k_cache.kv_cache,
                 index_q_fp8,
                 None,  # q_scale folded into weights on the fp8 path
                 None,  # k unused when skip_k_cache_insert=True
                 index_weights_out,
-                self.indexer.quant_block_size,
-                self.indexer.scale_fmt,
-                self.indexer.topk_tokens,
-                self.indexer.head_dim,
-                self.indexer.max_model_len,
-                self.indexer.max_total_seq_len,
+                indexer.quant_block_size,
+                indexer.scale_fmt,
+                indexer.topk_tokens,
+                indexer.head_dim,
+                indexer.max_model_len,
+                indexer.max_total_seq_len,
                 self.topk_indices_buffer,
                 skip_k_cache_insert=True,
                 use_pcp=False,
