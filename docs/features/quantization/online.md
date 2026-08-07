@@ -171,6 +171,6 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
 !!! info
 
     - `targets` is mutually exclusive with online `linear` and `moe`: set one or the other, not both.
-    - A layer that matches no `targets` pattern is left unquantized.
-    - A layer name may not match both `targets` and `ignore`.
-    - A layer may not match more than one `targets` pattern.
+    - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
+    - A layer name may not match both `targets` and `ignore`, raising an error.
+    - A layer may not match more than one `targets` pattern, raising an error.

@@ -7,14 +7,6 @@ from types import MappingProxyType
 import regex as re
 
 
-def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
-    """
-    Checks whether a layer_name is exactly equal or a regex match for
-    if target starts with 're:' to any target in list.
-    """
-    return any(is_equal_or_regex_match(layer_name, target) for target in targets)
-
-
 def find_matching_patterns(
     layer_name: str,
     patterns: Iterable[str],

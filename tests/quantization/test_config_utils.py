@@ -10,8 +10,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.online.base import (
     _find_matching_targets,
 )
+from vllm.model_executor.layers.quantization.quark.utils import (
+    should_ignore_layer as quark_should_ignore_layer,
+)
 from vllm.model_executor.layers.quantization.utils.config_utils import (
-    check_equal_or_regex_match,
     find_matching_patterns,
     get_layer_name_after_index,
     is_equal_or_regex_match,
@@ -24,14 +26,6 @@ def test_is_equal_or_regex_match():
     )
     assert is_equal_or_regex_match("model.layers.0.mlp.down_proj", r"re:.*down_proj")
     assert not is_equal_or_regex_match("model.layers.0.mlp.down_proj", "other")
-
-
-def test_check_equal_or_regex_match():
-    assert check_equal_or_regex_match(
-        "model.layers.0.mlp.down_proj",
-        ["other", r"re:.*down_proj"],
-    )
-    assert not check_equal_or_regex_match("model.layers.0.mlp.down_proj", ["other"])
 
 
 @pytest.mark.parametrize(
@@ -111,6 +105,7 @@ def test_should_ignore_layer_returns_false_when_no_fused_pattern_matches():
     assert find_matching_patterns(layer_name, [], fused_mapping) == [
         set(),
         set(),
+        set(),
     ]
     assert not should_ignore_layer(layer_name, [], fused_mapping)
 
@@ -144,3 +139,24 @@ def test_ignore_allows_individually_matched_fused_shards():
     fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     assert should_ignore_layer(layer_name, patterns, fused_mapping)
+
+
+@pytest.mark.parametrize(
+    "patterns",
+    [
+        ["model.layers.0.self_attn.qkv_proj"],
+        [r"re:.*\.qkv_proj$"],
+        [
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.0.self_attn.k_proj",
+            "model.layers.0.self_attn.v_proj",
+        ],
+    ],
+    ids=["direct_fused_name", "direct_fused_regex", "individual_shards"],
+)
+def test_quark_and_compressed_tensors_ignore_fused_layers_identically(patterns):
+    layer_name = "model.layers.0.self_attn.qkv_proj"
+    fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    assert should_ignore_layer(layer_name, patterns, fused_mapping)
+    assert quark_should_ignore_layer(layer_name, patterns, fused_mapping)
