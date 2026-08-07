@@ -11,6 +11,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
         SpeechToTextParams,
         VllmConfig,
     )
+    from vllm.config.multimodal import VideoPruningMethod
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
@@ -68,6 +70,23 @@ The output embeddings must be one of the following formats:
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
+
+MambaStateShapes: TypeAlias = (
+    tuple[tuple[int, int]]
+    | tuple[tuple[int, int, int]]
+    | tuple[tuple[int, int], tuple[int, int]]
+    | tuple[tuple[int, int], tuple[int, int, int]]
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DiarizedTranscriptionSegment:
+    """A timestamped, speaker-attributed segment produced by an ASR model."""
+
+    start: float
+    end: float
+    speaker: str
+    text: str
 
 
 class StreamingTranscriptionPostProcessor:
@@ -98,7 +117,22 @@ _language_model_by_module = dict[nn.Module, "VllmModel"]()
 
 
 @runtime_checkable
-class SupportsMultiModal(Protocol):
+class SupportsMultiModalEmbeddings(Protocol):
+    """The interface for models that can merge external multimodal embeddings."""
+
+    supports_multimodal_embeddings: ClassVar[Literal[True]] = True
+
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+
+@runtime_checkable
+class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     """The interface required for all multi-modal models."""
 
     supports_multimodal: ClassVar[Literal[True]] = True
@@ -120,6 +154,12 @@ class SupportsMultiModal(Protocol):
     """
     A flag that indicates whether this model supports
     `multimodal_config.mm_encoder_tp_mode="data"`.
+    """
+
+    supports_mm_device_do_normalize: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_device_do_normalize`.
     """
 
     requires_raw_input_tokens: ClassVar[bool] = False
@@ -424,6 +464,13 @@ class SupportsMultiModalPruning(Protocol):
 
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
 
+    supported_video_pruning_methods: ClassVar[tuple["VideoPruningMethod", ...]] = (
+        "evs",
+    )
+    """Video pruning methods (as reported by
+    `MultiModalConfig.get_video_pruning_spec`) implemented by this model.
+    Models supporting methods beyond EVS should override this."""
+
     def recompute_mrope_positions(
         self,
         input_ids: list[int] | torch.Tensor,
@@ -467,6 +514,24 @@ def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
     return getattr(model, "supports_multimodal", False)
+
+
+@overload
+def supports_multimodal_embeddings(
+    model: type[object],
+) -> TypeIs[type[SupportsMultiModalEmbeddings]]: ...
+
+
+@overload
+def supports_multimodal_embeddings(
+    model: object,
+) -> TypeIs[SupportsMultiModalEmbeddings]: ...
+
+
+def supports_multimodal_embeddings(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMultiModalEmbeddings]] | TypeIs[SupportsMultiModalEmbeddings]:
+    return getattr(model, "supports_multimodal_embeddings", False)
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
@@ -558,7 +623,7 @@ class SupportsLoRA(Protocol):
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    packed_modules_mapping: dict[str, list[str]] = {}
+    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
     lora_manager: "LoRAModelManager | None"
@@ -620,6 +685,15 @@ def _supports_lora(model: type[object] | object) -> bool:
     return isinstance(model, SupportsLoRA)
 
 
+class _MakeEmptyIntermediateTensors(Protocol):
+    def __call__(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> "IntermediateTensors": ...
+
+
 @runtime_checkable
 class SupportsPP(Protocol):
     """The interface required for all models that support pipeline parallel."""
@@ -633,14 +707,8 @@ class SupportsPP(Protocol):
         MRO of your model class.
     """
 
-    def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> "IntermediateTensors":
-        """Called when PP rank > 0 for profiling purposes."""
-        ...
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
+    """Called when PP rank > 0 for profiling purposes."""
 
     def forward(
         self,
@@ -648,7 +716,7 @@ class SupportsPP(Protocol):
         positions: Tensor,
         *,
         intermediate_tensors: "IntermediateTensors | None",
-    ) -> "IntermediateTensors | None":
+    ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]":
         """
         Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
         PP rank > 0.
@@ -665,12 +733,7 @@ class SupportsPP(Protocol):
 class _SupportsPPType(Protocol):
     supports_pp: Literal[True]
 
-    def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> "IntermediateTensors": ...
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
 
     def forward(
         self,
@@ -678,7 +741,7 @@ class _SupportsPPType(Protocol):
         positions: Tensor,
         *,
         intermediate_tensors: "IntermediateTensors | None",
-    ) -> "Tensor | IntermediateTensors": ...
+    ) -> "Tensor | IntermediateTensors | tuple[Tensor, list[Tensor]]": ...
 
 
 @overload
@@ -727,7 +790,7 @@ def supports_pp(
 
 def _supports_pp_attributes(model: type[object] | object) -> bool:
     if isinstance(model, type):
-        return isinstance(model, _SupportsPPType)
+        return SupportsPP in model.__mro__ or isinstance(model, _SupportsPPType)
 
     return isinstance(model, SupportsPP)
 
@@ -809,16 +872,14 @@ class IsHybrid(Protocol):
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
             vllm_config: vLLM config
 
         Returns:
-            Tuple containing:
-            - conv_state_shape: Shape for convolutional state cache
-            - temporal_state_shape: Shape for state space model cache
+            Shapes for each state cache used by the model.
         """
         ...
 
@@ -1032,7 +1093,7 @@ class SupportsQuant:
     """The interface required for all models that support quantization."""
 
     hf_to_vllm_mapper: ClassVar["WeightsMapper | None"] = None
-    packed_modules_mapping: ClassVar[dict[str, list[str]] | None] = None
+    packed_modules_mapping: ClassVar[dict[str, list[str]]]
     quant_config: QuantizationConfig | None = None
 
     def __new__(cls, *args, **kwargs) -> Self:
@@ -1067,8 +1128,8 @@ class SupportsQuant:
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
             unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
             self.quant_config.apply_vllm_mapper(unstacked_mapper)
-        if self.packed_modules_mapping is not None:
-            self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
+        if packed_modules_mapping := getattr(self, "packed_modules_mapping", None):
+            self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
 
 @runtime_checkable
@@ -1124,6 +1185,9 @@ class SupportsTranscription(Protocol):
     """
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
+
+    supports_diarized_transcription: ClassVar[bool] = False
+    """Enables the ``diarized_json`` response format for the model."""
 
     supports_explicit_language_detection: ClassVar[bool] = False
     """
@@ -1229,6 +1293,15 @@ class SupportsTranscription(Protocol):
             Cleaned transcription text.
         """
         return text
+
+    @classmethod
+    def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
+        """Parse the model-specific diarized transcript format.
+
+        Only models that set ``supports_diarized_transcription`` must override
+        this method.
+        """
+        raise NotImplementedError
 
     @classmethod
     def get_streaming_post_processor_cls(
@@ -1376,7 +1449,7 @@ class EagleModelMixin:
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
+        residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states
@@ -1665,13 +1738,12 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Post-process encoder output, directly call scatter_output_slices by default.
@@ -1683,7 +1755,9 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         from vllm.model_executor.models.utils import scatter_output_slices
 
-        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
+        scatter_output_slices(
+            outputs["default"], indices, per_item_out_tokens, dest, clone
+        )
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
