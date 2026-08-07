@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import multiprocessing
+import threading
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -16,7 +17,11 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
 )
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.backend_xgrammar import (
+    XgrammarBackend,
+    XgrammarGrammar,
+    xgr,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -56,6 +61,7 @@ class StructuredOutputManager:
 
         self._grammar_bitmask: torch.Tensor | None = None
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
+        self._xgr_batch_filler_local = threading.local()
 
         max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
         self.fill_bitmask_parallel_threshold = 128
@@ -195,14 +201,28 @@ class StructuredOutputManager:
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
     ) -> None:
         assert self._grammar_bitmask is not None
+        xgr_matchers = []
+        xgr_indices = []
         for grammar, index, apply_bitmask in batch:
             if apply_bitmask and not grammar.is_terminated():
-                grammar.fill_bitmask(self._grammar_bitmask, index)
+                if isinstance(grammar, XgrammarGrammar):
+                    xgr_matchers.append(grammar.matcher)
+                    xgr_indices.append(index)
+                else:
+                    grammar.fill_bitmask(self._grammar_bitmask, index)
             else:
                 # Note that for thinking support, we will need to
                 # reset the relevant part of the bitmask for consequent
                 # requests here.
                 self._grammar_bitmask[index].fill_(self._full_mask)
+        if xgr_matchers:
+            batch_filler = getattr(self._xgr_batch_filler_local, "value", None)
+            if batch_filler is None:
+                batch_filler = xgr.BatchGrammarMatcher(max_threads=1)
+                self._xgr_batch_filler_local.value = batch_filler
+            batch_filler.batch_fill_next_token_bitmask(
+                xgr_matchers, self._grammar_bitmask, xgr_indices
+            )
 
     def _async_submit_fill_bitmask(
         self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
