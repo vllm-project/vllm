@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -61,18 +60,12 @@ _FI_MOE_EP_RUNTIME_AVAILABLE: bool | None = None
 
 
 def _has_fi_moe_ep_runtime() -> bool:
-    """True when the installed flashinfer exposes the moe_ep runtime helpers.
-
-    Probes for BootstrapConfig.device (flashinfer>=0.6.17) rather than the
-    package version so source builds with the fix pass regardless of their
-    version metadata.
-    """
+    """True when the installed flashinfer exposes the moe_ep runtime helpers."""
     global _FI_MOE_EP_RUNTIME_AVAILABLE
     if _FI_MOE_EP_RUNTIME_AVAILABLE is not None:
         return _FI_MOE_EP_RUNTIME_AVAILABLE
     try:
         from flashinfer.moe_ep import (  # noqa: F401
-            BootstrapConfig,
             bootstrap_moe_ep_runtime,
             ensure_moe_ep_cuda_device,
             finalize_moe_ep_runtime,
@@ -80,9 +73,7 @@ def _has_fi_moe_ep_runtime() -> bool:
     except ImportError:
         _FI_MOE_EP_RUNTIME_AVAILABLE = False
     else:
-        _FI_MOE_EP_RUNTIME_AVAILABLE = "device" in {
-            f.name for f in dataclasses.fields(BootstrapConfig)
-        }
+        _FI_MOE_EP_RUNTIME_AVAILABLE = True
     return _FI_MOE_EP_RUNTIME_AVAILABLE
 
 
@@ -92,10 +83,9 @@ def is_fi_moe_ep_backend(moe_backend: str) -> bool:
     if not _has_fi_moe_ep_runtime():
         raise ImportError(
             f"moe_backend={moe_backend!r} requires the flashinfer.moe_ep "
-            "runtime with device-pinned bootstrap (flashinfer>=0.6.17), "
-            "which the installed flashinfer does not provide. Upgrade "
-            "flashinfer, or use moe_backend=deep_gemm_mega_moe for the "
-            "native mega path."
+            "runtime, which the installed flashinfer does not provide. "
+            "Install a flashinfer build with moe_ep support, or use "
+            "moe_backend=deep_gemm_mega_moe for the native mega path."
         )
     return True
 
