@@ -174,6 +174,7 @@ class TieringMetricsTracker:
     ) -> None:
         transfer_job = job_metadata.transfer_job
         labelvalues = self.tier_label(job_metadata.tier_idx)
+        completed_key_count = len(transfer_job.keys)
         if not completed_job.success:
             failure_metric = (
                 TieringOffloadingMetrics.PROMOTION_JOB_FAILURES
@@ -181,7 +182,10 @@ class TieringMetricsTracker:
                 else TieringOffloadingMetrics.CASCADE_JOB_FAILURES
             )
             self._stats.increase_counter(failure_metric, labelvalues=labelvalues)
-            return
+            if transfer_job.is_promotion and completed_job.successful_keys:
+                completed_key_count = len(completed_job.successful_keys)
+            else:
+                return
 
         bytes_metric = (
             TieringOffloadingMetrics.READ_BYTES
@@ -193,7 +197,7 @@ class TieringMetricsTracker:
             if transfer_job.is_promotion
             else TieringOffloadingMetrics.WRITE_TIME
         )
-        transfer_size = len(transfer_job.keys) * self._primary_block_size
+        transfer_size = completed_key_count * self._primary_block_size
         self._stats.increase_counter(bytes_metric, transfer_size, labelvalues)
         if completed_job.transfer_time is not None:
             self._stats.increase_counter(
