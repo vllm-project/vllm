@@ -377,6 +377,26 @@ def health(url) -> int:
 
 
 # ---------------------------------------------------------------------------
+# HTTP helpers — weight checker
+# ---------------------------------------------------------------------------
+
+
+def weight_checker(url: str, action: str) -> requests.Response:
+    return requests.post(
+        f"{url}/weight_checker", json={"action": action}, timeout=180
+    )
+
+
+def collective_rpc(url: str, method: str) -> requests.Response:
+    """Invoke an existing worker method through the development RPC API."""
+    return requests.post(
+        f"{url}/collective_rpc",
+        json={"method": method, "timeout": 900},
+        timeout=900,
+    )
+
+
+# ---------------------------------------------------------------------------
 # HTTP helpers — weight transfer
 # ---------------------------------------------------------------------------
 

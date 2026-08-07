@@ -374,6 +374,29 @@ class Executor(ABC):
         if not self.sleeping_tags:
             self.is_sleeping = False
 
+    def compute_weight_checksums(self) -> dict:
+        """Return SHA-256 digests for all named parameters across workers.
+
+        Worker keys include their DP, PP, PCP, TP, and EP ranks, so shards of
+        the same logical weight are distinct entries.
+
+        For TP=1 the list has one element and we return it directly.
+        """
+        results: list[dict] = self.collective_rpc("compute_weight_checksums")
+        combined: dict = {}
+        for worker_result in results:
+            duplicate_keys = combined.keys() & worker_result.keys()
+            if duplicate_keys:
+                duplicates = ", ".join(sorted(duplicate_keys))
+                raise RuntimeError(f"Duplicate weight checksum keys: {duplicates}")
+            combined.update(worker_result)
+        return combined
+
+    def reset_weights(self) -> None:
+        """Overwrite all weight-bearing tensors with random values on every
+        distributed worker (mirrors compute_weight_checksums coverage)."""
+        self.collective_rpc("reset_weights")
+
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
