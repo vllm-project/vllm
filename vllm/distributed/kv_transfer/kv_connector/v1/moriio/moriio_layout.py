@@ -111,9 +111,10 @@ def get_layer_transfer_geometry(
     is_mla_cache = is_mla_cache_layer(layer_to_spec, layer_name)
 
     if is_mla_cache and len(shape) == 3:
-        num_blocks, block_size, latent_dim = shape
-        slot_size_bytes = latent_dim * element_size
-        block_len = block_size * slot_size_bytes
+        num_blocks = shape[0]
+        block_size = spec.block_size
+        block_len = stride[0] * element_size
+        slot_size_bytes = block_len // block_size
         return LayerTransferGeometry(
             num_blocks=num_blocks,
             block_size=block_size,
