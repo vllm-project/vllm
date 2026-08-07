@@ -7,7 +7,6 @@ varlen MHA. Decode-only batches use the Triton absorbed-MQA kernel.
 """
 
 from dataclasses import dataclass
-from typing import Any, cast
 
 import torch
 
@@ -19,9 +18,17 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, CommonAttentionMetadata
+from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+    FlashAttnMLASparseBackend,
+    FlashAttnMLASparseImpl,
+    FlashAttnMLASparseMetadata,
+)
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.flash_attn import (
     FlashAttnPrefillBackend,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLABackend,
@@ -34,6 +41,7 @@ from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
+from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 
 @dataclass
@@ -231,7 +239,7 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
             device=self.device,
         )
         metadata.prefill.chunked_context = None
-        cast(Any, metadata.prefill).sliding_window = sliding_metadata
+        metadata.prefill.sliding_window = sliding_metadata
         if metadata.num_decodes > 0 and metadata.num_prefills > 0:
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             for chunk in sliding_metadata.chunks:
@@ -267,14 +275,6 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
 
 class Dots3NoteTritonMLABackend(TritonMLABackend):
     """Internal NOTE SWA specialization; not a user-selectable backend."""
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -478,3 +478,82 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
             sliding_window=self.sliding_window,
         )
         return output, lse
+
+
+class Dots3NotePackedSparseBackend(FlashAttnMLASparseBackend):
+    """NOTE DSA backend that accepts block-padded BF16 cache pages."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "DOTS3_NOTE_PACKED_MLA_SPARSE"
+
+    @staticmethod
+    def get_impl_cls() -> type["Dots3NotePackedSparseImpl"]:
+        return Dots3NotePackedSparseImpl
+
+
+class Dots3NotePackedSparseImpl(FlashAttnMLASparseImpl):
+    """Pack selected KV rows before reusing the existing FA3 sparse kernel."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        assert self.topk_indices_buffer is not None
+        num_rows, topk = self.topk_indices_buffer.shape
+        self.packed_block_table = torch.arange(
+            num_rows * topk,
+            dtype=torch.int32,
+            device=self.topk_indices_buffer.device,
+        ).view(num_rows, topk)
+
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashAttnMLASparseMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if not isinstance(q, tuple):
+            raise NotImplementedError(
+                "Dots3NotePackedSparseImpl expects split (q_nope, q_rope) input."
+            )
+        q_nope, q_rope = q
+        num_actual_toks = q_rope.shape[0]
+
+        assert self.topk_indices_buffer is not None
+        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        global_indices, valid_counts = triton_convert_req_index_to_global_index(
+            attn_metadata.req_id_per_token[:num_actual_toks],
+            attn_metadata.block_table,
+            topk_indices,
+            BLOCK_SIZE=attn_metadata.block_size,
+            NUM_TOPK_TOKENS=topk_indices.shape[1],
+            return_valid_counts=True,
+        )
+        kv_cache = kv_c_and_k_pe_cache.view(
+            -1, attn_metadata.block_size, self.head_size
+        )
+        safe_indices = global_indices.clamp_min(0).to(torch.int64)
+        packed_kv = kv_cache[
+            safe_indices // attn_metadata.block_size,
+            safe_indices % attn_metadata.block_size,
+        ].view(-1, self.head_size)
+        cu_seqlens_q = torch.arange(
+            num_actual_toks + 1,
+            dtype=torch.int32,
+            device=q_rope.device,
+        )
+        output = flash_attn_varlen_func(
+            q=q_rope,
+            k=packed_kv[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1),
+            v=packed_kv[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1),
+            q_v=q_nope,
+            max_seqlen_q=1,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_k=topk_indices.shape[1],
+            seqused_k=valid_counts,
+            block_table=self.packed_block_table[:num_actual_toks],
+            softmax_scale=self.scale,
+            causal=True,
+            fa_version=3,
+        )
+        return output, None

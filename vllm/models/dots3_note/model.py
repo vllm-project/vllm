@@ -52,6 +52,8 @@ from vllm.models.deepseek_v32.nvidia.model import (
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.dots3_note import (
     Dots3NoteFlashAttnPrefillBackend,
+    Dots3NotePackedSparseBackend,
+    Dots3NotePackedSparseImpl,
     Dots3NoteTritonMLABackend,
 )
 
@@ -117,11 +119,9 @@ class Dot3NoteMoE(DeepseekV2MoE):
         gather_output = self.is_sequence_parallel and not already_sequence_parallel
         if gather_output:
             hidden_states = sequence_parallel_chunk(hidden_states)
-        shared_experts = self.shared_experts
-        assert shared_experts is not None
         output = super().forward(
             hidden_states, already_sequence_parallel=True
-        ) + shared_experts(hidden_states)
+        ) + self.shared_experts(hidden_states)
         if gather_output:
             return tensor_model_parallel_all_gather(output, 0)[:num_tokens]
         if self.reduce_results:
@@ -236,6 +236,29 @@ class Dot3NoteFullAttention(DeepseekV2MLAAttention):
             reduce_results=False,
         )
         wrapper = self._modules.pop("mla_attn")
+        inner_attention = wrapper.mla_attn
+        inner_attention.attn_backend = Dots3NotePackedSparseBackend
+        inner_attention.impl = Dots3NotePackedSparseImpl(
+            num_heads=inner_attention.num_heads,
+            head_size=inner_attention.head_size,
+            scale=inner_attention.scale,
+            num_kv_heads=inner_attention.num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=inner_attention.kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=inner_attention.q_lora_rank,
+            kv_lora_rank=inner_attention.kv_lora_rank,
+            qk_nope_head_dim=inner_attention.qk_nope_head_dim,
+            qk_rope_head_dim=inner_attention.qk_rope_head_dim,
+            qk_head_dim=inner_attention.qk_head_dim,
+            v_head_dim=inner_attention.v_head_dim,
+            kv_b_proj=inner_attention.kv_b_proj,
+            indexer=wrapper.indexer,
+            topk_indices_buffer=topk_indices_buffer,
+        )
         gate_type = config.attention_gate_type
         gate_cls = ReplicatedLinear if gate_type == "headwise" else ColumnParallelLinear
         gate_size = (
