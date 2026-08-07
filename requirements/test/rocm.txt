@@ -237,7 +237,7 @@ fastavro==1.12.2
     # via cohere
 fastparquet==2026.3.0
     # via genai-perf
-fastsafetensors==0.3.2
+fastsafetensors==0.3.3
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
@@ -351,8 +351,10 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.22.0
+huggingface-hub==1.26.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   accelerate
     #   datasets
     #   evaluate

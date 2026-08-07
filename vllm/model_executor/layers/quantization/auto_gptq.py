@@ -541,7 +541,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 hidden_size // self.quant_config.pack_factor,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -565,7 +565,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 scales_size13,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -586,7 +586,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 scales_size13,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                self.moe.w13_num_shards
+                * intermediate_size_per_partition
+                // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -654,7 +656,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         w13_bias = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                self.moe.w13_num_shards * intermediate_size_per_partition,
                 dtype=params_dtype,
             ),
             requires_grad=False,
