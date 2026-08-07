@@ -184,7 +184,7 @@ RUN cd mori \
     && git submodule update --init --recursive \
     && ln -sfn ${ROCM_PATH} /opt/rocm \
     && mkdir -p /usr/lib64 && ln -sf /usr/lib/x86_64-linux-gnu/libc.so /usr/lib64/libc.so \
-    && sed -i '/-DUSE_ROCM=ON/a\            f"-DCMAKE_PREFIX_PATH={os.environ.get(\"ROCM_PATH\", \"/opt/rocm\")};{os.environ.get(\"ROCM_PATH\", \"/opt/rocm\")}/lib/rocm_sysdeps",' setup.py \
+    && sed -i '/-DUSE_ROCM=ON/a\            "-DCMAKE_PREFIX_PATH=/opt/rocm;/opt/rocm/lib/rocm_sysdeps",' setup.py \
     && sed -i '/find_package(hsakmt REQUIRED)/i \
 if(NOT TARGET numa::numa)\n\
   find_library(NUMA_LIBRARY NAMES numa)\n\
