@@ -591,6 +591,7 @@ class OutputProcessor:
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float | None = None,
         iteration_stats: IterationStats | None = None,
+        finished_request_ids: set[str] | None = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -631,6 +632,12 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
+            request_finished_in_engine = (
+                finished_request_ids is not None and req_id in finished_request_ids
+            )
+            is_streaming_input_request = (
+                req_state.streaming_input or req_state.input_chunk_queue is not None
+            )
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
@@ -685,15 +692,21 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
-                if req_state.streaming_input:
+                if req_state.streaming_input and not request_finished_in_engine:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
                     else:
                         req_state.input_chunk_queue = None
                 else:
+                    if request_finished_in_engine and req_state.queue is not None:
+                        req_state.queue.close()
                     self._finish_request(req_state)
-                    if not engine_core_output.finished:
+                    if request_finished_in_engine and is_streaming_input_request:
+                        # Acknowledge engine-terminal streaming cleanup only
+                        # after the frontend has stopped accepting input chunks.
+                        reqs_to_abort.append(req_id)
+                    elif not engine_core_output.finished:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)

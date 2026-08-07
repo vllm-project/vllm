@@ -196,6 +196,7 @@ outputs = EngineCoreOutputs(
             request_id="req-1",
             new_token_ids=[7, 8],
             finish_reason=FinishReason.LENGTH,
+            stop_reason="streaming-length-cap",
         )
     ],
     finished_requests={"req-1"},

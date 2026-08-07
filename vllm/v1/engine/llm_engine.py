@@ -312,6 +312,7 @@ class LLMEngine:
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
+                finished_request_ids=outputs.finished_requests,
             )
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 

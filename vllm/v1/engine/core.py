@@ -432,7 +432,9 @@ class EngineCore:
             )
         return metadata
 
-    def add_request(self, request: Request, request_wave: int = 0):
+    def add_request(
+        self, request: Request, request_wave: int = 0
+    ) -> list[tuple[str, int]]:
         """Add request to the scheduler.
 
         `request_wave`: indicate which wave of requests this is expected to
@@ -472,11 +474,12 @@ class EngineCore:
                 "Disabling ECTransfer for this request."
             )
 
-        self.scheduler.add_request(request)
+        length_capped_reqs = self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
+        return length_capped_reqs
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -1878,14 +1881,25 @@ class EngineCoreProc(EngineCore):
         """
         return not self.has_work()
 
+    def add_request(
+        self, request: Request, request_wave: int = 0
+    ) -> list[tuple[str, int]]:
+        length_capped_reqs = super().add_request(request, request_wave)
+        if length_capped_reqs:
+            self._send_finished_outputs(length_capped_reqs, FinishReason.LENGTH)
+        return length_capped_reqs
+
     def _send_finish_outputs_to_client(
-        self, req_ids: list[str], client_index: int, finish_reason: FinishReason
+        self,
+        req_ids: list[str],
+        client_index: int,
+        finish_reason: FinishReason,
     ) -> None:
         outputs = [
             EngineCoreOutput(req_id, [], finish_reason=finish_reason)
             for req_id in req_ids
         ]
-        eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+        eco = EngineCoreOutputs(finished_requests=set(req_ids), outputs=outputs)
         self.output_queue.put_nowait((client_index, eco))
 
     def _send_abort_outputs_to_client(
@@ -1897,6 +1911,24 @@ class EngineCoreProc(EngineCore):
         self, req_ids: list[str], client_index: int
     ) -> None:
         self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
+
+    def _send_finished_outputs(
+        self,
+        finished_reqs: list[tuple[str, int]],
+        finish_reason: FinishReason,
+    ) -> None:
+        if not finished_reqs:
+            return
+
+        by_client = defaultdict[int, set[str]](set)
+        for req_id, client_index in finished_reqs:
+            by_client[client_index].add(req_id)
+        for client_index, req_ids in by_client.items():
+            self._send_finish_outputs_to_client(
+                list(req_ids),
+                client_index,
+                finish_reason,
+            )
 
     def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
         # TODO(nick) this will be moved inside the scheduler
@@ -1999,8 +2031,10 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return False
 
-    def add_request(self, request: Request, request_wave: int = 0):
-        super().add_request(request, request_wave)
+    def add_request(
+        self, request: Request, request_wave: int = 0
+    ) -> list[tuple[str, int]]:
+        length_capped_reqs = super().add_request(request, request_wave)
         if self.has_coordinator and request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
@@ -2014,6 +2048,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
                 )
+        return length_capped_reqs
 
     def resume_scheduler(self):
         if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):

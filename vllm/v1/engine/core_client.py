@@ -7,7 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -38,10 +38,12 @@ from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     FT_STATUS_CALL_ID,
     EEPNotificationType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -268,6 +270,9 @@ class EngineCoreClient(ABC):
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
+    async def cleanup_finished_requests_async(self, request_ids: set[str]) -> None:
+        return None
+
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
@@ -315,8 +320,12 @@ class InprocClient(EngineCoreClient):
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
+        self._pending_outputs: deque[EngineCoreOutputs] = deque()
 
     def get_output(self) -> EngineCoreOutputs:
+        if self._pending_outputs:
+            return self._pending_outputs.popleft()
+
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
@@ -326,7 +335,18 @@ class InprocClient(EngineCoreClient):
 
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)
-        self.engine_core.add_request(req, request_wave)
+        length_capped_reqs = self.engine_core.add_request(req, request_wave)
+        if length_capped_reqs:
+            req_ids = [req_id for req_id, _ in length_capped_reqs]
+            self._pending_outputs.append(
+                EngineCoreOutputs(
+                    outputs=[
+                        EngineCoreOutput(req_id, [], finish_reason=FinishReason.LENGTH)
+                        for req_id in req_ids
+                    ],
+                    finished_requests=set(req_ids),
+                )
+            )
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
@@ -399,7 +419,7 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def dp_engines_running(self) -> bool:
-        return False
+        return self.engine_core.scheduler.has_finished_requests()
 
 
 @dataclass
@@ -1445,6 +1465,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
+        self.streaming_req_ids: set[str] = set()
+        # Terminal streaming outputs remain routable until frontend cleanup.
+        self.pending_streaming_cleanup_req_ids: set[str] = set()
 
         # Exact per-engine count of this client's unfinished requests.
         self.engine_inflight: Counter[EngineIdentity] = Counter()
@@ -1466,6 +1489,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         ) // client_count
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
+        existing_engine = self.reqs_in_flight.get(request.request_id)
+        if existing_engine is not None and (
+            request.resumable or request.request_id in self.streaming_req_ids
+        ):
+            return existing_engine
+
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None and (
             eng_index := get_late_interaction_engine_index(
@@ -1516,6 +1545,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
         self.engine_inflight[chosen_engine] += 1
+        if request.resumable:
+            self.streaming_req_ids.add(request.request_id)
         return chosen_engine
 
     async def call_utility_async(self, method: str, *args) -> Any:
@@ -1533,10 +1564,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def process_engine_outputs(
         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
     ):
-        if outputs.finished_requests and self.reqs_in_flight:
-            for req_id in outputs.finished_requests:
-                if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
-                    self.engine_inflight[engine] -= 1
+        if not outputs.finished_requests:
+            return
+
+        output_req_ids = {output.request_id for output in outputs.outputs}
+        self.pending_streaming_cleanup_req_ids.update(
+            outputs.finished_requests & output_req_ids & self.streaming_req_ids
+        )
+        for req_id in (
+            outputs.finished_requests - self.pending_streaming_cleanup_req_ids
+        ):
+            if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
+                self.engine_inflight[engine] -= 1
+            self.streaming_req_ids.discard(req_id)
+
+    async def cleanup_finished_requests_async(self, request_ids: set[str]) -> None:
+        for req_id in request_ids:
+            if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
+                self.engine_inflight[engine] -= 1
+            self.streaming_req_ids.discard(req_id)
+            self.pending_streaming_cleanup_req_ids.discard(req_id)
 
     @staticmethod
     async def eep_process_engine_core_notification(

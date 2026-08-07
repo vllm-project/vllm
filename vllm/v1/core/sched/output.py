@@ -268,6 +268,11 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Resumable requests length-capped while selecting waiting work for this
+    # step. These need a frontend-visible terminal output after the worker
+    # consumes this SchedulerOutput.
+    terminal_streaming_reqs: list[tuple[str, int]] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

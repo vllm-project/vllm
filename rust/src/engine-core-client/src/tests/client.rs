@@ -2599,7 +2599,11 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         finish_reason: Some(
                             Length,
                         ),
-                        stop_reason: None,
+                        stop_reason: Some(
+                            Text(
+                                "streaming-length-cap",
+                            ),
+                        ),
                         events: None,
                         kv_transfer_params: None,
                         ec_transfer_params: None,

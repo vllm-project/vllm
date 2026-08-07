@@ -52,7 +52,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -195,6 +200,10 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+        # Resumable request IDs that finished in the engine but may still have
+        # same-ID input chunks queued until the frontend handles the terminal
+        # output and acknowledges cleanup through the abort path.
+        self.terminal_streaming_req_ids: set[str] = set()
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
@@ -454,6 +463,7 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        terminal_streaming_reqs: list[tuple[str, int]] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -863,6 +873,22 @@ class Scheduler(SchedulerInterface):
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
+                max_num_new_tokens = request.num_tokens - num_computed_tokens
+                if request.resumable:
+                    max_prompt_len = (
+                        self.max_model_len - self.num_sampled_tokens_per_step
+                    )
+                    if request.num_tokens > max_prompt_len:
+                        terminal_streaming_reqs.extend(
+                            self._finish_length_capped_streaming_request(request)
+                        )
+                        continue
+                    max_num_new_tokens = max_prompt_len - num_computed_tokens
+                    if max_num_new_tokens <= 0:
+                        terminal_streaming_reqs.extend(
+                            self._finish_length_capped_streaming_request(request)
+                        )
+                        continue
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -877,7 +903,10 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
-                    num_new_tokens = request.num_tokens - num_computed_tokens
+                    num_new_tokens = min(
+                        request.num_tokens - num_computed_tokens,
+                        max_num_new_tokens,
+                    )
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
@@ -1227,6 +1256,7 @@ class Scheduler(SchedulerInterface):
             partial_tail_offloads=pending_partial_tail_offloads,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            terminal_streaming_reqs=terminal_streaming_reqs or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1367,12 +1397,22 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
-    ) -> None:
+    ) -> bool:
         """
         Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
+
+        Returns:
+            True if the update was applied, or False if its cumulative prompt
+            would exceed the model length available before sampling.
         """
+        renewed_prompt_len = session.num_computed_tokens + len(
+            update.prompt_token_ids or ()
+        )
+        max_prompt_len = self.max_model_len - self.num_sampled_tokens_per_step
+        if renewed_prompt_len > max_prompt_len:
+            return False
 
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
@@ -1407,6 +1447,8 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+
+        return True
 
     def _make_cached_request_data(
         self,
@@ -1693,6 +1735,14 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        # Terminal resumable requests need the batch-level finished signal even
+        # when the broader finished-set optimization is disabled.
+        terminal_streaming_req_ids_by_client: dict[int, set[str]] = defaultdict(set)
+        for req_id, client_index in scheduler_output.terminal_streaming_reqs or ():
+            outputs[client_index].append(
+                EngineCoreOutput(req_id, [], finish_reason=FinishReason.LENGTH)
+            )
+            terminal_streaming_req_ids_by_client[client_index].add(req_id)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids = None
@@ -1796,6 +1846,7 @@ class Scheduler(SchedulerInterface):
                 self._free_encoder_inputs(request)
 
             stopped = False
+            finished = False
             new_logprobs = None
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
@@ -1911,7 +1962,15 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    updated_finish_reason = request.get_finished_reason()
+                    if updated_finish_reason is not None:
+                        finish_reason = updated_finish_reason
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+                    if request.resumable:
+                        self.terminal_streaming_req_ids.add(req_id)
+                        terminal_streaming_req_ids_by_client[request.client_index].add(
+                            req_id
+                        )
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -2042,6 +2101,16 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
+        for client_index, finished_set in terminal_streaming_req_ids_by_client.items():
+            if (eco := engine_core_outputs.get(client_index)) is not None:
+                if eco.finished_requests is None:
+                    eco.finished_requests = set()
+                eco.finished_requests.update(finished_set)
+            else:
+                engine_core_outputs[client_index] = EngineCoreOutputs(
+                    finished_requests=finished_set
+                )
+
         if (
             stats := self.make_stats(
                 spec_decoding_stats,
@@ -2095,7 +2164,9 @@ class Scheduler(SchedulerInterface):
             if update is None:
                 # Streaming request finished.
                 return True
-            self._update_request_as_session(request, update)
+            if not self._update_request_as_session(request, update):
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                return True
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
@@ -2222,7 +2293,24 @@ class Scheduler(SchedulerInterface):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
 
-    def add_request(self, request: Request) -> None:
+    def _finish_length_capped_streaming_request(
+        self, request: Request
+    ) -> list[tuple[str, int]]:
+        assert request.resumable
+        self.terminal_streaming_req_ids.add(request.request_id)
+        finished_requests = self.finish_requests(
+            request.request_id,
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        return [
+            (finished_request.request_id, finished_request.client_index)
+            for finished_request in finished_requests
+        ]
+
+    def add_request(self, request: Request) -> list[tuple[str, int]]:
+        if request.request_id in self.terminal_streaming_req_ids:
+            return []
+
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -2232,7 +2320,8 @@ class Scheduler(SchedulerInterface):
                 existing.streaming_queue.append(update)
             elif update is not None:
                 # Commence next input chunk.
-                self._update_request_as_session(existing, update)
+                if not self._update_request_as_session(existing, update):
+                    return self._finish_length_capped_streaming_request(existing)
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
@@ -2245,6 +2334,7 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+        return []
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -2261,12 +2351,19 @@ class Scheduler(SchedulerInterface):
             already finished.
         """
         assert RequestStatus.is_finished(finished_status)
+        clear_all_terminal_streaming_req_ids = request_ids is None
         if isinstance(request_ids, str):
             request_ids = (request_ids,)
         elif request_ids is not None:
             request_ids = set(request_ids)
         else:
             request_ids = self.requests.keys()
+
+        if finished_status == RequestStatus.FINISHED_ABORTED:
+            if clear_all_terminal_streaming_req_ids:
+                self.terminal_streaming_req_ids.clear()
+            else:
+                self.terminal_streaming_req_ids.difference_update(request_ids)
 
         running_requests_to_remove = set()
         waiting_requests_to_remove = []

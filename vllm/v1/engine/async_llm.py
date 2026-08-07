@@ -699,9 +699,21 @@ class AsyncLLM(EngineClient):
                     for start in range(0, num_outputs, chunk_size):
                         end = start + chunk_size
                         outputs_slice = engine_core_outputs[start:end]
+                        finished_output_ids = (
+                            {
+                                output.request_id
+                                for output in outputs_slice
+                                if output.request_id in outputs.finished_requests
+                            }
+                            if outputs.finished_requests
+                            else set()
+                        )
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
+                            outputs.finished_requests,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
@@ -714,6 +726,10 @@ class AsyncLLM(EngineClient):
                         if processed_outputs.reqs_to_abort:
                             await engine_core.abort_requests_async(
                                 processed_outputs.reqs_to_abort
+                            )
+                        if finished_output_ids:
+                            await engine_core.cleanup_finished_requests_async(
+                                finished_output_ids
                             )
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
