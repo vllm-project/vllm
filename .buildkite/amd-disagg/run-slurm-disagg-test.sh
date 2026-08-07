@@ -89,8 +89,8 @@ fi
 JOB_NAME="$(grep -oE '^#SBATCH[[:space:]]+--job-name=[^[:space:]]+' "${JOB_SCRIPT}" | sed -E 's/.*--job-name=//' | head -n1)"
 JOB_NAME="${JOB_NAME:-vllm-disagg-pd}"
 
-echo "[slurm-submit] image=${IMAGE} nodes=${NODES} gpus/node=${GPUS_PER_NODE} mode=$([[ ${WIDE_EP_MODE} == 0 ]] && echo tp || echo ep) router=${ROUTER_TYPE}"
-SUBMIT_OUT="$(sbatch "${SUBMIT_SCRIPT}")"
+echo "[slurm-submit] image=${IMAGE} nodes=${NODES} gpus/node=${GPUS_PER_NODE} mode=$([[ ${WIDE_EP_MODE} == 0 ]] && echo tp || echo ep) router=${ROUTER_TYPE} walltime=${TIME_LIMIT}"
+SUBMIT_OUT="$(sbatch --time="${TIME_LIMIT}" "${SUBMIT_SCRIPT}")"
 echo "${SUBMIT_OUT}"
 # "Submitted batch job 114" -> 114 (last integer on the line).
 JOB_ID="$(printf '%s\n' "${SUBMIT_OUT}" | grep -oE '[0-9]+' | tail -n1 || true)"
@@ -141,6 +141,7 @@ SUBMIT_GRACE_S="${SUBMIT_GRACE_S:-900}"                        # reach RUNNING w
 PENDING_MAX_S="${PENDING_MAX_S:-1800}"                          # tolerate 30m queued
 HEALTH_PHASE_TIMEOUT_S="${HEALTH_PHASE_TIMEOUT_S:-$(( HEALTH_TIMEOUT_S + 900 ))}"
 WORKLOAD_TIMEOUT_S="${WORKLOAD_TIMEOUT_S:-1800}"               # accuracy/bench cap
+COMPLETED_GRACE_S="${COMPLETED_GRACE_S:-60}"                   # verdict lag after job exit
 
 SENTINEL="${LOG_DIR}/.disagg_done"
 
@@ -151,6 +152,22 @@ job_field() {  # $1=jobid  $2=field  ->  value | ""
         | grep -oE "$2=[^ ]+" | head -n1 | cut -d= -f2- || true
 }
 have() { grep -aqE "$1" "${LOG_FILE}" 2>/dev/null; }
+
+# The job's own verdict sources, in authority order: the .disagg_done sentinel
+# (rank-0 rc, written by a single writer) and then the gate line in the log.
+# Sets STATE/RC/REASON and returns 0 when a verdict exists, 1 when it does not.
+read_verdict() {
+    if [[ -f "${SENTINEL}" ]]; then
+        RC="$(tr -dc '0-9' < "${SENTINEL}" 2>/dev/null || true)"; RC="${RC:-1}"
+        if [[ "${RC}" == "0" ]]; then STATE="COMPLETED"; else STATE="FAILED"; fi
+        REASON="sentinel"; return 0
+    fi
+    if have '(PASS|FAIL): '; then
+        if have 'FAIL: '; then STATE="FAILED"; RC=1; else STATE="COMPLETED"; RC=0; fi
+        REASON="gate"; return 0
+    fi
+    return 1
+}
 
 # Never let the job outlive this poller. Cancelling a Buildkite build kills the
 # agent's bootstrap, and without this the sbatch job keeps its whole allocation
@@ -199,15 +216,7 @@ while [[ $(date +%s) -lt ${WAIT_DEADLINE} ]]; do
 
     # (1) Ultimate authority: terminal sentinel (holds rank-0 rc), then the
     #     explicit accuracy gate line. Honored regardless of phase.
-    if [[ -f "${SENTINEL}" ]]; then
-        RC="$(tr -dc '0-9' < "${SENTINEL}" 2>/dev/null || true)"; RC="${RC:-1}"
-        if [[ "${RC}" == "0" ]]; then STATE="COMPLETED"; else STATE="FAILED"; fi
-        REASON="sentinel"; break
-    fi
-    if have '(PASS|FAIL): '; then
-        if have 'FAIL: '; then STATE="FAILED"; RC=1; else STATE="COMPLETED"; RC=0; fi
-        REASON="gate"; break
-    fi
+    read_verdict && break
 
     # (2) Scheduler state via scontrol: drives phase transitions and catches
     #     infra/scheduler failures fast.
@@ -231,7 +240,20 @@ while [[ $(date +%s) -lt ${WAIT_DEADLINE} ]]; do
             RC=1; REASON="scontrol JobState=FAILED phase=${PHASE}"; break
             ;;
         COMPLETED)
-            STATE="COMPLETED"; RC=0; REASON="scontrol COMPLETED"; break
+            _vd=$(( NOW + COMPLETED_GRACE_S ))
+            _found=0
+            while :; do
+                if read_verdict; then _found=1; break; fi
+                (( $(date +%s) >= _vd )) && break
+                sleep 5
+            done
+            if (( _found == 1 )); then
+                echo "[slurm-submit] verdict arrived after JobState=COMPLETED (${REASON})" >&2
+            else
+                STATE="completed-no-verdict"; RC=1
+                REASON="COMPLETED with no sentinel/gate within ${COMPLETED_GRACE_S}s (a walltime kill reports COMPLETED here)"
+            fi
+            break
             ;;
         PENDING|CONFIGURING|RESV_DEL_HOLD|REQUEUED)
             if (( NOW - T_PHASE > PENDING_MAX_S )); then
@@ -292,6 +314,20 @@ done
 if [[ -z "${STATE}" ]]; then
     echo "[slurm-submit] WARN: no verdict before ${TIME_LIMIT}; failing" >&2
     STATE="deadline"; RC=1; REASON="poll deadline"
+fi
+
+# Preflight to see if the nodes are actually free and fail if not free.
+PF_LINES=()
+if compgen -G "${LOG_DIR}/preflight_NODE*.log" >/dev/null 2>&1; then
+    cat -- "${LOG_DIR}"/preflight_NODE*.log >&2 || true
+    mapfile -t PF_LINES < <(grep -h '^PREFLIGHT-REJECTED: ' "${LOG_DIR}"/preflight_NODE*.log 2>/dev/null || true)
+fi
+if (( ${#PF_LINES[@]} > 0 )); then
+    STATE="preflight-rejected"; RC=1
+    REASON="${PF_LINES[0]#PREFLIGHT-REJECTED: }"
+    if (( ${#PF_LINES[@]} > 1 )); then
+        REASON="${REASON} [+$(( ${#PF_LINES[@]} - 1 )) more node(s), see ${LOG_DIR}/]"
+    fi
 fi
 
 # Surface the accuracy gate verdict (if any) from the job log — to stderr.

@@ -457,12 +457,12 @@ run_workload() {
 # rank 0: proxy + health-gate + workload, then write the completion sentinel.
 orchestrate_master() {
     local sentinel="$1" rc=0
-    # Front door: the toy proxy runs in-container (started here); the vllm-router
+    # Front door: the proxy runs in-container (started here); the vllm-router
     # runs as a SEPARATE container started by the SLURM job on this (rank-0) node,
     # so in that mode we don't start anything here.
     PROXY_PID=""
     if [[ "${ROUTER_TYPE:-vllm-router}" == "vllm-router" ]]; then
-        log "ROUTER_TYPE=vllm-router: external router expected on gateway :${GATEWAY_PORT:-${ROUTER_PORT}} (not starting toy proxy)"
+        log "ROUTER_TYPE=vllm-router: external router expected on gateway :${GATEWAY_PORT:-${ROUTER_PORT}} (not starting proxy)"
     else
         start_proxy_bg
     fi

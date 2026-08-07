@@ -60,7 +60,7 @@ export KV_PORT="${KV_PORT:-9711}"
 export LOCAL_PING_PORT="${LOCAL_PING_PORT:-61555}"
 
 # MoRIIO proxy: HTTP port clients/benchmark hit, plus the connector control ports.
-# PROXY_PING_PORT MUST be 36367 — the toy proxy hardcodes its zmq service-discovery
+# PROXY_PING_PORT MUST be 36367 — the proxy hardcodes its zmq service-discovery
 # socket on that port; prefill/decode register to PROXY_IP:PROXY_PING_PORT.
 export PROXY_IP="${PROXY_IP:-${PREFILL_IP}}"
 export PROXY_PORT="${PROXY_PORT:-10001}"
@@ -77,9 +77,9 @@ export MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
 
 # ----------------------------------------------------------------- router / gateway
 # Selection for client (bench/accuracy) traffic:
-#   toy         -> the in-container MoRIIO toy proxy started by the launcher (default)
+#   proxy       -> the in-container MoRIIO proxy started by the launcher
 #   vllm-router -> an external `vllm/vllm-router` container started by the SLURM job
-#                  on the rank-0 node
+#                  on the rank-0 node (default)
 # Both use the SAME MoRIIO discovery mechanism (prefill/decode register to
 # PROXY_IP:PROXY_PING_PORT=36367); only the client HTTP front door differs.
 export ROUTER_TYPE="${ROUTER_TYPE:-vllm-router}"
@@ -87,7 +87,7 @@ export ROUTER_PORT="${ROUTER_PORT:-30000}"
 export ROUTER_POLICY="${ROUTER_POLICY:-round_robin}"
 export VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
 # Single client-facing port bench/accuracy target: the router port when routing,
-# else the toy proxy port. Env override always wins.
+# else the proxy port. Env override always wins.
 if [[ "${ROUTER_TYPE}" == "vllm-router" ]]; then
     export GATEWAY_PORT="${GATEWAY_PORT:-${ROUTER_PORT}}"
 else
@@ -143,6 +143,8 @@ export NCCL_IB_RETRY_CNT="${NCCL_IB_RETRY_CNT:-12}"
 export MORI_RDMA_DEVICES="${MORI_RDMA_DEVICES:-${_IB_DEVICES}}"
 export MORI_IB_GID_INDEX="${MORI_IB_GID_INDEX:-${_IB_GID_INDEX}}"
 export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
+
+# Pin to gfx950 to avoid jit compilation failures with other archs on this cluster.
 export MORI_GPU_ARCHS="gfx950"
 
 # ----------------------------------------------------------------- benchmark

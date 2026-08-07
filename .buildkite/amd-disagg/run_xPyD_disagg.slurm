@@ -27,7 +27,7 @@ MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -
 
 # ---- router / gateway (host-side; also forwarded into the container) --------
 # vllm-router -> external `vllm/vllm-router` container started on the rank-0 node (default)
-# toy         -> in-container MoRIIO toy proxy (no extra container)
+# proxy       -> in-container MoRIIO proxy (no extra container)
 ROUTER_TYPE="${ROUTER_TYPE:-vllm-router}"
 ROUTER_PORT="${ROUTER_PORT:-30000}"
 ROUTER_POLICY="${ROUTER_POLICY:-round_robin}"
@@ -48,6 +48,7 @@ else
     GATEWAY_PORT="${GATEWAY_PORT:-${PROXY_PORT}}"
 fi
 
+# This line is a recommended template from infra side.
 exec > "$LOG_ROOT/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.log" 2>&1
 
 # Where the disagg scripts live ON THE HOST (bind-mounted into the container).
@@ -66,6 +67,22 @@ CLUSTER_ENV_IN="${CLUSTER_ENV_IN:-${CONTAINER_SCRIPTS}/cluster.sh}"
 PREFILL_PORT="${PREFILL_PORT:-8100}"
 DECODE_PORT="${DECODE_PORT:-8200}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-3600}"
+
+# EP-mode ports, mirrored from cluster.sh purely so the preflight below can test
+# them host-side; the in-container values still come from cluster.sh.
+SERVE_PORT="${SERVE_PORT:-20005}"
+RPC_PORT="${RPC_PORT:-13345}"
+KV_PORT="${KV_PORT:-9711}"
+LOCAL_PING_PORT="${LOCAL_PING_PORT:-61555}"
+# vllm-router binds this for Prometheus in addition to ROUTER_PORT, and panics
+# at startup if it is taken.
+ROUTER_METRICS_PORT="${ROUTER_METRICS_PORT:-29000}"
+
+# Node preflight (see preflight_node): 0 disables, VRAM% above which a GPU counts
+# as busy, and how long to let a reaped container's VRAM drain before judging.
+PREFLIGHT="${PREFLIGHT:-1}"
+PREFLIGHT_MAX_VRAM_PCT="${PREFLIGHT_MAX_VRAM_PCT:-10}"
+PREFLIGHT_GPU_SETTLE_S="${PREFLIGHT_GPU_SETTLE_S:-30}"
 
 
 NUM_NODES=$((xP + yD))
@@ -226,8 +243,126 @@ export DOCKER_CONT_NAME="vllm_disagg_${MODEL_NAME:-model}_${SLURM_JOB_ID}"
 export ROUTER_TYPE ROUTER_PORT ROUTER_POLICY VLLM_ROUTER_IMAGE PROXY_PING_PORT GATEWAY_PORT ROUTER_DP_LOCAL
 export ROUTER_CONT_NAME="vllm_router_${SLURM_JOB_ID}"
 
+# Consumed by preflight_node on each node (srun forwards the environment).
+export PREFILL_PORT DECODE_PORT PROXY_PORT ROUTER_METRICS_PORT
+export SERVE_PORT RPC_PORT KV_PORT LOCAL_PING_PORT
+export PREFLIGHT PREFLIGHT_MAX_VRAM_PCT PREFLIGHT_GPU_SETTLE_S
+
 echo "[disagg-pd] IPADDRS=${IPADDRS}"
 echo "[disagg-pd] launching ${NUM_NODES} containers (1/node) -> vllm_disagg.sh node"
+
+# Refuse a node that is not actually free. $1 = this node's global rank.
+#
+# `#SBATCH --exclusive` only keeps out other SLURM jobs. A plain `docker run` on
+# a node is invisible to the scheduler, so we get allocated nodes whose GPUs and
+# ports are already in use. Without this the job pulls the image, loads the model
+# and dies minutes later inside vLLM ("Free memory on device cuda:N ... is less
+# than desired GPU memory utilization"); worse, on rank 0 a foreign router
+# already listening on ROUTER_PORT can satisfy the health gate and take the
+# accuracy traffic. Called after the stale-container reap, with a settle window
+# so VRAM the reap is still releasing is not counted against us.
+preflight_node() {
+    local rank="$1"
+    if [ "${PREFLIGHT:-1}" != "1" ]; then
+        echo "Rank $rank preflight: skipped (PREFLIGHT=0)"
+        return 0
+    fi
+
+    local host max_pct settle problems=""
+    local -a issues=()          # one short tag per fault, for the one-line summary
+    host="$(hostname)"
+    max_pct="${PREFLIGHT_MAX_VRAM_PCT:-10}"
+    settle="${PREFLIGHT_GPU_SETTLE_S:-30}"
+
+    # GPUs: vLLM asks for a fraction of TOTAL, so memory already resident is
+    # subtracted from what it can get and pushes it under its own threshold.
+    if command -v rocm-smi >/dev/null 2>&1; then
+        local csv busy nbusy ncards deadline
+        deadline=$(( $(date +%s) + settle ))
+        while :; do
+            csv="$(rocm-smi --showmeminfo vram --csv 2>/dev/null || true)"
+            busy="$(printf '%s\n' "$csv" |
+                    awk -F, -v m="$max_pct" '/^card/ && $2+0 > 0 {
+                        pct = $3 * 100 / $2
+                        if (pct > m) printf "%s=%d%%(%.0fGiB) ", $1, pct, $3/1073741824
+                    }' || true)"
+            if [ -z "$busy" ]; then break; fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
+            sleep 5
+        done
+        if [ -n "$busy" ]; then
+            nbusy="$(printf '%s' "$busy" | tr ' ' '\n' | grep -c 'card' || true)"
+            ncards="$(printf '%s\n' "$csv" | grep -c '^card' || true)"
+            issues+=("${nbusy}/${ncards} GPUs hold VRAM above ${max_pct}%")
+            problems="${problems}  GPU VRAM in use above ${max_pct}%: ${busy}"$'\n'
+        fi
+    else
+        echo "Rank $rank preflight: no rocm-smi on $host, skipping GPU check"
+    fi
+
+    # Ports this rank will bind. Every container here is --network host, so a
+    # foreign listener either collides or silently serves our traffic.
+    local -a want=()
+    if [ "${WIDE_EP_MODE:-0}" = "1" ]; then
+        want+=("$SERVE_PORT" "$RPC_PORT" "$KV_PORT" "$LOCAL_PING_PORT")
+    elif [ "$rank" -lt "${xP:-1}" ]; then
+        want+=("$PREFILL_PORT")
+    else
+        want+=("$DECODE_PORT")
+    fi
+    if [ "$rank" = "0" ]; then
+        want+=("$PROXY_PING_PORT")
+        if [ "$ROUTER_TYPE" = "vllm-router" ]; then
+            want+=("$ROUTER_PORT" "$ROUTER_METRICS_PORT")
+        else
+            want+=("$PROXY_PORT")
+        fi
+    fi
+
+    if command -v ss >/dev/null 2>&1; then
+        local bound taken="" p
+        bound="$(ss -lnt 2>/dev/null | awk '{ n = split($4, a, ":"); print a[n] }' | sort -u || true)"
+        for p in "${want[@]}"; do
+            if printf '%s\n' "$bound" | grep -qx -- "$p"; then
+                taken="${taken}${p} "
+            fi
+        done
+        if [ -n "$taken" ]; then
+            issues+=("ports already bound: ${taken% }")
+            problems="${problems}  ports already bound: ${taken}"$'\n'
+        fi
+    else
+        echo "Rank $rank preflight: no ss on $host, skipping port check"
+    fi
+
+    if [ -n "$problems" ]; then
+        mkdir -p "$LOG_PATH" 2>/dev/null || true
+        local summary
+        summary="$(printf '%s; ' "${issues[@]}")"
+        summary="${summary%; }"
+        # Every node writes the shared job log concurrently, so this diagnostic can
+        # be overwritten there. Keep a single-writer copy per node as well, or the
+        # job fails in seconds with no surviving explanation. The submitter reads
+        # the PREFLIGHT-REJECTED line back out of it to use as the failure reason,
+        # so keep that prefix in sync with run-slurm-disagg-test.sh. It must not
+        # contain "FAIL:" — that is the accuracy gate's pattern.
+        {
+            echo "PREFLIGHT-REJECTED: rank ${rank} on ${host}: ${summary}"
+            printf '%s' "$problems"
+            echo "  containers here: $(docker ps --format '{{.Names}} ({{.Image}})' 2>/dev/null | paste -sd'; ' - || true)"
+            echo "  --exclusive does not exclude non-SLURM workloads; clear the node or exclude it from the allocation."
+            echo "  Set PREFLIGHT=0 to submit anyway."
+        } | tee -a "$LOG_PATH/preflight_NODE${rank}.log" 2>/dev/null || true
+        # Unblock the other ranks: they park on this sentinel, and the submitter
+        # polls it. Without it a peer waits out HEALTH_TIMEOUT_S for an endpoint
+        # that is never coming.
+        echo 1 > "$LOG_PATH/.disagg_done" 2>/dev/null || true
+        return 1
+    fi
+
+    echo "Rank $rank preflight ok on $host: GPUs idle, ports free (${want[*]})"
+    return 0
+}
 
 # Per-node container launch, auto-dispatched by srun availability:
 # Launch this node's disagg container and hand off to vllm_disagg.sh. $1 = this
@@ -244,6 +379,8 @@ run_node_container() {
         docker stop -t 30 "${stale[@]}" >/dev/null 2>&1 || true
         docker rm "${stale[@]}" >/dev/null 2>&1 || true
     fi
+
+    preflight_node "$rank" || return 1
 
     # Bind-mount the host AMD Pensando (ionic) RoCE userspace provider into the
     # container IF present: the image ships an ABI-incompatible copy and the NICs
@@ -386,7 +523,7 @@ if command -v srun >/dev/null 2>&1; then
     srun --label \
          --nodelist="$SELECTED_NODELIST_STR" \
          --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 \
-      bash -c "$(declare -f run_node_container); run_node_container \"\$SLURM_PROCID\"" || RC=$?
+      bash -c "$(declare -f preflight_node run_node_container); run_node_container \"\$SLURM_PROCID\"" || RC=$?
 else
     # Spur: the body already runs once per node; this node's rank is
     # SPUR_TASK_OFFSET (fall back to NODE_RANK, then 0 for a single-node run).
