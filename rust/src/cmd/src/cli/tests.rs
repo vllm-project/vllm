@@ -28,6 +28,41 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
 }
 
 #[test]
+fn render_args_build_supported_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--port",
+        "8080",
+        "--max-model-len",
+        "32768",
+        "--served-model-name",
+        "qwen",
+        "--tokenizer-mode",
+        "deepseek_v32",
+        "--max-logprobs",
+        "-1",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 8080);
+    assert_eq!(config.max_model_len, 32768);
+    assert_eq!(config.served_model_name, ["qwen"]);
+    assert_eq!(config.tool_call_parser, ParserSelection::Auto);
+    assert_eq!(config.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
+    assert_eq!(config.max_logprobs, Some(-1));
+}
+
+#[test]
 fn serve_args_forward_python_flags_with_separator() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -64,6 +99,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -666,7 +702,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)
 
         For more information, try '--help'.
     "#]]
@@ -762,6 +798,7 @@ fn frontend_args_accept_json() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -1118,6 +1155,24 @@ fn frontend_args_json_rejects_malformed_json() {
 }
 
 #[test]
+fn serve_args_reject_unsupported_modality_in_limit_mm_per_prompt() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--limit-mm-per-prompt",
+        r#"{"unsupported_modality": 1}"#,
+    ])
+    .unwrap_err();
+
+    expect![[r#"
+        error: invalid value '{"unsupported_modality": 1}' for '--limit-mm-per-prompt <JSON>': invalid JSON object: unknown variant `unsupported_modality`, expected one of `image`, `audio`, `video` at line 1 column 23
+
+        For more information, try '--help'.
+    "#]].assert_eq(&error.to_string());
+}
+
+#[test]
 fn serve_args_reject_flags_before_model() {
     let error = Cli::try_parse_from(["vllm-rs", "serve", "--python", "python3", "Qwen/Qwen3-0.6B"])
         .unwrap_err();
@@ -1331,6 +1386,7 @@ fn serve_args_accept_handshake_aliases() {
                         http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
+                        limit_mm_per_prompt: {},
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -1474,6 +1530,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {
@@ -1558,6 +1615,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {
@@ -1660,6 +1718,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
+            limit_mm_per_prompt: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {

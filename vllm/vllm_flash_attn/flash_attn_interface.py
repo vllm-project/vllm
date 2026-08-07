@@ -217,7 +217,9 @@ def flash_attn_varlen_func(
     cp_tot_seqused_k=None,
     # FA4 only
     mask_mod=None,
+    block_sparse_tensors=None,
     aux_tensors=None,
+    aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
 ):
     """dropout_p should be set to 0.0 during evaluation
@@ -393,6 +395,15 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"
+        if block_sparse_tensors is not None:
+            assert block_sparse_tensors.full_block_cnt is not None, (
+                "FA4 block_sparse_tensors must materialize empty full_block_cnt "
+                "instead of passing None"
+            )
+            assert block_sparse_tensors.full_block_idx is not None, (
+                "FA4 block_sparse_tensors must materialize empty full_block_idx "
+                "instead of passing None"
+            )
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
@@ -423,7 +434,9 @@ def flash_attn_varlen_func(
             out=out,
             learnable_sink=s_aux,
             mask_mod=mask_mod,
+            block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
+            aux_tensor_leading_dims=aux_tensor_leading_dims,
             output_scale=output_scale,
             cp_world_size=cp_world_size if sm90 else 1,
             cp_rank=cp_rank if sm90 else 0,

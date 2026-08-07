@@ -8,12 +8,9 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    MarlinNvFp4LinearKernel,
-    NvFp4LinearLayerConfig,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
@@ -407,7 +404,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 80
 
     @classmethod
     def override_quantization_method(
@@ -452,7 +449,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -521,6 +518,8 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
                 layer.weight, layer.weight_scale, layer.logical_widths
             )
         layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight.input_dim = 0
+        layer.weight.output_dim = 1
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
@@ -545,7 +544,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -642,7 +641,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
             static=True, group_shape=GroupShape(block_n, block_k)
         )
 
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -769,25 +768,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             config=self.moe,
             weight_key=kFp8StaticTensorSym,
             activation_key=kFp8StaticTensorSym,
-        )
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: RoutedExperts,
-    ) -> mk.FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
         )
 
     def create_weights(
@@ -919,7 +899,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         # Per tensor kernels require single activation scale. Use the max.
         w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
-            w13_input_scale, w2_input_scale
+            w13_input_scale,
+            w2_input_scale,
+            layer.moe_config.moe_parallel_config.enable_eplb,
         )
         replace_parameter(layer, "w13_input_scale", w13_input_scale)
         replace_parameter(layer, "w2_input_scale", w2_input_scale)
@@ -1247,16 +1229,16 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
     """Linear method for ModelOpt NVFP4 W4A16.
 
     4-bit NVFP4 weights, fp16/bf16 activations. Loads ModelOpt-style names
-    directly (no on-disk conversion) and dispatches to the FP4 Marlin GEMM:
+    directly (no on-disk conversion) and dispatches to a W4A16 GEMM:
 
         weight          uint8     packed NVFP4 (2 nibbles/byte along input dim)
         weight_scale    fp8-e4m3  per 16-elem group along input dim
         weight_scale_2  fp32      per-tensor global scale = amax / (6.0 * 448.0)
 
-    No activation quantization. Marlin expects the global scale in the same
-    form ModelOpt stores (amax/2688), so we rename weight_scale_2 ->
-    weight_global_scale **without reciprocation** -- the CT W4A16 path
-    reciprocates only because CT stores the inverse on disk.
+    No activation quantization. ModelOpt stores the global scale as
+    amax/2688, so we rename weight_scale_2 -> weight_global_scale without
+    reciprocation. The selected kernel converts it to its runtime format.
+    The CT W4A16 path reciprocates because CT stores the inverse on disk.
 
     We also register a placeholder input_scale parameter so that W4A4-shaped
     checkpoints (which contain *_proj.input_scale tensors) can be loaded
@@ -1267,17 +1249,12 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
-        # Vestigial slot mirrored from ModelOptNvFp4LinearMethod: the parent
-        # config's get_quant_method only fills marlin_input_dtype when
-        # backend == "marlin"; we don't set that since we pin the kernel
-        # below, but we keep the attribute for shape parity.
         self.marlin_input_dtype = None
-        # Direct-instantiate the Marlin NVFP4 adapter rather than going through
-        # init_nvfp4_linear_kernel(): the latter's priority list returns a
-        # cutlass W4A4 kernel as first-pick on this hardware, which would
-        # silently try to quantize activations (we have no input_scale). For
-        # W4A16 there is exactly one valid kernel, so we pin it.
-        self.kernel = MarlinNvFp4LinearKernel(NvFp4LinearLayerConfig())
+        # `init_nvfp4_linear_kernel(use_a16=True)` is best of both worlds:
+        # 1. `use_a16=True` forces  `Marlin`: https://github.com/vllm-project/vllm/commit/e68988a#diff-7135ab92aa94dfacb1ad3c77fc13f9c4ffe0b977f8eac5d86c2afe243e5f92a6R842-R889
+        # for `--linear-backend=auto`, avoiding a W4A4 kernel that requires input_scale.
+        # 2. Specifying e.g. `--linear-backend=humming` will override.
+        self.kernel = init_nvfp4_linear_kernel(use_a16=True)
 
     def create_weights(
         self,
@@ -1300,6 +1277,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.output_partition_sizes = output_partition_sizes
 
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -1355,6 +1333,9 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if not hasattr(layer, "has_bias"):
+            layer.has_bias = getattr(layer, "bias", None) is not None
+
         # Discard the input_scale placeholder. Whether it carries values
         # (W4A4 ckpt loaded as W4A16) or is uninitialized (native W4A16
         # ckpt), W4A16 mode does not quantize activations, so this is unused.
@@ -1418,15 +1399,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
-        )
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
@@ -1621,6 +1593,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            swiglu_alpha=getattr(layer, "swiglu_alpha", None),
+            swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
         )
 
@@ -2098,25 +2072,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         ):
             self._dequant_mxfp8_weights_to_bf16(layer)
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: RoutedExperts,
-    ) -> mk.FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
@@ -2366,7 +2321,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(prefix_dot):
                     return info["quant_algo"].upper()
 
-        # FusedMoE expert prefix is e.g. "...moe.experts", while ModelOpt's
+        # RoutedExperts expert prefix is e.g. "...moe.experts", while ModelOpt's
         # quantized_layers entries use "...moe.gate_proj" / "...moe.up_proj".
         if prefix.endswith(".experts"):
             parent_dot = prefix.rsplit(".experts", 1)[0] + "."

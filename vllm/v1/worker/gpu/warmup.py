@@ -182,6 +182,9 @@ def warmup_kernels(
     We must call the provided worker's execute_model for pipeline parallel
     coordination.
     """
+    if model_runner.is_encoder_only:
+        return
+
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
@@ -250,7 +253,11 @@ def warmup_kernels(
     # SamplingParams exercising all sampling features.
     if model_runner.is_pooling_model:
         sampling_params = None
-        pooling_params = PoolingParams()
+        pooling_task = model_runner.model_config.get_pooling_task(
+            model_runner.get_supported_tasks()
+        )
+        pooling_params = PoolingParams(task=pooling_task)
+        pooling_params.verify(model_runner.model_config)
     else:
         sampling_params = SamplingParams.for_sampler_warmup()
         pooling_params = None

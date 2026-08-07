@@ -50,7 +50,8 @@ def test_dummy_dcp_lengths_are_attached_before_attention_metadata(monkeypatch):
     class MetadataBuilt(Exception):
         pass
 
-    def prepare_attn(batch, *args):
+    def prepare_attn(batch, *args, for_capture):
+        assert for_capture is False
         events.append("prepare_attn")
         if expect_dcp:
             assert batch.dcp_local_seq_lens is not None
