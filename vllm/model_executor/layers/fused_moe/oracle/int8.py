@@ -183,9 +183,10 @@ def make_int8_moe_quant_config(
     per_act_token_quant: bool = False,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
-    assert (a1_scale is None and a2_scale is None) or (
-        a1_scale is not None and a2_scale is not None
-    ), "a1_scale and a2_scale must both be provided or both be None"
+    if (a1_scale is None) != (a2_scale is None):
+        raise ValueError("a1_scale and a2_scale must both be provided or both be None")
+
+    scales_absent = a1_scale is None and a2_scale is None
 
     if int8_backend == Int8MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -196,7 +197,7 @@ def make_int8_moe_quant_config(
         assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(layer)
 
-    if a1_scale is None or a2_scale is None:
+    if scales_absent and not per_act_token_quant:
         return int8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
