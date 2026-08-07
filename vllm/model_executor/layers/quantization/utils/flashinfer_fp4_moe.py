@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
     align_trtllm_fp4_moe_hidden_dim_for_fi,
@@ -80,6 +81,28 @@ def interleave_linear_and_gate(
     return x
 
 
+def reorder_w13_to_w31_for_flashinfer_cutedsl(
+    activation: MoEActivation,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize gated w13 rows to the [up; gate] order used by FlashInfer."""
+    if activation == MoEActivation.SWIGLUOAI:
+        # gpt-oss checkpoints store w13 interleaved as [gate0, up0, gate1, ...].
+        gate, up = w13[:, 0::2], w13[:, 1::2]
+        gate_scale, up_scale = w13_scale[:, 0::2], w13_scale[:, 1::2]
+        return (
+            torch.cat([up, gate], dim=1).contiguous(),
+            torch.cat([up_scale, gate_scale], dim=1).contiguous(),
+        )
+
+    half = w13.shape[1] // 2
+    return (
+        torch.cat([w13[:, half:], w13[:, :half]], dim=1).contiguous(),
+        torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1).contiguous(),
+    )
+
+
 def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     layer: "RoutedExperts",
     w13: torch.Tensor,
@@ -114,9 +137,9 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     a2_scale = a2_scale.max().to(torch.float32).repeat(num_experts)
 
     if layer.activation.is_gated:
-        half = w13.shape[1] // 2
-        w13 = torch.cat([w13[:, half:], w13[:, :half]], dim=1)
-        w13_scale = torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1)
+        w13, w13_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
+            layer.activation, w13, w13_scale
+        )
 
         # Interleave up/gate rows for w13 weights and scales.
         w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
