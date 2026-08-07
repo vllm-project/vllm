@@ -66,6 +66,35 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         self._fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_kv_needs_view = self._fp8_kv and self.kv_cache_dtype != "fp8_ds_mla"
 
+    def forward(  # type: ignore[override]
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        q_c, kv_c, k_pe = qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+
+        if self.indexer is not None and not self.skip_topk:
+            kw = self.indexer.wk_weights_proj(hidden_states)[0]
+            index_k = kw[:, : self.indexer.head_dim]
+            index_weights = kw[:, self.indexer.head_dim :]
+        else:
+            index_k = None
+            index_weights = None
+
+        num_tokens = hidden_states.shape[0]
+        output = torch.empty(
+            (num_tokens, self.num_local_heads * self.v_head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        self._fused_attention(
+            positions, q_c, kv_c, k_pe, index_k, index_weights, output
+        )
+        return self.o_proj(output)[0]
+
     def _compute_ql_nope(self, q_c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
