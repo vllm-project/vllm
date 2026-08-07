@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa:
 )
 
 _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
+_FLYDSL_MOD = "vllm.model_executor.layers.fused_moe.experts.flydsl_emulation_moe"
 
 
 def _config(ep_size: int = 1):
@@ -166,9 +167,14 @@ def test_gfx950_picks_aiter():
 
 
 def test_gfx942_picks_emulation():
-    """flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
-    dot_scaled backend wins instead."""
-    with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
+    """No native MX and no flydsl runtime -> BF16 emulation wins.
+
+    On gfx942 AITER_MXFP8 resolves to the FlyDSL BF16-emulation experts, so the
+    flydsl runtime must be mocked away too for the backend to be skipped."""
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False),
+        patch(f"{_FLYDSL_MOD}.is_flydsl_emulation_available", return_value=False),
+    ):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.EMULATION
     assert experts_cls is Mxfp8EmulationTritonExperts
