@@ -573,6 +573,16 @@ class RoutedExperts(PluggableLayer):
         # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
 
+    @staticmethod
+    def _encode_mxfp4_weight_scale(loaded_weight: torch.Tensor) -> torch.Tensor:
+        if loaded_weight.dtype == torch.uint8:
+            return loaded_weight
+        if loaded_weight.dtype == torch.float8_e8m0fnu:
+            return loaded_weight.view(torch.uint8)
+        if loaded_weight.is_floating_point():
+            return loaded_weight.to(torch.float8_e8m0fnu).view(torch.uint8)
+        return loaded_weight
+
     def _load_g_idx(
         self,
         shard_id: str,
@@ -636,6 +646,9 @@ class RoutedExperts(PluggableLayer):
             return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
+        if quant_method_name == "Mxfp4MoEMethod" and "weight_scale" in weight_name:
+            loaded_weight = self._encode_mxfp4_weight_scale(loaded_weight)
+
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
@@ -934,6 +947,14 @@ class RoutedExperts(PluggableLayer):
                         break
                     continue
                 matched = True
+                is_per_expert_fused_w13 = (
+                    not is_fused
+                    and shard_id in {"w1", "w3"}
+                    and any(
+                        f".{fused_name}." in qual_name
+                        for fused_name in ("gate_up_proj", "w13")
+                    )
+                )
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name)
@@ -950,6 +971,12 @@ class RoutedExperts(PluggableLayer):
                     else:
                         experts_shard = fused_weight
                     start = 0
+                elif is_per_expert_fused_w13:
+                    shard_index = 0 if shard_id == "w1" else 1
+                    experts_shard = loaded_weight.chunk(2, dim=0)[
+                        shard_index
+                    ].unsqueeze(0)
+                    start = expert_id
                 else:
                     # loaded_weight is a single expert weight, so we add a dummy expert
                     # dimension to unify the loading logic with the fused case
@@ -1100,6 +1127,19 @@ class RoutedExperts(PluggableLayer):
                     (f"{w13}weight", f"experts.{gate_up}", 1, "w3"),
                     (f"{w2}weight", f"experts.{ckpt_down_proj_name}", 0, "w2"),
                 ]
+                fused_mapping.extend(
+                    (
+                        w13,
+                        (
+                            f"experts.{physical_to_logical_map[expert_id]}."
+                            f"{gate_up}.{lora_base_layer_prefix}"
+                        ),
+                        expert_id,
+                        shard_id,
+                    )
+                    for expert_id in range(num_physical_experts)
+                    for shard_id in ("w1", "w3")
+                )
 
         per_expert_mapping = [
             # (param_name, weight_name, expert_id, shard_id)
