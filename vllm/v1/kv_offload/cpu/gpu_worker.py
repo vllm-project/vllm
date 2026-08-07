@@ -120,36 +120,6 @@ def compute_sub_block_ptrs(
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
 
-def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
-    if not current_platform.is_cuda_alike():
-        logger.info(
-            "Skipping mmap host registration on %s; cudaHostRegister is only "
-            "available on CUDA/ROCm.",
-            current_platform.device_name,
-        )
-        return
-
-    rank = region.rank
-
-    base_ptr = region._base.data_ptr()
-    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
-    if result.value != 0:
-        logger.warning(
-            "cudaHostRegister failed for rank=%d (code=%d) — "
-            "transfers will still work but may be slower (unpinned DMA)",
-            rank,
-            result,
-        )
-    else:
-        logger.debug(
-            "cudaHostRegister rank=%d %.2f GB",
-            rank,
-            region.total_size_bytes / 1e9,
-        )
-        region.is_pinned = True
-
-
 def _new_descriptor_buffers(
     num_copy_ops: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -479,7 +449,8 @@ class CPUOffloadingWorker(OffloadingWorker):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
-            pin_mmap_region(mmap_region)
+            # No-op when asynchronous initialization already pinned the region.
+            mmap_region.pin()
 
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
