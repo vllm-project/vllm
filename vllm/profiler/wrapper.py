@@ -237,6 +237,12 @@ class TorchProfilerWrapper(WorkerProfiler):
             profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
             0,
         )
+        # Whether the vLLM version metadata has been stamped into the trace.
+        # With a schedule, profiler.start() begins in the WAIT phase where
+        # Kineto is not yet initialized and add_metadata_json is silently
+        # dropped, so stamping is deferred until Kineto is live (see
+        # _maybe_add_version_metadata).
+        self._version_metadata_added = False
 
     def _build_profiler_table(
         self,
@@ -260,13 +266,24 @@ class TorchProfilerWrapper(WorkerProfiler):
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
-    @override
-    def _start(self) -> None:
-        self.profiler.start()
-        # Stamp the vLLM version (setuptools_scm string embeds the git commit
-        # for source installs) into the trace metadata so the source locations
-        # in "Call stack" frames can be pinned to the exact commit that
-        # produced the trace.
+    def _maybe_add_version_metadata(self) -> None:
+        """Stamp the vLLM version into the trace metadata once Kineto is live.
+
+        The setuptools_scm version string embeds the git commit for source
+        installs, so the source locations reported in "Call stack" frames can
+        be pinned to the exact commit that produced the trace.
+
+        add_metadata_json is a no-op until the underlying Kineto profiler is
+        initialized. With a schedule this only happens after the WAIT phase,
+        so this is called every step and stamps exactly once, as soon as the
+        profiler leaves WAIT.
+        """
+        if self._version_metadata_added:
+            return
+        # self.profiler.profiler is the underlying _KinetoProfile; it is None
+        # while the schedule is still in the WAIT phase.
+        if self.profiler.profiler is None:
+            return
         try:
             self.profiler.add_metadata_json(
                 "vllm_version", json.dumps(vllm.version.__version__)
@@ -277,6 +294,16 @@ class TorchProfilerWrapper(WorkerProfiler):
             )
         except Exception as e:
             logger.warning("Failed to add vLLM version to profiler metadata: %s", e)
+        # Mark done regardless: on failure, retrying every step would just spam.
+        self._version_metadata_added = True
+
+    @override
+    def _start(self) -> None:
+        self.profiler.start()
+        # Covers the no-schedule case, where Kineto is live immediately after
+        # start(). With a schedule this is a no-op until WAIT ends and the
+        # per-step call in _profiler_step stamps the metadata.
+        self._maybe_add_version_metadata()
 
     @override
     def _stop(self) -> None:
@@ -312,6 +339,9 @@ class TorchProfilerWrapper(WorkerProfiler):
         """
         if self._uses_schedule:
             self.profiler.step()
+            # Kineto becomes initialized once the schedule leaves the WAIT
+            # phase; stamp the version metadata as soon as that happens.
+            self._maybe_add_version_metadata()
             # Track warmup steps - only count active steps toward max_iterations
             if self._warmup_steps_remaining > 0:
                 self._warmup_steps_remaining -= 1
