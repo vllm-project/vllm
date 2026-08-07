@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -1108,3 +1109,66 @@ class RocmPlatform(Platform):
         except Exception as e:
             logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
             return None
+
+    @classmethod
+    def launch_multi_stream(
+        cls,
+        default_fn: Callable[[], Any],
+        aux_fns: list[Callable[[], Any] | None],
+        start_event: torch.cuda.Event,
+        done_events: list[torch.cuda.Event],
+        aux_streams: list[torch.cuda.Stream] | None = None,
+        queue_aux_before_default: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Launch default and auxiliary work on separate HIP streams.
+
+        Uses ``Stream.wait_stream()`` fork-join instead of CUDA events.
+        On HIP, ``Event.wait()`` / ``Event.wait_event()`` cross-stream
+        ordering is not reliably enforced and can deadlock or hang under
+        multistream overlap, especially during HIP graph capture/replay.
+        Stream-level waits express dependencies directly and are the
+        supported synchronization path on ROCm.
+
+        ``start_event`` and ``done_events`` are kept for API compatibility
+        with CUDA but are unused here.
+
+        Args:
+            default_fn: Callable for the current (default) stream.
+            aux_fns: Per-aux callables; entries may be None to skip.
+            start_event: Unused on ROCm; CUDA-path fan-out event.
+            done_events: Unused on ROCm; CUDA-path per-aux join events.
+            aux_streams: Per-aux HIP streams. Length must match ``aux_fns``.
+            queue_aux_before_default: When True, queue aux kernels before
+                ``default_fn`` (``execute_in_parallel`` pattern). When False,
+                run ``default_fn`` first (``maybe_execute_in_parallel``
+                pattern).
+
+        Returns:
+            Tuple of (default_result, aux_results).
+        """
+        assert aux_streams is not None
+        aux_results = [None] * len(aux_fns)
+        current_stream = torch.cuda.current_stream()
+        pending: list[torch.cuda.Stream] = []
+
+        def _launch_aux() -> None:
+            for i, fn in enumerate(aux_fns):
+                if fn is None:
+                    continue
+                aux_stream = aux_streams[i]
+                aux_stream.wait_stream(current_stream)
+                with torch.cuda.stream(aux_stream):
+                    aux_results[i] = fn()
+                pending.append(aux_stream)
+
+        if queue_aux_before_default:
+            _launch_aux()
+            default_result = default_fn()
+        else:
+            default_result = default_fn()
+            _launch_aux()
+
+        for aux_stream in pending:
+            current_stream.wait_stream(aux_stream)
+
+        return default_result, aux_results
