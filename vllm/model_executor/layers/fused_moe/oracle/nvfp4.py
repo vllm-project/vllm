@@ -193,6 +193,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.EMULATION,
         NvFp4MoeBackend.HUMMING,
     }
 
