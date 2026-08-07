@@ -103,6 +103,9 @@ from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.mxfp8.b12x import (
+    B12xMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
@@ -162,6 +165,12 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
+    B12xFp8BlockScaledMMKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.b12x_tensor import (
+    B12xTensorFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
@@ -228,6 +237,11 @@ def _get_linear_backend() -> str:
 # set are considered candidates. If none can implement the layer config,
 # an error is raised to respect the user's explicit intent.
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
+    "b12x": {
+        B12xFp8BlockScaledMMKernel,
+        B12xMxfp8LinearKernel,
+        B12xTensorFP8ScaledMMLinearKernel,
+    },
     "cutlass": {
         CutlassInt8ScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
@@ -374,6 +388,7 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
 # in priority/performance order (when available)
 _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
     PlatformEnum.CUDA: [
+        B12xTensorFP8ScaledMMLinearKernel,
         MarlinFP8ScaledMMLinearKernel,
         FlashInferFP8ScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
@@ -408,6 +423,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
+        B12xFp8BlockScaledMMKernel,
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
@@ -478,6 +494,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
 # in priority/performance order (when available)
 _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        B12xMxfp8LinearKernel,
         FlashInferCutedslMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
         MarlinMxfp8LinearKernel,
@@ -1174,6 +1191,7 @@ __all__ = [
     "init_mxfp8_linear_kernel",
     "Mxfp8LinearKernel",
     "Mxfp8LinearLayerConfig",
+    "B12xMxfp8LinearKernel",
     "init_mxfp4_linear_kernel",
     "MxFp4LinearKernel",
     "MxFp4LinearLayerConfig",
@@ -1202,4 +1220,6 @@ __all__ = [
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",
     "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
+    "B12xFp8BlockScaledMMKernel",
+    "B12xTensorFP8ScaledMMLinearKernel",
 ]

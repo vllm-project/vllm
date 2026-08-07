@@ -141,6 +141,7 @@ MoEBackend = Literal[
 
 LinearBackend = Literal[
     "auto",
+    "b12x",
     "cutlass",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
@@ -192,6 +193,7 @@ class KernelConfig:
     """Backend for MoE expert computation kernels. Available options:
 
     - "auto": Automatically select the best backend based on model and hardware
+    - "b12x": Use B12X kernels for SM12x FP8 and FP4 linear layers
     - "triton": Use Triton-based fused MoE kernels
     - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
       activation format ([E_local, max_num_tokens, K])
