@@ -169,7 +169,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             processor = self.info.get_hf_processor()
             audio_token = getattr(processor, "audio_token", "")
             # Separated so that `_apply_audio` can tell the placeholders apart
-            text += "\n".join([audio_token] * num_audios)
+            text += " ".join([audio_token] * num_audios)
         if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
             processor = self.info.get_hf_processor()
             if "gemma3" in processor.__class__.__name__.lower():
