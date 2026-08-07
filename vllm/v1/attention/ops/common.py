@@ -22,11 +22,14 @@ def mask_dcp_empty_shards_(
     ):
         raise ValueError("query_start_loc must contain one boundary per sequence")
 
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    empty_rows = torch.repeat_interleave(
-        seq_lens == 0,
-        query_lens,
-        output_size=lse.shape[0],
+    row_indices = torch.arange(
+        lse.shape[0], device=lse.device, dtype=query_start_loc.dtype
+    )
+    sequence_indices = torch.searchsorted(
+        query_start_loc[1:], row_indices, right=True
+    ).clamp_max(seq_lens.shape[0] - 1)
+    empty_rows = (row_indices >= query_start_loc[-1]) | (
+        seq_lens[sequence_indices] == 0
     )
     lse.masked_fill_(empty_rows[:, None], float("-inf"))
 

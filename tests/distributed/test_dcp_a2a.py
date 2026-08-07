@@ -232,7 +232,7 @@ class TestLSEWeightedCombine:
 
         torch.testing.assert_close(result, outputs[1])
 
-    def test_ag_rs_masks_empty_shard_lse(self, monkeypatch):
+    def test_ag_rs_masks_empty_shard_and_padded_lse(self, monkeypatch):
         import vllm.v1.attention.ops.common as common
 
         class FakeGroup:
@@ -248,8 +248,8 @@ class TestLSEWeightedCombine:
             "correct_attn_out",
             lambda output, lses, *args, **kwargs: (output, lses[0]),
         )
-        output = torch.ones(5, 1, 1)
-        lse = torch.ones(5, 1)
+        output = torch.ones(7, 1, 1)
+        lse = torch.ones(7, 1)
         seq_lens = torch.tensor([0, 2], dtype=torch.int32)
         query_start_loc = torch.tensor([0, 1, 5], dtype=torch.int32)
 
@@ -262,7 +262,8 @@ class TestLSEWeightedCombine:
         )
 
         assert torch.isneginf(masked_lse[:1]).all()
-        torch.testing.assert_close(masked_lse[1:], torch.ones_like(masked_lse[1:]))
+        torch.testing.assert_close(masked_lse[1:5], torch.ones_like(masked_lse[1:5]))
+        assert torch.isneginf(masked_lse[5:]).all()
 
     def test_mathematically_correct(self):
         """Verify mathematical correctness of LSE combination."""
