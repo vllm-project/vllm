@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -92,6 +92,10 @@ try:
 
         def get_node_ip(self) -> str:
             return get_ip()
+
+        def get_open_port(self) -> int:
+            """Probe a TCPStore port on this Ray actor's node."""
+            return get_open_port()
 
         def get_node_and_physical_gpu_ids(self) -> tuple[str, list[int]]:
             node_id = ray.get_runtime_context().get_node_id()
