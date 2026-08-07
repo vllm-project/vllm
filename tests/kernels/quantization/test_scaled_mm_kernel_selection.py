@@ -12,18 +12,34 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear import (
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
+    _get_linear_backend,
     init_int8_linear_kernel,
     register_linear_kernel,
 )
 from vllm.platforms import PlatformEnum
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_linear_backend_override_is_quantization_specific():
+    config = VllmConfig(
+        kernel_config=KernelConfig(
+            linear_backend="cutlass",
+            linear_backend_per_quant={"nvfp4_w4a16": "humming"},
+        )
+    )
+
+    with set_current_vllm_config(config):
+        assert _get_linear_backend(quantization="nvfp4_w4a16") == "humming"
+        assert _get_linear_backend(quantization="nvfp4_w4a4") == "cutlass"
+        assert _get_linear_backend(quantization="fp8_w8a8") == "cutlass"
 
 
 def test_is_supported_is_abstract():
