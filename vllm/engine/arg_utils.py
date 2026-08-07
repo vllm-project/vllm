@@ -602,8 +602,8 @@ class EngineArgs:
     mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
-    paged_shm_size: int | str | None = MultiModalConfig.paged_shm_size
-    paged_shm_block_size: int | str | None = MultiModalConfig.paged_shm_block_size
+    paged_shm_size: int | None = MultiModalConfig.paged_shm_size
+    paged_shm_block_size: int | None = MultiModalConfig.paged_shm_block_size
 
     # LoRA fields
     enable_lora: bool = False
