@@ -2065,38 +2065,61 @@ class TestLlama4PythonMarkers:
         ],
         ids=["wrapped-prose-json", "ipython-content"],
     )
-    def test_markers_are_dropped_on_the_serving_path_too(
+    def test_the_parser_cleans_markers_but_the_serving_path_still_leaks(
         self, tokenizer, mock_request, text
     ):
-        """The parser cleaning them is not enough on its own.
+        """Where the cleaning stops, and why.
 
-        ``LlamaJsonParser.extract_tool_calls`` sits below the delegating
-        layer, and that layer used to discard the parser's cleaned content
-        when no call was promoted -- so a test that calls the parser
-        directly passes while the client still receives the markers.
-        Drive the serving path instead.
+        ``LlamaJsonParser.extract_tool_calls`` removes the markers, but it
+        sits *below* the delegating layer, and that layer returns the raw
+        text when no call was promoted.  So the parser is clean and the
+        client still receives the markers.
+
+        Fixing that means changing ``DelegatingParser._extract_tool_calls``
+        for every engine-based parser, which is
+        vllm-project/vllm#47562's job, not this migration's -- carrying it
+        here silently deletes reasoning markup for nine other parsers when
+        no ``--reasoning-parser`` is configured.
+
+        Asserting both halves rather than only the parser's: a bare
+        ``"<|python_" not in content`` passes when the layer drops the
+        content entirely, i.e. it is satisfied by the regression it is
+        supposed to catch.
         """
         parser_cls = ParserManager.get_parser(
             tool_parser_name="llama3_json",
             reasoning_parser_name=None,
             enable_auto_tools=True,
         )
-        _, content = parser_cls(tokenizer)._extract_tool_calls(
+        parser = parser_cls(tokenizer)
+
+        cleaned = parser.extract_tool_calls(text, mock_request).content
+        _, served = parser._extract_tool_calls(
             text, mock_request, enable_auto_tools=True
         )
 
-        assert "<|python_" not in (content or "")
+        assert cleaned and "<|python_" not in cleaned
+        assert served == text
 
 
 class TestServingPathMarkerParity:
-    """``<|python_tag|>`` must not survive on the non-streaming route either.
+    """``<|python_tag|>`` survives on the non-streaming route. Known gap.
 
     ``ParserEngine.adjust_request`` sets ``skip_special_tokens=False``, so the
     tag reaches the parser verbatim.  Streaming consumes it via the PYTHON_TAG
     terminal, but when no call is promoted the serving layer's non-streaming
-    route returned the *raw* text, leaking the 14-character tag to the client
+    route returns the *raw* text, leaking the 14-character tag to the client
     -- a divergence this migration introduces and released vLLM does not have.
-    Fixed by vllm-project/vllm#47562 in ``_extract_tool_calls``.
+
+    The fix belongs in ``DelegatingParser._extract_tool_calls`` and is
+    vllm-project/vllm#47562's, not this migration's: it changes non-streaming
+    content for all twelve engine-based parsers, and as written it also deletes
+    reasoning markup for nine of them when no ``--reasoning-parser`` is
+    configured.  Carrying it here would make a Llama migration silently rewrite
+    other parsers' output.
+
+    So this class pins the divergence rather than the fix.  When #47562 (or a
+    narrowed version of it) lands, these assertions fail and say so.
 
     Both routes are driven through ``DelegatingParser`` (``parse`` /
     ``parse_delta``), not through ``LlamaJsonParser.extract_tool_calls``: the
@@ -2173,7 +2196,9 @@ class TestServingPathMarkerParity:
 
     @pytest.mark.parametrize("chunk_size", [1, 10_000])
     @pytest.mark.parametrize("case", list(BODIES))
-    def test_tag_dropped_and_routes_agree(self, make_parser, case, chunk_size):
+    def test_streaming_drops_the_tag_and_non_streaming_does_not(
+        self, make_parser, case, chunk_size
+    ):
         text, expected = self.BODIES[case]
 
         _, content, tool_calls = make_parser().parse(
@@ -2182,7 +2207,17 @@ class TestServingPathMarkerParity:
         streamed = self._stream(make_parser(), self._request(), text, chunk_size)
 
         assert not tool_calls
-        assert content == streamed == expected
+        # Streaming consumes the tag via the PYTHON_TAG terminal, at every
+        # chunk size.  This half must not regress.
+        assert streamed == expected
+        # Non-streaming does not, because the fix lives in the delegating
+        # layer rather than in this parser, and that hunk is deliberately
+        # left to vllm-project/vllm#47562 rather than carried here (it
+        # changes non-streaming content for every engine-based parser).
+        # Pinned so the divergence is a stated limitation rather than a
+        # surprise; when #47562 lands this assertion is what says so.
+        assert content == text
+        assert content != streamed
 
 
 class TestArgumentsStreamIncrementally:
