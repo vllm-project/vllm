@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 
+import argparse
 import json
 import os
 
@@ -43,6 +44,9 @@ def parser_with_config():
     parser.add_argument("--port", type=int)
     parser.add_argument("--tensor-parallel-size", type=int)
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--nullable-toggle", action=argparse.BooleanOptionalAction, default=None
+    )
     return parser
 
 
@@ -124,6 +128,28 @@ def test_config_args(parser_with_config, cli_config_file):
     )
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code
+
+
+def test_config_false_preserves_boolean_optional_value(parser_with_config, tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("nullable_toggle: false\n")
+
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", "--config", str(config_file)]
+    )
+
+    assert args.nullable_toggle is False
+
+
+def test_config_false_omits_store_true_flag(parser_with_config, tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("trust-remote-code: false\n")
+
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", "--config", str(config_file)]
+    )
+
+    assert args.trust_remote_code is False
 
 
 def test_config_file(parser_with_config):
