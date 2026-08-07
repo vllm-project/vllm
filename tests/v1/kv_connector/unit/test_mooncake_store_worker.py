@@ -2184,6 +2184,7 @@ def _refresh_group_tp_replication_factors(
     worker._group_tp_replication_factors = (
         worker._compute_group_tp_replication_factors()
     )
+    worker._group_put_steps = worker._compute_group_put_steps()
     worker._init_lookup_key_prefixes()
 
 
@@ -2266,9 +2267,9 @@ def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
 
     assert worker._lookup_key_prefixes[0] == (
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
-        "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0",
-        "test-model@tp_rank:2@pcp0@dcp2@pp_rank:0@group:0",
-        "test-model@tp_rank:3@pcp0@dcp3@pp_rank:0@group:0",
+        "test-model@tp_rank:0@pcp0@dcp1@pp_rank:0@group:0",
+        "test-model@tp_rank:0@pcp0@dcp2@pp_rank:0@group:0",
+        "test-model@tp_rank:0@pcp0@dcp3@pp_rank:0@group:0",
     )
 
 
@@ -2471,10 +2472,85 @@ def test_lookup_requires_all_dcp_rank_namespaces():
     assert worker.lookup(16, [b"a0"]) == 0
     assert worker.store.batch_is_exist.call_args.args[0] == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
-        "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
-        "test-model@tp_rank:2@pcp0@dcp2@pp_rank:0@group:0@6130",
-        "test-model@tp_rank:3@pcp0@dcp3@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp1@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp2@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp3@pp_rank:0@group:0@6130",
     ]
+
+
+def test_dcp_put_step_decouples_factor_from_namespace():
+    """Under DCP, put_step = factor // dcp_size (not tp_size // dcp_size).
+
+    MLA: factor=tp_size → put_step=tp_size//dcp_size (chunks distributed
+    within segment).  Mamba: factor=1 → put_step=1 (each rank independent).
+    GQA: factor=tp_size//num_kv_head → put_step=factor//dcp_size.
+    """
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+        MLAAttentionSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 4
+    worker.dcp_size = 2
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
+    gqa = FullAttentionSpec(block_size=16, num_kv_heads=4, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16, shapes=((1, 1),), dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["mla"], mla),
+        KVCacheGroupSpec(["gqa"], gqa),
+        KVCacheGroupSpec(["mamba"], mamba),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", g, 0, 0, 0, group_id=g), block_size=16
+        )
+        for g in range(3)
+    ]
+    _refresh_group_tp_replication_factors(worker)
+
+    assert worker._group_tp_replication_factors == (8, 2, 1)
+    assert worker._group_put_steps == (4, 1, 1)
+
+
+def test_dcp_namespace_shares_within_segment():
+    """Under DCP+MLA, all same-segment ranks share one namespace (tp_rank:0).
+    The dcp_rank field distinguishes segments."""
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        MLAAttentionSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 1
+    worker.dcp_size = 2
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
+    worker._kv_cache_groups = [KVCacheGroupSpec(["mla"], mla)]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+        )
+    ]
+    _refresh_group_tp_replication_factors(worker)
+
+    assert worker._lookup_key_prefixes[0] == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
+        "test-model@tp_rank:0@pcp0@dcp1@pp_rank:0@group:0",
+    )
+
+
+def test_pressure_codes_include_transfer_fail():
+    """-800 (TRANSFER_FAIL) triggers pressure skipping alongside -200."""
+    assert worker.MOONCAKE_TRANSFER_FAIL == -800
+    assert worker.MOONCAKE_TRANSFER_FAIL in worker._PRESSURE_CODES
+    assert worker.MOONCAKE_NO_AVAILABLE_HANDLE in worker._PRESSURE_CODES
 
 
 def test_lookup_partial_prefix_returns_first_hit_length():

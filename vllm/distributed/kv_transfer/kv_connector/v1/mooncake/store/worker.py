@@ -82,6 +82,10 @@ DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
+MOONCAKE_TRANSFER_FAIL = -800
+_PRESSURE_CODES = frozenset(
+    (MOONCAKE_NO_AVAILABLE_HANDLE, MOONCAKE_TRANSFER_FAIL)
+)
 _T = TypeVar("_T")
 
 
@@ -477,6 +481,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         replicate_config: Any = None,
         enable_group_semantics: bool = False,
         supports_group_ids: bool = False,
+        dcp_size: int = 1,
         record_operation: Callable[..., None] | None = None,
     ):
         super().__init__(
@@ -490,6 +495,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         )
         # Only ranks with identical group bytes may stripe PUTs (e.g., MLA).
         self.group_put_steps = group_put_steps
+        self.dcp_size = dcp_size
         self.coord = coord
         self.kv_role = kv_role
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
@@ -595,7 +601,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[g_idx]
-            put_step_rank = (self.tp_rank + g_idx) % put_step
+            if self.dcp_size > 1 and put_step > 1:
+                put_step_rank = self.tp_rank // self.dcp_size
+            else:
+                put_step_rank = (self.tp_rank + g_idx) % put_step
             # Always include the boundary block: its sub-hash key is written
             # only here, even if normal saves already advanced past it.
             last_block = cdiv(boundary, db.block_size) - 1
@@ -712,7 +721,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 len(keys),
                 failed_codes,
             )
-            if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
+            if _PRESSURE_CODES & set(failed_codes):
                 self._mark_request_skipped_for_pressure(req_meta.req_id)
             return False
 
@@ -777,7 +786,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             for g_idx, db in enumerate(self.token_databases):
                 # Rotate the stride phase per group to balance load across ranks.
                 put_step = self.group_put_steps[g_idx]
-                put_step_rank = (self.tp_rank + g_idx) % put_step
+                if self.dcp_size > 1 and put_step > 1:
+                    put_step_rank = self.tp_rank // self.dcp_size
+                else:
+                    put_step_rank = (self.tp_rank + g_idx) % put_step
                 for start, end, block_hash in db.process_tokens(
                     token_len,
                     req_meta.block_hashes,
@@ -939,7 +951,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         keys[0] if keys else "N/A",
                     )
                     if (
-                        MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
+                        _PRESSURE_CODES & set(failed_codes)
                         and not self._mark_request_skipped_for_pressure(req_id)
                     ):
                         logger.warning(
@@ -1393,6 +1405,9 @@ class MooncakeStoreWorker:
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
         )
+        self._group_put_steps: tuple[int, ...] = (
+            self._compute_group_put_steps()
+        )
         self.token_dbs = [
             ChunkedTokenDatabase(
                 dataclasses.replace(
@@ -1408,8 +1423,6 @@ class MooncakeStoreWorker:
         self._init_lookup_key_prefixes()
 
     def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
-        if self.dcp_size > 1:
-            return 1
         inner_specs = (
             tuple(spec.kv_cache_specs.values())
             if isinstance(spec, UniformTypeKVCacheSpecs)
@@ -1429,22 +1442,42 @@ class MooncakeStoreWorker:
     def _compute_group_tp_replication_factors(self) -> tuple[int, ...]:
         """Return the number of byte-identical TP replicas per cache group.
 
-        DCP and Mamba use 1; MLA uses ``tp_size``; GQA uses
-        ``tp_size // num_kv_head``.
+        MLA uses ``tp_size``; GQA uses ``tp_size // num_kv_head``;
+        Mamba uses 1.  Under DCP the ``dcp_rank`` key field distinguishes
+        segments, so MLA ranks within the same segment still share one
+        namespace.
         """
         return tuple(
             self._spec_tp_replication_factor(group.kv_cache_spec)
             for group in self._kv_cache_groups
         )
 
+    def _spec_put_step(self, spec: KVCacheSpec) -> int:
+        """Chunk-distribution stride for the save thread.
+
+        Under DCP, ranks from different segments hold disjoint token ranges,
+        so ``put_step`` must be ``factor // dcp_size`` to distribute chunks
+        only within a segment.  For Mamba (factor 1) put_step stays 1.
+        """
+        factor = self._spec_tp_replication_factor(spec)
+        if self.dcp_size > 1 and factor > 1:
+            return factor // self.dcp_size
+        return factor
+
+    def _compute_group_put_steps(self) -> tuple[int, ...]:
+        return tuple(
+            self._spec_put_step(group.kv_cache_spec)
+            for group in self._kv_cache_groups
+        )
+
     def _init_lookup_key_prefixes(self) -> None:
         def rank_namespaces(factor: int) -> tuple[tuple[int, int, int, int], ...]:
             if self.dcp_size > 1:
-                # DCP is a TP subdivision: dcp_rank == tp_rank % dcp_size.
                 return tuple(
-                    (tp_rank, pcp_rank, tp_rank % self.dcp_size, pp_rank)
+                    (shard_rank, pcp_rank, dcp_rank, pp_rank)
                     for pcp_rank in range(self.pcp_size)
-                    for tp_rank in range(self.tp_size)
+                    for shard_rank in range(self.tp_size // factor)
+                    for dcp_rank in range(self.dcp_size)
                     for pp_rank in range(self.pp_size)
                 )
             return tuple(
@@ -1563,13 +1596,14 @@ class MooncakeStoreWorker:
                 self.token_dbs,
                 self.block_size,
                 self.tp_rank,
-                self._group_tp_replication_factors,
+                self._group_put_steps,
                 self.kv_role,
                 ready_event_sending,
                 self.enable_kv_events,
                 self.store_replicate_config,
                 enable_group_semantics=self.enable_group_semantics,
                 supports_group_ids=self._supports_group_ids,
+                dcp_size=self.dcp_size,
                 record_operation=self._record_kv_connector_operation,
             )
             self.kv_send_thread.start()
