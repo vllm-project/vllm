@@ -1928,6 +1928,133 @@ class TestLlama4PythonMarkers:
         assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
         assert "<|python_" not in (result.content or "")
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<|python_start|>{}<|python_end|>".format('{"items": [1, 2]}'),
+            "<|python_tag|>print('hello')",
+        ],
+        ids=["wrapped-prose-json", "ipython-content"],
+    )
+    def test_markers_are_dropped_on_the_serving_path_too(
+        self, tokenizer, mock_request, text
+    ):
+        """The parser cleaning them is not enough on its own.
+
+        ``LlamaJsonParser.extract_tool_calls`` sits below the delegating
+        layer, and that layer used to discard the parser's cleaned content
+        when no call was promoted -- so a test that calls the parser
+        directly passes while the client still receives the markers.
+        Drive the serving path instead.
+        """
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        _, content = parser_cls(tokenizer)._extract_tool_calls(
+            text, mock_request, enable_auto_tools=True
+        )
+
+        assert "<|python_" not in (content or "")
+
+
+class TestServingPathMarkerParity:
+    """``<|python_tag|>`` must not survive on the non-streaming route either.
+
+    ``ParserEngine.adjust_request`` sets ``skip_special_tokens=False``, so the
+    tag reaches the parser verbatim.  Streaming consumes it via the PYTHON_TAG
+    terminal, but when no call is promoted the serving layer's non-streaming
+    route returned the *raw* text, leaking the 14-character tag to the client
+    -- a divergence this migration introduces and released vLLM does not have.
+    Fixed by vllm-project/vllm#47562 in ``_extract_tool_calls``.
+
+    Both routes are driven through ``DelegatingParser`` (``parse`` /
+    ``parse_delta``), not through ``LlamaJsonParser.extract_tool_calls``: the
+    leak lives in the delegating layer, so the parser's own extraction never
+    sees it.
+    """
+
+    BODIES = {
+        # max_tokens cut the envelope mid-key: no call is promoted, so the
+        # whole raw string used to come back as content.
+        "truncated-call": (
+            PYTHON_TAG + '{"name": "get_weather", "para',
+            '{"name": "get_weather", "para',
+        ),
+        # JSON-shaped output that is not a call at all.
+        "prose-json": (
+            PYTHON_TAG + '{"items": [{"id": 1, "name": "x"}]}',
+            '{"items": [{"id": 1, "name": "x"}]}',
+        ),
+    }
+
+    @pytest.fixture
+    def make_parser(self):
+        cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        assert cls is not None
+        # <|python_tag|> is in the vocab but NOT in all_special_tokens, which
+        # is how Llama-3.1 reports it.  Marking it special would let the
+        # engine's drop machinery consume it for free, making these vacuous.
+        return lambda: cls(
+            make_mock_tokenizer(_LLAMA_VOCAB, special_tokens=["<|eot_id|>"])
+        )
+
+    @staticmethod
+    def _request():
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                ChatCompletionToolsParam(
+                    type="function",
+                    function={
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                )
+            ],
+            tool_choice="auto",
+        )
+
+    @staticmethod
+    def _stream(parser, request, text: str, chunk_size: int) -> str:
+        tokens = _tokenize(text)
+        parts: list[str] = []
+        for start in range(0, len(tokens), chunk_size):
+            batch = tokens[start : start + chunk_size]
+            delta = parser.parse_delta(
+                "".join(t for _, t in batch),
+                [tid for tid, _ in batch],
+                request,
+                prompt_token_ids=[1] if start == 0 else None,
+                finished=start + chunk_size >= len(tokens),
+            )
+            assert not (delta.tool_calls if delta else None)
+            if delta and delta.content:
+                parts.append(delta.content)
+        return "".join(parts)
+
+    @pytest.mark.parametrize("chunk_size", [1, 10_000])
+    @pytest.mark.parametrize("case", list(BODIES))
+    def test_tag_dropped_and_routes_agree(self, make_parser, case, chunk_size):
+        text, expected = self.BODIES[case]
+
+        _, content, tool_calls = make_parser().parse(
+            text, self._request(), enable_auto_tools=True
+        )
+        streamed = self._stream(make_parser(), self._request(), text, chunk_size)
+
+        assert not tool_calls
+        assert content == streamed == expected
+
 
 class TestArgumentsStreamIncrementally:
     """Arguments must reach the client as they are produced, not at the end.
