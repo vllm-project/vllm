@@ -12,6 +12,7 @@ state machine::
 
 from __future__ import annotations
 
+import ast
 import functools
 import json
 from collections.abc import Sequence
@@ -41,6 +42,9 @@ TOOL_CALL_START = "<|tool_call>"
 TOOL_CALL_END = "<tool_call|>"
 STRING_DELIM = '<|"|>'
 _DELIM_LEN = len(STRING_DELIM)
+# Gemma4 usually writes ``key:value``, but a minority of emissions use
+# ``key=value`` (python-call style). Both must key the same argument.
+_KEY_SEPARATORS = (":", "=")
 
 logger = init_logger(__name__)
 
@@ -63,6 +67,36 @@ def _strip_partial_delim(value: str) -> str:
         if value.endswith(suffix):
             return value[: -len(suffix)]
     return value
+
+
+def _decode_literal(raw: str, quote: str) -> str:
+    """Decode a complete quoted literal, preserving escape sequences.
+
+    JSON decoding is tried first for double-quoted tokens; ``literal_eval``
+    covers the python-source spelling (and JSON escapes JSON itself rejects).
+    Falls back to dropping the outer quotes if neither decoder accepts it.
+    """
+    decoders = (json.loads, ast.literal_eval) if quote == '"' else (ast.literal_eval,)
+    for decode in decoders:
+        try:
+            decoded = decode(raw)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            continue
+        if isinstance(decoded, str):
+            return decoded
+    return raw[1:-1]
+
+
+def _skip_fallback_literal(src: str, i: int) -> int | None:
+    """Return the index just past a complete quoted literal at ``src[i]``.
+
+    Used by the nested-container scans so that a ``}`` or ``]`` *inside* a
+    fallback literal does not close the container early. ``None`` means no
+    complete literal starts here, and the caller should treat the character
+    as structural.
+    """
+    literal = _read_fallback_string(src, i)
+    return None if literal is None else literal[1]
 
 
 def _read_fallback_string(src: str, i: int) -> tuple[str, int] | None:
@@ -94,31 +128,9 @@ def _read_fallback_string(src: str, i: int) -> tuple[str, int] | None:
             j += 2
             continue
         if c == quote:
-            raw = src[i : j + 1]
-            if quote == '"':
-                try:
-                    decoded = json.loads(raw)
-                except ValueError:
-                    decoded = raw[1:-1]
-                if not isinstance(decoded, str):
-                    decoded = raw[1:-1]
-            else:
-                decoded = raw[1:-1].replace("\\'", "'").replace('\\"', '"')
-            return decoded, j + 1
+            return _decode_literal(src[i : j + 1], quote), j + 1
         j += 1
     return None
-
-
-def _unquote_fallback(raw: str) -> str:
-    """Strip one matching pair of JSON/Python quotes from an already-cut token.
-
-    Used for object keys, which are cut at ``:`` before this runs. Values go
-    through :func:`_read_fallback_string` instead.
-    """
-    literal = _read_fallback_string(raw, 0) if raw else None
-    if literal is not None and literal[1] == len(raw):
-        return literal[0]
-    return raw
 
 
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
@@ -153,17 +165,32 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         if i >= n:
             break
 
-        key_start = i
-        while i < n and args_str[i] != ":":
-            i += 1
-        if i >= n:
-            break
-        key = args_str[key_start:i].strip()
-        if key.startswith(STRING_DELIM) and key.endswith(STRING_DELIM):
-            key = key[_DELIM_LEN:-_DELIM_LEN]
+        # Resolve a bounded key before looking for the separator, so that a
+        # separator *inside* the key cannot split it. Delimited keys exist
+        # precisely to carry arbitrary characters.
+        key = None
+        if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+            key_end = args_str.find(STRING_DELIM, i + _DELIM_LEN)
+            if key_end == -1:
+                break
+            key = args_str[i + _DELIM_LEN : key_end]
+            i = key_end + _DELIM_LEN
         else:
-            # Objects written in JSON syntax carry quoted keys.
-            key = _unquote_fallback(key)
+            key_literal = _read_fallback_string(args_str, i)
+            if key_literal is not None:
+                key, i = key_literal
+        if key is not None:
+            while i < n and args_str[i] in (" ", "\n", "\t"):
+                i += 1
+            if i >= n or args_str[i] not in _KEY_SEPARATORS:
+                break
+        else:
+            key_start = i
+            while i < n and args_str[i] not in _KEY_SEPARATORS:
+                i += 1
+            if i >= n:
+                break
+            key = args_str[key_start:i].strip()
         i += 1
 
         if i >= n:
@@ -203,6 +230,11 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                     next_delim = args_str.find(STRING_DELIM, i)
                     i = n if next_delim == -1 else next_delim + _DELIM_LEN
                     continue
+                if args_str[i] in ('"', "'"):
+                    after = _skip_fallback_literal(args_str, i)
+                    if after is not None:
+                        i = after
+                        continue
                 if args_str[i] == "{":
                     depth += 1
                 elif args_str[i] == "}":
@@ -225,6 +257,11 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                     next_delim = args_str.find(STRING_DELIM, i)
                     i = n if next_delim == -1 else next_delim + _DELIM_LEN
                     continue
+                if args_str[i] in ('"', "'"):
+                    after = _skip_fallback_literal(args_str, i)
+                    if after is not None:
+                        i = after
+                        continue
                 if args_str[i] == "[":
                     depth += 1
                 elif args_str[i] == "]":
@@ -295,6 +332,11 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                     nd = arr_str.find(STRING_DELIM, i)
                     i = nd + _DELIM_LEN if nd != -1 else n
                     continue
+                if arr_str[i] in ('"', "'"):
+                    after = _skip_fallback_literal(arr_str, i)
+                    if after is not None:
+                        i = after
+                        continue
                 if arr_str[i] == "{":
                     depth += 1
                 elif arr_str[i] == "}":
@@ -315,6 +357,11 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                     nd = arr_str.find(STRING_DELIM, i)
                     i = nd + _DELIM_LEN if nd != -1 else n
                     continue
+                if arr_str[i] in ('"', "'"):
+                    after = _skip_fallback_literal(arr_str, i)
+                    if after is not None:
+                        i = after
+                        continue
                 if arr_str[i] == "[":
                     depth += 1
                 elif arr_str[i] == "]":
@@ -444,7 +491,7 @@ def gemma4_config() -> ParserEngineConfig:
         },
         arg_converter=_gemma4_arg_converter,
         tool_args_json=False,
-        arg_structural_chars=frozenset(",:{}[]<"),
+        arg_structural_chars=frozenset(",:={}[]<"),
         preserve_tokens=frozenset({STRING_DELIM}),
     )
 

@@ -209,6 +209,47 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('name:"ds_152a4bfd"')
         assert result == {"name": "ds_152a4bfd"}
 
+    def test_equals_key_separator(self):
+        """A minority of emissions use ``key=value`` (issue #51284).
+
+        Previously the pair was swallowed into the next key, or dropped with
+        everything after it when no later ``:`` existed.
+        """
+        assert _parse_gemma4_args('data_refs=["ds_a"]') == {"data_refs": ["ds_a"]}
+
+    def test_equals_and_colon_mixed(self):
+        result = _parse_gemma4_args(
+            'code:<|"|>x<|"|>,data_refs=["ds_a"],note:<|"|>hi<|"|>'
+        )
+        assert result == {"code": "x", "data_refs": ["ds_a"], "note": "hi"}
+
+    def test_equals_separator_does_not_swallow_next_key(self):
+        result = _parse_gemma4_args('code:<|"|>x<|"|>,data_refs=["ds_a"]')
+        assert result == {"code": "x", "data_refs": ["ds_a"]}
+
+    def test_delimited_key_containing_separator(self):
+        """Delimited keys carry arbitrary characters, including separators.
+
+        Guards the `=` separator support against cutting inside a
+        ``STRING_DELIM``-wrapped key.
+        """
+        assert _parse_gemma4_args('<|"|>a=b<|"|>:v') == {"a=b": "v"}
+        assert _parse_gemma4_args('<|"|>a:b<|"|>:v') == {"a:b": "v"}
+
+    def test_quoted_key_containing_separator(self):
+        """A separator inside a quoted key must not split it."""
+        assert _parse_gemma4_args('"a:b":1') == {"a:b": "1"}
+        assert _parse_gemma4_args('"a=b":1') == {"a=b": "1"}
+
+    def test_closing_brace_inside_fallback_literal(self):
+        """A ``}`` inside a quoted literal must not close the object early."""
+        result = _parse_gemma4_args('opts:{"pattern":"a}b"}')
+        assert result == {"opts": {"pattern": "a}b"}}
+
+    def test_closing_bracket_inside_fallback_literal(self):
+        """A ``]`` inside a quoted literal must not close the array early."""
+        assert _parse_gemma4_args('xs:["a]b","c"]') == {"xs": ["a]b", "c"]}
+
     def test_json_object_with_nested_array(self):
         result = _parse_gemma4_args('opts:{"tags": ["a","b"], "n": 3}')
         assert result == {"opts": {"tags": ["a", "b"], "n": "3"}}
@@ -317,6 +358,11 @@ class TestParseGemma4Array:
     def test_quoted_element_keeps_string_type(self):
         """A quoted numeric stays a string; only bare tokens are coercible."""
         assert _parse_gemma4_array('"42"') == ["42"]
+
+    def test_python_escape_sequences_decoded(self):
+        """Python-spelled literals keep normal string semantics."""
+        assert _parse_gemma4_array(r"'a\nb'") == ["a\nb"]
+        assert _parse_gemma4_array(r'"a\u00e9b"') == ["a\u00e9b"]
 
     def test_mixed_delimited_and_json_elements(self):
         """The model can switch spellings inside one array."""
