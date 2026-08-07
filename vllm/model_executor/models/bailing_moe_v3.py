@@ -11,6 +11,7 @@ vLLM's parallel linear layers, MLA kernel, KDA kernel and fused MoE loader.
 import copy
 from collections.abc import Callable, Iterable
 from math import lcm
+from typing import TypeGuard
 
 import torch
 import torch.nn as nn
@@ -56,6 +57,7 @@ from vllm.model_executor.layers.mla import (
     MultiHeadLatentAttentionWrapper,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -81,7 +83,13 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers, maybe_prefix
+from .utils import (
+    PPMissingLayer,
+    WeightsMapper,
+    is_pp_missing_parameter,
+    make_layers,
+    maybe_prefix,
+)
 
 
 def bailing_v3_kda_attention(
@@ -195,55 +203,35 @@ def _load_a_log(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
         sharded_weight_loader(2)(param, loaded_weight)
 
 
-def _is_serialized_block_fp8(
+def _is_block_fp8_config(
     quant_config: QuantizationConfig | None,
-) -> bool:
-    return bool(
-        quant_config is not None
-        and quant_config.get_name() == "fp8"
-        and getattr(quant_config, "is_checkpoint_fp8_serialized", False)
-        and getattr(quant_config, "weight_block_size", None)
+) -> TypeGuard[Fp8Config]:
+    return (
+        isinstance(quant_config, Fp8Config)
+        and quant_config.weight_block_size is not None
     )
+
+
+def _configure_ling_fp8_quant_config(
+    quant_config: QuantizationConfig | None,
+) -> None:
+    if _is_block_fp8_config(quant_config):
+        quant_config.ignored_layers_match_mode = "suffix"
 
 
 def _is_fp8_module_excluded(
     quant_config: QuantizationConfig | None,
     prefix: str,
 ) -> bool:
-    """Match Ling's abbreviated FP8 exclusion names against vLLM prefixes."""
-    if not _is_serialized_block_fp8(quant_config):
+    """Match Ling's abbreviated FP8 exclusions against mapped vLLM prefixes."""
+    if not _is_block_fp8_config(quant_config):
         return False
 
-    ignored_layers = getattr(quant_config, "ignored_layers", None) or []
-    checkpoint_prefix = prefix.replace(".self_attn.", ".attention.")
-    return any(
-        checkpoint_prefix == ignored or checkpoint_prefix.endswith(f".{ignored}")
-        for ignored in ignored_layers
-    )
-
-
-def _get_linear_quant_config(
-    quant_config: QuantizationConfig | None,
-    prefix: str,
-) -> QuantizationConfig | None:
-    if _is_fp8_module_excluded(quant_config, prefix):
-        return None
-    return quant_config
-
-
-def _uses_serialized_block_fp8_linear(
-    quant_config: QuantizationConfig | None,
-    prefix: str,
-) -> bool:
-    if not _is_serialized_block_fp8(quant_config):
-        return False
-    assert quant_config is not None
-    if _is_fp8_module_excluded(quant_config, prefix):
-        return False
-    return not is_layer_skipped(
+    return is_layer_skipped(
         prefix=prefix,
-        ignored_layers=getattr(quant_config, "ignored_layers", None) or [],
-        fused_mapping=getattr(quant_config, "packed_modules_mapping", {}),
+        ignored_layers=quant_config.ignored_layers,
+        fused_mapping=quant_config.packed_modules_mapping,
+        match_mode=quant_config.ignored_layers_match_mode,
     )
 
 
@@ -253,16 +241,15 @@ def _get_block_fp8_mlp_padded_intermediate_size(
     prefix: str,
 ) -> int:
     """Pad a block-FP8 MLP so each TP shard contains whole quant blocks."""
-    if not _is_serialized_block_fp8(quant_config):
+    if not _is_block_fp8_config(quant_config):
         return intermediate_size
-    assert quant_config is not None
-    block_size = getattr(quant_config, "weight_block_size", None)
+    block_size = quant_config.weight_block_size
     assert block_size is not None
 
     alignments: list[int] = []
-    if _uses_serialized_block_fp8_linear(quant_config, f"{prefix}.gate_up_proj"):
+    if not _is_fp8_module_excluded(quant_config, f"{prefix}.gate_up_proj"):
         alignments.append(int(block_size[0]))
-    if _uses_serialized_block_fp8_linear(quant_config, f"{prefix}.down_proj"):
+    if not _is_fp8_module_excluded(quant_config, f"{prefix}.down_proj"):
         alignments.append(int(block_size[1]))
     if not alignments:
         return intermediate_size
@@ -381,22 +368,20 @@ class BailingMoeV3MLP(nn.Module):
         swiglu_limit: float | None = None,
     ) -> None:
         super().__init__()
-        gate_up_prefix = f"{prefix}.gate_up_proj"
         self.gate_up_proj = MergedColumnParallelLinear(
             config.hidden_size,
             [intermediate_size] * 2,
             bias=config.use_bias,
-            quant_config=_get_linear_quant_config(quant_config, gate_up_prefix),
-            prefix=gate_up_prefix,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
-        down_prefix = f"{prefix}.down_proj"
         self.down_proj = RowParallelLinear(
             intermediate_size,
             config.hidden_size,
             bias=config.use_bias,
-            quant_config=_get_linear_quant_config(quant_config, down_prefix),
+            quant_config=quant_config,
             reduce_results=reduce_results,
-            prefix=down_prefix,
+            prefix=f"{prefix}.down_proj",
         )
         self.act_fn = (
             SwigluStepAndMul(limit=swiglu_limit) if swiglu_limit else SiluAndMul()
@@ -438,55 +423,50 @@ class BailingMoeV3MLAAttention(nn.Module):
         self.q_proj: ColumnParallelLinear | None
         self.kv_a_proj_with_mqa: ReplicatedLinear | None
         if self.q_lora_rank is None:
-            q_prefix = f"{prefix}.q_proj"
             self.q_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
-                quant_config=_get_linear_quant_config(quant_config, q_prefix),
-                prefix=q_prefix,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
             )
             self.fused_qkv_a_proj = None
             self.q_a_layernorm = None
             self.q_b_proj = None
-            kv_a_prefix = f"{prefix}.kv_a_proj_with_mqa"
             self.kv_a_proj_with_mqa = ReplicatedLinear(
                 self.hidden_size,
                 self.kv_lora_rank + self.qk_rope_head_dim,
                 bias=False,
-                quant_config=_get_linear_quant_config(quant_config, kv_a_prefix),
-                prefix=kv_a_prefix,
+                quant_config=quant_config,
+                prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
         else:
-            fused_qkv_a_prefix = f"{prefix}.fused_qkv_a_proj"
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 bias=False,
-                quant_config=_get_linear_quant_config(quant_config, fused_qkv_a_prefix),
-                prefix=fused_qkv_a_prefix,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fused_qkv_a_proj",
                 disable_tp=True,
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            q_b_prefix = f"{prefix}.q_b_proj"
             self.q_b_proj = ColumnParallelLinear(
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
-                quant_config=_get_linear_quant_config(quant_config, q_b_prefix),
-                prefix=q_b_prefix,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_b_proj",
             )
             self.q_proj = None
             self.kv_a_proj_with_mqa = None
 
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
-        kv_b_prefix = f"{prefix}.kv_b_proj"
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
-            quant_config=_get_linear_quant_config(quant_config, kv_b_prefix),
-            prefix=kv_b_prefix,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_b_proj",
         )
         self.gated_attention_proj_granularity_type = getattr(
             config, "gated_attention_proj_granularity_type", None
@@ -497,25 +477,23 @@ class BailingMoeV3MLAAttention(nn.Module):
             g_out = self.num_heads * self.v_head_dim
         else:
             g_out = 0
-        g_prefix = f"{prefix}.g_proj"
         self.g_proj = (
             ColumnParallelLinear(
                 self.hidden_size,
                 g_out,
                 bias=False,
-                quant_config=_get_linear_quant_config(quant_config, g_prefix),
-                prefix=g_prefix,
+                quant_config=quant_config,
+                prefix=f"{prefix}.g_proj",
             )
             if g_out > 0
             else None
         )
-        dense_prefix = f"{prefix}.dense"
         self.dense = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=False,
-            quant_config=_get_linear_quant_config(quant_config, dense_prefix),
-            prefix=dense_prefix,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
 
         self.rotary_emb = get_rope(
@@ -628,42 +606,41 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         projection_size = self.head_dim * self.num_heads
         self.projection_size_per_partition = projection_size // self.tp_size
         self.separate_b_proj = _is_fp8_module_excluded(quant_config, f"{prefix}.b_proj")
+        self.qkv_proj: MergedColumnParallelLinear | None
+        self.b_proj: ColumnParallelLinear | None
+        self.qkvb_proj: MergedColumnParallelLinear | None
         if self.separate_b_proj:
-            qkv_prefix = f"{prefix}.qkv_proj"
             self.qkv_proj = MergedColumnParallelLinear(
                 self.hidden_size,
                 [projection_size, projection_size, projection_size],
                 bias=False,
-                quant_config=_get_linear_quant_config(quant_config, qkv_prefix),
-                prefix=qkv_prefix,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
             )
-            b_prefix = f"{prefix}.b_proj"
             self.b_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_heads,
                 bias=False,
-                quant_config=_get_linear_quant_config(quant_config, b_prefix),
-                prefix=b_prefix,
+                quant_config=quant_config,
+                prefix=f"{prefix}.b_proj",
             )
             self.qkvb_proj = None
         else:
-            qkvb_prefix = f"{prefix}.qkvb_proj"
             self.qkvb_proj = MergedColumnParallelLinear(
                 self.hidden_size,
                 [projection_size, projection_size, projection_size, self.num_heads],
                 bias=False,
                 quant_config=quant_config,
-                prefix=qkvb_prefix,
+                prefix=f"{prefix}.qkvb_proj",
             )
             self.qkv_proj = None
             self.b_proj = None
-        f_prefix = f"{prefix}.f_proj"
         self.f_proj = ColumnParallelLinear(
             self.hidden_size,
             projection_size,
             bias=False,
-            quant_config=_get_linear_quant_config(quant_config, f_prefix),
-            prefix=f_prefix,
+            quant_config=quant_config,
+            prefix=f"{prefix}.f_proj",
         )
         self.dt_bias = nn.Parameter(
             torch.empty(projection_size // self.tp_size, dtype=torch.float32)
@@ -700,24 +677,22 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         )
         set_weight_attrs(self.A_log, {"weight_loader": _load_a_log})
 
-        g_prefix = f"{prefix}.g_proj"
         self.g_proj = ColumnParallelLinear(
             self.hidden_size,
             projection_size,
             bias=False,
-            quant_config=_get_linear_quant_config(quant_config, g_prefix),
-            prefix=g_prefix,
+            quant_config=quant_config,
+            prefix=f"{prefix}.g_proj",
         )
         self.o_norm = FusedRMSNormGated(
             self.head_dim, eps=config.rms_norm_eps, activation="sigmoid"
         )
-        o_prefix = f"{prefix}.o_proj"
         self.o_proj = RowParallelLinear(
             projection_size,
             self.hidden_size,
             bias=False,
-            quant_config=_get_linear_quant_config(quant_config, o_prefix),
-            prefix=o_prefix,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -1138,16 +1113,14 @@ class BailingMoeV3MoE(nn.Module):
         shared_intermediate = (
             config.moe_shared_expert_intermediate_size * config.num_shared_experts
         )
-        shared_prefix = f"{prefix}.shared_experts"
-        padded_shared_intermediate = _get_block_fp8_mlp_padded_intermediate_size(
-            quant_config, shared_intermediate, shared_prefix
-        )
         self.shared_experts = BailingMoeV3MLP(
-            intermediate_size=padded_shared_intermediate,
+            intermediate_size=_get_block_fp8_mlp_padded_intermediate_size(
+                quant_config, shared_intermediate, f"{prefix}.shared_experts"
+            ),
             config=config,
             quant_config=quant_config,
             reduce_results=False,
-            prefix=shared_prefix,
+            prefix=f"{prefix}.shared_experts",
             swiglu_limit=self.share_expert_swiglu_limit,
         )
         self.experts = FusedMoEFactory(
@@ -1366,6 +1339,8 @@ class BailingMoeV3Model(nn.Module):
 
 
 class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".attention.": ".self_attn."})
+
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1376,6 +1351,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        _configure_ling_fp8_quant_config(quant_config)
         self.config = config
         self.quant_config = quant_config
         self.model = BailingMoeV3Model(
@@ -1444,6 +1420,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         return self.model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = self.hf_to_vllm_mapper.apply(weights)
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         stacked_mappings = [
@@ -1484,7 +1461,6 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 layer_idx = int(name.split("model.layers.")[1].split(".")[0])
                 if layer_idx >= self.config.num_hidden_layers:
                     return None
-            name = name.replace("attention.", "self_attn.")
             return maybe_remap_kv_scale_name(name, params_dict)
 
         for orig_name, weight in weights:

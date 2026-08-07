@@ -26,10 +26,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.bailing_moe_v3 import (
+    BailingMoeV3ForCausalLM,
     BailingMoeV3MLAAttention,
     BailingMoeV3MoE,
-    _get_linear_quant_config,
-    _is_serialized_block_fp8,
+    _configure_ling_fp8_quant_config,
     _maybe_pad_block_fp8_shared_expert_checkpoint_tensor,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
@@ -83,22 +83,14 @@ class BailingMoeV3MultiTokenPredictorLayer(nn.Module):
         self.layer_id = layer_id
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        eh_prefix = maybe_prefix(prefix, "eh_proj")
-        eh_quant_config = _get_linear_quant_config(vllm_config.quant_config, eh_prefix)
-        if _is_serialized_block_fp8(eh_quant_config):
-            self.eh_proj = ReplicatedLinear(
-                config.hidden_size * 2,
-                config.hidden_size,
-                bias=False,
-                quant_config=eh_quant_config,
-                prefix=eh_prefix,
-                return_bias=False,
-            )
-        else:
-            # Keep the BF16 module and weight-loading path unchanged.
-            self.eh_proj = nn.Linear(
-                config.hidden_size * 2, config.hidden_size, bias=False
-            )
+        self.eh_proj = ReplicatedLinear(
+            config.hidden_size * 2,
+            config.hidden_size,
+            bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "eh_proj"),
+            return_bias=False,
+        )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.self_attn = BailingMoeV3MLAAttention(
             config,
@@ -223,6 +215,8 @@ class BailingMoeV3MultiTokenPredictor(nn.Module):
 
 @support_torch_compile
 class BailingMoeV3MTPModel(nn.Module, SupportsPP):
+    hf_to_vllm_mapper = BailingMoeV3ForCausalLM.hf_to_vllm_mapper
+
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
@@ -237,6 +231,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
         super().__init__()
         self.config = _get_draft_hf_config(vllm_config)
         self.quant_config = vllm_config.quant_config
+        _configure_ling_fp8_quant_config(self.quant_config)
         self.model = BailingMoeV3MultiTokenPredictor(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -285,6 +280,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = self.hf_to_vllm_mapper.apply(weights)
         stacked_params_mapping = [
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
@@ -340,7 +336,6 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
             return None
 
         def normalize_name(name: str) -> str:
-            name = name.replace(".attention.", ".self_attn.")
             return name.replace(
                 "mlp.gate.e_score_correction_bias",
                 "mlp.gate.expert_bias",

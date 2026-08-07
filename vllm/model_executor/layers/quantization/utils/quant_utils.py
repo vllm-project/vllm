@@ -5,7 +5,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple
 
 import numpy
 import torch
@@ -582,7 +582,7 @@ def is_layer_skipped(
     ignored_layers: list[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
     *,
-    skip_with_substr: bool = False,
+    match_mode: Literal["exact", "substring", "suffix"] = "exact",
 ) -> bool:
     def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
         return prefix in ignored_layers
@@ -591,7 +591,22 @@ def is_layer_skipped(
     def substr_match(prefix: str, ignored_layers: list[str]) -> bool:
         return any(layer in prefix for layer in ignored_layers)
 
-    match_func = substr_match if skip_with_substr else prefix_full_match
+    # Match abbreviated module paths at a component boundary. For example,
+    # ``b_proj`` matches ``model.layers.0.self_attn.b_proj`` but not
+    # ``model.layers.0.self_attn.q_b_proj``.
+    def suffix_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return any(
+            prefix == layer or prefix.endswith(f".{layer}") for layer in ignored_layers
+        )
+
+    if match_mode == "exact":
+        match_func = prefix_full_match
+    elif match_mode == "substring":
+        match_func = substr_match
+    elif match_mode == "suffix":
+        match_func = suffix_match
+    else:
+        raise ValueError(f"Unsupported layer skip match mode: {match_mode}")
 
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
@@ -627,14 +642,11 @@ def is_layer_skipped(
                     "are quantized. All shards of fused layers "
                     "to have the same precision."
                 )
-    elif "experts" in prefix and not skip_with_substr:
+    elif "experts" in prefix and match_mode == "exact":
         expert_ignore_layers = filter(
             lambda layer_name: "experts" in layer_name, ignored_layers
         )
-        return any(
-            prefix in layer_name if not skip_with_substr else layer_name in prefix
-            for layer_name in expert_ignore_layers
-        )
+        return any(prefix in layer_name for layer_name in expert_ignore_layers)
     else:
         is_skipped = match_func(prefix, ignored_layers)
 

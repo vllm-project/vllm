@@ -1,63 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import cast
-
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization import fp8 as fp8_quantization
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.models import bailing_moe_v3
+from vllm.model_executor.model_loader.utils import configure_quant_config
+from vllm.model_executor.models import bailing_moe_v3, bailing_moe_v3_mtp
 
 
-class _FakeQuantConfig:
-    def __init__(
-        self,
-        *,
-        name: str = "fp8",
-        serialized: bool = True,
-        block_size: list[int] | None = None,
-        ignored_layers: list[str] | None = None,
-    ) -> None:
-        self.name = name
-        self.is_checkpoint_fp8_serialized = serialized
-        self.weight_block_size = block_size
-        self.ignored_layers = ignored_layers or []
-        self.packed_modules_mapping: dict[str, list[str]] = {}
-
-    def get_name(self) -> str:
-        return self.name
+def _block_fp8_config(
+    ignored_layers: list[str] | None = None,
+) -> Fp8Config:
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+        ignored_layers=ignored_layers,
+    )
+    bailing_moe_v3._configure_ling_fp8_quant_config(quant_config)
+    return quant_config
 
 
-def _quant_config(**kwargs) -> QuantizationConfig:
-    return cast(QuantizationConfig, _FakeQuantConfig(**kwargs))
+class _StubLinear(LinearBase):
+    def __init__(self) -> None:
+        torch.nn.Module.__init__(self)
 
 
 @pytest.mark.parametrize(
-    ("prefix", "expected"),
+    "model_class",
     [
-        ("model.layers.5.self_attn.kv_b_proj", True),
-        ("model.layers.5.self_attn.g_proj", True),
-        ("model.layers.6.self_attn.g_proj", False),
-        ("model.layers.0.self_attn.b_proj", True),
-        ("model.layers.0.self_attn.q_proj", False),
+        bailing_moe_v3.BailingMoeV3ForCausalLM,
+        bailing_moe_v3_mtp.BailingMoeV3MTPModel,
     ],
 )
-def test_ling_block_fp8_exclusion_aliases(prefix: str, expected: bool):
-    quant_config = _quant_config(
-        block_size=[128, 128],
-        ignored_layers=[
-            "kv_b_proj",
-            "b_proj",
-            "5.attention.g_proj",
-        ],
+def test_ling_block_fp8_maps_checkpoint_exclusions(model_class):
+    assert (
+        model_class.hf_to_vllm_mapper._map_name(
+            "model.layers.5.attention.g_proj.weight"
+        )
+        == "model.layers.5.self_attn.g_proj.weight"
     )
 
-    assert bailing_moe_v3._is_fp8_module_excluded(quant_config, prefix) is expected
-
-
-def test_ling_block_fp8_uses_checkpoint_modules_to_not_convert():
     quant_config = Fp8Config.from_config(
         {
             "quant_method": "fp8",
@@ -66,52 +51,65 @@ def test_ling_block_fp8_uses_checkpoint_modules_to_not_convert():
             "modules_to_not_convert": ["b_proj", "5.attention.g_proj"],
         }
     )
+    configure_quant_config(quant_config, model_class)
 
-    assert bailing_moe_v3._is_fp8_module_excluded(
-        quant_config, "model.layers.0.self_attn.b_proj"
+    assert quant_config.ignored_layers == ["b_proj", "5.self_attn.g_proj"]
+    assert quant_config.ignored_layers_match_mode == "exact"
+
+    bailing_moe_v3._configure_ling_fp8_quant_config(quant_config)
+    assert quant_config.ignored_layers_match_mode == "suffix"
+
+
+def test_ling_block_fp8_dispatches_excluded_linear(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    quant_config = _block_fp8_config(ignored_layers=["b_proj"])
+
+    class _StubFp8LinearMethod:
+        pass
+
+    fp8_method = _StubFp8LinearMethod()
+    linear = _StubLinear()
+    # Keep this dispatch test independent of platform-specific FP8 kernels.
+    monkeypatch.setattr(
+        fp8_quantization,
+        "Fp8LinearMethod",
+        lambda _: fp8_method,
     )
-    assert bailing_moe_v3._is_fp8_module_excluded(
-        quant_config, "model.layers.5.self_attn.g_proj"
+    assert isinstance(
+        quant_config.get_quant_method(linear, "model.layers.0.self_attn.b_proj"),
+        UnquantizedLinearMethod,
     )
-
-
-def test_ling_fp8_exclusions_do_not_change_other_precision_paths():
-    quant_config = _quant_config(
-        name="some_other_quantization",
-        block_size=[128, 128],
-        ignored_layers=["kv_b_proj"],
-    )
-
     assert (
-        bailing_moe_v3._get_linear_quant_config(
-            quant_config, "model.layers.5.self_attn.kv_b_proj"
-        )
-        is quant_config
-    )
-    assert (
-        bailing_moe_v3._get_linear_quant_config(
-            None, "model.layers.5.self_attn.kv_b_proj"
-        )
-        is None
+        quant_config.get_quant_method(linear, "model.layers.0.self_attn.q_b_proj")
+        is fp8_method
     )
 
 
 @pytest.mark.parametrize(
-    ("serialized", "block_size"),
-    [(False, [128, 128]), (True, None)],
+    "quant_config",
+    [
+        pytest.param(None, id="bf16"),
+        pytest.param(Fp8Config(), id="online-fp8"),
+        pytest.param(
+            Fp8Config(is_checkpoint_fp8_serialized=True),
+            id="serialized-per-tensor-fp8",
+        ),
+    ],
 )
-def test_ling_kda_split_requires_serialized_block_fp8(
-    serialized: bool,
-    block_size: list[int] | None,
-):
-    quant_config = _quant_config(
-        serialized=serialized,
-        block_size=block_size,
-        ignored_layers=["b_proj"],
-    )
+def test_ling_non_block_fp8_paths_unchanged(quant_config: Fp8Config | None):
+    bailing_moe_v3._configure_ling_fp8_quant_config(quant_config)
+    if quant_config is not None:
+        assert quant_config.ignored_layers_match_mode == "exact"
 
     assert not bailing_moe_v3._is_fp8_module_excluded(
         quant_config, "model.layers.0.self_attn.b_proj"
+    )
+    assert (
+        bailing_moe_v3._get_block_fp8_mlp_padded_intermediate_size(
+            quant_config, 768, "model.layers.2.mlp.shared_experts"
+        )
+        == 768
     )
 
 
@@ -141,7 +139,7 @@ def test_ling_block_fp8_shared_expert_padding(
         "get_tensor_model_parallel_world_size",
         lambda: tp_size,
     )
-    quant_config = _quant_config(block_size=[128, 128])
+    quant_config = _block_fp8_config()
     prefix = "model.layers.2.mlp.shared_experts"
 
     assert (
@@ -150,24 +148,20 @@ def test_ling_block_fp8_shared_expert_padding(
         )
         == expected
     )
-    assert (
-        bailing_moe_v3._get_block_fp8_mlp_padded_intermediate_size(None, 768, prefix)
-        == 768
-    )
-    online_quant_config = _quant_config(
-        serialized=False,
-        block_size=[128, 128],
-    )
-    assert (
-        bailing_moe_v3._get_block_fp8_mlp_padded_intermediate_size(
-            online_quant_config, 768, prefix
-        )
-        == 768
-    )
 
 
+@pytest.mark.parametrize(
+    ("ignored_layers", "expected"),
+    [
+        (["gate_up_proj", "down_proj"], 768),
+        (["gate_up_proj"], 1024),
+        (["down_proj"], 1024),
+    ],
+)
 def test_ling_shared_expert_padding_requires_an_fp8_projection(
     monkeypatch: pytest.MonkeyPatch,
+    ignored_layers: list[str],
+    expected: int,
 ):
     monkeypatch.setattr(
         bailing_moe_v3,
@@ -175,38 +169,12 @@ def test_ling_shared_expert_padding_requires_an_fp8_projection(
         lambda: 4,
     )
     prefix = "model.layers.2.mlp.shared_experts"
-    quant_config = _quant_config(
-        block_size=[128, 128],
-        ignored_layers=["gate_up_proj", "down_proj"],
-    )
-
+    quant_config = _block_fp8_config(ignored_layers=ignored_layers)
     assert (
         bailing_moe_v3._get_block_fp8_mlp_padded_intermediate_size(
             quant_config, 768, prefix
         )
-        == 768
-    )
-
-    quant_config = _quant_config(
-        block_size=[128, 128],
-        ignored_layers=["gate_up_proj"],
-    )
-    assert (
-        bailing_moe_v3._get_block_fp8_mlp_padded_intermediate_size(
-            quant_config, 768, prefix
-        )
-        == 1024
-    )
-
-    quant_config = _quant_config(
-        block_size=[128, 128],
-        ignored_layers=["down_proj"],
-    )
-    assert (
-        bailing_moe_v3._get_block_fp8_mlp_padded_intermediate_size(
-            quant_config, 768, prefix
-        )
-        == 1024
+        == expected
     )
 
 
@@ -225,7 +193,7 @@ def test_ling_pad_block_fp8_shared_expert_checkpoint_tensor(
     expected_shape: tuple[int, ...],
     dim: int,
 ):
-    quant_config = _quant_config(block_size=[128, 128])
+    quant_config = _block_fp8_config()
     loaded_weight = torch.ones(shape)
 
     padded = bailing_moe_v3._pad_block_fp8_mlp_checkpoint_tensor(
@@ -255,7 +223,7 @@ def test_ling_pad_fused_gate_up_checkpoint_tensor_between_logical_shards(
     shard_size: int,
     padded_shard_size: int,
 ):
-    quant_config = _quant_config(block_size=[128, 128])
+    quant_config = _block_fp8_config()
     loaded_weight = torch.cat(
         [torch.ones(shard_size, 2), torch.full((shard_size, 2), 2.0)]
     )
@@ -286,7 +254,7 @@ def test_ling_shared_expert_checkpoint_padding_handles_mtp_layer_name(
         "get_tensor_model_parallel_world_size",
         lambda: 4,
     )
-    quant_config = _quant_config(block_size=[128, 128])
+    quant_config = _block_fp8_config()
 
     class _FakeBailingConfig:
         moe_shared_expert_intermediate_size = 768
@@ -305,23 +273,33 @@ def test_ling_shared_expert_checkpoint_padding_handles_mtp_layer_name(
     assert torch.count_nonzero(padded[6:]) == 0
 
 
-def test_ling_shared_expert_padding_keeps_down_bias_unchanged():
-    quant_config = _quant_config(block_size=[128, 128])
-    loaded_bias = torch.ones(2)
+@pytest.mark.parametrize(
+    ("name", "shape"),
+    [
+        ("shared_experts.down_proj.bias", (2,)),
+        ("shared_experts.gate_proj.weight", (1024, 2)),
+    ],
+)
+def test_ling_shared_expert_padding_keeps_unchanged_tensors(
+    name: str,
+    shape: tuple[int, ...],
+):
+    quant_config = _block_fp8_config()
+    loaded_weight = torch.ones(shape)
 
     padded = bailing_moe_v3._pad_block_fp8_mlp_checkpoint_tensor(
         quant_config,
-        "shared_experts.down_proj.bias",
-        loaded_bias,
+        name,
+        loaded_weight,
         intermediate_size=768,
         padded_intermediate_size=1024,
     )
 
-    assert padded is loaded_bias
+    assert padded is loaded_weight
 
 
 def test_ling_shared_expert_padding_rejects_wrong_checkpoint_shape():
-    quant_config = _quant_config(block_size=[128, 128])
+    quant_config = _block_fp8_config()
 
     with pytest.raises(ValueError, match="expected each logical intermediate"):
         bailing_moe_v3._pad_block_fp8_mlp_checkpoint_tensor(
@@ -331,18 +309,3 @@ def test_ling_shared_expert_padding_rejects_wrong_checkpoint_shape():
             intermediate_size=768,
             padded_intermediate_size=1024,
         )
-
-
-def test_ling_shared_expert_padding_accepts_already_padded_checkpoint():
-    quant_config = _quant_config(block_size=[128, 128])
-    loaded_weight = torch.ones(1024, 2)
-
-    padded = bailing_moe_v3._pad_block_fp8_mlp_checkpoint_tensor(
-        quant_config,
-        "shared_experts.gate_proj.weight",
-        loaded_weight,
-        intermediate_size=768,
-        padded_intermediate_size=1024,
-    )
-
-    assert padded is loaded_weight
