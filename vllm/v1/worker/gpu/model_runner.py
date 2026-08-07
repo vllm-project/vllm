@@ -63,7 +63,6 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.notifications import take_worker_notifications
 from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
@@ -1661,7 +1660,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
-        model_runner_output.worker_notifications = take_worker_notifications()
 
         return async_output
 
@@ -1697,7 +1695,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
-            worker_notifications=take_worker_notifications(),
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,

@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
+    VLLM_WORKER_NOTIFICATION_POLL_INTERVAL: float = 0.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
@@ -838,6 +839,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         val
         if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))) > 0.0
         else 10.0
+    ),
+    # Interval in seconds at which the engine core polls workers for
+    # notifications (see vllm/v1/notifications.py). 0 disables polling; events
+    # from producers that publish during model load are still gathered once at
+    # startup, and in-tree producers gather on their own state changes.
+    "VLLM_WORKER_NOTIFICATION_POLL_INTERVAL": lambda: max(
+        0.0, float(os.getenv("VLLM_WORKER_NOTIFICATION_POLL_INTERVAL", "0."))
     ),
     # Trace function calls
     # If set to 1, vllm will trace function calls
@@ -2186,6 +2194,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
+        "VLLM_WORKER_NOTIFICATION_POLL_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",

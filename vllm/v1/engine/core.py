@@ -242,6 +242,7 @@ class EngineCore:
         # overrides _publish_notifications to broadcast instead). Additive in
         # emission order, like scheduler_stats: nothing dropped.
         self._pending_notifications: list[EngineNotification] = []
+        self._last_notification_gather = 0.0
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -612,7 +613,7 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
-        self._collect_step_notifications(model_output, engine_core_outputs)
+        self._flush_notifications(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -715,7 +716,7 @@ class EngineCore:
             scheduler_output, model_output
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
-        self._collect_step_notifications(model_output, engine_core_outputs)
+        self._flush_notifications(engine_core_outputs)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -762,14 +763,26 @@ class EngineCore:
         eco.engine_notifications = self._pending_notifications
         self._pending_notifications = []
 
-    def _collect_step_notifications(
-        self,
-        model_output: ModelRunnerOutput,
-        engine_core_outputs: dict[int, EngineCoreOutputs],
-    ) -> None:
-        if model_output.worker_notifications:
-            self._publish_notifications(model_output.worker_notifications)
-        self._flush_notifications(engine_core_outputs)
+    def gather_worker_notifications(self) -> None:
+        """Collect notifications from every worker rank and publish them.
+
+        A rank-0-only reply would discard producers on the other ranks (e.g.
+        per-rank transfer metrics from a weight-loader plugin), so this keeps
+        all of them. Callers own the cadence: this is an rpc round trip, not
+        something to run per step.
+        """
+        try:
+            per_rank = self.model_executor.collective_rpc("take_notifications")
+        except Exception:
+            # Never fail an engine operation for a metrics channel. Workers
+            # without the method (e.g. out-of-tree platforms) land here too.
+            logger.warning_once(
+                "Could not gather worker notifications; events published in "
+                "workers will not reach the frontend."
+            )
+            return
+        if notifications := [n for rank in per_rank or () for n in rank or ()]:
+            self._publish_notifications(notifications)
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
@@ -1408,16 +1421,37 @@ class EngineCoreProc(EngineCore):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+        # Producers that publish during model load have already run, and no
+        # event will prompt a gather on their behalf.
+        self.gather_worker_notifications()
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
+            self._maybe_gather_worker_notifications()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
             self._maybe_publish_request_counts()
 
         raise SystemExit
+
+    def _maybe_gather_worker_notifications(self) -> None:
+        """Poll workers for spontaneously published notifications.
+
+        Off unless VLLM_WORKER_NOTIFICATION_POLL_INTERVAL is set. Deliberately
+        here rather than inside step(): the gather is an rpc that queues behind
+        any in-flight execute_model, so issuing it between steps keeps it to a
+        round trip instead of stalling on a rank mid-forward.
+        """
+        interval = envs.VLLM_WORKER_NOTIFICATION_POLL_INTERVAL
+        if not interval:
+            return
+        now = time.monotonic()
+        if now - self._last_notification_gather < interval:
+            return
+        self._last_notification_gather = now
+        self.gather_worker_notifications()
 
     def _maybe_publish_request_counts(self):
         if not self.publish_dp_lb_stats:
