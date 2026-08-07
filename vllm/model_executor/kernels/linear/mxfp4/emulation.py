@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E3M2Dynamic,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_quark
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
@@ -67,6 +68,9 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
             kMxfp6E2M3Dynamic,
         ):
             return False, "only supports MXFP4 or MXFP6 or unquantized activations"
+
+        if not has_quark():
+            return False, "amd-quark package not available"
 
         if (
             current_platform.is_rocm()
