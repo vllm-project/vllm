@@ -378,15 +378,17 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         # Should be bit exact since no processing had been done on v for both paths
         torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
 
-        # fp8 vs triton-rope ref requires loosening tolerance to 1.25e-1.
-        if is_fp8_cache and enable_aiter_triton_rope:
+        # fp8: fused vs unfused writers can round to adjacent fp8 codes (~1 ULP,
+        # 1.25e-1). Tolerate it; a real layout bug corrupts many elements by >>1 ULP.
+        if is_fp8_cache:
             cache_atol = cache_rtol = 1.25e-1
         else:
             cache_atol, cache_rtol = ATOL, RTOL
 
+        # Whole cache, so the interleaved V write (ROCM_ATTN kv_cache[1]) is checked.
         torch.testing.assert_close(
-            kv_cache_unfused[0].float(),
-            kv_cache_fused[0].float(),
+            kv_cache_unfused.float(),
+            kv_cache_fused.float(),
             atol=cache_atol,
             rtol=cache_rtol,
         )
@@ -412,6 +414,7 @@ _FUSION_CONFIGS = [
 @pytest.mark.parametrize(
     "attn_backend",
     [
+        AttentionBackendEnum.ROCM_ATTN,
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         AttentionBackendEnum.ROCM_AITER_FA,
     ],
@@ -458,6 +461,11 @@ def test_qk_norm_rope_kvcache_fusion(
         and use_shuffle_kv_layout == "1"
     ):
         pytest.skip("ROCM_AITER_UNIFIED_ATTN is NHD-only; shuffle env is ignored")
+    if attn_backend == AttentionBackendEnum.ROCM_ATTN and use_shuffle_kv_layout == "1":
+        pytest.skip(
+            "ROCM_ATTN ignores VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT; V interleaving "
+            "is keyed on the fusion's _use_interleaved_v_cache flag"
+        )
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,

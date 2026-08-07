@@ -84,6 +84,7 @@ def kernel_paged_attention_2d(
     query_start_len_ptr,  # [num_seqs+1]
     USE_SINKS: tl.constexpr,  # bool
     USE_FP8: tl.constexpr,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -175,13 +176,24 @@ def kernel_paged_attention_2d(
             + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
-        # 4D addressing logic of V (Slot is innermost)
-        v_offset = (
-            p_block_idx[:, None] * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_1
-            + offs_d[None, :] * stride_v_cache_2
-            + internal_offsets[:, None] * stride_v_cache_3
-        )
+        # V addressing: standard 4D or interleaved 5D
+        if INTERLEAVED_V_PACK_FACTOR > 0:
+            v_offset = (
+                p_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_1
+                + (internal_offsets[:, None] // INTERLEAVED_V_PACK_FACTOR)
+                * HEAD_SIZE
+                * INTERLEAVED_V_PACK_FACTOR
+                + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
+                + (internal_offsets[:, None] % INTERLEAVED_V_PACK_FACTOR)
+            )
+        else:
+            v_offset = (
+                p_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_1
+                + offs_d[None, :] * stride_v_cache_2
+                + internal_offsets[:, None] * stride_v_cache_3
+            )
 
         # K : (HEAD_SIZE, BLOCK_SIZE)
         K_load = tl.load(
@@ -290,6 +302,7 @@ def chunked_prefill_paged_decode(
     # Optional tensor for sinks
     sinks=None,
     is_block_table_ptr: bool = False,
+    use_interleaved_v_cache: bool = False,
     causal: bool = True,
 ):
     if sm_scale is None:
@@ -299,6 +312,10 @@ def chunked_prefill_paged_decode(
 
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
+
+    interleaved_v_pack_factor = (
+        (16 // value_cache.element_size()) if use_interleaved_v_cache else 0
+    )
 
     if max_query_len > 1:
         context_attention_fwd(
@@ -322,6 +339,7 @@ def chunked_prefill_paged_decode(
             skip_decode=True,
             fp8_out_scale=output_scale,
             sinks=sinks,
+            interleaved_v_pack_factor=interleaved_v_pack_factor,
             causal=causal,
         )
 
@@ -414,6 +432,7 @@ def chunked_prefill_paged_decode(
             k_scale=k_scale,
             v_scale=v_scale,
             fp8_out_scale=output_scale,
+            use_interleaved_v_cache=use_interleaved_v_cache,
         )
     else:
         logger.warning_once(
@@ -490,4 +509,5 @@ def chunked_prefill_paged_decode(
             query_start_len_ptr=query_start_loc,
             USE_SINKS=sinks is not None,
             USE_FP8=output_scale is not None,
+            INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
         )

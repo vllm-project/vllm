@@ -315,6 +315,8 @@ class RocmAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
 
+        self._use_interleaved_v_cache = False
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -463,6 +465,7 @@ class RocmAttentionImpl(AttentionImpl):
             sm_scale=self.scale,
             output_scale=output_scale,
             sinks=self.sinks,
+            use_interleaved_v_cache=self._use_interleaved_v_cache,
             causal=attn_metadata.causal,
         )
 
@@ -488,6 +491,12 @@ class RocmAttentionImpl(AttentionImpl):
         block_size = value_cache.shape[3]
         has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
 
+        # Match the fused writer's interleaved V-cache when fusion is active.
+        interleaved_v = self._use_interleaved_v_cache
+        interleaved_v_pack_factor = (
+            (16 // value_cache.element_size()) if interleaved_v else 0
+        )
+
         if block_size in (16, 32) and has_native_layout:
             # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
@@ -499,6 +508,7 @@ class RocmAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                interleaved_v,
             )
         else:
             # Non-standard blocks and hybrid attention/Mamba layouts need the
@@ -514,7 +524,57 @@ class RocmAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                interleaved_v_pack_factor,
             )
+
+    def fused_qk_norm_rope_kvcache_supported(self):
+        return rocm_aiter_ops.is_enabled()
+
+    def set_interleaved_v_cache(self):
+        # Decode/prefill kernels must read the interleaved V-cache the AITER
+        # fused write emits when use_shuffle_layout=True.
+        self._use_interleaved_v_cache = True
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        # ROCM_ATTN still uses the old KV layout -> [2, blocks, blocksize, heads,
+        # head_size], with K/V on dim 0, so unbind(0)
+        key_cache, value_cache = kv_cache.unbind(0)
+        use_shuffle_layout = self._use_interleaved_v_cache
+        rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_out=k_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
+            kv_cache_dtype=self.kv_cache_dtype,
+            use_shuffle_layout=use_shuffle_layout,
+        )
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()

@@ -966,7 +966,6 @@ class CompilationConfig:
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
-
         if (
             self.pass_config.fuse_qk_norm_rope_kvcache
             and "+rotary_embedding" not in self.custom_ops

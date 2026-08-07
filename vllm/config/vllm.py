@@ -1327,6 +1327,26 @@ class VllmConfig:
                 "optimization level defaults."
             )
 
+        # Fusion flags may have been auto-enabled by optimization-level
+        # callables above.  CompilationConfig.__post_init__ already ran
+        # (during construction) when these flags were still None, so we
+        # must apply the dependent settings here.
+        pass_config = self.compilation_config.pass_config
+        if (
+            pass_config.enable_qk_norm_rope_fusion
+            and "+rotary_embedding" not in self.compilation_config.custom_ops
+        ):
+            self.compilation_config.custom_ops.append("+rotary_embedding")
+        if pass_config.fuse_qk_norm_rope_kvcache:
+            if "+rotary_embedding" not in self.compilation_config.custom_ops:
+                self.compilation_config.custom_ops.append("+rotary_embedding")
+            if not self.compilation_config.use_inductor_graph_partition:
+                self.compilation_config.use_inductor_graph_partition = True
+                logger.info(
+                    "Enabling use_inductor_graph_partition for "
+                    "fuse_qk_norm_rope_kvcache (requires "
+                    "unified_kv_cache_update in compiled graph)."
+                )
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
