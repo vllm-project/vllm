@@ -67,7 +67,7 @@ void fused_experts_fp_kernel_impl(
     // get local pointers
     int tid = get_thread_num();
     scalar_t* __restrict__ A = A_tmp + tid * BLOCK_M * K;
-    bool used_brgemm = false;
+    bool use_brgemm = false;
 
     loop_2d<packed_t>(mb0, mb1, nb0, nb1, BLOCK_N * K, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
       int64_t n_size = std::min(2 * N - nb * BLOCK_N, BLOCK_N);
@@ -88,7 +88,7 @@ void fused_experts_fp_kernel_impl(
         return;
       }
       const bool brg = can_use_brgemm<packed_t>(m_size, n_size);
-      used_brgemm |= brg;
+      use_brgemm |= brg;
 
       if (nb_offset == 0) {
         // 1.a load A
@@ -119,7 +119,7 @@ void fused_experts_fp_kernel_impl(
           /*   do_unpack    */ do_unpack);
     });
 
-    if (used_brgemm) {
+    if (use_brgemm) {
       at::native::cpublas::brgemm_release();
     }
   });
@@ -155,7 +155,7 @@ void fused_experts_fp_kernel_impl(
   parallel_2d(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     int tid = get_thread_num();
     alignas(64) scalar_t C[BLOCK_M * BLOCK_K];
-    bool used_brgemm = false;
+    bool use_brgemm = false;
 
     loop_2d<packed_t>(mb0, mb1, nb0, nb1, BLOCK_N * IC, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
       int64_t m_size = offsets[mb + 1] - offsets[mb];
@@ -164,7 +164,7 @@ void fused_experts_fp_kernel_impl(
       }
       int64_t n_size = std::min(OC - nb * BLOCK_N, BLOCK_N);
       const bool brg = can_use_brgemm<packed_t>(m_size, n_size);
-      used_brgemm |= brg;
+      use_brgemm |= brg;
 
       // A ptr from ic1 of [M * topk, N] in sorted order
       // so as to avoid copy A to tmp buffer again
@@ -209,7 +209,7 @@ void fused_experts_fp_kernel_impl(
       }
     });
 
-    if (used_brgemm) {
+    if (use_brgemm) {
       at::native::cpublas::brgemm_release();
     }
   });
