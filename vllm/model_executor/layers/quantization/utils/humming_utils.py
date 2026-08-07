@@ -532,6 +532,7 @@ def make_humming_moe_quant_config(
     quant_dtype: torch.dtype | str | None,
     weight_dtype: torch.dtype | str | None,
     weight_group_shape: GroupShape | None = None,
+    activation_group_shape: GroupShape | None = None,
     w1_scale: torch.Tensor | None = None,
     w2_scale: torch.Tensor | None = None,
     w1_zp: torch.Tensor | None = None,
@@ -546,7 +547,20 @@ def make_humming_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     if quant_dtype is None:
         a_quant_desc = FusedMoEQuantDesc(dtype=None)
+    elif activation_group_shape is not None:
+        # Pre-dispatch quantization path: the prepare/finalize step quantizes
+        # activations with vLLM's moe_kernel_quantize_input *before* the EP
+        # all-to-all (so FP8 rather than BF16 crosses the interconnect), and
+        # Humming consumes the result as-is. That kernel needs a real torch
+        # dtype and the true group shape (e.g. block-FP8 group-128), so the
+        # caller passes both here. See
+        # HummingExpertsBase.expects_unquantized_inputs.
+        a_quant_desc = FusedMoEQuantDesc(
+            dtype=quant_dtype, shape=activation_group_shape
+        )
     else:
+        # Deferred path: Humming quantizes the activation internally, so the
+        # descriptor only needs a non-None dtype to mark it as quantized.
         shape = GroupShape(row=1, col=-1)
         a_quant_desc = FusedMoEQuantDesc(dtype=quant_dtype, shape=shape)
 
@@ -593,6 +607,22 @@ def get_humming_moe_quant_config(
     else:
         q_dtype = str(input_schema.a_dtype)
 
+    # Block-FP8 (group-128) activations are quantized *before* the EP all-to-all
+    # dispatch (so FP8 rather than BF16 crosses the interconnect) and consumed by
+    # Humming as-is. Surface the real torch dtype + group shape so the
+    # prepare/finalize step performs the block-FP8 quantization. Every other
+    # scheme leaves activation_group_shape=None and keeps deferring quantization
+    # to Humming (see HummingExpertsBase.expects_unquantized_inputs).
+    activation_group_shape: GroupShape | None = None
+    input_scale_group_size = getattr(input_schema, "input_scale_group_size", 0) or 0
+    if (
+        q_dtype is not None
+        and q_dtype.startswith("float8")
+        and input_scale_group_size == 128
+    ):
+        q_dtype = _HUMMING_TO_QUANT_DTYPE.get(input_schema.a_dtype, FP8_DTYPE)
+        activation_group_shape = GroupShape(row=1, col=input_scale_group_size)
+
     weight_scale_group_size = weight_schema.weight_scale_group_size
     weight_scale_group_size_n = weight_schema.weight_scale_group_size_n
     weight_group_shape: tuple[int, ...] = ()
@@ -610,6 +640,7 @@ def get_humming_moe_quant_config(
         quant_dtype=q_dtype,
         weight_dtype=str(weight_schema.b_dtype),
         weight_group_shape=weight_group_shape,
+        activation_group_shape=activation_group_shape,
         w1_scale=getattr(layer, "w13_weight_scale", None),
         w1_gscale=getattr(layer, "w13_global_scale", None),
         w1_zp=getattr(layer, "w13_zero_point", None),

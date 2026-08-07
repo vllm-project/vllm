@@ -219,21 +219,44 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
+    def _prequantizes_dispatch_activation(self) -> bool:
+        """
+        Whether the prepare/finalize step should quantize activations before
+        the (EP all-to-all) dispatch instead of leaving it to Humming.
+
+        This is enabled only for block-FP8 (group-128) activations: quantizing
+        to FP8 before dispatch sends FP8 rather than BF16 over the interconnect,
+        and Humming then consumes the pre-quantized FP8 + scale directly (see
+        the apply() methods, which forward the dispatch scale into
+        HummingMethod.may_quant_input, and may_quant_input itself, which is a
+        no-op when an input scale is already supplied). The scale layout
+        produced by vLLM's block-FP8 quantization ([M, K // 128] float32,
+        row-major) matches what the Humming WGMMA grouped GEMM expects.
+        """
+        quant_config = self.quant_config
+        return (
+            quant_config.is_block_quantized
+            and quant_config.quant_dtype == current_platform.fp8_dtype()
+        )
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         """
-        Humming kernels handle input quantization internally via
-        HummingMethod.may_quant_input() in the apply() method.
+        Whether the prepare/finalize step should defer input quantization to
+        the experts (by setting defer_input_quant=True and passing unquantized
+        inputs).
 
-        This property tells the prepare/finalize step to skip input
-        quantization (by setting defer_input_quant=True) and pass
-        unquantized inputs to the experts. This prevents double
-        quantization: once in prepare and once in Humming's apply().
+        Humming normally quantizes inputs internally via
+        HummingMethod.may_quant_input() in apply(), so we defer quantization
+        (return True) to avoid quantizing twice -- once in prepare and once in
+        Humming's apply().
 
-        Returns:
-            True to indicate that this expert expects unquantized inputs
-            and will handle quantization internally.
+        The exception is block-FP8 (group-128) activations, which are quantized
+        before the dispatch to save interconnect bandwidth (see
+        _prequantizes_dispatch_activation): for those we must NOT defer.
         """
+        if self._prequantizes_dispatch_activation():
+            return False
         return True
 
     @staticmethod
@@ -604,9 +627,12 @@ class HummingIndexedExperts(HummingExpertsBase):
         """
         Standard apply implementation for Humming indexed experts.
 
-        Note: Humming kernels handle weights and quantization internally through
-        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
-        The output is written into workspace13 via the buffer management.
+        Note: Humming kernels handle weights internally through the layer
+        object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual
+        path (Humming quantizes the w13 input itself); for block-FP8 activations
+        it carries the scale computed before dispatch, which is forwarded to
+        may_quant_input so Humming skips the redundant w13 quantization. The
+        output is written into workspace13 via the buffer management.
         """
         from vllm.utils.humming import HummingMethod
 
@@ -630,6 +656,7 @@ class HummingIndexedExperts(HummingExpertsBase):
         inputs, input_scale = HummingMethod.may_quant_input(
             layer=self.layer,
             inputs=hidden_states,
+            input_scale=a1q_scale,
             quanted_input=buffers.get("quanted_gate_up_input", None),
             sublayer_name="w13",
         )
@@ -709,9 +736,13 @@ class HummingGroupedExperts(HummingExpertsBase):
         """
         Standard apply implementation for Humming grouped experts.
 
-        Note: Humming kernels handle weights and quantization internally through
-        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
-        The output is written into workspace13 via the buffer management.
+        Note: Humming kernels handle weights internally through the layer
+        object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual
+        path (Humming quantizes the w13 input itself); for block-FP8 activations
+        it carries the scale computed before dispatch. It is permuted alongside
+        the tokens by moe_permute and forwarded to may_quant_input so Humming
+        skips the redundant w13 quantization. The output is written into
+        workspace13 via the buffer management.
         """
         from vllm.utils.humming import HummingMethod
 
@@ -727,9 +758,9 @@ class HummingGroupedExperts(HummingExpertsBase):
             activation,
         )
 
-        hidden_states, _, expert_first_token_offset, inv_perm, _ = moe_permute(
+        hidden_states, a1q_scale, expert_first_token_offset, inv_perm, _ = moe_permute(
             hidden_states=hidden_states,
-            a1q_scale=None,
+            a1q_scale=a1q_scale,
             topk_ids=topk_ids,
             n_expert=global_num_experts,
             n_local_expert=self.num_experts,
@@ -740,6 +771,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         inputs, input_scale = HummingMethod.may_quant_input(
             layer=self.layer,
             inputs=hidden_states,
+            input_scale=a1q_scale,
             quanted_input=buffers.get("quanted_gate_up_input", None),
             sublayer_name="w13",
         )
@@ -825,9 +857,12 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         """
         Standard apply implementation for Humming batched grouped experts.
 
-        Note: Humming kernels handle weights and quantization internally through
-        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
-        The output is written into workspace13 via the buffer management.
+        Note: Humming kernels handle weights internally through the layer
+        object, so w1, w2, a2_scale are unused. a1q_scale is None on the usual
+        path (Humming quantizes the w13 input itself); for block-FP8 activations
+        it carries the scale computed before dispatch, which is forwarded to
+        may_quant_input so Humming skips the redundant w13 quantization. The
+        output is written into workspace13 via the buffer management.
         """
         from vllm.utils.humming import HummingMethod
 
@@ -835,6 +870,10 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         assert expert_tokens_meta is not None
 
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+        # Keep the (batched) block-FP8 scale row-aligned with the flattened
+        # [num_experts * max_tokens, K] hidden states above.
+        if a1q_scale is not None and a1q_scale.dim() == 3:
+            a1q_scale = a1q_scale.view(-1, a1q_scale.size(-1))
         valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
@@ -849,6 +888,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         inputs, input_scale = HummingMethod.may_quant_input(
             layer=self.layer,
             inputs=hidden_states,
+            input_scale=a1q_scale,
             quanted_input=buffers.get("quanted_gate_up_input", None),
             sublayer_name="w13",
         )
