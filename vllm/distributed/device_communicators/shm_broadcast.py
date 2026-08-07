@@ -486,7 +486,6 @@ def _reduce_tensor(tensor: torch.Tensor):
 # on first write), so arenas on queues that never carry big tensors cost ~0.
 # ---------------------------------------------------------------------------
 
-VLLM_SHM_TENSOR_ARENA = os.getenv("VLLM_SHM_TENSOR_ARENA", "1") != "0"
 VLLM_SHM_TENSOR_ARENA_SLOTS = int(os.getenv("VLLM_SHM_TENSOR_ARENA_SLOTS", "8"))
 VLLM_SHM_TENSOR_ARENA_SLOT_MB = int(os.getenv("VLLM_SHM_TENSOR_ARENA_SLOT_MB", "256"))
 VLLM_SHM_TENSOR_ARENA_MIN_MB = int(os.getenv("VLLM_SHM_TENSOR_ARENA_MIN_MB", "8"))
@@ -495,6 +494,20 @@ VLLM_SHM_TENSOR_ARENA_MIN_MB = int(os.getenv("VLLM_SHM_TENSOR_ARENA_MIN_MB", "8"
 # by MessageQueue.create_from_handle; consumed by _rebuild_arena_tensor when
 # unpickling a tensor stub.
 _TENSOR_ARENAS: dict[str, "ShmTensorArena"] = {}
+
+
+def _shm_tensor_arena_enabled() -> bool:
+    """Whether large CPU tensors are routed through the zero-copy arena.
+
+    Driven by ``ParallelConfig.enable_shm_tensor_arena`` (CLI flag
+    ``--enable-shm-tensor-arena`` / ``--no-enable-shm-tensor-arena``); defaults
+    to enabled when no vLLM config is in scope (e.g. standalone use / tests)."""
+    try:
+        from vllm.config import get_current_vllm_config
+
+        return bool(get_current_vllm_config().parallel_config.enable_shm_tensor_arena)
+    except Exception:
+        return True
 
 
 class ShmTensorArena:
@@ -809,7 +822,7 @@ class MessageQueue:
             # Local readers only: remote readers receive the pickled bytes
             # over a socket and cannot map the arena, so the substitution
             # would break them.
-            if VLLM_SHM_TENSOR_ARENA and n_remote_reader == 0:
+            if _shm_tensor_arena_enabled() and n_remote_reader == 0:
                 self.tensor_arena = ShmTensorArena(
                     n_local_reader,
                     VLLM_SHM_TENSOR_ARENA_SLOT_MB * 1024 * 1024,
