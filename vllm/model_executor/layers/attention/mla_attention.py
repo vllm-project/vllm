@@ -556,8 +556,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.prefill_backend = None
         else:
             try:
-                prefill_backend_cls = (
-                    prefill_backend_cls or get_mla_prefill_backend(vllm_config)
+                prefill_backend_cls = prefill_backend_cls or get_mla_prefill_backend(
+                    vllm_config
                 )
             except ValueError:
                 if (

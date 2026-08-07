@@ -7,6 +7,7 @@ varlen MHA. Decode-only batches use the Triton absorbed-MQA kernel.
 """
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 import torch
 
@@ -230,7 +231,7 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
             device=self.device,
         )
         metadata.prefill.chunked_context = None
-        metadata.prefill.sliding_window = sliding_metadata
+        cast(Any, metadata.prefill).sliding_window = sliding_metadata
         if metadata.num_decodes > 0 and metadata.num_prefills > 0:
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             for chunk in sliding_metadata.chunks:
@@ -241,9 +242,7 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
                 query_lens = query_lens_cpu[req_start:req_end].to(
                     self.device, non_blocking=True
                 )
-                kv_lens = torch.minimum(
-                    seq_lens, query_lens + self.sliding_window - 1
-                )
+                kv_lens = torch.minimum(seq_lens, query_lens + self.sliding_window - 1)
                 chunk.cu_seq_lens_k.zero_()
                 torch.cumsum(
                     kv_lens,
@@ -268,6 +267,14 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
 
 class Dots3NoteTritonMLABackend(TritonMLABackend):
     """Internal NOTE SWA specialization; not a user-selectable backend."""
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (0, 1, 2, 3)
+        return (0, 1, 2)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

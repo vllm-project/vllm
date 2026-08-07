@@ -117,9 +117,11 @@ class Dot3NoteMoE(DeepseekV2MoE):
         gather_output = self.is_sequence_parallel and not already_sequence_parallel
         if gather_output:
             hidden_states = sequence_parallel_chunk(hidden_states)
+        shared_experts = self.shared_experts
+        assert shared_experts is not None
         output = super().forward(
             hidden_states, already_sequence_parallel=True
-        ) + self.shared_experts(hidden_states)
+        ) + shared_experts(hidden_states)
         if gather_output:
             return tensor_model_parallel_all_gather(output, 0)[:num_tokens]
         if self.reduce_results:
@@ -164,9 +166,7 @@ def _forward_note_mla(
     )
 
     if attention.indexer and attention.is_sparse and not attention.skip_topk:
-        attention.indexer(
-            hidden_states, q_c, positions, attention.indexer_rope_emb
-        )
+        attention.indexer(hidden_states, q_c, positions, attention.indexer_rope_emb)
     if llama_4_scaling is not None:
         q *= llama_4_scaling
 
@@ -178,7 +178,8 @@ def _forward_note_mla(
         kv_c_normed,
         k_pe,
         output_shape=(
-            hidden_states.shape[0], attention.num_heads * attention.v_head_dim
+            hidden_states.shape[0],
+            attention.num_heads * attention.v_head_dim,
         ),
         q_dcp_replicated=q_dcp_replicated,
     )
