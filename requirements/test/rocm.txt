@@ -692,7 +692,7 @@ outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-packaging==26.0
+packaging==26.2
     # via
     #   -c requirements/rocm.txt
     #   accelerate
