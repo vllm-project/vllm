@@ -428,7 +428,8 @@ class SingleTypeKVCacheManager(ABC):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
-        replay_boundary: int = 0,
+        *,
+        replay_boundary: int,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -781,7 +782,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
-        replay_boundary: int = 0,
+        *,
+        replay_boundary: int,
     ) -> None:
         super().cache_blocks(
             request,
@@ -1683,7 +1685,8 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
-        replay_boundary: int = 0,
+        *,
+        replay_boundary: int,
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(
@@ -1790,7 +1793,8 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
-        replay_boundary: int = 0,
+        *,
+        replay_boundary: int,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
