@@ -94,6 +94,21 @@ class OffloadConfig:
     prefetch: PrefetchOffloadConfig = Field(default_factory=PrefetchOffloadConfig)
     """Parameters for prefetch offloading backend."""
 
+    def is_enabled(self) -> bool:
+        """Whether any weight offloading is requested.
+
+        Mirrors the backend selection in
+        `vllm.model_executor.offloader.base.create_offloader`: a config is
+        considered enabled iff `create_offloader` would return a non-noop
+        offloader that can actually offload weights.
+        """
+        if self.offload_backend == "auto":
+            return self.prefetch.offload_group_size > 0 or self.uva.cpu_offload_gb > 0
+        if self.offload_backend == "uva":
+            return self.uva.cpu_offload_gb > 0
+        # "prefetch"
+        return self.prefetch.offload_group_size > 0
+
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":
         """Validate offload configuration constraints."""

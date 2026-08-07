@@ -2298,6 +2298,16 @@ class VllmConfig:
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
+        # The V2 model runner never installs the weight offloader
+        # (set_offloader/create_offloader are only wired in the V1
+        # GPUModelRunner), so offload settings would silently no-op:
+        # the model loads fully on-GPU and typically OOMs. Fall back to
+        # V1 (or raise if V2 is forced) instead.
+        if self.offload_config.is_enabled():
+            unsupported.append(
+                "model weight CPU offloading (--cpu-offload-gb / prefetch offloading)"
+            )
+
         if (
             self.compilation_config.pass_config.enable_sp
             and self.parallel_config.tensor_parallel_size > 1

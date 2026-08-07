@@ -68,6 +68,24 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_v2_model_runner_unsupported_with_weight_offloading():
+    """Weight offloading is not wired in the V2 model runner; it must be
+    reported as unsupported so config selection falls back to V1 (or raises
+    when V2 is forced) instead of silently not offloading."""
+    config = VllmConfig()
+    baseline = config._get_v2_model_runner_unsupported_features()
+    assert not any("offload" in feature for feature in baseline)
+
+    config.offload_config.uva.cpu_offload_gb = 4
+    unsupported = config._get_v2_model_runner_unsupported_features()
+    assert any("offload" in feature for feature in unsupported)
+
+    config.offload_config.uva.cpu_offload_gb = 0
+    config.offload_config.prefetch.offload_group_size = 8
+    unsupported = config._get_v2_model_runner_unsupported_features()
+    assert any("offload" in feature for feature in unsupported)
+
+
 @pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
