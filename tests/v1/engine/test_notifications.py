@@ -19,7 +19,6 @@ from vllm.v1.notifications import (
     publish_worker_notification,
     take_worker_notifications,
 )
-from vllm.v1.outputs import ModelRunnerOutput
 
 
 @pytest.fixture(autouse=True)
@@ -124,32 +123,66 @@ def test_worker_notifications_survive_until_the_first_drain():
     assert take_worker_notifications() == [first, second]
 
 
-def _model_output(
-    notifications: list[CustomNotification] | None = None,
-) -> ModelRunnerOutput:
-    return ModelRunnerOutput(
-        req_ids=[], req_id_to_index={}, worker_notifications=notifications
-    )
-
-
-def test_collect_forwards_worker_notifications():
-    """Worker-sourced events flow out through EngineCore."""
+def _gathering_engine_core(per_rank) -> EngineCore:
+    """An EngineCore whose executor answers take_notifications with per_rank."""
     engine_core = _bare_engine_core()
+    executor = SimpleNamespace(collective_rpc=lambda method: per_rank)
+    engine_core.model_executor = executor
+    return engine_core
 
-    event = CustomNotification(key="my_plugin", payload={"n": 1})
+
+def test_gather_keeps_every_rank():
+    """The point of gathering: a rank-0-only reply would drop the rest.
+
+    Per-rank producers (e.g. a weight loader reporting each TP rank's transfer)
+    are the reason this cannot collapse to outputs[0].
+    """
+    rank0 = CustomNotification(key="my_plugin", payload={"rank": 0})
+    rank1 = CustomNotification(key="my_plugin", payload={"rank": 1})
+    rank2 = CustomNotification(key="my_plugin", payload={"rank": 2})
+    engine_core = _gathering_engine_core([[rank0], [rank1], [rank2]])
+
+    engine_core.gather_worker_notifications()
+
     outputs: dict[int, EngineCoreOutputs] = {}
-    engine_core._collect_step_notifications(_model_output([event]), outputs)
+    engine_core._flush_notifications(outputs)
+    assert outputs[0].engine_notifications == [rank0, rank1, rank2]
 
+
+def test_gather_publishes_nothing_when_all_ranks_are_quiet():
+    engine_core = _gathering_engine_core([[], [], []])
+
+    engine_core.gather_worker_notifications()
+
+    outputs: dict[int, EngineCoreOutputs] = {}
+    engine_core._flush_notifications(outputs)
+    assert outputs == {}
+
+
+def test_gather_tolerates_ranks_that_cannot_report():
+    """Workers without the method reply None; that must not break the merge."""
+    event = CustomNotification(key="my_plugin", payload={"rank": 1})
+    engine_core = _gathering_engine_core([None, [event]])
+
+    engine_core.gather_worker_notifications()
+
+    outputs: dict[int, EngineCoreOutputs] = {}
+    engine_core._flush_notifications(outputs)
     assert outputs[0].engine_notifications == [event]
 
 
-def test_collect_is_noop_without_worker_notifications():
-    """A step that produced no events must not manufacture an outputs entry."""
+def test_gather_never_raises_into_the_engine():
+    """A metrics channel must not take down an engine operation."""
     engine_core = _bare_engine_core()
 
-    outputs: dict[int, EngineCoreOutputs] = {}
-    engine_core._collect_step_notifications(_model_output(), outputs)
+    def boom(method):
+        raise RuntimeError("executor is gone")
 
+    engine_core.model_executor = SimpleNamespace(collective_rpc=boom)
+    engine_core.gather_worker_notifications()
+
+    outputs: dict[int, EngineCoreOutputs] = {}
+    engine_core._flush_notifications(outputs)
     assert outputs == {}
 
 
