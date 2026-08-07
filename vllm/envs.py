@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
+    VLLM_KV_CACHE_FABRIC: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
@@ -707,6 +708,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE": lambda: (
         os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true"
+    ),
+    # Allocate KV cache with CUDA fabric-handle VMM memory so NIXL/UCX cuda_ipc
+    # can move it across an MNNVL (multi-node NVLink) domain (GB200/GB300 NVL72).
+    "VLLM_KV_CACHE_FABRIC": lambda: (
+        os.environ.get("VLLM_KV_CACHE_FABRIC", "False").lower() == "true"
     ),
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
