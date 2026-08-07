@@ -759,11 +759,18 @@ class SpeculativeConfig:
             if speculators_model_type == "peagle":
                 return "eagle3"
             return speculators_model_type
-        if (
-            "Qwen3DSparkModel" in draft_model_config.architectures
-            or "Gemma4DSparkModel" in draft_model_config.architectures
-        ):
+        # Drafters that ship outside speculators format name their algorithm in
+        # `architectures`. `_SPECULATIVE_DECODING_MODELS` in the model registry
+        # is the complete list; only the entries whose method is not otherwise
+        # detectable are repeated here.
+        architectures = draft_model_config.architectures
+        if "Qwen3DSparkModel" in architectures or "Gemma4DSparkModel" in architectures:
             return "dspark"
+        if (
+            "DFlashDraftModel" in architectures
+            or "DFlashLagunaForCausalLM" in architectures
+        ):
+            return "dflash"
         if hf_config.model_type == "medusa":
             return "medusa"
         if hf_config.model_type == "mlp_speculator":

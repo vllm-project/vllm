@@ -1726,6 +1726,14 @@ def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
             "dspark",
             id="declared-dspark-arch-beats-dflash-in-path",
         ),
+        # Native DFlash drafters (e.g. z-lab/*) ship outside speculators format
+        # and declare themselves only through `architectures`.
+        pytest.param(
+            "draft_model",
+            _draft_config("z-lab/Qwen3.6-35B-A3B", architectures=["DFlashDraftModel"]),
+            "dflash",
+            id="declared-dflash-arch-without-name-hint",
+        ),
         # Checkpoints that declare nothing still fall back to the path name.
         pytest.param(
             "draft_model",
