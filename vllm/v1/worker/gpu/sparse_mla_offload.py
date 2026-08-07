@@ -7,6 +7,7 @@ import mmap
 import os
 import tempfile
 import uuid
+import warnings
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -30,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import AttentionGroup
 
 _SCHEMA_VERSION = 1
+_CUDA_HOST_REGISTER_READ_ONLY = 0x08
 _BACKING_PATTERN = re.compile(r"vllm_sparse_mla_([0-9a-f]{32})_dp([0-9]+)\.mmap\Z")
 
 
@@ -372,6 +374,12 @@ class SparseMLAOffloadManager:
             out=request_num_tokens[:num_reqs],
         )
         for finalize_phase in range(2):
+            if finalize_phase:
+                status = buffers["tp_fence_token"]
+                status.copy_(self._tp_group.all_reduce(status))
+                torch._assert_async(
+                    status == 0, "sparse MLA MTP finalize validation failed"
+                )
             for layer_index, layer_name in enumerate(self._plan.main_layer_names):
                 layer_view = self._layer_views[layer_name]
                 host_view = layer_view.main_host_kv_uva
@@ -389,8 +397,8 @@ class SparseMLAOffloadManager:
                     buffers["newest_logical_ids"][layer_index],
                     provisional,
                     provisional,
-                    provisional[..., 0],
-                    provisional[..., 0],
+                    buffers["miss_counts"],
+                    buffers["accepted_counts"],
                     buffers["resident_main_kv"][layer_index],
                     buffers["resident_logical_ids"][layer_index],
                     buffers["resident_last_access"][layer_index],
@@ -410,7 +418,7 @@ class SparseMLAOffloadManager:
         idx_mapping: torch.Tensor,
         block_tables: tuple[torch.Tensor, ...],
         num_blocks: torch.Tensor,
-        num_computed_tokens: torch.Tensor,
+        batch_num_tokens: torch.Tensor,
         num_reqs_padded: int,
     ) -> None:
         self._require_open()
@@ -447,10 +455,10 @@ class SparseMLAOffloadManager:
             or num_blocks.dtype != torch.int32
             or num_blocks.ndim != 2
             or num_blocks.shape != (1, max_num_reqs)
-            or num_computed_tokens.device != device
-            or num_computed_tokens.dtype != torch.int32
-            or num_computed_tokens.ndim != 1
-            or num_computed_tokens.shape != (max_num_reqs,)
+            or batch_num_tokens.device != device
+            or batch_num_tokens.dtype != torch.int32
+            or batch_num_tokens.ndim != 1
+            or batch_num_tokens.shape != (num_reqs,)
         ):
             raise ValueError("invalid sparse MLA decode batch tensors")
 
@@ -483,12 +491,7 @@ class SparseMLAOffloadManager:
                 idx_mapping,
                 out=request_num_blocks[:num_reqs],
             )
-            torch.index_select(
-                num_computed_tokens,
-                0,
-                idx_mapping,
-                out=request_num_tokens[:num_reqs],
-            )
+            request_num_tokens[:num_reqs].copy_(batch_num_tokens)
             request_active[:num_reqs].fill_(True)
 
     def close(self) -> None:
@@ -790,16 +793,19 @@ class SparseMLAOffloadManager:
                 os.close(fd)
                 raise
         else:
-            fd = os.open(path, os.O_RDWR)
+            fd = os.open(path, os.O_RDONLY)
             if os.fstat(fd).st_size != handle.byte_length:
                 os.close(fd)
                 raise ValueError("shared Host backing size does not match the handle")
         try:
+            protection = mmap.PROT_READ
+            if self._is_host_writer:
+                protection |= mmap.PROT_WRITE
             mapping = mmap.mmap(
                 fd,
                 handle.byte_length,
                 flags=mmap.MAP_SHARED,
-                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                prot=protection,
             )
         except (OSError, ValueError):
             os.close(fd)
@@ -807,15 +813,21 @@ class SparseMLAOffloadManager:
         self._pool_handle = handle
         self._fd = fd
         self._mmap = mapping
-        self._host_views = {
-            name: torch.frombuffer(
-                mapping,
-                dtype=self._host_entry.dtype,
-                count=math.prod(self._host_entry.shape),
-                offset=offset,
-            ).view(self._host_entry.shape)
-            for name, offset in zip(handle.layer_names, handle.layer_offsets)
-        }
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="The given buffer is not writable",
+                category=UserWarning,
+            )
+            self._host_views = {
+                name: torch.frombuffer(
+                    mapping,
+                    dtype=self._host_entry.dtype,
+                    count=math.prod(self._host_entry.shape),
+                    offset=offset,
+                ).view(self._host_entry.shape)
+                for name, offset in zip(handle.layer_names, handle.layer_offsets)
+            }
         self._host_base_ptr = self._host_views[handle.layer_names[0]].data_ptr()
 
     def _register_host_mapping(self) -> None:
@@ -823,8 +835,9 @@ class SparseMLAOffloadManager:
             return
         if self._registered:
             raise RuntimeError("Host mapping is already registered")
+        flags = 0 if self._is_host_writer else _CUDA_HOST_REGISTER_READ_ONLY
         result = torch.cuda.cudart().cudaHostRegister(
-            self._host_base_ptr, self._pool_handle.byte_length, 0
+            self._host_base_ptr, self._pool_handle.byte_length, flags
         )
         if result.value != 0:
             raise RuntimeError(f"cudaHostRegister failed with code {result.value}")

@@ -73,16 +73,16 @@ __global__ void validate_rows_kernel(
     valid = physical >= 0 && physical < num_host_blocks;
   }
   const int saved_request = valid ? request : 0;
+  const bool use_saved_topk = window > 1 && tp_fence_token[0] > 0;
   const int32_t* topk_logical_ids =
-      tp_fence_token[0] > 0
-          ? saved_topk_logical_ids + saved_request * window * topk
-          : live_topk_logical_ids + row * topk;
+      use_saved_topk ? saved_topk_logical_ids + saved_request * window * topk
+                     : live_topk_logical_ids + row * topk;
   for (int item = 0; valid && item < topk; ++item) {
     const int logical = topk_logical_ids[item];
     if (logical == -1) continue;
     valid = logical >= 0 && logical < num_tokens;
   }
-  if (valid) row_valid[request * window + slot] = 1;
+  if (valid) row_valid[row] = 1;
 }
 
 __global__ void plan_rows_kernel(
@@ -94,16 +94,11 @@ __global__ void plan_rows_kernel(
     uint16_t* newest_main_kv, int64_t* newest_logical_ids,
     int32_t* topk_physical_ids, bool* topk_hit_mask, int32_t* miss_logical_ids,
     int32_t* miss_victim_slots, int32_t* miss_counts, int32_t* hit_counts,
-    int token_rows, int scratch_rows, int window, int topk, int resident_rows,
-    int head_dim) {
-  const int row = blockIdx.x;
-  if (row >= scratch_rows || threadIdx.x != 0) return;
-  int32_t* hit_indices = topk_physical_ids + row * topk;
-  bool* hit_mask = topk_hit_mask + row * topk;
-  int32_t* miss_ids = miss_logical_ids + row * topk;
-  int32_t* victim_slots = miss_victim_slots + row * topk;
-  const int request = row / window;
-  const int window_slot = row % window;
+    int token_rows, int scratch_rows, int window_slot, int window, int topk,
+    int resident_rows, int head_dim) {
+  const int request = blockIdx.x;
+  if (request >= scratch_rows / window || threadIdx.x != 0) return;
+  const int state_row = request * window + window_slot;
   int token_row = -1;
   for (int candidate = 0; candidate < token_rows; ++candidate) {
     if (req_id_per_token[candidate] == request &&
@@ -112,9 +107,14 @@ __global__ void plan_rows_kernel(
       break;
     }
   }
-  const bool valid = token_row >= 0 && miss_counts[row] == 1;
-  miss_counts[row] = 0;
-  hit_counts[row] = 0;
+  if (token_row < 0) return;
+  int32_t* hit_indices = topk_physical_ids + token_row * topk;
+  bool* hit_mask = topk_hit_mask + token_row * topk;
+  int32_t* miss_ids = miss_logical_ids + token_row * topk;
+  int32_t* victim_slots = miss_victim_slots + token_row * topk;
+  const bool valid = miss_counts[token_row] == 1;
+  miss_counts[token_row] = 0;
+  hit_counts[token_row] = 0;
   for (int item = 0; item < topk; ++item) {
     hit_indices[item] = -1;
     hit_mask[item] = false;
@@ -126,9 +126,10 @@ __global__ void plan_rows_kernel(
   const int64_t access = request_num_tokens[request];
   const int64_t current_id = positions[token_row];
   const int resident_base = request * resident_rows;
+  const bool use_saved_topk = window > 1 && tp_fence_token[0] > 0;
   const int32_t* topk_logical_ids =
-      tp_fence_token[0] > 0 ? saved_topk_logical_ids + request * window * topk
-                            : live_topk_logical_ids + token_row * topk;
+      use_saved_topk ? saved_topk_logical_ids + request * window * topk
+                     : live_topk_logical_ids + token_row * topk;
 
   for (int item = 0; item < topk; ++item) {
     const int logical = topk_logical_ids[item];
@@ -227,17 +228,23 @@ __global__ void plan_rows_kernel(
   }
 
   const uint16_t* current = current_main_kv + token_row * head_dim;
-  uint16_t* newest =
-      newest_main_kv + (request * window + window_slot) * head_dim;
+  uint16_t* newest = newest_main_kv + state_row * head_dim;
   for (int dim = 0; dim < head_dim; ++dim) newest[dim] = current[dim];
-  newest_logical_ids[request * window + window_slot] = current_id;
-  if (tp_fence_token[0] == 0) {
+  newest_logical_ids[state_row] = current_id;
+  bool is_last_request_token = true;
+  for (int candidate = token_row + 1; candidate < token_rows; ++candidate) {
+    if (req_id_per_token[candidate] == request) {
+      is_last_request_token = false;
+      break;
+    }
+  }
+  if (window > 1 && tp_fence_token[0] == 0 && is_last_request_token) {
     int32_t* saved = saved_topk_logical_ids + request * window * topk;
     for (int item = 0; item < topk; ++item)
       saved[item] = topk_logical_ids[item];
   }
-  hit_counts[row] = hit_count;
-  miss_counts[row] = miss_count;
+  hit_counts[token_row] = hit_count;
+  miss_counts[token_row] = miss_count;
 }
 
 __global__ void transfer_misses_kernel(
@@ -257,20 +264,17 @@ __global__ void transfer_misses_kernel(
   const int request = req_id_per_token[row];
   if (request < 0 || request >= request_slots || !request_active[request])
     return;
-  const int window_slot = positions[row] % window;
-  if (window_slot < 0) return;
-  const int scratch_row = request * window + window_slot;
-  if (miss >= miss_counts[scratch_row]) return;
+  if (miss >= miss_counts[row]) return;
   const int num_blocks = request_num_blocks[request];
   if (num_blocks <= 0 || num_blocks > request_block_width) return;
-  const int logical = miss_logical_ids[scratch_row * topk + miss];
+  const int logical = miss_logical_ids[row * topk + miss];
   const int logical_block = logical / block_size;
   if (logical < 0 || logical >= request_num_tokens[request] ||
       logical_block >= num_blocks)
     return;
   const int physical_block =
       request_block_ids[request * request_block_width + logical_block];
-  const int global_slot = miss_victim_slots[scratch_row * topk + miss];
+  const int global_slot = miss_victim_slots[row * topk + miss];
   if (physical_block < 0 || physical_block >= num_host_blocks ||
       global_slot < 0 || global_slot >= request_slots * resident_rows)
     return;
@@ -288,24 +292,39 @@ __global__ void transfer_misses_kernel(
   }
 }
 
+__global__ void record_provisional_slots_kernel(
+    const int32_t* req_id_per_token, const int64_t* positions,
+    const int32_t* miss_victim_slots, int32_t* provisional_slots,
+    int token_rows, int window, int topk, int request_slots) {
+  const int row = blockIdx.x;
+  if (row >= token_rows) return;
+  const int request = req_id_per_token[row];
+  if (request < 0 || request >= request_slots) return;
+  const int window_slot = positions[row] % window;
+  if (window_slot < 0) return;
+  const int state_row = request * window + window_slot;
+  for (int item = threadIdx.x; item < topk; item += blockDim.x) {
+    provisional_slots[state_row * topk + item] =
+        miss_victim_slots[row * topk + item];
+  }
+}
+
 __global__ void writeback_current_kernel(
     uint16_t* main_host_kv, const int32_t* request_block_ids,
     const int32_t* request_num_blocks, const int32_t* request_num_tokens,
     const bool* request_active, const int32_t* req_id_per_token,
     const int64_t* positions, const uint16_t* newest_main_kv,
-    const int64_t* newest_logical_ids, const int32_t* miss_counts,
-    const int32_t* hit_counts, const int32_t* tp_fence_token, int token_rows,
-    int window, int topk, int request_slots, int request_block_width,
+    const int64_t* newest_logical_ids, const int32_t* tp_fence_token,
+    int token_rows, int window, int request_slots, int request_block_width,
     int num_host_blocks, int block_size, int head_dim) {
   const int row = blockIdx.x;
-  if (row >= token_rows || tp_fence_token[0] != 0) return;
+  if (row >= token_rows || window != 1 || tp_fence_token[0] != 0) return;
   const int request = req_id_per_token[row];
   if (request < 0 || request >= request_slots || !request_active[request])
     return;
   const int window_slot = positions[row] % window;
   if (window_slot < 0) return;
   const int scratch_row = request * window + window_slot;
-  if (hit_counts[scratch_row] + miss_counts[scratch_row] <= 0) return;
   const int num_blocks = request_num_blocks[request];
   if (num_blocks <= 0 || num_blocks > request_block_width) return;
   const int logical = newest_logical_ids[scratch_row];
@@ -572,6 +591,8 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
   const cudaStream_t stream = get_current_cuda_stream(device_index);
   cudaMemsetAsync(miss_counts.mutable_data_ptr<int32_t>(), 0,
                   scratch_rows * sizeof(int32_t), stream);
+  cudaMemsetAsync(hit_counts.mutable_data_ptr<int32_t>(), 0,
+                  scratch_rows * sizeof(int32_t), stream);
   validate_rows_kernel<<<token_rows, 1, 0, stream>>>(
       request_block_ids.const_data_ptr<int32_t>(),
       request_num_blocks.const_data_ptr<int32_t>(),
@@ -584,26 +605,28 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
       tp_fence_token.const_data_ptr<int32_t>(),
       miss_counts.mutable_data_ptr<int32_t>(), token_rows, request_slots,
       request_block_width, window, topk, num_host_blocks);
-  plan_rows_kernel<<<scratch_rows, 1, 0, stream>>>(
-      static_cast<const uint16_t*>(current_main_kv.const_data_ptr()),
-      request_num_tokens.const_data_ptr<int32_t>(),
-      req_id_per_token.const_data_ptr<int32_t>(),
-      live_topk_logical_ids.const_data_ptr<int32_t>(),
-      positions.const_data_ptr<int64_t>(),
-      saved_topk_logical_ids.mutable_data_ptr<int32_t>(),
-      tp_fence_token.const_data_ptr<int32_t>(),
-      static_cast<uint16_t*>(resident_main_kv.mutable_data_ptr()),
-      resident_logical_ids.mutable_data_ptr<int64_t>(),
-      resident_last_access.mutable_data_ptr<int64_t>(),
-      static_cast<uint16_t*>(newest_main_kv.mutable_data_ptr()),
-      newest_logical_ids.mutable_data_ptr<int64_t>(),
-      topk_physical_ids.mutable_data_ptr<int32_t>(),
-      topk_hit_mask.mutable_data_ptr<bool>(),
-      miss_logical_ids.mutable_data_ptr<int32_t>(),
-      miss_victim_slots.mutable_data_ptr<int32_t>(),
-      miss_counts.mutable_data_ptr<int32_t>(),
-      hit_counts.mutable_data_ptr<int32_t>(), token_rows, scratch_rows, window,
-      topk, resident_rows, head_dim);
+  for (int window_slot = 0; window_slot < window; ++window_slot) {
+    plan_rows_kernel<<<request_slots, 1, 0, stream>>>(
+        static_cast<const uint16_t*>(current_main_kv.const_data_ptr()),
+        request_num_tokens.const_data_ptr<int32_t>(),
+        req_id_per_token.const_data_ptr<int32_t>(),
+        live_topk_logical_ids.const_data_ptr<int32_t>(),
+        positions.const_data_ptr<int64_t>(),
+        saved_topk_logical_ids.mutable_data_ptr<int32_t>(),
+        tp_fence_token.const_data_ptr<int32_t>(),
+        static_cast<uint16_t*>(resident_main_kv.mutable_data_ptr()),
+        resident_logical_ids.mutable_data_ptr<int64_t>(),
+        resident_last_access.mutable_data_ptr<int64_t>(),
+        static_cast<uint16_t*>(newest_main_kv.mutable_data_ptr()),
+        newest_logical_ids.mutable_data_ptr<int64_t>(),
+        topk_physical_ids.mutable_data_ptr<int32_t>(),
+        topk_hit_mask.mutable_data_ptr<bool>(),
+        miss_logical_ids.mutable_data_ptr<int32_t>(),
+        miss_victim_slots.mutable_data_ptr<int32_t>(),
+        miss_counts.mutable_data_ptr<int32_t>(),
+        hit_counts.mutable_data_ptr<int32_t>(), token_rows, scratch_rows,
+        window_slot, window, topk, resident_rows, head_dim);
+  }
   const cudaError_t error = cudaGetLastError();
   STD_TORCH_CHECK(error == cudaSuccess,
                   "sparse_mla_cache_plan failed: ", cudaGetErrorString(error));
@@ -732,8 +755,8 @@ void sparse_mla_offload_transfer(
           resident_logical_ids.size(0) == request_slots &&
           resident_logical_ids.size(1) == resident_rows &&
           resident_last_access.sizes().equals(resident_logical_ids.sizes()) &&
-          provisional_slots.size(0) == request_slots &&
-          provisional_slots.size(1) == window && tp_fence_token.size(0) == 1,
+          provisional_slots.sizes().equals(miss_victim_slots.sizes()) &&
+          tp_fence_token.size(0) == 1,
       "invalid sparse MLA transfer static shape");
   const torch::stable::accelerator::DeviceGuard guard(device_index);
   const cudaStream_t stream = get_current_cuda_stream(device_index);
@@ -798,15 +821,15 @@ void sparse_mla_offload_transfer(
         positions.const_data_ptr<int64_t>(),
         static_cast<const uint16_t*>(newest_main_kv.const_data_ptr()),
         newest_logical_ids.const_data_ptr<int64_t>(),
-        miss_counts.const_data_ptr<int32_t>(),
-        hit_counts.const_data_ptr<int32_t>(),
-        tp_fence_token.const_data_ptr<int32_t>(), token_rows, window, topk,
+        tp_fence_token.const_data_ptr<int32_t>(), token_rows, window,
         request_slots, request_block_width, num_host_blocks, block_size,
         head_dim);
-    cudaMemcpyAsync(provisional_slots.mutable_data_ptr<int32_t>(),
-                    miss_victim_slots.const_data_ptr<int32_t>(),
-                    provisional_slots.numel() * sizeof(int32_t),
-                    cudaMemcpyDeviceToDevice, stream);
+    record_provisional_slots_kernel<<<token_rows, 256, 0, stream>>>(
+        req_id_per_token.const_data_ptr<int32_t>(),
+        positions.const_data_ptr<int64_t>(),
+        miss_victim_slots.const_data_ptr<int32_t>(),
+        provisional_slots.mutable_data_ptr<int32_t>(), token_rows, window, topk,
+        request_slots);
   }
   const cudaError_t error = cudaGetLastError();
   STD_TORCH_CHECK(error == cudaSuccess, "sparse_mla_offload_transfer failed: ",

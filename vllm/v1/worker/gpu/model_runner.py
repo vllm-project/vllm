@@ -1463,7 +1463,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch.idx_mapping,
                     block_tables,
                     self.block_tables.num_blocks.gpu,
-                    self.req_states.num_computed_tokens.gpu,
+                    input_batch.seq_lens,
                     input_batch.num_reqs_after_padding,
                 )
             # Mamba "align" pre-copy: migrate recurrent state across block

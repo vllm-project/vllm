@@ -302,7 +302,7 @@ def test_sparse_mla_split_plan_recomputes_effective_hbm_budget():
         ("miss_victim_slots", (2, 1, 4), torch.int32, 256, 1, manager, hbm),
         ("miss_counts", (2, 1), torch.int32, 256, 1, manager, hbm),
         ("provisional_slots", (2, 2, 1, 4), torch.int32, 256, 1, manager, hbm),
-        ("accepted_counts", (2,), torch.int32, 256, 1, manager, hbm),
+        ("accepted_counts", (2, 1), torch.int32, 256, 1, manager, hbm),
         ("hit_output", (2, 1, 4, 8), torch.bfloat16, 256, 1, manager, hbm),
         ("hit_lse", (2, 1, 4), torch.float32, 256, 1, manager, hbm),
         ("miss_output", (2, 1, 4, 8), torch.bfloat16, 256, 1, manager, hbm),

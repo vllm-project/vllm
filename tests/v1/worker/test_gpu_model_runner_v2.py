@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fcntl
 import gc
 import math
 import multiprocessing
+import os
 import tempfile
 from contextlib import nullcontext, suppress
 from dataclasses import replace
@@ -183,6 +185,8 @@ def _sparse_mla_rank(
             results.put((rank, handle, sentinel, malformed_result))
         elif case == "lifetime":
             denied = False
+            assert manager._fd is not None
+            access_mode = fcntl.fcntl(manager._fd, fcntl.F_GETFL) & os.O_ACCMODE
             if tp_group.rank_in_group != 0:
                 try:
                     manager.main_host_write_view("main.0")
@@ -204,7 +208,7 @@ def _sparse_mla_rank(
             if tp_group.rank_in_group == 0:
                 manager.unlink()
                 manager.unlink()
-            results.put((rank, handle, denied, owner_live))
+            results.put((rank, handle, denied, owner_live, access_mode))
         elif case == "local":
             view = manager.layer_view("main.0")
             other_view = manager.layer_view("main.1")
@@ -389,6 +393,8 @@ def test_sparse_mla_pool_writer_and_lifetime_ownership():
     assert records[0][3] == 16
     assert records[1][2] is True
     assert records[1][3] is None
+    assert records[0][4] == os.O_RDWR
+    assert records[1][4] == os.O_RDONLY
     assert records[0][1] == records[1][1]
     assert not _backing_path(records[0][1].backing_name).exists()
 
@@ -1444,6 +1450,7 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         req_ids=["request-a", "request-b"],
         idx_mapping=torch.tensor([1, 0], dtype=torch.int32),
         num_reqs_after_padding=3,
+        seq_lens=torch.tensor([10, 9], dtype=torch.int32),
     )
     runner.prepare_inputs = lambda output, desc: input_batch
     gathered = torch.tensor(
@@ -1479,7 +1486,7 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([[11, 12], [21, 22], [-1, -1]], dtype=torch.int32),
     )
     assert buffers["request_num_blocks"].tolist() == [1, 2, 0]
-    assert buffers["request_num_tokens"].tolist() == [9, 8, 0]
+    assert buffers["request_num_tokens"].tolist() == [10, 9, 0]
     assert buffers["request_active"].tolist() == [True, True, False]
     assert not buffers.generation_accesses
     assert generation_names.isdisjoint(buffers)
@@ -1506,7 +1513,7 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([0, 2], dtype=torch.int32),
         (torch.tensor([[31, 32], [41, 42]], dtype=torch.int32),),
         torch.tensor([[1, 0, 2]], dtype=torch.int32),
-        torch.tensor([18, 0, 20], dtype=torch.int32),
+        torch.tensor([18, 20], dtype=torch.int32),
         2,
     )
     assert torch.equal(buffers["resident_logical_ids"], preserved_resident_ids)
@@ -1520,7 +1527,7 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([2, 0], dtype=torch.int32),
         (torch.tensor([[51, 52], [61, 62]], dtype=torch.int32),),
         torch.tensor([[1, 0, 2]], dtype=torch.int32),
-        torch.tensor([28, 0, 30], dtype=torch.int32),
+        torch.tensor([30, 28], dtype=torch.int32),
         2,
     )
     assert torch.all(buffers["resident_logical_ids"][:, 0] == -1)
@@ -1570,7 +1577,7 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([0], dtype=torch.int32),
         (torch.tensor([[61, 62], [0, 0], [0, 0]], dtype=torch.int32),),
         torch.tensor([[1, 0, 0]], dtype=torch.int32),
-        torch.tensor([38, 0, 0], dtype=torch.int32),
+        torch.tensor([38], dtype=torch.int32),
         3,
     )
     assert sorted(clear_calls) == [
@@ -1596,7 +1603,7 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([0], dtype=torch.int32),
         (torch.tensor([[61, 62], [0, 0], [0, 0]], dtype=torch.int32),),
         torch.tensor([[1, 0, 0]], dtype=torch.int32),
-        torch.tensor([38, 0, 0], dtype=torch.int32),
+        torch.tensor([38], dtype=torch.int32),
         3,
     )
     assert not clear_calls
@@ -1607,7 +1614,7 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([0, 1], dtype=torch.int32),
         (torch.tensor([[71, 72], [81, 82]], dtype=torch.int32),),
         torch.tensor([[1, 1, 0]], dtype=torch.int32),
-        torch.tensor([48, 49, 0], dtype=torch.int32),
+        torch.tensor([48, 49], dtype=torch.int32),
         2,
     )
     buffers["resident_logical_ids"].fill_(77)
@@ -1619,7 +1626,7 @@ def test_gpu_model_runner_v2_sparse_mla_manager_request_lifecycle(monkeypatch):
         torch.tensor([1, 0], dtype=torch.int32),
         (torch.tensor([[91, 92], [101, 102]], dtype=torch.int32),),
         torch.tensor([[1, 1, 0]], dtype=torch.int32),
-        torch.tensor([58, 59, 0], dtype=torch.int32),
+        torch.tensor([59, 58], dtype=torch.int32),
         2,
     )
     assert torch.all(buffers["resident_logical_ids"][:, :2] == -1)
@@ -1714,7 +1721,7 @@ def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
             torch.tensor([1, 0], dtype=torch.int32),
             (torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]], dtype=torch.int32),),
             torch.tensor([[2, 1]], dtype=torch.int32),
-            torch.tensor([7, 8], dtype=torch.int32),
+            torch.tensor([8, 7], dtype=torch.int32),
             2,
         )
     assert torch.equal(
@@ -1735,7 +1742,7 @@ def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
     valid_idx = torch.tensor([0], dtype=torch.int32)
     valid_table = torch.tensor([[1, 2]], dtype=torch.int32)
     valid_counts = torch.tensor([[1, 0]], dtype=torch.int32)
-    valid_tokens = torch.tensor([1, 0], dtype=torch.int32)
+    valid_tokens = torch.tensor([1], dtype=torch.int32)
     buffers_before_rejection = {
         name: tensor.clone() for name, tensor in manager._local_buffers.items()
     }
@@ -1787,7 +1794,7 @@ def test_gpu_model_runner_v2_sparse_mla_fixed_capture_inventory(monkeypatch):
             valid_idx,
             (valid_table,),
             valid_counts,
-            valid_tokens[:1],
+            torch.tensor([1, 0], dtype=torch.int32),
             1,
         ),
         (("a",), valid_idx, (valid_table,), valid_counts, valid_tokens, 0),
@@ -2002,9 +2009,13 @@ def _make_c6_full_decode_seed(monkeypatch):
     events: list[tuple] = []
     req_id_per_token = torch.tensor([7, 8, 9], dtype=torch.int32)
     fence_token = torch.zeros(1, dtype=torch.int32)
+
+    def prepare_decode_batch(*args):
+        events.append(("publish", tuple(args[5].tolist())))
+
     manager = SimpleNamespace(
         _local_buffers={"tp_fence_token": fence_token},
-        _prepare_decode_batch=lambda *args: events.append(("publish",)),
+        _prepare_decode_batch=prepare_decode_batch,
     )
     manager.layer_view = lambda name: SimpleNamespace(
         local_buffers=manager._local_buffers
@@ -2048,6 +2059,7 @@ def _make_c6_full_decode_seed(monkeypatch):
         num_tokens_after_padding=3,
         input_ids=torch.zeros(3, dtype=torch.int64),
         positions=torch.arange(3),
+        seq_lens=torch.tensor([2], dtype=torch.int32),
         is_padding=torch.tensor([False, True, True]),
         num_draft_tokens=0,
     )
@@ -2127,8 +2139,8 @@ def test_gpu_model_runner_v2_sparse_mla_full_decode_fence_and_tail(monkeypatch):
 
     runner.execute_model(scheduler_output)
 
-    assert [event[0] for event in events] == [
-        "publish",
+    assert events[0] == ("publish", (2,))
+    assert [event[0] for event in events[1:]] == [
         "pre_forward",
         "broadcast",
         "target",
@@ -2172,7 +2184,7 @@ def test_gpu_model_runner_v2_sparse_mla_broadcast_failure_stops_target(monkeypat
     with pytest.raises(RuntimeError, match="fence failed"):
         runner.execute_model(scheduler_output)
 
-    assert events == [("publish",), ("pre_forward",)]
+    assert events == [("publish", (2,)), ("pre_forward",)]
     assert runner.execute_model_state is None
 
 
