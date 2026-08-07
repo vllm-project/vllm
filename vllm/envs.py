@@ -1549,6 +1549,21 @@ class RocmSettings(BaseSettings):
         default=True,
         description="Whether to use aiter mla ops. By default is enabled.",
     )
+    rocm_aiter_mla_asm_padding: Literal["auto", "gluon", "asm"] = Field(
+        default="auto",
+        description=(
+            "Small-head (<16) AITER MLA decode kernel selection. Small head "
+            "counts (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode "
+            "either through the Gluon small-head kernel or through the padded "
+            'persistent-scheduling (PS) ASM kernel. "auto" (default) keeps '
+            "Gluon for head counts that divide 16 where a Gluon build exists "
+            "(gfx950/CDNA4) and otherwise uses the padded PS ASM decode; "
+            '"gluon" forces the Gluon path wherever a build exists; "asm" '
+            "forces the padded PS ASM decode. On gfx942/CDNA3 there is no "
+            "Gluon build, so the ASM path is always used regardless of this "
+            "setting."
+        ),
+    )
     rocm_use_aiter_mha: bool = Field(
         default=True,
         description="Whether to use aiter mha ops. By default is enabled.",
@@ -1656,6 +1671,11 @@ class RocmSettings(BaseSettings):
         default=False,
         description="If set, use the fp8 mfma in rocm paged attention.",
     )
+
+    @field_validator("rocm_aiter_mla_asm_padding", mode="before")
+    @classmethod
+    def _lower_aiter_mla_asm_padding(cls, v: Any) -> Any:
+        return v.lower() if isinstance(v, str) else v
 
 
 class TpuXpuSettings(BaseSettings):

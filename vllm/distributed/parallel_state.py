@@ -1234,10 +1234,6 @@ class GroupCoordinator:
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
-    def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
-        if self.device_communicator is not None:
-            self.device_communicator.prepare_communication_buffer_for_model(model)
-
     def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
@@ -2041,27 +2037,6 @@ def ensure_model_parallel_initialized(
     )
 
 
-def prepare_communication_buffer_for_model(model: torch.nn.Module):
-    """Prepare the communication buffer for the model.
-    Traditional communication libraries like NCCL are almost
-    model agnostic. However, emerging new communication libraries like
-    MoE all2all (DeepEP) usually allocate the communication buffer
-    based on the model shape for optimal performance.
-    """
-    if _TP is not None:
-        _TP.prepare_communication_buffer_for_model(model)
-    if _PCP is not None:
-        _PCP.prepare_communication_buffer_for_model(model)
-    if _PP is not None:
-        _PP.prepare_communication_buffer_for_model(model)
-    if _DP is not None:
-        _DP.prepare_communication_buffer_for_model(model)
-    if _EP is not None:
-        _EP.prepare_communication_buffer_for_model(model)
-    if _EPLB is not None:
-        _EPLB.prepare_communication_buffer_for_model(model)
-
-
 def checkpoint_prepare_distributed_state() -> None:
     """Prepare every device communicator for a process checkpoint."""
     torch.accelerator.synchronize()
@@ -2179,10 +2154,10 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     if not current_platform.is_cpu():
         torch.accelerator.empty_cache()
         try:
-            torch._C._host_emptyCache()
+            torch.accelerator.empty_host_cache()
         except AttributeError:
             logger.warning(
-                "torch._C._host_emptyCache() only available in Pytorch >=2.5"
+                "torch.accelerator.empty_host_cache() only available in Pytorch >=2.9"
             )
 
     logger.debug_once("[shutdown] Distributed: cleanup complete")
