@@ -964,10 +964,18 @@ class LlamaJsonParser(ParserEngine):
         if getattr(structured_outputs, "structural_tag", None) is not None:
             return None
         text_format = getattr(getattr(request, "text", None), "format", None)
-        if (
-            getattr(structured_outputs, "json", None) is None
-            and getattr(text_format, "schema_", None) is None
-        ):
+        schema = getattr(structured_outputs, "json", None)
+        if schema is None:
+            schema = getattr(text_format, "schema_", None)
+        if schema is None:
+            return None
+        # A schema that declares no properties does not forbid the
+        # {"name": ..., "parameters": ...} envelope, and an effectively
+        # unconstrained model writes the envelope the chat template asks
+        # for.  Only a schema that names its keys makes bare parameters the
+        # shape actually generated, so only then is it safe to read the
+        # whole object as the arguments.
+        if not isinstance(schema, dict) or "properties" not in schema:
             return None
         return name or None
 
