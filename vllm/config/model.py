@@ -396,6 +396,7 @@ class ModelConfig:
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
@@ -527,6 +528,7 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        mm_device_do_normalize: bool | None,
         mm_processor_device: MMProcessorDevice | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
@@ -793,6 +795,9 @@ class ModelConfig:
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+                mm_device_do_normalize=self._resolve_mm_device_do_normalize(
+                    mm_device_do_normalize
+                ),
             )
 
             mm_config_kwargs = {
@@ -925,6 +930,51 @@ class ModelConfig:
                 "Example: max_model_len=2048"
             )
         return self
+
+    def _resolve_mm_device_do_normalize(
+        self, mm_device_do_normalize: bool | None
+    ) -> bool:
+        if mm_device_do_normalize is None:
+            if envs.VLLM_USE_RUST_FRONTEND:
+                logger.debug(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+            else:
+                mm_device_do_normalize = (
+                    self._model_info.supports_mm_device_do_normalize
+                )
+                logger.debug(
+                    "mm_device_do_normalize is %s by default.",
+                    "enabled" if mm_device_do_normalize else "disabled",
+                )
+        else:
+            if mm_device_do_normalize and envs.VLLM_USE_RUST_FRONTEND:
+                logger.warning(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+
+            if (
+                mm_device_do_normalize
+                and not self._model_info.supports_mm_device_do_normalize
+            ):
+                logger.warning(
+                    "Model does not support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+
+            logger.debug(
+                "mm_device_do_normalize is %s.",
+                "enabled" if mm_device_do_normalize else "disabled",
+            )
+
+        return mm_device_do_normalize
 
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if

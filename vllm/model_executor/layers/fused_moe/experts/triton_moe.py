@@ -62,6 +62,31 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+        if not supported or not current_platform.is_cuda_alike():
+            return supported, reason
+
+        padded_num_experts = (moe_config.num_experts + 31) // 32 * 32
+        if padded_num_experts >= 1024:
+            return False, (
+                "kernel's moe_align_block_size requires fewer than 1024 padded experts"
+            )
+        return True, None
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
