@@ -1119,10 +1119,8 @@ class SpeculativeConfig:
                     )
                 )
 
-        # Only DSpark produces the per-request confidences the adaptive budget
-        # needs, so resolve the flag once here instead of re-deriving it.
-        if self.method != "dspark":
-            self.enable_adaptive_verification = False
+        if self.method != "dspark" and self.enable_adaptive_verification:
+            raise ValueError("Adaptive verification only supported with DSpark")
 
         return self
 
