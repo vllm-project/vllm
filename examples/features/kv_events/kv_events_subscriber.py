@@ -42,12 +42,16 @@ class BlockStored(KVCacheEvent):
     """
 
     group_idx: int | None = None
+    kv_cache_spec_kind: str | None = None
+    kv_cache_spec_sliding_window: int | None = None
+    locality: str | None = None
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
     group_idx: int | None = None
+    locality: str | None = None
 
 
 class AllBlocksCleared(KVCacheEvent):

@@ -5,11 +5,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.fla.ops import (
+from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_sigmoid_gating_delta_rule_update,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
@@ -58,8 +58,10 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     dt_bias = torch.rand(num_v_heads // tp_size, dtype=dtype)
     a = torch.rand(num_tokens, num_v_heads, dtype=dtype)
     b = torch.rand(num_tokens, num_v_heads, dtype=dtype)
+    # Entry 0 is reserved as NULL_BLOCK_ID (CUDA graph padding), so valid
+    # state indices start at 1.
     ssm_state = torch.rand(
-        total_entries, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
+        total_entries + 1, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
     )
     # Index 0 is NULL_BLOCK_ID: the kernel intentionally skips sequences whose
     # state index is 0 and leaves their output slot unwritten. Draw indices from
@@ -150,8 +152,10 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     dt_bias = torch.rand(num_v_heads // tp_size, dtype=dtype)
     a = torch.rand(num_tokens, num_v_heads, dtype=dtype)
     b = torch.rand(num_tokens, num_v_heads, dtype=dtype)
+    # Entry 0 is reserved as NULL_BLOCK_ID (CUDA graph padding), so valid
+    # state indices start at 1.
     ssm_state = torch.rand(
-        total_entries, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
+        total_entries + 1, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
     )
     # Index 0 is NULL_BLOCK_ID (skipped by the kernel, output left unwritten), so
     # draw active state indices from [1, total_entries) to keep every output slot
