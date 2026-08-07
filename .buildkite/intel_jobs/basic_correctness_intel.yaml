@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   agent_tags:
     label: production
-    gpu: 1+
+    gpu: 2+
     mem: 16+
   no_plugin: true
   working_dir: "."
@@ -25,4 +25,5 @@ steps:
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       VLLM_DISABLE_COMPILE_CACHE=1 pytest -v -s basic_correctness/test_cpu_offload.py &&
-      pytest -v -s basic_correctness/test_mem.py::test_end_to_end'
+      pytest -v -s basic_correctness/test_mem.py &&
+      pytest -v -s basic_correctness/test_basic_correctness.py'

@@ -57,6 +57,28 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh v1'
+  - label: "XPU W8A8 FP8 Linear Examples"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    optional: true
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 24+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+      VLLM_TEST_DEVICE: "xpu"
+    source_file_dependencies:
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml
+      - .buildkite/scripts/hardware_ci/run-intel-ci-test.sh
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh w8a8-fp8-linear'
   - label: "XPU server test"
     depends_on:
       - image-build-xpu
@@ -78,3 +100,68 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh server'
+  - label: "XPU quantization test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    optional: true
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+    source_file_dependencies:
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml
+      - .buildkite/scripts/hardware_ci/run-intel-ci-test.sh
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh quantization'
+  - label: "XPU compressed tensors FP8 test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    optional: true
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+      VLLM_TEST_DEVICE: "xpu"
+    source_file_dependencies:
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml
+      - .buildkite/scripts/hardware_ci/run-intel-ci-test.sh
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh compressed-tensors-fp8'
+  - label: "XPU Graph"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    optional: true
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 32+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+      VLLM_TEST_DEVICE: "xpu"
+    source_file_dependencies:
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml
+      - .buildkite/scripts/hardware_ci/run-intel-ci-test.sh
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh graph'
