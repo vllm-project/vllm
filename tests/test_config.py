@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pydantic
 import pytest
+from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
@@ -29,10 +30,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
-from vllm.config.vllm import (
-    OPTIMIZATION_LEVEL_TO_CONFIG,
-    OptimizationLevel,
-)
+from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1882,3 +1880,23 @@ def test_load_config_rejects_invalid_safetensors_load_strategy():
 def test_load_config_rejects_non_string_load_format(bad_load_format):
     with pytest.raises(pydantic.ValidationError):
         LoadConfig(load_format=bad_load_format)
+
+
+# A real Qwen3-0.6B model revision that is used in the tests below.
+REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+
+
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_revision_not_resolved_when_weights_differ_from_model(mock_resolve):
+    model_weights = "unsloth/Qwen3-0.6B-GGUF:Q8_0"
+    config = ModelConfig("Qwen/Qwen3-0.6B", model_weights=model_weights)
+    assert config.revision is None
+
+
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_revision_resolved_when_weights_match_model(mock_resolve):
+    model = "Qwen/Qwen3-0.6B"
+    config = ModelConfig(model)
+    assert isinstance(config.revision, ResolvedRevision)
+    assert config.revision.resolved == REVISION
+    mock_resolve.assert_any_call(model, None, config.hf_token)

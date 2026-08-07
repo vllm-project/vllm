@@ -177,6 +177,10 @@ def packed_nccl_broadcast_producer(
             # Move to the next buffer
             buffer_idx = (buffer_idx + 1) % num_buffers
 
+    # Drain every slot before returning.
+    for stream in streams:
+        stream.synchronize()
+
 
 def packed_nccl_broadcast_consumer(
     iterator: Iterator[tuple[str, tuple[list[int], torch.dtype]]],
@@ -278,6 +282,10 @@ def packed_nccl_broadcast_consumer(
                         )
                     )
                 break
+
+    # Drain every slot before returning.
+    for stream in streams:
+        stream.synchronize()
 
 
 # ── IPC packed transfer ────────────────────────────────────────────────
