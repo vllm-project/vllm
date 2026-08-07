@@ -290,6 +290,82 @@ class TestSpanHelpers:
         raw = f'{{"name": "f", "parameters": {span}'
         assert _llama_arg_converter(raw, False) == completed
 
+    @pytest.mark.parametrize(
+        ("span", "completed"),
+        [
+            ('{"a": "\\u0041"}', '{"a": "\\u0041"}'),
+            ('{"a": "x\\u00e9y"}', '{"a": "x\\u00e9y"}'),
+            ('{"k\\u00e9y": 1}', '{"k\\u00e9y": 1}'),
+            ('{"a": "x\\u00e9', '{"a": "x\\u00e9"}'),
+            ('{"a": "x\\', '{"a": "x"}'),
+            ('{"a": "x\\u', '{"a": "x"}'),
+            ('{"a": "x\\u0', '{"a": "x"}'),
+            ('{"a": "x\\u00', '{"a": "x"}'),
+            ('{"a": "x\\u00e', '{"a": "x"}'),
+            ('{"a": "x\\u00e"}', '{"a": "x"}'),
+            ('{"a": "x\\uZZZZ"}', '{"a": "x"}'),
+            ('{"a": "x\\u00g9"}', '{"a": "x"}'),
+            ('{"a": "x\\qy"}', '{"a": "x"}'),
+            ('{"k\\u00e": 1}', "{}"),
+        ],
+    )
+    def test_unicode_escapes_cut_back_to_valid_json(self, span, completed):
+        # A "\\uXXXX" escape is six characters, so every prefix of it must
+        # cut back to before the backslash: appending a quote inside the
+        # escape emits '{"a": "x\\u"}', which does not parse.  Invalid hex
+        # and unknown escapes are the same lexical error, one token later.
+        end, closers = _closeable_prefix(span)
+        assert span[:end] + closers == completed
+        json.loads(completed)
+        raw = f'{{"name": "f", "parameters": {span}'
+        assert _llama_arg_converter(raw, False) == completed
+        assert completed.startswith(_llama_arg_converter(raw, True))
+
+    @pytest.mark.parametrize(
+        ("span", "completed"),
+        [
+            ('{"l": [], "a": "z"}', '{"l": [], "a": "z"}'),
+            ('{"o": {}, "a": "z"}', '{"o": {}, "a": "z"}'),
+            ('{"l": [[], {}], "a": "z"}', '{"l": [[], {}], "a": "z"}'),
+            ('{"l": [], "a": "z', '{"l": [], "a": "z"}'),
+            ('{"o": {}, "a": "z', '{"o": {}, "a": "z"}'),
+            ('{"l": [', '{"l": []}'),
+            ('{"l": []', '{"l": []}'),
+            ('{"l": [],', '{"l": []}'),
+            ('{"o": {', '{"o": {}}'),
+            ('{"o": {}', '{"o": {}}'),
+        ],
+    )
+    def test_empty_containers_do_not_end_the_span(self, span, completed):
+        # An empty "[]"/"{}" closes from a state no other input reaches
+        # (nothing has been read since the opener), and a scanner that
+        # stops there still returns valid JSON -- '{"l": []}' -- while
+        # silently dropping every later member.
+        end, closers = _closeable_prefix(span)
+        assert span[:end] + closers == completed
+        json.loads(completed)
+        raw = f'{{"name": "f", "parameters": {span}'
+        assert _llama_arg_converter(raw, False) == completed
+
+    @pytest.mark.parametrize(
+        "document",
+        [
+            "{}",
+            "[]",
+            '{"a": 1}',
+            '{"l": [], "a": "z"}',
+            '{"o": {}, "a": "z"}',
+            '{"l": [[], {}], "n": null}',
+            '[{}, [], "s", 1.5e-3, true, false, null]',
+            '{"a": "x\\u00e9y", "b": [1, {"c": {}}]}',
+        ],
+    )
+    def test_complete_document_needs_no_repair(self, document):
+        # The repair must be a no-op on well-formed arguments: consuming
+        # the whole document with no closers is what says nothing was cut.
+        json.loads(document)
+        assert _closeable_prefix(document) == (len(document), "")
+
     def test_closeable_prefix_is_monotonic(self):
         # Prefix-stability of the streamed text depends on the cut point
         # never moving backwards as more of the value arrives.
@@ -413,6 +489,28 @@ class TestNonStreaming:
         assert result.tool_calls[0].function.arguments == '{"q": "t1"}'
         assert result.tool_calls[1].function.arguments == "{}"
         assert result.tool_calls[2].function.arguments == '{"n": 3}'
+
+    @pytest.mark.parametrize(
+        ("span", "arguments"),
+        [
+            ('{"a": "x\\u', '{"a": "x"}'),
+            ('{"a": "x\\u00e9', '{"a": "x\\u00e9"}'),
+            ('{"a": "x\\uZZZZ"}', '{"a": "x"}'),
+            ('{"l": [], "a": "z"}', '{"l": [], "a": "z"}'),
+            ('{"o": {}, "a": "z"}', '{"o": {}, "a": "z"}'),
+        ],
+    )
+    def test_truncated_arguments_reach_the_client_parseable(
+        self, parser, mock_request, span, arguments
+    ):
+        # What the span helpers repair is what the client is handed: a
+        # generation cut mid-escape must not emit unparsable arguments,
+        # and one holding an empty container must not lose its later keys.
+        text = f'{{"name": "f", "parameters": {span}'
+        result = parser.extract_tool_calls_from_content(text, mock_request)
+        emitted = result.tool_calls[0].function.arguments
+        assert emitted == arguments
+        json.loads(emitted)
 
     def test_prose_before_call_kept_trailing_dropped(self, parser, mock_request):
         # Deliberate change vs legacy (content was None): leading prose is
