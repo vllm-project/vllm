@@ -747,7 +747,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             is_gfx1250 = on_gfx1250()
 
-        uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or is_gfx1250
+        uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250()
+        )
         if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
