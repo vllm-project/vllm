@@ -13,8 +13,13 @@ from .idefics3 import Idefics3MultiModalProcessor as SmolVLMMultiModalProcessor
 
 
 class SmolVLMProcessingInfo(Idefics3ProcessingInfo):
-    def get_hf_processor(self, **kwargs: object) -> SmolVLMProcessor:
+    def _get_hf_processor_unchecked(self, **kwargs: object) -> SmolVLMProcessor:
         return self.ctx.get_hf_processor(SmolVLMProcessor, **kwargs)
+
+    def get_hf_processor(self, **kwargs: object) -> SmolVLMProcessor:
+        processor = self._get_hf_processor_unchecked(**kwargs)
+        self._validate_size_limit(processor, kwargs)
+        return processor
 
     def _get_image_token(self, processor: SmolVLMProcessor) -> tuple[str, str, str]:
         image_token = processor.image_token

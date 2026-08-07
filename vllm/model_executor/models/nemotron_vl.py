@@ -53,7 +53,12 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for Nemotron VL models."""
 
     def get_image_processor(self, **kwargs: object):
-        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        trusted_orig_processor = cached_image_processor_from_config(
+            self.ctx.model_config, **self.ctx.get_merged_mm_kwargs({})
+        )
+        kwargs = self._merge_image_processor_kwargs(
+            kwargs, max_dynamic_patch=trusted_orig_processor.max_num_tiles
+        )
         orig_processor = cached_image_processor_from_config(
             self.ctx.model_config, **kwargs
         )
@@ -432,7 +437,9 @@ class LlamaNemotronVLEmbedProcessingInfo(BaseInternVLProcessingInfo):
             getattr(config, "dynamic_image_size", True),
         )
 
-        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs = self._merge_image_processor_kwargs(
+            kwargs, max_dynamic_patch=max_dynamic_patch
+        )
         kwargs.setdefault("image_size", config.force_image_size)
         kwargs.setdefault("min_dynamic_patch", min_dynamic_patch)
         kwargs.setdefault("max_dynamic_patch", max_dynamic_patch)

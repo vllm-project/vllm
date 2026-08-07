@@ -46,7 +46,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
-from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -80,8 +80,10 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -853,6 +855,42 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
+    @staticmethod
+    def _validate_pixels_override(
+        key: str,
+        value: object,
+        max_pixels_ceiling: int,
+    ) -> None:
+        if isinstance(value, (int, float)) and value > max_pixels_ceiling:
+            raise ValueError(
+                f"Qwen2-VL request {key}={value} exceeds the configured "
+                f"max_pixels ceiling of {max_pixels_ceiling}."
+            )
+
+    def _validate_request_mm_processor_kwargs(
+        self,
+        mm_kwargs: Mapping[str, object],
+    ) -> None:
+        size = mm_kwargs.get("size")
+        overrides: list[tuple[str, object]] = [
+            ("max_pixels", mm_kwargs.get("max_pixels")),
+            ("min_pixels", mm_kwargs.get("min_pixels")),
+        ]
+        if isinstance(size, Mapping):
+            overrides.extend(
+                [
+                    ("size.longest_edge", size.get("longest_edge")),
+                    ("size.shortest_edge", size.get("shortest_edge")),
+                ]
+            )
+
+        if all(value is None for _, value in overrides):
+            return
+
+        max_pixels_ceiling = self.get_image_processor().size["longest_edge"]
+        for key, value in overrides:
+            self._validate_pixels_override(key, value, max_pixels_ceiling)
+
     def get_data_parser(self):
         return Qwen2VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
@@ -1122,6 +1160,14 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
+    def apply(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
+        self.info._validate_request_mm_processor_kwargs(inputs.hf_processor_mm_kwargs)
+        return super().apply(inputs, timing_ctx)
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

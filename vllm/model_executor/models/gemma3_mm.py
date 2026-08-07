@@ -86,6 +86,35 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
+    def _get_images_kwargs(
+        self,
+        *,
+        processor: Gemma3Processor,
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return processor._merge_kwargs(
+            Gemma3ProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs(mm_kwargs),
+        )["images_kwargs"]
+
+    @staticmethod
+    def _get_positive_int(name: str, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"`{name}` must be a positive integer.")
+
+        return value
+
+    def _get_trusted_pan_and_scan_max_num_crops(self) -> int:
+        processor = self.get_hf_processor()
+        image_processor: Gemma3ImageProcessor = processor.image_processor
+        images_kwargs = self._get_images_kwargs(processor=processor, mm_kwargs={})
+        value = images_kwargs.get(
+            "pan_and_scan_max_num_crops",
+            image_processor.pan_and_scan_max_num_crops,
+        )
+        return self._get_positive_int("pan_and_scan_max_num_crops", value)
+
     def get_num_crops(
         self,
         *,
@@ -96,28 +125,34 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     ) -> int:
         image_processor: Gemma3ImageProcessor = processor.image_processor
 
-        images_kwargs = processor._merge_kwargs(
-            Gemma3ProcessorKwargs,
-            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
-            **self.ctx.get_merged_mm_kwargs(mm_kwargs),
-        )["images_kwargs"]
+        images_kwargs = self._get_images_kwargs(
+            processor=processor,
+            mm_kwargs=mm_kwargs,
+        )
 
         do_pan_and_scan = images_kwargs.get(
             "do_pan_and_scan", image_processor.do_pan_and_scan
         )
-        pan_and_scan_min_crop_size = images_kwargs.get(
-            "pan_and_scan_min_crop_size", image_processor.pan_and_scan_min_crop_size
+        if not do_pan_and_scan:
+            return 0
+
+        pan_and_scan_min_crop_size = self._get_positive_int(
+            "pan_and_scan_min_crop_size",
+            images_kwargs.get(
+                "pan_and_scan_min_crop_size", image_processor.pan_and_scan_min_crop_size
+            ),
         )
-        pan_and_scan_max_num_crops = images_kwargs.get(
-            "pan_and_scan_max_num_crops", image_processor.pan_and_scan_max_num_crops
+        pan_and_scan_max_num_crops = self._get_positive_int(
+            "pan_and_scan_max_num_crops",
+            images_kwargs.get(
+                "pan_and_scan_max_num_crops",
+                image_processor.pan_and_scan_max_num_crops,
+            ),
         )
         pan_and_scan_min_ratio_to_activate = images_kwargs.get(
             "pan_and_scan_min_ratio_to_activate",
             image_processor.pan_and_scan_min_ratio_to_activate,
         )
-
-        if not do_pan_and_scan:
-            return 0
 
         logger.warning_once(
             "`do_pan_and_scan=True` has suboptimal results on V1 "
@@ -156,7 +191,16 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         if min(crop_size_w, crop_size_h) < pan_and_scan_min_crop_size:
             return 0
 
-        return num_crops_w * num_crops_h
+        num_crops = num_crops_w * num_crops_h
+        trusted_max_num_crops = self._get_trusted_pan_and_scan_max_num_crops()
+        if num_crops > trusted_max_num_crops:
+            raise ValueError(
+                "Gemma3 pan-and-scan crop count "
+                f"{num_crops} exceeds the deployed limit of "
+                f"{trusted_max_num_crops}."
+            )
+
+        return num_crops
 
     def get_image_repl(
         self,
@@ -268,14 +312,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
-        )
-
-        # HF processor pops the `num_crops` kwarg, which is needed by vLLM
+        num_crops: list[int] | None = None
         if (images := mm_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
@@ -293,6 +330,16 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                 )
                 for size in image_sizes
             ]
+
+        processed_outputs = super()._call_hf_processor(
+            prompt,
+            mm_data,
+            mm_kwargs,
+            tok_kwargs,
+        )
+
+        # HF processor pops the `num_crops` kwarg, which is needed by vLLM
+        if num_crops is not None:
             processed_outputs["num_patches"] = torch.tensor(num_crops) + 1
 
         return processed_outputs

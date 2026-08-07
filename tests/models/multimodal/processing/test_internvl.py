@@ -3,17 +3,37 @@
 """Tests for InternVL's multimodal preprocessing kwargs."""
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 from transformers import PretrainedConfig
 
+from vllm.model_executor.models.internvl import InternVLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.processing import BaseMultiModalProcessor
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
+
+
+class _FakeInternVLProcessingContext:
+    def __init__(self, mm_processor_kwargs: Mapping[str, object] | None = None) -> None:
+        self._mm_processor_kwargs = dict(mm_processor_kwargs or {})
+        self._config = SimpleNamespace(
+            vision_config=SimpleNamespace(image_size=448),
+            min_dynamic_patch=1,
+            max_dynamic_patch=12,
+            dynamic_image_size=True,
+            use_thumbnail=True,
+        )
+
+    def get_hf_config(self):
+        return self._config
+
+    def get_merged_mm_kwargs(self, kwargs: Mapping[str, object]) -> dict[str, object]:
+        return self._mm_processor_kwargs | dict(kwargs)
 
 
 def _get_expected_num_patches(
@@ -79,6 +99,42 @@ def _run_check(
 
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("operator_kwargs", "request_max_dynamic_patch", "ceiling"),
+    [
+        ({}, 13, 12),
+        ({"max_dynamic_patch": 4}, 5, 4),
+    ],
+)
+def test_request_max_dynamic_patch_cannot_raise_trusted_ceiling(
+    operator_kwargs: Mapping[str, object],
+    request_max_dynamic_patch: int,
+    ceiling: int,
+) -> None:
+    info = InternVLProcessingInfo(_FakeInternVLProcessingContext(operator_kwargs))
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            rf"max_dynamic_patch={request_max_dynamic_patch} "
+            rf"cannot exceed.*{ceiling}"
+        ),
+    ):
+        info.get_image_processor(max_dynamic_patch=request_max_dynamic_patch)
+
+
+@pytest.mark.cpu_test
+def test_request_max_dynamic_patch_can_lower_trusted_ceiling() -> None:
+    info = InternVLProcessingInfo(
+        _FakeInternVLProcessingContext({"max_dynamic_patch": 4})
+    )
+
+    image_processor = info.get_image_processor(max_dynamic_patch=2)
+
+    assert image_processor.max_dynamic_patch == 2
 
 
 @pytest.mark.parametrize("model_id", ["OpenGVLab/InternVL2-2B"])

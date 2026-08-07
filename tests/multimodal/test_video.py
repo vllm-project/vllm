@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import builtins
 import itertools
 import sys
 import threading
@@ -1069,6 +1070,69 @@ def test_video_loader_frames_sampling(
     assert frames.ndim == 4
     assert frames.shape[3] == 3  # RGB
     assert frames.shape[0] == expected_num_frames
+
+
+def test_dynamic_video_sampling_work_is_bounded_by_source_frames(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = VideoSourceMetadata(
+        total_frames_num=30,
+        original_fps=30.0,
+        duration=1.0,
+    )
+    target = VideoTargetMetadata(num_frames=-1, fps=1_000_000.0, max_duration=10.0)
+    range_stops: list[int] = []
+
+    def recording_range(*args: int):
+        stop = args[0] if len(args) == 1 else args[1]
+        range_stops.append(stop)
+        return builtins.range(*args)
+
+    monkeypatch.setattr("vllm.multimodal.video.range", recording_range, raising=False)
+
+    indices = DynamicVideoBackend.compute_frames_index_to_sample(source, target)
+
+    assert indices == list(range(source.total_frames_num))
+    assert max(range_stops) <= source.total_frames_num
+
+
+@pytest.mark.parametrize(
+    "source, target, expected",
+    [
+        pytest.param(
+            VideoSourceMetadata(30, 30.0, 1.0),
+            VideoTargetMetadata(-1, 2.0, 10.0),
+            [0, 15],
+            id="downsample",
+        ),
+        pytest.param(
+            VideoSourceMetadata(30, 30.0, 1.0),
+            VideoTargetMetadata(-1, 30.0, 10.0),
+            list(range(30)),
+            id="exact-rate",
+        ),
+        pytest.param(
+            VideoSourceMetadata(30, 30.0, 1.0),
+            VideoTargetMetadata(-1, 60.0, 10.0),
+            list(range(30)),
+            id="upsample-deduplicates",
+        ),
+        pytest.param(
+            VideoSourceMetadata(30, 30.0, 100.0),
+            VideoTargetMetadata(-1, 2.0, 100.0),
+            [0, 15, 29],
+            id="tail-clamps-to-last-frame",
+        ),
+    ],
+)
+def test_dynamic_video_sampling_preserves_index_semantics(
+    source: VideoSourceMetadata,
+    target: VideoTargetMetadata,
+    expected: list[int],
+):
+    assert (
+        DynamicVideoBackend.compute_frames_index_to_sample(source, target) == expected
+    )
 
 
 # ============================================================================

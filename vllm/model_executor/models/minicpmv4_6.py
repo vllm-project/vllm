@@ -59,6 +59,7 @@ from .minicpmv import (
     MiniCPMVMultiModalProcessor,
     MiniCPMVProcessingInfo,
     MiniCPMVVideoEmbeddingItems,
+    _validate_minicpm_image_processor_kwargs,
 )
 from .module_mapping import MultiModelKeys
 from .qwen3_5 import Qwen3_5ForCausalLM
@@ -157,6 +158,10 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         if (images := mm_data.get("images")) is None:
             return {}
 
+        image_mm_kwargs = _validate_minicpm_image_processor_kwargs(
+            self.info.get_image_processor_max_slice_num(),
+            mm_kwargs,
+        )
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
         parsed_images = mm_items.get_items(
             "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
@@ -175,7 +180,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         per_image_pixel_values: list[torch.Tensor] = []
         per_image_tgt_sizes: list[torch.Tensor] = []
         for image in parsed_images:
-            ip_out = image_processor([image], **mm_kwargs)
+            ip_out = image_processor([image], **image_mm_kwargs)
             pv = ip_out["pixel_values"]  # (1, C, P, sum_W)
             ts = ip_out["target_sizes"]  # (n_slices, 2)
             if pv.ndim == 4 and pv.shape[0] == 1:
@@ -203,7 +208,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             "tgt_sizes": per_image_tgt_sizes,
         }
 
-        ds_mode = self._resolve_downsample_mode(mm_kwargs)
+        ds_mode = self._resolve_downsample_mode(image_mm_kwargs)
         insert_layer_id = getattr(
             self.info.get_hf_config(),
             "insert_layer_id",

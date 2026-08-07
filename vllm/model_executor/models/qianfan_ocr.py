@@ -30,7 +30,9 @@ class QianfanOCRProcessingInfo(BaseInternVLProcessingInfo):
         config = self.get_hf_config()
         vision_config = config.vision_config
 
-        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs = self._merge_image_processor_kwargs(
+            kwargs, max_dynamic_patch=config.max_dynamic_patch
+        )
         kwargs.setdefault("image_size", vision_config.image_size)
         kwargs.setdefault("min_dynamic_patch", config.min_dynamic_patch)
         kwargs.setdefault("max_dynamic_patch", config.max_dynamic_patch)

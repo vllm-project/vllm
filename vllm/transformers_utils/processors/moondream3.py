@@ -9,7 +9,12 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, BatchFeature
 from transformers.image_utils import ImageInput
-from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
+from transformers.processing_utils import (
+    ImagesKwargs,
+    ProcessingKwargs,
+    ProcessorMixin,
+    Unpack,
+)
 from transformers.tokenization_utils_base import (
     PreTokenizedInput,
     PreTrainedTokenizerBase,
@@ -21,7 +26,16 @@ from vllm.multimodal.image import convert_image_mode
 __all__ = ["Moondream3Processor"]
 
 
+class Moondream3ImagesKwargs(ImagesKwargs, total=False):  # type: ignore[call-arg]
+    max_crops: int
+    overlap_margin: int
+    patch_size: int
+    convert_to_rgb: bool
+
+
 class Moondream3ProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
+    images_kwargs: Moondream3ImagesKwargs
+
     _defaults = {
         "text_kwargs": {
             "padding": False,

@@ -17,6 +17,7 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
+from functools import cached_property
 from typing import Annotated, Literal, TypeAlias
 
 import torch
@@ -27,6 +28,7 @@ from transformers import (
     Idefics3ImageProcessor,
     Idefics3Processor,
 )
+from transformers.image_processing_utils import get_size_dict
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -51,6 +53,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import get_processor_kwargs_type
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import (
@@ -97,8 +100,234 @@ ImageInputs: TypeAlias = Idefics3ImagePixelInputs | Idefics3ImageEmbeddingInputs
 
 
 class Idefics3ProcessingInfo(BaseProcessingInfo):
-    def get_hf_processor(self, **kwargs: object) -> Idefics3Processor:
+    @staticmethod
+    def _get_kwarg_names(kwargs_cls: type[dict]) -> frozenset[str]:
+        names = set[str]()
+        for base in reversed(kwargs_cls.__mro__):
+            names.update(getattr(base, "__annotations__", {}))
+        return frozenset(names)
+
+    @classmethod
+    def _get_modality_kwarg_names(
+        cls,
+        kwargs_cls: type[dict],
+        modality_name: str,
+    ) -> frozenset[str]:
+        for base in kwargs_cls.__mro__:
+            modality_kwargs_cls = getattr(base, "__annotations__", {}).get(
+                modality_name
+            )
+            if isinstance(modality_kwargs_cls, type):
+                return cls._get_kwarg_names(modality_kwargs_cls)
+
+        return frozenset()
+
+    @cached_property
+    def image_processor_kwarg_names(self) -> frozenset[str]:
+        processor = self._get_hf_processor_unchecked()
+        return self._get_kwarg_names(processor.image_processor.valid_kwargs)
+
+    @cached_property
+    def image_only_processor_kwarg_names(self) -> frozenset[str]:
+        processor = self._get_hf_processor_unchecked()
+        text_kwarg_names = self._get_modality_kwarg_names(
+            get_processor_kwargs_type(processor),
+            "text_kwargs",
+        )
+        return self.image_processor_kwarg_names - text_kwarg_names
+
+    @staticmethod
+    def _get_size_value(size: object, name: str) -> object:
+        return (
+            size.get(name) if isinstance(size, Mapping) else getattr(size, name, None)
+        )
+
+    @staticmethod
+    def _get_positive_size_value(
+        value: object,
+        *,
+        label: str,
+        source: str,
+    ) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{source} `{label}` must be a positive integer.")
+
+        return value
+
+    @classmethod
+    def _get_size_max_edge(
+        cls,
+        size: object,
+        *,
+        default_to_square: bool | None,
+        source: str,
+    ) -> tuple[str, int]:
+        try:
+            normalized_size = get_size_dict(
+                size=size,
+                default_to_square=default_to_square,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{source} `size` must use a supported Hugging Face size form."
+            ) from exc
+
+        if normalized_size.get("longest_edge") is None and (
+            normalized_size.get("height") is None
+            or normalized_size.get("width") is None
+        ):
+            raise ValueError(
+                f"{source} `size` must include `longest_edge` "
+                "or both `height` and `width`."
+            )
+
+        if isinstance(size, int) and not isinstance(size, bool):
+            return (
+                "size",
+                cls._get_positive_size_value(
+                    size,
+                    label="size",
+                    source=source,
+                ),
+            )
+
+        if isinstance(size, Sequence) and not isinstance(
+            size,
+            (str, bytes, bytearray),
+        ):
+            if len(size) != 2:
+                raise ValueError(
+                    f"{source} `size` sequence must contain exactly two items."
+                )
+
+            return (
+                "size.height/width",
+                max(
+                    cls._get_positive_size_value(
+                        size[0],
+                        label="size[0]",
+                        source=source,
+                    ),
+                    cls._get_positive_size_value(
+                        size[1],
+                        label="size[1]",
+                        source=source,
+                    ),
+                ),
+            )
+
+        if cls._get_size_value(size, "longest_edge") is not None:
+            return (
+                "size.longest_edge",
+                cls._get_positive_size_value(
+                    cls._get_size_value(size, "longest_edge"),
+                    label="size.longest_edge",
+                    source=source,
+                ),
+            )
+
+        if (
+            cls._get_size_value(size, "height") is None
+            or cls._get_size_value(size, "width") is None
+        ):
+            raise ValueError(
+                f"{source} `size` must include `longest_edge` "
+                "or both `height` and `width`."
+            )
+
+        return (
+            "size.height/width",
+            max(
+                cls._get_positive_size_value(
+                    cls._get_size_value(size, "height"),
+                    label="size.height",
+                    source=source,
+                ),
+                cls._get_positive_size_value(
+                    cls._get_size_value(size, "width"),
+                    label="size.width",
+                    source=source,
+                ),
+            ),
+        )
+
+    def _get_hf_processor_unchecked(self, **kwargs: object) -> Idefics3Processor:
         return self.ctx.get_hf_processor(Idefics3Processor, **kwargs)
+
+    # Dynamic HF processor kwargs are routed per call, not stored on the
+    # cached processor instance. Resolve the same effective image kwargs here.
+    def _get_effective_images_kwargs(
+        self,
+        processor: Idefics3Processor,
+        mm_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        return processor._merge_kwargs(
+            get_processor_kwargs_type(processor),
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs(mm_kwargs),
+        )["images_kwargs"]
+
+    def _validate_size_limit(
+        self,
+        processor: Idefics3Processor,
+        mm_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        trusted_processor = self._get_hf_processor_unchecked()
+        trusted_images_kwargs = self._get_effective_images_kwargs(
+            trusted_processor,
+            {},
+        )
+        _, trusted_max_edge = self._get_size_max_edge(
+            trusted_images_kwargs.get(
+                "size",
+                trusted_processor.image_processor.size,
+            ),
+            default_to_square=trusted_images_kwargs.get(
+                "default_to_square",
+                getattr(trusted_processor.image_processor, "default_to_square", True),
+            ),
+            source="Deployment",
+        )
+        request_images_kwargs = self._get_effective_images_kwargs(
+            processor,
+            mm_kwargs,
+        )
+        request_do_resize = request_images_kwargs.get(
+            "do_resize",
+            getattr(processor.image_processor, "do_resize", True),
+        )
+        request_do_image_splitting = request_images_kwargs.get(
+            "do_image_splitting",
+            getattr(processor.image_processor, "do_image_splitting", True),
+        )
+        if not request_do_resize and request_do_image_splitting:
+            raise ValueError(
+                "Effective `do_resize` must remain enabled while "
+                "`do_image_splitting` is enabled so image patch accounting "
+                "matches preprocessing."
+            )
+
+        request_size_label, request_max_edge = self._get_size_max_edge(
+            request_images_kwargs.get("size", processor.image_processor.size),
+            default_to_square=request_images_kwargs.get(
+                "default_to_square",
+                getattr(processor.image_processor, "default_to_square", True),
+            ),
+            source="Request",
+        )
+        if request_max_edge > trusted_max_edge:
+            raise ValueError(
+                f"Request `{request_size_label}` "
+                f"{request_max_edge} exceeds the deployed limit of "
+                f"{trusted_max_edge}."
+            )
+
+        return request_images_kwargs
+
+    def get_hf_processor(self, **kwargs: object) -> Idefics3Processor:
+        processor = self._get_hf_processor_unchecked(**kwargs)
+        self._validate_size_limit(processor, kwargs)
+        return processor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -112,11 +341,12 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int, int]:
         image_processor: Idefics3ImageProcessor = processor.image_processor
+        images_kwargs = self._validate_size_limit(processor, mm_kwargs)
 
         return image_processor.get_number_of_image_patches(
             image_height,
             image_width,
-            self.ctx.get_merged_mm_kwargs(mm_kwargs),
+            images_kwargs,
         )
 
     def get_num_patches(
@@ -238,6 +468,65 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo])
 
 
 class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo]):
+    @staticmethod
+    def _normalize_tokenization_kwargs(
+        tok_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        normalized_tok_kwargs = dict(tok_kwargs)
+        common_kwargs = tok_kwargs.get("common_kwargs")
+        if common_kwargs is None or isinstance(common_kwargs, Mapping):
+            return normalized_tok_kwargs
+
+        try:
+            normalized_tok_kwargs["common_kwargs"] = dict(common_kwargs)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "`common_kwargs` in `tokenization_kwargs` must be a mapping "
+                "or iterable of key/value pairs."
+            ) from exc
+
+        return normalized_tok_kwargs
+
+    def _validate_tokenization_kwargs(
+        self,
+        tok_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        tok_kwargs = self._normalize_tokenization_kwargs(tok_kwargs)
+        if not tok_kwargs:
+            return tok_kwargs
+
+        image_only_kwarg_names = self.info.image_only_processor_kwarg_names
+
+        if invalid_name := next(
+            (name for name in sorted(image_only_kwarg_names) if name in tok_kwargs),
+            None,
+        ):
+            raise ValueError(
+                f"`{invalid_name}` must be passed via `mm_processor_kwargs`, "
+                "not `tokenization_kwargs`."
+            )
+
+        for container_name in ("images_kwargs", "common_kwargs"):
+            nested_kwargs = tok_kwargs.get(container_name)
+            if not isinstance(nested_kwargs, Mapping):
+                continue
+
+            if invalid_name := next(
+                (
+                    name
+                    for name in sorted(image_only_kwarg_names)
+                    if name in nested_kwargs
+                ),
+                None,
+            ):
+                raise ValueError(
+                    f"`{container_name}.{invalid_name}` must be passed via "
+                    "`mm_processor_kwargs`, "
+                    "not `tokenization_kwargs`."
+                )
+
+        return tok_kwargs
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -245,6 +534,8 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        tok_kwargs = self._validate_tokenization_kwargs(tok_kwargs)
+
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
@@ -255,6 +546,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         if getattr(image_processor, "backend", "pil") == "pil":
             mm_kwargs = {"input_data_format": "channels_last", **mm_kwargs}
 
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
@@ -267,7 +559,6 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
         num_patches = [
             self.info.get_num_patches(

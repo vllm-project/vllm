@@ -1,16 +1,86 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+from vllm.model_executor.models.qwen2_vl import (
+    Qwen2VLMultiModalProcessor,
+    Qwen2VLProcessingInfo,
+)
 from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessorInputs
+from vllm.multimodal.processing.context import TimingContext
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
+
+
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        {"max_pixels": 1025},
+        {"size": {"longest_edge": 1025}},
+        {"min_pixels": 1025},
+        {"size": {"shortest_edge": 1025}},
+    ],
+)
+def test_request_cannot_raise_qwen2vl_pixel_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+    request_kwargs: dict[str, object],
+):
+    info = object.__new__(Qwen2VLProcessingInfo)
+    monkeypatch.setattr(
+        info,
+        "get_image_processor",
+        lambda: SimpleNamespace(size={"longest_edge": 1024}),
+    )
+
+    processor = object.__new__(Qwen2VLMultiModalProcessor)
+    processor.info = info
+    monkeypatch.setattr(BaseMultiModalProcessor, "apply", lambda *_args: object())
+
+    with pytest.raises(ValueError, match="configured max_pixels ceiling"):
+        processor.apply(
+            ProcessorInputs(
+                "",
+                MultiModalDataItems({}),
+                hf_processor_mm_kwargs=request_kwargs,
+            ),
+            TimingContext(enabled=False),
+        )
+
+
+def test_request_can_lower_qwen2vl_pixel_ceiling(monkeypatch: pytest.MonkeyPatch):
+    info = object.__new__(Qwen2VLProcessingInfo)
+    monkeypatch.setattr(
+        info,
+        "get_image_processor",
+        lambda: SimpleNamespace(size={"longest_edge": 1024}),
+    )
+
+    processor = object.__new__(Qwen2VLMultiModalProcessor)
+    processor.info = info
+    sentinel = object()
+    monkeypatch.setattr(BaseMultiModalProcessor, "apply", lambda *_args: sentinel)
+
+    assert (
+        processor.apply(
+            ProcessorInputs(
+                "",
+                MultiModalDataItems({}),
+                hf_processor_mm_kwargs={"max_pixels": 1023},
+            ),
+            TimingContext(enabled=False),
+        )
+        is sentinel
+    )
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])

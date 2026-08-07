@@ -18,6 +18,9 @@ from .image import ImageMediaIO
 
 logger = init_logger(__name__)
 
+_DEFAULT_NUM_FRAMES = 32
+_INVALID_NUM_FRAMES_MESSAGE = "num_frames must be greater than 0 or -1"
+
 
 class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
     """Configuration values can be user-provided either by --media-io-kwargs or
@@ -31,6 +34,10 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
         default_kwargs: dict[str, Any] | None,
         runtime_kwargs: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        runtime_kwargs = cls._enforce_runtime_num_frames_policy(
+            default_kwargs,
+            runtime_kwargs,
+        )
         if runtime_kwargs:
             # Decoder GPU memory is reserved from the startup value.
             runtime_kwargs = dict(runtime_kwargs)
@@ -55,20 +62,62 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
                         }
 
         merged = super().merge_kwargs(default_kwargs, runtime_kwargs)
-        # fps and num_frames interact with each other, so if either is
-        # overridden at request time, wipe the other from defaults to
-        # avoid unintuitive cross-field interactions.
-        if runtime_kwargs:
-            if "num_frames" in runtime_kwargs and "fps" not in runtime_kwargs:
-                merged.pop("fps", None)
-            elif "fps" in runtime_kwargs and "num_frames" not in runtime_kwargs:
-                merged.pop("num_frames", None)
+        # A request num_frames override replaces a default fps because it is
+        # a complete frame-count selection. An fps-only request must retain
+        # num_frames because that field is also the frame ceiling.
+        if (
+            runtime_kwargs
+            and "num_frames" in runtime_kwargs
+            and "fps" not in runtime_kwargs
+        ):
+            merged.pop("fps", None)
         return merged
+
+    @classmethod
+    def _enforce_runtime_num_frames_policy(
+        cls,
+        default_kwargs: dict[str, Any] | None,
+        runtime_kwargs: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not runtime_kwargs or "num_frames" not in runtime_kwargs:
+            return runtime_kwargs
+
+        requested_num_frames = cls._validate_num_frames(runtime_kwargs["num_frames"])
+        num_frames_cap = cls._get_finite_num_frames_cap(default_kwargs)
+        if num_frames_cap is None or 0 < requested_num_frames <= num_frames_cap:
+            return runtime_kwargs
+
+        logger.warning_once(
+            "Clamping request-level num_frames=%r to finite video frame cap %d.",
+            requested_num_frames,
+            num_frames_cap,
+        )
+        return {**runtime_kwargs, "num_frames": num_frames_cap}
+
+    @classmethod
+    def _get_finite_num_frames_cap(
+        cls,
+        default_kwargs: dict[str, Any] | None,
+    ) -> int | None:
+        configured_num_frames = (default_kwargs or {}).get(
+            "num_frames",
+            _DEFAULT_NUM_FRAMES,
+        )
+        configured_num_frames = cls._validate_num_frames(configured_num_frames)
+        if configured_num_frames == -1:
+            return None
+        return configured_num_frames
+
+    @staticmethod
+    def _validate_num_frames(num_frames: Any) -> int:
+        if type(num_frames) is not int or num_frames == 0 or num_frames < -1:
+            raise ValueError(_INVALID_NUM_FRAMES_MESSAGE)
+        return num_frames
 
     def __init__(
         self,
         image_io: ImageMediaIO,
-        num_frames: int = 32,
+        num_frames: int = _DEFAULT_NUM_FRAMES,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -112,7 +161,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
             if self.num_frames > 0:
                 frame_parts = data.split(",", self.num_frames)[: self.num_frames]
             elif self.num_frames == 0:
-                raise ValueError("num_frames must be greater than 0 or -1")
+                raise ValueError(_INVALID_NUM_FRAMES_MESSAGE)
             else:
                 frame_parts = data.split(",")
 

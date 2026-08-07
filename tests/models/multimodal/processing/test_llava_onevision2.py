@@ -20,10 +20,15 @@ import types
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.model_executor.models.llava_onevision2 import (
     _CODEC_VIDEO_MARKER,
+    _IMAGE_MARKER,
+    _VIDEO_MARKER,
+    LlavaOnevision2MultiModalProcessor,
     LlavaOnevision2VideoBackend,
+    _expand_video_markers_in_prompt,
     _extract_codec_video_paths,
     _frame_video_to_pil_and_timestamps,
     _validate_video_source,
@@ -250,6 +255,139 @@ def test_frame_video_to_pil_and_timestamps_rejects_non_tuple():
     plain = np.zeros((4, 8, 8, 3), dtype=np.uint8)
     with pytest.raises(ValueError):
         _frame_video_to_pil_and_timestamps(plain)
+
+
+@pytest.mark.parametrize("timestamp_decimals", [-1, 50000, -0.5, 6.9, True, None])
+def test_expand_video_markers_rejects_out_of_range_timestamp_decimals(
+    timestamp_decimals,
+):
+    with pytest.raises(
+        ValueError,
+        match="LlavaOneVision2 timestamp_decimals must be an integer between 0 and 6",
+    ):
+        _expand_video_markers_in_prompt(
+            _VIDEO_MARKER,
+            [[0.0]],
+            timestamp_decimals=timestamp_decimals,
+        )
+
+
+@pytest.mark.parametrize(
+    ("timestamp_decimals", "expected_prefix"),
+    [
+        (0, "<0 seconds>"),
+        (1, "<0.0 seconds>"),
+        (6, "<0.000000 seconds>"),
+    ],
+)
+def test_expand_video_markers_accepts_bounded_timestamp_decimals(
+    timestamp_decimals,
+    expected_prefix,
+):
+    expanded = _expand_video_markers_in_prompt(
+        _VIDEO_MARKER,
+        [[0.0]],
+        timestamp_decimals=timestamp_decimals,
+    )
+
+    assert expanded == f"{expected_prefix}{_IMAGE_MARKER}"
+
+
+def test_prompt_updates_reject_oversized_timestamp_decimals_before_processor_lookup():
+    class _UnexpectedInfo:
+        def get_image_processor(self, **kwargs):
+            raise AssertionError(f"unexpected processor lookup: {kwargs}")
+
+    processor = LlavaOnevision2MultiModalProcessor.__new__(
+        LlavaOnevision2MultiModalProcessor
+    )
+    processor.info = _UnexpectedInfo()
+
+    with pytest.raises(
+        ValueError,
+        match="LlavaOneVision2 timestamp_decimals must be an integer between 0 and 6",
+    ):
+        processor._get_prompt_updates(
+            mm_items=None,
+            hf_processor_mm_kwargs={"timestamp_decimals": 50000},
+            out_mm_kwargs=None,
+        )
+
+
+def test_hf_processor_call_rejects_oversized_timestamp_decimals_early():
+    class _UnexpectedInfo:
+        def get_hf_processor(self, **kwargs):
+            raise AssertionError(f"unexpected processor lookup: {kwargs}")
+
+    processor = LlavaOnevision2MultiModalProcessor.__new__(
+        LlavaOnevision2MultiModalProcessor
+    )
+    processor.info = _UnexpectedInfo()
+
+    with pytest.raises(
+        ValueError,
+        match="LlavaOneVision2 timestamp_decimals must be an integer between 0 and 6",
+    ):
+        processor._call_hf_processor(
+            prompt=_VIDEO_MARKER,
+            mm_data={"videos": [object()]},
+            mm_kwargs={"timestamp_decimals": 50000},
+            tok_kwargs={},
+        )
+
+
+@pytest.mark.parametrize("hf_processor_mm_kwargs", [{}, {"timestamp_decimals": 1}])
+def test_prompt_updates_preserve_default_one_decimal_timestamp(
+    hf_processor_mm_kwargs,
+):
+    class _FakeImageProcessor:
+        merge_size = 1
+
+    class _FakeTokenizer:
+        def get_vocab(self):
+            return {
+                "<|image_pad|>": 1,
+                "<|video_pad|>": 2,
+                "<|vision_start|>": 3,
+                "<|vision_end|>": 4,
+            }
+
+        def encode(self, text, add_special_tokens=False):
+            assert add_special_tokens is False
+            if text == "\n":
+                return [5]
+            assert text == "<0.0 seconds>"
+            return [6]
+
+    class _Info:
+        def get_image_processor(self, **kwargs):
+            assert kwargs == hf_processor_mm_kwargs
+            return _FakeImageProcessor()
+
+        def get_tokenizer(self):
+            return _FakeTokenizer()
+
+    processor = LlavaOnevision2MultiModalProcessor.__new__(
+        LlavaOnevision2MultiModalProcessor
+    )
+    processor.info = _Info()
+    out_mm_kwargs = {
+        "video": [
+            {
+                "video_grid_thw": types.SimpleNamespace(data=torch.tensor([[1, 1, 1]])),
+                "frame_timestamps": types.SimpleNamespace(data=torch.tensor([0.0])),
+            }
+        ]
+    }
+
+    updates = processor._get_prompt_updates(
+        mm_items=None,
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        out_mm_kwargs=out_mm_kwargs,
+    )
+    video_update = next(update for update in updates if update.modality == "video")
+
+    assert video_update.resolve(0).content.full == [6, 3, 1, 4]
 
 
 # ---------------------------------------------------------------------------

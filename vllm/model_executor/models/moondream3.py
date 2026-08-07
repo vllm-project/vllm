@@ -942,6 +942,63 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
     image_placeholder: str = "<image>"
     bos_image_placeholder: str = "<|endoftext|><image>"
 
+    @staticmethod
+    def _validate_processor_geometry(
+        field: str,
+        received_value: object,
+        trusted_value: int,
+    ) -> None:
+        if received_value != trusted_value:
+            raise ValueError(
+                "Moondream3 processor argument "
+                f"{field!r} must match the deployed vision configuration "
+                f"({trusted_value!r}), got {received_value!r}."
+            )
+
+    def _bind_processor_geometry(
+        self,
+        mm_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        vision_config = self.info.get_hf_config().vision_config
+        trusted_geometry = {
+            "crop_size": vision_config.crop_size,
+            "max_crops": vision_config.max_crops,
+            "overlap_margin": vision_config.overlap_margin,
+            "patch_size": vision_config.enc_patch_size,
+        }
+        bound_kwargs = dict(mm_kwargs)
+
+        for container_name in ("images_kwargs", "common_kwargs"):
+            nested_kwargs = bound_kwargs.get(container_name)
+            if not isinstance(nested_kwargs, Mapping):
+                continue
+
+            nested_kwargs = dict(nested_kwargs)
+            for field, trusted_value in trusted_geometry.items():
+                if field not in nested_kwargs:
+                    continue
+                self._validate_processor_geometry(
+                    field,
+                    nested_kwargs.pop(field),
+                    trusted_value,
+                )
+
+            if nested_kwargs or container_name == "images_kwargs":
+                bound_kwargs[container_name] = nested_kwargs
+            else:
+                bound_kwargs.pop(container_name)
+
+        for field, trusted_value in trusted_geometry.items():
+            if field in bound_kwargs:
+                self._validate_processor_geometry(
+                    field,
+                    bound_kwargs[field],
+                    trusted_value,
+                )
+            bound_kwargs[field] = trusted_value
+
+        return bound_kwargs
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -951,6 +1008,7 @@ class Moondream3MultiModalProcessor(BaseMultiModalProcessor[Moondream3Processing
     ) -> BatchFeature:
         # Moondream3's processor handles images directly rather than exposing a
         # separate `image_processor`, so keep the cache path on text+MM calls.
+        mm_kwargs = self._bind_processor_geometry(mm_kwargs)
         return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
     @cached_property

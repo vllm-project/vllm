@@ -106,6 +106,7 @@ class ChatParams:
             not default_chat_template_kwargs
             and not default_media_io_kwargs
             and not default_mm_processor_kwargs
+            and not self.media_io_kwargs
         ):
             return self
 

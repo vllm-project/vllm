@@ -1373,6 +1373,39 @@ class DynamicVideoBackend(VideoBackend):
             source.total_frames_num, source.original_fps, duration
         )
 
+    @staticmethod
+    def _compute_indices_within_duration(
+        total_frames_num: int,
+        duration: float,
+        original_fps: float,
+        fps: float,
+    ) -> list[int]:
+        num_samples = int(math.floor(duration * fps))
+        if num_samples <= 0 or total_frames_num <= 0:
+            return []
+        if original_fps <= 0:
+            return [0]
+
+        max_frame_idx = total_frames_num - 1
+        frame_indices_list: list[int] = []
+        # Invert the original target-tick loop: each source frame only needs
+        # the first target sample that could select it.
+        for frame_idx in range(total_frames_num):
+            if frame_idx == 0:
+                sample_idx = 0
+            else:
+                sample_idx = math.floor((frame_idx - 1) * fps / original_fps) + 1
+            if sample_idx >= num_samples:
+                break
+
+            sampled_frame_idx = min(
+                max_frame_idx,
+                int(math.ceil(sample_idx * original_fps / fps)),
+            )
+            if sampled_frame_idx == frame_idx:
+                frame_indices_list.append(frame_idx)
+        return frame_indices_list
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -1391,12 +1424,11 @@ class DynamicVideoBackend(VideoBackend):
         # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
         frame_indices_list: list[int]
         if duration <= max_duration:
-            n = int(math.floor(duration * fps))
-            frame_indices_list = sorted(
-                {
-                    min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
-                    for i in range(n)
-                }
+            frame_indices_list = cls._compute_indices_within_duration(
+                total_frames_num=total_frames_num,
+                duration=duration,
+                original_fps=original_fps,
+                fps=fps,
             )
         else:
             num_samples = int(max_duration * fps)

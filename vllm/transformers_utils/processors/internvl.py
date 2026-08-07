@@ -28,6 +28,69 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
+def validate_internvl_max_dynamic_patch_override(
+    max_dynamic_patch: object,
+    *,
+    max_allowed_dynamic_patch: object,
+) -> None:
+    if (
+        isinstance(max_allowed_dynamic_patch, bool)
+        or not isinstance(max_allowed_dynamic_patch, int)
+        or max_allowed_dynamic_patch < 1
+    ):
+        raise ValueError(
+            "Configured `max_dynamic_patch` must be a positive integer, "
+            f"got {max_allowed_dynamic_patch!r}."
+        )
+
+    if (
+        isinstance(max_dynamic_patch, bool)
+        or not isinstance(max_dynamic_patch, int)
+        or max_dynamic_patch < 1
+    ):
+        raise ValueError(
+            "`max_dynamic_patch` must be a positive integer, "
+            f"got {max_dynamic_patch!r}."
+        )
+
+    if max_dynamic_patch > max_allowed_dynamic_patch:
+        raise ValueError(
+            "`max_dynamic_patch` cannot exceed the configured limit of "
+            f"{max_allowed_dynamic_patch}, got {max_dynamic_patch}."
+        )
+
+
+def validate_internvl_image_size_override(
+    image_size: object,
+    *,
+    max_allowed_image_size: object,
+) -> None:
+    if (
+        isinstance(max_allowed_image_size, bool)
+        or not isinstance(max_allowed_image_size, int)
+        or max_allowed_image_size < 1
+    ):
+        raise ValueError(
+            "Configured `image_size` must be a positive integer, "
+            f"got {max_allowed_image_size!r}."
+        )
+
+    if (
+        isinstance(image_size, bool)
+        or not isinstance(image_size, int)
+        or image_size < 1
+    ):
+        raise ValueError(
+            f"`image_size` must be a positive integer, got {image_size!r}."
+        )
+
+    if image_size > max_allowed_image_size:
+        raise ValueError(
+            "`image_size` cannot exceed the configured limit of "
+            f"{max_allowed_image_size}, got {image_size}."
+        )
+
+
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
@@ -228,10 +291,28 @@ class InternVLImageProcessor(ImageProcessingMixin):
         max_dynamic_patch: int,
         dynamic_image_size: bool,
         use_thumbnail: bool,
+        max_dynamic_patch_limit: int | None = None,
+        image_size_limit: int | None = None,
     ) -> None:
+        if max_dynamic_patch_limit is None:
+            max_dynamic_patch_limit = max_dynamic_patch
+        if image_size_limit is None:
+            image_size_limit = image_size
+
+        validate_internvl_max_dynamic_patch_override(
+            max_dynamic_patch,
+            max_allowed_dynamic_patch=max_dynamic_patch_limit,
+        )
+        validate_internvl_image_size_override(
+            image_size,
+            max_allowed_image_size=image_size_limit,
+        )
+
         self.image_size = image_size
+        self.image_size_limit = image_size_limit
         self.min_dynamic_patch = min_dynamic_patch
         self.max_dynamic_patch = max_dynamic_patch
+        self.max_dynamic_patch_limit = max_dynamic_patch_limit
         self.dynamic_image_size = dynamic_image_size
         self.use_thumbnail = use_thumbnail
 
@@ -251,6 +332,11 @@ class InternVLImageProcessor(ImageProcessingMixin):
             dynamic_image_size = self.dynamic_image_size
         if use_thumbnail is None:
             use_thumbnail = self.use_thumbnail
+
+        validate_internvl_max_dynamic_patch_override(
+            max_dynamic_patch,
+            max_allowed_dynamic_patch=self.max_dynamic_patch_limit,
+        )
 
         return resolve_internvl_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -273,7 +359,7 @@ class InternVLImageProcessor(ImageProcessingMixin):
         if dynamic_image_size is None:
             dynamic_image_size = self.dynamic_image_size
 
-        min_num, max_num = resolve_internvl_min_max_num(
+        min_num, max_num = self.resolve_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
@@ -321,8 +407,16 @@ class InternVLVideoProcessor(BaseVideoProcessor):
     def __init__(
         self,
         image_size: int,
+        image_size_limit: int | None = None,
     ) -> None:
+        if image_size_limit is None:
+            image_size_limit = image_size
+        validate_internvl_image_size_override(
+            image_size,
+            max_allowed_image_size=image_size_limit,
+        )
         self.image_size = image_size
+        self.image_size_limit = image_size_limit
 
     def _videos_to_pixel_values_lst(
         self,
