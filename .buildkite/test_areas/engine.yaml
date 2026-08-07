@@ -128,7 +128,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: V1 e2e (4xH100)
+- label: V1 e2e (4xH100-4xMI300)
   key: v1-e2e-4xh100
   timeout_in_minutes: 35
   device: h100
@@ -140,3 +140,10 @@ steps:
     - tests/v1/e2e/test_hybrid_chunked_prefill.py
   commands:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
+  mirror:
+    amd:
+      dind: false
+      device: mi300_4
+      timeout_in_minutes: 32
+      depends_on:
+      - image-build-amd
