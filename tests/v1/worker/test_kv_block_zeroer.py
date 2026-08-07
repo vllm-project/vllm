@@ -21,6 +21,7 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
         page_size_el // page_size_el,  # max_chunks = 1
         page_size_el,  # blk_size
         1,  # n_segs
@@ -71,6 +72,7 @@ def test_non_uniform_page_sizes():
             device=device,
         ),
         torch.tensor(seg_page_sizes, dtype=torch.int64, device=device),
+        torch.tensor(seg_page_sizes, dtype=torch.int64, device=device),
         max_ps // blk_size,
         blk_size,
         2,
@@ -89,6 +91,41 @@ def test_non_uniform_page_sizes():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_packed_segment_zeros_only_its_last_block_page():
+    """A packed KV segment steps by block stride but clears only its page."""
+    device = torch.device("cuda")
+    num_blocks = 4
+    block_stride_el = 12
+    page_size_el = 4
+    page_offset_el = 3
+    backing = torch.ones(
+        (num_blocks, block_stride_el), dtype=torch.int32, device=device
+    )
+
+    zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
+    zeroer.device = device
+    zeroer._meta = (
+        torch.tensor(
+            [backing.data_ptr() + page_offset_el * backing.element_size()],
+            dtype=torch.uint64,
+            device=device,
+        ),
+        torch.tensor([block_stride_el], dtype=torch.int64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        1,
+        page_size_el,
+        1,
+    )
+
+    zeroer.zero_block_ids([num_blocks - 1])
+    torch.accelerator.synchronize()
+
+    expected = torch.ones_like(backing)
+    expected[-1, page_offset_el : page_offset_el + page_size_el] = 0
+    assert torch.equal(backing, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_warmup_compiles_every_n_blocks_specialization():
     """After warmup, no launch should trigger a first-request JIT compile.
 
@@ -104,6 +141,7 @@ def test_warmup_compiles_every_n_blocks_specialization():
     zeroer.device = device
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         1,  # max_chunks
         page_size_el,  # blk_size
@@ -140,6 +178,7 @@ def test_warmup_respects_available_block_count():
     zeroer.device = device
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         1,
         page_size_el,

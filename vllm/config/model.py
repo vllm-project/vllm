@@ -18,6 +18,7 @@ from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
     MMHasherAlgorithm,
+    MMProcessorDevice,
     MMTensorIPC,
     MultiModalConfig,
 )
@@ -47,6 +48,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -394,6 +396,8 @@ class ModelConfig:
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    mm_device_do_normalize: InitVar[bool | None] = None
+    mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -524,11 +528,14 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        mm_device_do_normalize: bool | None,
+        mm_processor_device: MMProcessorDevice | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
         )
+        requested_revision = self.revision
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -557,6 +564,31 @@ class ModelConfig:
             hf_overrides_fn = None
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
+
+        # If loading model/tokenizer from HF Hub, resolve the revision once
+        # to prevent resolving it multiple times downstream.
+        can_resolve_model_revision = (
+            self.hf_config_path is None or self.hf_config_path == self.model
+        )
+        if can_resolve_model_revision:
+            self.revision = resolve_revision(
+                self.model,
+                self.revision,
+                self.hf_token,
+            )
+
+        if (
+            can_resolve_model_revision
+            and self.tokenizer == self.model
+            and self.tokenizer_revision == requested_revision
+        ):
+            self.tokenizer_revision = self.revision
+        else:
+            self.tokenizer_revision = resolve_revision(
+                self.tokenizer,
+                self.tokenizer_revision,
+                self.hf_token,
+            )
 
         if self.override_attention_dtype is not None and not current_platform.is_rocm():
             warnings.warn(
@@ -736,6 +768,10 @@ class ModelConfig:
                 )
                 mm_encoder_tp_mode = "weights"
 
+            mm_processor_kwargs = MultiModalConfig.fold_mm_processor_device(
+                mm_processor_kwargs, mm_processor_device
+            )
+
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,
                 limit_per_prompt=limit_mm_per_prompt,
@@ -759,6 +795,9 @@ class ModelConfig:
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+                mm_device_do_normalize=self._resolve_mm_device_do_normalize(
+                    mm_device_do_normalize
+                ),
             )
 
             mm_config_kwargs = {
@@ -892,6 +931,51 @@ class ModelConfig:
                 "Example: max_model_len=2048"
             )
         return self
+
+    def _resolve_mm_device_do_normalize(
+        self, mm_device_do_normalize: bool | None
+    ) -> bool:
+        if mm_device_do_normalize is None:
+            if envs.VLLM_USE_RUST_FRONTEND:
+                logger.debug(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+            else:
+                mm_device_do_normalize = (
+                    self._model_info.supports_mm_device_do_normalize
+                )
+                logger.debug(
+                    "mm_device_do_normalize is %s by default.",
+                    "enabled" if mm_device_do_normalize else "disabled",
+                )
+        else:
+            if mm_device_do_normalize and envs.VLLM_USE_RUST_FRONTEND:
+                logger.warning(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+
+            if (
+                mm_device_do_normalize
+                and not self._model_info.supports_mm_device_do_normalize
+            ):
+                logger.warning(
+                    "Model does not support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+
+            logger.debug(
+                "mm_device_do_normalize is %s.",
+                "enabled" if mm_device_do_normalize else "disabled",
+            )
+
+        return mm_device_do_normalize
 
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if
@@ -1436,6 +1520,9 @@ class ModelConfig:
     def get_num_experts(self) -> int:
         return self.model_arch_config.num_experts
 
+    def get_num_experts_per_tok(self) -> int:
+        return self.model_arch_config.num_experts_per_token
+
     def get_total_num_hidden_layers(self) -> int:
         return self.model_arch_config.total_num_hidden_layers
 
@@ -1789,7 +1876,13 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
-        return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
+        if envs.VLLM_MLA_DISABLE:
+            return False
+        if self.using_transformers_backend():
+            # kv_lora_rank indicates that a Transformers model implementation uses MLA
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+        # Manually maintained list of model types for vLLM model implementations
+        return self.is_deepseek_mla
 
     @property
     def is_matryoshka(self) -> bool:
