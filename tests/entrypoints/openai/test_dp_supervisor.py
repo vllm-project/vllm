@@ -312,7 +312,7 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
         await self._shutdown_event.wait()
 
     monkeypatch.setattr(dp_sup.asyncio, "get_running_loop", lambda: FakeLoop())
-    monkeypatch.setattr(dp_sup.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(dp_sup, "NoSignalServer", FakeServer)
     monkeypatch.setattr(DPSupervisor, "_shutdown_children", fake_shutdown_children)
     monkeypatch.setattr(DPSupervisor, "_start_children", fake_start_children)
     monkeypatch.setattr(DPSupervisor, "_monitor_children", fake_monitor_children)
