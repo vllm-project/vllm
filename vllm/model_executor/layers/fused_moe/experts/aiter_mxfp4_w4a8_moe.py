@@ -5,7 +5,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -25,6 +25,9 @@ __all__ = [
 ]
 
 
+# TODO(akaratza): Remove
+# _get_padding_mask and patch_gating_output after
+# https://github.com/ROCm/aiter/pull/4530 is released and consumed by vLLM.
 def _get_padding_mask() -> torch.Tensor | None:
     """
     Retrieves a boolean mask with non-padding (0) and padding (1) tokens.
@@ -34,7 +37,13 @@ def _get_padding_mask() -> torch.Tensor | None:
         slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
 
     in gpu_model_runner.py.
+
+    Direct kernel callers do not have model-runner padding metadata, so no
+    mask is needed when there is no forward context.
     """
+    if not is_forward_context_available():
+        return None
+
     forward_context = get_forward_context()
 
     # model runner v2.
