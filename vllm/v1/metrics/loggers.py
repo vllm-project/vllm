@@ -601,6 +601,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prefix_cache_hits, per_engine_labelvalues
         )
 
+        counter_engine_steps = self._counter_cls(
+            name="vllm:engine_steps",
+            documentation="Engine scheduler steps.",
+            labelnames=labelnames,
+        )
+        self.counter_engine_steps = create_metric_per_engine(
+            counter_engine_steps, per_engine_labelvalues
+        )
+
         #
         # External - KV connector prefix cache
         #
@@ -1106,6 +1115,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     ):
         """Log to prometheus."""
         if scheduler_stats is not None:
+            self.counter_engine_steps[engine_idx].inc()
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
             )
