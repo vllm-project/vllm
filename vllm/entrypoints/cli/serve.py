@@ -20,7 +20,11 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
+from vllm.v1.engine.utils import (
+    CoreEngineActorManager,
+    CoreEngineProcManager,
+    launch_core_engines,
+)
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -372,6 +376,7 @@ def run_multi_api_server(args: argparse.Namespace):
             api_server_manager.gather_actual_addresses()
         )
         if is_ray_dp:
+            assert isinstance(local_engine_manager, CoreEngineActorManager)
             local_engine_manager.publish_addresses(addresses)
 
         # Set frontend processes to watch during engine startup.

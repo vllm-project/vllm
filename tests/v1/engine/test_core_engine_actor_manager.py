@@ -36,6 +36,7 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
         log_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
+        address_broker: Any | None = None,
     ):
         # Exercise the production Ray actor mixin without loading a model.
         EngineCoreActorMixin.__init__(

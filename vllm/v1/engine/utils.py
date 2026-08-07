@@ -11,7 +11,7 @@ from enum import Enum, auto
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import zmq
@@ -536,8 +536,8 @@ class CoreEngineActorManager:
             self.placement_group_is_local.append(local_client)
             refs.append(actor.wait_for_init.remote())
 
-        self.run_refs = []
-        self.actor_run_ref_dict = dict()
+        self.run_refs: list[Any] = []
+        self.actor_run_ref_dict: dict[Any, Any] = {}
         self._init_refs = refs
         # Actors waiting on the address broker cannot finish init until
         # publish_addresses() runs, so defer the readiness wait until then.
