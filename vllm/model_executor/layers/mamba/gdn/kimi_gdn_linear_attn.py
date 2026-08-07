@@ -300,7 +300,12 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 quant_config=self.quant_config,
                 prefix=f"{prefix}.g_b_proj",
             )
-        self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        self.o_norm = FusedRMSNormGated(
+            self.head_dim,
+            activation="sigmoid",
+            # Kimi-K3 does not support torch.compile, so keep this fused on ROCm.
+            enforce_enable=current_platform.is_rocm(),
+        )
         self.o_proj = RowParallelLinear(
             self.projection_size,
             self.hidden_size,
