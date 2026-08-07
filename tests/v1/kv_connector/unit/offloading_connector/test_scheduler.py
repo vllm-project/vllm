@@ -139,10 +139,18 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     assert len(events) == 2
     assert all(isinstance(event, BlockStored) for event in events)
     assert {event.group_idx for event in events} == {0, 1}
-    assert all(event.block_size == 4 for event in events)
-    assert all(event.token_ids == list(range(16, 28)) for event in events)
-    assert all(len(event.block_hashes) == 3 for event in events)
-    assert all(event.parent_block_hash is not None for event in events)
+    events_by_group = {event.group_idx: event for event in events}
+    full_attention_event = events_by_group[0]
+    assert full_attention_event.block_size == 4
+    assert full_attention_event.token_ids == list(range(16, 28))
+    assert len(full_attention_event.block_hashes) == 3
+    assert full_attention_event.parent_block_hash is not None
+
+    recurrent_event = events_by_group[1]
+    assert recurrent_event.block_size == 0
+    assert recurrent_event.token_ids == []
+    assert len(recurrent_event.block_hashes) == 1
+    assert recurrent_event.parent_block_hash is None
 
 
 def test_partial_lookup_returns_exact_boundary_and_group_load_keys():

@@ -242,6 +242,24 @@ def test_partial_tail_lookup_does_not_overwrite_store_metadata():
     assert event.token_ids == [1, 2, 3, 4]
 
 
+@pytest.mark.parametrize(
+    "record_method", ["record_partial_store", "record_partial_lookup"]
+)
+def test_partial_tail_sliding_window_event_uses_placeholder(record_method):
+    tracker = _tracker()
+    group_config = _group_config(sliding_window_size_in_chunks=1)
+    req = _request(block_hashes=[_hash(0)], token_count=4)
+    key = make_offload_key(req.block_hashes[0], group_config.group_idx)
+
+    getattr(tracker, record_method)(req, group_config, 4, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(0))]
+    assert event.token_ids == []
+    assert event.block_size == 0
+
+
 def test_take_events_forwards_locality_to_remove():
     tracker = _tracker()
     req = _request(block_hashes=[_hash(0)], token_count=4)

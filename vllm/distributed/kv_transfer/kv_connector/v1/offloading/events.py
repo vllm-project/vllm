@@ -153,6 +153,8 @@ class OffloadingEventsTracker:
         offload_key: OffloadKey,
     ) -> None:
         """Snapshot metadata for a newly stored partial recurrent tail."""
+        if group_config.sliding_window_size_in_chunks is not None:
+            return
         self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
 
     def record_partial_lookup(
@@ -163,6 +165,8 @@ class OffloadingEventsTracker:
         offload_key: OffloadKey,
     ) -> None:
         """Backfill metadata for a partial recurrent tail lookup hit."""
+        if group_config.sliding_window_size_in_chunks is not None:
+            return
         if offload_key not in self._pending_event_metadata:
             self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
 

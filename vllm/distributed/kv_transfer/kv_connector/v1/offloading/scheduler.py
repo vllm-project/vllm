@@ -884,10 +884,12 @@ class OffloadingConnectorScheduler:
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
             boundary_pending = False
             boundary_missed = False
+            boundary_keys = []
             for group_config in self.config.kv_group_configs:
                 key = self._make_boundary_key(
                     req_status.req, group_config.group_idx, boundary
                 )
+                boundary_keys.append(key)
                 result = self.manager.lookup(key, req_status.req_context)
                 if result is LookupResult.MISS:
                     boundary_missed = True
@@ -897,10 +899,9 @@ class OffloadingConnectorScheduler:
 
             pending |= boundary_pending
             if not boundary_missed and not boundary_pending:
-                for group_config in self.config.kv_group_configs:
-                    key = self._make_boundary_key(
-                        req_status.req, group_config.group_idx, boundary
-                    )
+                for group_config, key in zip(
+                    self.config.kv_group_configs, boundary_keys
+                ):
                     self._events_tracker.record_partial_lookup(
                         req_status.req, group_config, boundary, key
                     )
