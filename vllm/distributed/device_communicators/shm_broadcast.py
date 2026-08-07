@@ -485,9 +485,12 @@ def _reduce_tensor(tensor: torch.Tensor):
 # on first write), so arenas on queues that never carry big tensors cost ~0.
 # ---------------------------------------------------------------------------
 
-VLLM_SHM_TENSOR_ARENA_SLOTS = int(os.getenv("VLLM_SHM_TENSOR_ARENA_SLOTS", "8"))
-VLLM_SHM_TENSOR_ARENA_SLOT_MB = int(os.getenv("VLLM_SHM_TENSOR_ARENA_SLOT_MB", "256"))
-VLLM_SHM_TENSOR_ARENA_MIN_MB = int(os.getenv("VLLM_SHM_TENSOR_ARENA_MIN_MB", "8"))
+# Arena sizing — internal constants (kept off the env/CLI surface).
+_ARENA_SLOTS = 8
+_ARENA_SLOT_BYTES = 256 * 1024 * 1024
+# Minimum contiguous CPU-tensor size to divert into the arena; smaller tensors
+# take the out-of-band pickle-buffer path.
+_ARENA_MIN_BYTES = 8 * 1024 * 1024
 
 # Reader-side registry: arena shm name -> attached ShmTensorArena. Populated
 # by MessageQueue.create_from_handle; consumed by _rebuild_arena_tensor when
@@ -617,8 +620,7 @@ class ShmTensorArena:
         if self._fallbacks == 1 or self._fallbacks % 100 == 0:
             logger.info(
                 "ShmTensorArena: no free slot (%d bytes, %d fallbacks so far); "
-                "falling back to in-band pickling. Consider raising "
-                "VLLM_SHM_TENSOR_ARENA_SLOTS/SLOT_MB.",
+                "falling back to the out-of-band pickle path.",
                 nbytes,
                 self._fallbacks,
             )
@@ -759,7 +761,7 @@ class _ArenaPickler(pickle.Pickler):
             and obj.layout == torch.strided
             and obj.is_contiguous()
             and obj.numel() * obj.element_size()
-            >= VLLM_SHM_TENSOR_ARENA_MIN_MB * 1024 * 1024
+            >= _ARENA_MIN_BYTES
         ):
             idx = self.arena.write_tensor(obj)
             if idx is not None:
@@ -824,8 +826,8 @@ class MessageQueue:
             if _shm_tensor_arena_enabled() and n_remote_reader == 0:
                 self.tensor_arena = ShmTensorArena(
                     n_local_reader,
-                    VLLM_SHM_TENSOR_ARENA_SLOT_MB * 1024 * 1024,
-                    VLLM_SHM_TENSOR_ARENA_SLOTS,
+                    _ARENA_SLOT_BYTES,
+                    _ARENA_SLOTS,
                 )
 
             # XPUB is very similar to PUB,
