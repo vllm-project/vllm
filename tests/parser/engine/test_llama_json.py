@@ -491,6 +491,37 @@ class TestNonStreaming:
         assert result.tool_calls[2].function.arguments == '{"n": 3}'
 
     @pytest.mark.parametrize(
+        ("trailing", "names"),
+        [
+            (" I used {searchTool} for this", ["f"]),
+            (' the args were {"query": "x"}', ["f"]),
+            ("{", ["f"]),
+            # A trailing object that *does* carry a name is a second call
+            # with repaired arguments, not junk -- the deliberate deviation
+            # documented as behavior change 3.
+            ('{"name": "g", "parameters": {invalid}}', ["f", "g"]),
+        ],
+        ids=["brace-prose", "quoted-args", "lone-brace", "malformed-call"],
+    )
+    def test_completed_call_survives_a_bad_object_after_it(
+        self, parser, mock_request, trailing, names
+    ):
+        # Legacy was all-or-nothing: any unparsable brace region *after* a
+        # good call made extract_tool_calls return the whole output as
+        # content, discarding the call the client was waiting on
+        # (vllm-project/vllm#49923, bug 2).  Checked against the legacy
+        # parser: it returns tools_called=False for brace-prose,
+        # quoted-args and malformed-call.  "lone-brace" is the one shape
+        # legacy already got right, kept here as a parity case.
+        text = '{"name": "f", "parameters": {"query": "a"}}' + trailing
+        result = parser.extract_tool_calls_from_content(text, mock_request)
+        assert result.tools_called is True
+        assert [tc.function.name for tc in result.tool_calls] == names
+        assert result.tool_calls[0].function.arguments == '{"query": "a"}'
+        for call in result.tool_calls:
+            json.loads(call.function.arguments)
+
+    @pytest.mark.parametrize(
         ("span", "arguments"),
         [
             ('{"a": "x\\u', '{"a": "x"}'),
