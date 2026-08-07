@@ -533,6 +533,21 @@ class LocalSnapshotTools:
             return self._binary_revision()
         source_root = Path(vllm_spec.origin).resolve().parents[1]
         try:
+            dirty = self._run(
+                [
+                    "git",
+                    "-C",
+                    str(source_root),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+                timeout=10,
+            ).stdout.strip()
+            if dirty:
+                raise SnapshotCompatibilityError(
+                    "snapshot source is an editable dirty checkout"
+                )
             return self._run(
                 ["git", "-C", str(source_root), "rev-parse", "HEAD"], timeout=10
             ).stdout.strip()

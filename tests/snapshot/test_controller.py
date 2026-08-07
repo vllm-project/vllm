@@ -548,7 +548,7 @@ def test_source_revision_does_not_import_vllm(
         tools,
         "_run",
         lambda command, **_kwargs: SimpleNamespace(
-            stdout="source-sha\n" if command[0] == "git" else ""
+            stdout="source-sha\n" if "rev-parse" in command else ""
         ),
     )
     real_import = builtins.__import__
@@ -561,6 +561,31 @@ def test_source_revision_does_not_import_vllm(
     monkeypatch.setattr(builtins, "__import__", reject_vllm_import)
 
     assert tools._source_revision() == "source-sha"
+
+
+def test_source_revision_rejects_a_dirty_editable_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    package_init = package / "__init__.py"
+    package_init.write_text("")
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(origin=str(package_init)),
+    )
+
+    def fake_run(command: list[str], **_kwargs):
+        if "rev-parse" in command:
+            return SimpleNamespace(stdout="source-sha\n")
+        return SimpleNamespace(stdout=" M vllm/config.py\n")
+
+    monkeypatch.setattr(tools, "_run", fake_run)
+
+    with pytest.raises(SnapshotCompatibilityError, match="dirty checkout"):
+        tools._source_revision()
 
 
 def test_restore_resets_child_log_to_captured_size(

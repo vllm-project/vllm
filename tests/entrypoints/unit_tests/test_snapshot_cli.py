@@ -43,6 +43,23 @@ def test_snapshot_restore_dispatches_without_runtime_imports(monkeypatch):
     assert dispatched == [["restore", "/tmp/qwen-snapshot"]]
 
 
+def test_non_snapshot_commands_use_the_existing_vllm_cli(monkeypatch):
+    received_argv: list[list[str]] = []
+
+    def fake_vllm_main() -> None:
+        received_argv.append(sys.argv.copy())
+
+    monkeypatch.setattr("vllm.entrypoints.cli.main.main", fake_vllm_main)
+
+    from vllm_cli.main import main
+
+    main(["serve", "Qwen/Qwen3-0.6B"])
+
+    assert received_argv == [
+        [sys.argv[0], "serve", "Qwen/Qwen3-0.6B"],
+    ]
+
+
 def test_snapshot_restore_parser_stays_lightweight(monkeypatch, tmp_path: Path):
     from vllm_cli.snapshot import cli
 

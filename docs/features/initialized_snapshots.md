@@ -22,6 +22,9 @@ Snapshots currently require all of the following:
   CRIU CUDA plugin installed on the host.
 - `criu`, `cuda-checkpoint`, and `nvidia-smi` available on `PATH`.
 - Either root execution or passwordless `sudo` for CRIU.
+- An installed vLLM build or a clean editable Git checkout. Snapshot creation
+  and restore reject tracked or untracked source changes because a commit SHA
+  alone cannot identify their contents.
 - Enough local disk for the complete process and CUDA snapshot.
 
 Set `CRIU_CUDA_PLUGIN_DIR` to the directory containing `cuda_plugin.so`:
