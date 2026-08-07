@@ -1011,6 +1011,44 @@ def test_thinking_budget_holder_swap_exchanges_state():
     assert h._state[1]["thinking_token_budget"] == b0
 
 
+def test_thinking_budget_holder_mixed_swap_moves_single_state():
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=3),
+                    None,
+                    [],
+                ),
+            ],
+            moved=(),
+        )
+    )
+    original_state = h._state[0]
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=(),
+            moved=[(1, 0, MoveDirectionality.SWAP)],
+        )
+    )
+    assert 0 not in h._state
+    assert h._state[1] is original_state
+
+
 def test_thinking_budget_holder_unidirectional_move():
     vc = VllmConfig()
     vc.reasoning_config = MockReasoningConfig()
