@@ -52,29 +52,6 @@ RUN if [ -n "${VLLM_VERSION_STAMP}" ]; then python docker/stamp_vllm_version.py 
 # 内部私有仓库克隆用的 token; transformers 与 lmcache 共用 (装完各自 scrub 掉 remote)
 ARG GITLAB_TOKEN=
 
-# 内部 pretrain/transformers 分支 (可编辑 --no-deps 安装, 源码在 /vllm-workspace/transformers)。
-# 与 lmcache 一样放在 update 层: 内部分支迭代频繁, 每次发版更新, 不必重建 base。
-# REPO_URL/BRANCH 必填 (无默认值, 空则报错); COMMIT 可选 (空则停在分支 HEAD)。
-# --no-deps 确保绝不触碰 vLLM 已对齐的底层依赖环境。
-ARG TRANSFORMER_REPO_URL
-ARG TRANSFORMER_BRANCH
-ARG TRANSFORMER_COMMIT=
-RUN set -e; \
-    : "${TRANSFORMER_REPO_URL:?TRANSFORMER_REPO_URL is required (set in GitLab CI/CD Variables)}"; \
-    : "${TRANSFORMER_BRANCH:?TRANSFORMER_BRANCH is required (set in GitLab CI/CD Variables)}"; \
-    if [ -n "${GITLAB_TOKEN:-}" ]; then \
-        tf_clone_url="https://oauth2:${GITLAB_TOKEN}@${TRANSFORMER_REPO_URL#https://}"; \
-    else \
-        tf_clone_url="$TRANSFORMER_REPO_URL"; \
-    fi; \
-    git clone "$tf_clone_url" /vllm-workspace/transformers; \
-    unset tf_clone_url; \
-    cd /vllm-workspace/transformers; \
-    git checkout "$TRANSFORMER_BRANCH"; \
-    if [ -n "${TRANSFORMER_COMMIT:-}" ]; then git checkout "$TRANSFORMER_COMMIT"; fi; \
-    git remote set-url origin "$TRANSFORMER_REPO_URL"; \
-    uv pip install --system --no-build-isolation --no-deps -e .
-
 # lmcache: 从内部 gitlab 仓库以可编辑形式安装 (源码在 /vllm-workspace/lmcache)。
 # 放在 update 层: lmcache 迭代频繁, 每次发版按需切 ref, 不必重建 base。
 # 仓库地址/分支/commit 全部由 CI/CD Variables 经 --build-arg 注入, 不设默认值:
@@ -82,6 +59,18 @@ RUN set -e; \
 #   LMCACHE_BRANCH/LMCACHE_COMMIT 至少配一个, 都空报错
 #   两个都配: 校验 commit 必须在 branch 上, 通过后以 commit 为准 (打印提示)
 # 装完把 token 从 git remote 抹掉, 不把凭据留在镜像的 .git/config 里。
+#
+# 依赖策略: 带依赖安装 (不加 --no-deps), 让 lmcache 自己声明的依赖装齐
+# (blake3/awscrt/cufile-python/numba/otel/redis/cupy...), 只对 transformers 与
+# huggingface_hub 用 --overrides 压回内部分支能用的区间。不压则镜像 import
+# transformers 直接失败:
+#   lmcache develop_v0.5.2 的 requirements/common.txt 声明 transformers>=5.4 与
+#   huggingface_hub>=1.5.0; 而内部 pretrain/transformers@feat_baseline 是 4.57.1,
+#   它的 dependency_versions_check 在 import 时硬校验 huggingface-hub>=0.34.0,<1.0,
+#   碰上 hub 1.x 抛 ImportError (已实测); vllm 本身也要求 transformers>=4.56.0,<5。
+#   后装内部 editable 只换得掉 transformers 本体, 换不掉已被拉高的 hub -> 必须在这里挡。
+# torch 在 lmcache 里不带版本约束, 已装的 2.10.0 即满足, uv 不会动它 (已实测)。
+# 内部 transformers 仍排在本步骤之后, 确保 editable 最终胜出。
 ARG LMCACHE_REPO_URL
 ARG LMCACHE_BRANCH
 ARG LMCACHE_COMMIT
@@ -112,12 +101,44 @@ RUN set -e; \
     git checkout "$lm_ref"; \
     git remote set-url origin "$LMCACHE_REPO_URL"; \
     echo "lmcache checked out to ${lm_ref}"; \
-    uv pip install --system --no-build-isolation --no-deps -e .; \
-    python -c "import torch, vllm, transformers as tf; \
+    printf '%s\n' 'transformers>=4.56.0,<5' 'huggingface_hub>=0.34.0,<1.0' > /tmp/lmcache-overrides.txt; \
+    uv pip install --system --no-build-isolation -e . --overrides /tmp/lmcache-overrides.txt; \
+    rm -f /tmp/lmcache-overrides.txt; \
+    python -c "import torch, vllm; \
 assert torch.__version__.startswith('2.10.'), 'lmcache 依赖改了 torch -> '+torch.__version__; \
 assert '/vllm-workspace/' in vllm.__file__, 'vllm 不再是 editable(被 lmcache 依赖覆盖) -> '+vllm.__file__; \
-assert '/vllm-workspace/' in tf.__file__, 'transformers 不再是内部 editable(被 lmcache 依赖覆盖) -> '+tf.__file__; \
-print('env intact: torch', torch.__version__, '| vllm', vllm.__file__, '| transformers', tf.__file__)"
+print('env intact after lmcache: torch', torch.__version__, '| vllm', vllm.__file__)"
+
+# 内部 pretrain/transformers 分支 (可编辑 --no-deps 安装, 源码在 /vllm-workspace/transformers)。
+# 与 lmcache 一样放在 update 层: 内部分支迭代频繁, 每次发版更新, 不必重建 base。
+# ⚠️ 必须排在 lmcache 之后: lmcache 带依赖安装可能拉进 PyPI 版 transformers,
+#    后装的内部 editable 才能覆盖掉它。
+# REPO_URL/BRANCH 必填 (无默认值, 空则报错); COMMIT 可选 (空则停在分支 HEAD)。
+# --no-deps 确保绝不触碰 vLLM 已对齐的底层依赖环境。
+ARG TRANSFORMER_REPO_URL
+ARG TRANSFORMER_BRANCH
+ARG TRANSFORMER_COMMIT=
+RUN set -e; \
+    : "${TRANSFORMER_REPO_URL:?TRANSFORMER_REPO_URL is required (set in GitLab CI/CD Variables)}"; \
+    : "${TRANSFORMER_BRANCH:?TRANSFORMER_BRANCH is required (set in GitLab CI/CD Variables)}"; \
+    if [ -n "${GITLAB_TOKEN:-}" ]; then \
+        tf_clone_url="https://oauth2:${GITLAB_TOKEN}@${TRANSFORMER_REPO_URL#https://}"; \
+    else \
+        tf_clone_url="$TRANSFORMER_REPO_URL"; \
+    fi; \
+    git clone "$tf_clone_url" /vllm-workspace/transformers; \
+    unset tf_clone_url; \
+    cd /vllm-workspace/transformers; \
+    git checkout "$TRANSFORMER_BRANCH"; \
+    if [ -n "${TRANSFORMER_COMMIT:-}" ]; then git checkout "$TRANSFORMER_COMMIT"; fi; \
+    git remote set-url origin "$TRANSFORMER_REPO_URL"; \
+    uv pip install --system --no-build-isolation --no-deps -e .; \
+    python -c "import torch, vllm, huggingface_hub as hh, transformers as tf; \
+assert torch.__version__.startswith('2.10.'), 'torch 版本被改动 -> '+torch.__version__; \
+assert '/vllm-workspace/' in vllm.__file__, 'vllm 不再是 editable -> '+vllm.__file__; \
+assert '/vllm-workspace/' in tf.__file__, 'transformers 不是内部 editable -> '+tf.__file__; \
+assert int(hh.__version__.split('.')[0]) < 1, '内部 transformers 4.x 要求 huggingface_hub<1.0 -> '+hh.__version__; \
+print('env intact: torch', torch.__version__, '| vllm', vllm.__file__, '| transformers', tf.__version__, tf.__file__, '| hub', hh.__version__)"
 
 # flashinfer-python (可编辑 --no-deps 安装, 源码在 /vllm-workspace/flashinfer)。
 # 与 transformers 一样放在 update 层: 内部分支迭代频繁, 每次发版更新, 不必重建 base。
