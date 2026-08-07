@@ -152,14 +152,17 @@ def resolve_mamba_align_size(
     """Scan all KV cache groups in *spec* and return the single mamba alignment
     size, or None if no group requires mamba alignment.
 
-    For MambaSpec groups in "align" cache mode the hit window must be rounded
-    down to a multiple of the offloaded chunk size. Asserts that all such
-    groups agree on the same value.
+    For MambaSpec groups in "align" or "all" cache mode the hit window must be
+    rounded down to a multiple of the offloaded chunk size. Asserts that all
+    such groups agree on the same value.
     """
     mamba_align_size: int | None = None
     for idx, tokens_per_block in enumerate(spec.tokens_per_block):
         kv_spec = kv_cache_config.kv_cache_groups[idx].kv_cache_spec
-        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
+        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode in (
+            "align",
+            "all",
+        ):
             tokens_per_chunk = tokens_per_block * spec.blocks_per_chunk
             assert mamba_align_size is None or mamba_align_size == tokens_per_chunk
             mamba_align_size = tokens_per_chunk
