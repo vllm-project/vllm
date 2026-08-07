@@ -244,13 +244,18 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | mk.DeferredMoEOutput:
         import flashinfer
 
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
+        num_tokens = hidden_states.shape[0]
+        # The runner divides by the token count on the host, so an idle rank's
+        # dummy 0-token forward has to keep the finalized (empty) form.
+        defer = self.defer_moe_finalize and num_tokens > 0
+
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
         out = flashinfer.fused_moe.trtllm_bf16_moe(
@@ -271,8 +276,19 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             activation_type=activation_to_flashinfer_int(activation),
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
+            do_finalize=not defer,
         )
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
-        )
-        return out
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        if defer:
+            # flashinfer returns a flat permute map; the protocol wants
+            # [num_tokens, top_k] so consumers can read top_k from its shape.
+            return mk.DeferredMoEOutput(
+                gemm2_permuted=out[0],
+                expert_weights=out[1],
+                expanded_idx_to_permuted_idx=out[2]
+                .to(torch.int32)
+                .view(num_tokens, self.topk),
+            )
+        # do_finalize=True yields the finalized states (a bare tensor on some
+        # FlashInfer versions, a single-element list on others).
+        return out[0] if isinstance(out, (list, tuple)) else out
