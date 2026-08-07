@@ -5,11 +5,15 @@
 on partial hits, and same-step deferral."""
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
+from tests.v1.core.test_prefix_caching import (
+    make_kv_cache_manager,
+    make_request,
+)
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
@@ -75,6 +79,60 @@ def test_mamba_align_split_partial_tail_schedule():
     assert split(self=mock, request=req2, num_new_tokens=2016) == 256
     req2.num_computed_tokens = 10240
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
+
+
+def test_full_attention_partial_tail_registration_is_memoized(monkeypatch):
+    hash_block_size = 2
+    block_size = 6
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=hash_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    request = make_request("memo", list(range(10)), hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert (
+        manager.allocate_slots(
+            request, request.num_tokens, num_computed, computed_blocks
+        )
+        is not None
+    )
+
+    cache_partial_block = MagicMock(wraps=manager.block_pool.cache_partial_block)
+    monkeypatch.setattr(manager.block_pool, "cache_partial_block", cache_partial_block)
+
+    manager.cache_blocks(request, request.num_tokens)
+    manager.cache_blocks(request, request.num_tokens)
+    cache_partial_block.assert_not_called()
+
+    request.append_output_token_ids([10, 11])
+    manager.cache_blocks(request, request.num_tokens)
+    cache_partial_block.assert_called_once()
 
 
 def test_mamba_align_split_when_block_exceeds_scheduling_budget():

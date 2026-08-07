@@ -115,6 +115,9 @@ class SingleTypeKVCacheManager(ABC):
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
         self._pending_cow_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
+        self._registered_partial_tails: dict[
+            str, dict[int, tuple[int, BlockHashWithGroupId | None]]
+        ] = {}
         # Partial-tail offload hand-off for external KV connectors: when a
         # producer registers its last-prompt-boundary partial tail and the
         # durable boundary block is not on the append-only request block table
@@ -220,8 +223,12 @@ class SingleTypeKVCacheManager(ABC):
         # If a computed block is an eviction candidate (in the free queue and
         # ref_cnt == 0), it will be removed from the free queue when touched by
         # the allocated request, so we must count it in the free-capacity check.
-        num_evictable_blocks = self._get_num_evictable_blocks(
-            new_computed_blocks[num_skipped_new_computed_blocks:]
+        num_evictable_blocks = (
+            self._get_num_evictable_blocks(
+                new_computed_blocks[num_skipped_new_computed_blocks:]
+            )
+            if len(new_computed_blocks) > num_skipped_new_computed_blocks
+            else 0
         )
         if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
             # Reserve the extra block that allocate_new_blocks pulls for the
@@ -514,6 +521,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
+        self._registered_partial_tails.pop(request_id, None)
         return req_blocks
 
     def free(self, request_id: str) -> None:
@@ -810,13 +818,18 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_idx = boundary_tokens // self.block_size
         if block_idx >= len(blocks):
             return
+        block = blocks[block_idx]
+        registered = self._registered_partial_tails.setdefault(request.request_id, {})
+        if registered.get(boundary_tokens) == (block.block_id, block.block_hash):
+            return
         self.block_pool.cache_partial_block(
             request=request,
-            block=blocks[block_idx],
+            block=block,
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
+        registered[boundary_tokens] = (block.block_id, block.block_hash)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -1524,10 +1537,9 @@ class MambaManager(SingleTypeKVCacheManager):
                         1 + self.num_speculative_blocks + int(has_partial_hit)
                     )
 
-            num_evictable_computed_blocks = self._get_num_evictable_blocks(
-                new_computed_blocks
-            )
-            return num_new_blocks + num_evictable_computed_blocks
+            if not new_computed_blocks:
+                return num_new_blocks
+            return num_new_blocks + self._get_num_evictable_blocks(new_computed_blocks)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
