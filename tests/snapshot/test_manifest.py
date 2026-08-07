@@ -12,7 +12,6 @@ from vllm_cli.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
     SnapshotSecurityError,
-    SocketIdentity,
     inspect_snapshot,
     read_manifest,
     validate_artifact_root,
@@ -47,15 +46,6 @@ def make_manifest(**changes: object) -> SnapshotManifest:
         environment=(("VLLM_USE_V1", "1"),),
         process_tree=(100, 101),
         cuda_holders=(101,),
-        socket_inventory=(
-            SocketIdentity(
-                family="AF_UNIX",
-                socket_type="SOCK_STREAM",
-                local_address="/tmp/vllm.sock",
-                remote_address=None,
-                state="LISTEN",
-            ),
-        ),
         oracle_token_ids=(12095,),
         oracle_text=" Paris",
     )
@@ -132,7 +122,6 @@ def test_inspect_is_json_safe(tmp_path: Path):
     assert inspected["complete"] is True
     assert inspected["support_boundary"] == "same-host Linux x86_64 TP1"
     assert inspected["oracle_token_ids"] == [12095]
-    assert inspected["socket_inventory"][0]["state"] == "LISTEN"
 
 
 def test_manifest_temp_file_is_not_left_behind(tmp_path: Path):

@@ -27,7 +27,6 @@ from typing import Protocol
 from vllm_cli.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
-    SocketIdentity,
     validate_artifact_root,
     validate_identity,
     write_manifest_atomic,
@@ -48,7 +47,6 @@ class ProcessInventory:
     root_pid: int
     process_tree: tuple[int, ...]
     cuda_holders: tuple[int, ...]
-    sockets: tuple[SocketIdentity, ...]
 
 
 class SnapshotTools(Protocol):
@@ -327,7 +325,6 @@ class LocalSnapshotTools:
             root_pid=root_pid,
             process_tree=process_tree,
             cuda_holders=cuda_holders,
-            sockets=(),
         )
 
     def _criu(
@@ -480,7 +477,6 @@ class LocalSnapshotTools:
                     "dump.log",
                     "--shell-job",
                     "--ext-unix-sk",
-                    "--tcp-established",
                     "--link-remap",
                 ],
             )
@@ -647,7 +643,6 @@ class LocalSnapshotTools:
             environment=self._environment_identity(),
             process_tree=inventory.process_tree,
             cuda_holders=inventory.cuda_holders,
-            socket_inventory=inventory.sockets,
             oracle_token_ids=oracle.token_ids,
             oracle_text=oracle.text,
         )
@@ -701,7 +696,6 @@ class LocalSnapshotTools:
                 "restore.log",
                 "--shell-job",
                 "--ext-unix-sk",
-                "--tcp-established",
                 "--link-remap",
                 "--restore-detached",
                 "--pidfile",

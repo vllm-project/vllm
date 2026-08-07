@@ -39,7 +39,6 @@ from vllm_cli.snapshot.controller import (
 from vllm_cli.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
-    SocketIdentity,
     read_manifest,
     write_manifest_atomic,
 )
@@ -286,7 +285,6 @@ class FakeSnapshotTools:
             root_pid=root_pid,
             process_tree=(root_pid, 101),
             cuda_holders=(101,),
-            sockets=(),
         )
 
     def dump(self, workdir: Path, _inventory: ProcessInventory) -> None:
@@ -369,15 +367,6 @@ def _controller_manifest(**changes: object) -> SnapshotManifest:
         environment=(("VLLM_USE_V1", "1"),),
         process_tree=(100, 101),
         cuda_holders=(101,),
-        socket_inventory=(
-            SocketIdentity(
-                family="AF_UNIX",
-                socket_type="SOCK_STREAM",
-                local_address="/tmp/vllm.sock",
-                remote_address=None,
-                state="LISTEN",
-            ),
-        ),
         oracle_token_ids=(12095,),
         oracle_text=" Paris",
     )
@@ -496,7 +485,6 @@ def test_manifest_records_installed_binary_revision(
             root_pid=100,
             process_tree=(100, 101),
             cuda_holders=(101,),
-            sockets=(),
         ),
         Oracle(token_ids=(12095,), text=" Paris"),
         tmp_path,
@@ -600,8 +588,9 @@ def test_restore_resets_child_log_to_captured_size(
     tools = LocalSnapshotTools()
     tools.shm_dir = shm_dir
 
-    def fake_dump(action: str, _artifact: Path, _arguments: list[str]) -> None:
+    def fake_dump(action: str, _artifact: Path, arguments: list[str]) -> None:
         assert action == "dump"
+        assert "--tcp-established" not in arguments
         (shm_dir / "link_remap.270").write_bytes(b"semaphore state")
 
     monkeypatch.setattr(tools, "_criu", fake_dump)
@@ -611,7 +600,6 @@ def test_restore_resets_child_log_to_captured_size(
             root_pid=100,
             process_tree=(100, 101),
             cuda_holders=(101,),
-            sockets=(),
         ),
     )
     assert (artifact / "link-remaps/link_remap.270").read_bytes() == (
@@ -620,8 +608,9 @@ def test_restore_resets_child_log_to_captured_size(
     assert not (shm_dir / "link_remap.270").exists()
     child_log.write_bytes(b"startup log\nrestored output")
 
-    def fake_restore(action: str, artifact: Path, _arguments: list[str]) -> None:
+    def fake_restore(action: str, artifact: Path, arguments: list[str]) -> None:
         assert action == "restore"
+        assert "--tcp-established" not in arguments
         assert child_log.read_bytes() == b"startup log"
         assert (shm_dir / "link_remap.270").read_bytes() == b"semaphore state"
         (artifact / "restored.pid").write_text("100")

@@ -17,6 +17,8 @@ Snapshots currently require all of the following:
 - Tensor, pipeline, and data parallel size 1.
 - One plaintext TCP HTTP API server without built-in API authentication,
   custom middleware, TLS, or a Unix domain socket.
+- No established TCP connections in the captured process tree. Snapshot
+  creation fails instead of asking CRIU to preserve external TCP sessions.
 - [CRIU](https://github.com/checkpoint-restore/criu),
   [cuda-checkpoint](https://github.com/NVIDIA/cuda-checkpoint), and NVIDIA's
   CRIU CUDA plugin installed on the host.
@@ -38,7 +40,7 @@ export CRIU_CUDA_PLUGIN_DIR=/path/to/criu/plugins
 Pass normal `vllm serve` engine arguments after the model name:
 
 ```bash
-vllm snapshot create Qwen/Qwen3-0.6B \
+VLLM_NO_USAGE_STATS=1 vllm snapshot create Qwen/Qwen3-0.6B \
   --snapshot-dir /var/lib/vllm/snapshots/qwen3-0.6b \
   --revision c1899de289a04d12100db370d81485cdf75e47ca \
   --dtype float16 \
@@ -102,6 +104,9 @@ tree has stopped. Concurrent restores of one artifact are not supported.
 - A snapshot can include application secrets or request state present in the
   process. Build it before serving user traffic and protect it like model
   weights and process memory.
+- The tested configuration disables usage reporting during snapshot creation.
+  Any feature that opens an external connection must close it before the
+  capture boundary.
 
 For a lower-complexity option that retains a live process, see
 [Sleep mode](sleep_mode.md). Sleep mode and initialized snapshots retain
