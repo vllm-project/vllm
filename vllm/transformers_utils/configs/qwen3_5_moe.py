@@ -70,6 +70,7 @@ class Qwen3_5MoeTextConfig(PreTrainedConfig):
         output_router_logits=False,
         router_aux_loss_coef=0.001,
         layer_types=None,
+        real_model_type=None,
         pad_token_id=None,
         bos_token_id=None,
         eos_token_id=None,
@@ -118,6 +119,13 @@ class Qwen3_5MoeTextConfig(PreTrainedConfig):
         self.num_experts = num_experts
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
+        # Optional override for the GDN linear attention norm dtype. The
+        # official Qwen3.5 and Qwen3.6 configs are otherwise identical and do
+        # not set this field, so the two series cannot be told apart. Set it to
+        # qwen3_5 for checkpoints that store linear_attn.norm.weight in FP32,
+        # otherwise that weight is cast to the model dtype on load. qwen3_6 is
+        # accepted and matches the default. See QwenGatedDeltaNetLinearAttention.
+        self.real_model_type = real_model_type
         super().__init__(**kwargs)
         # Set these AFTER super().__init__() because transformers v4's
         # PreTrainedConfig.__init__ has these as explicit params with different
