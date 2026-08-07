@@ -24,10 +24,6 @@ from ..utils import (
 )
 
 
-class AsyncSchedulingNotEnabledError(AssertionError):
-    """Raised when draft-model spec decode does not enable async scheduling."""
-
-
 @dataclass
 class ArgsTest:
     target_model: str
@@ -93,24 +89,12 @@ cases = [
 @pytest.mark.parametrize("args", cases)
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
-# TODO: Fix async_scheduling & engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-    strict=True,
-)
 def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runner):
     args.enforce_eager = enforce_eager
     assert_draft_model_correctness(args, vllm_runner)
 
 
 @single_gpu_only
-# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-    strict=True,
-)
 def test_draft_model_realistic_example(vllm_runner):
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -126,12 +110,6 @@ def test_draft_model_realistic_example(vllm_runner):
 
 
 @single_gpu_only
-# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-    strict=True,
-)
 def test_draft_model_parallel_drafting(vllm_runner):
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -158,12 +136,6 @@ def test_draft_model_parallel_drafting(vllm_runner):
 )
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
-# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-    strict=True,
-)
 def test_draft_model_quantization(
     models: tuple[str, str], enforce_eager: bool, vllm_runner
 ):
@@ -178,12 +150,6 @@ def test_draft_model_quantization(
 
 
 @multi_gpu_only(num_gpus=2)
-# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-    strict=True,
-)
 def test_draft_model_tensor_parallelism(vllm_runner):
     """Ensure spec decode works when running with TP > 1."""
     sd_case = ArgsTest(
@@ -405,14 +371,6 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
             f"{context}; expected acceptance_len >= {args.expected_acceptance_len:.3f}"
         )
         # draft_model supports async scheduling; assert it is active by default.
-        # Raise AsyncSchedulingNotEnabledError (a subclass of AssertionError) so that
-        # @pytest.mark.xfail(raises=AsyncSchedulingNotEnabledError) catches only this
-        # specific failure — leaving all other assertion failures (e.g. correctness or
-        # acceptance-rate checks above) visible as real test failures.
         has_async = spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
 
-    if not has_async:
-        raise AsyncSchedulingNotEnabledError(
-            "Expected async_scheduling=True for draft_model spec decode, got False."
-            " See https://github.com/vllm-project/vllm/issues/38929"
-        )
+    assert has_async, "Expected async_scheduling=True for draft_model spec decode"
