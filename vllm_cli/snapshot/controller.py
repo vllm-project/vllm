@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import ast
 import dataclasses
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 import platform
@@ -22,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from vllm.snapshot.manifest import (
+from vllm_cli.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
     SocketIdentity,
@@ -30,7 +32,7 @@ from vllm.snapshot.manifest import (
     validate_identity,
     write_manifest_atomic,
 )
-from vllm.snapshot.server import Oracle
+from vllm_cli.snapshot.types import Oracle
 
 
 class SnapshotCreateError(RuntimeError):
@@ -157,7 +159,7 @@ def restore_snapshot(
     artifact = Path(args.snapshot_dir).absolute()
     toolset = tools or LocalSnapshotTools()
     toolset.preflight("restore", artifact)
-    from vllm.snapshot.manifest import read_manifest
+    from vllm_cli.snapshot.manifest import read_manifest
 
     manifest = read_manifest(artifact)
     if not manifest.complete:
@@ -526,18 +528,43 @@ class LocalSnapshotTools:
         )
 
     def _source_revision(self) -> str:
-        import vllm
-
-        source_root = Path(vllm.__file__).resolve().parents[1]
+        vllm_spec = importlib.util.find_spec("vllm")
+        if vllm_spec is None or vllm_spec.origin is None:
+            return self._binary_revision()
+        source_root = Path(vllm_spec.origin).resolve().parents[1]
         try:
             return self._run(
                 ["git", "-C", str(source_root), "rev-parse", "HEAD"], timeout=10
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError):
-            return vllm.__version__
+            return self._binary_revision()
 
     def _binary_revision(self) -> str:
         return importlib.metadata.version("vllm")
+
+    def _torch_identity(self) -> tuple[str, str]:
+        torch_version = importlib.metadata.version("torch")
+        torch_spec = importlib.util.find_spec("torch")
+        locations = torch_spec and torch_spec.submodule_search_locations
+        if not locations:
+            raise RuntimeError("installed torch package could not be located")
+        version_path = Path(next(iter(locations))) / "version.py"
+        syntax = ast.parse(version_path.read_text(), filename=str(version_path))
+        cuda_runtime = ""
+        for statement in syntax.body:
+            target = None
+            value = None
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                target = statement.targets[0]
+                value = statement.value
+            elif isinstance(statement, ast.AnnAssign):
+                target = statement.target
+                value = statement.value
+            if isinstance(target, ast.Name) and target.id == "cuda" and value:
+                parsed = ast.literal_eval(value)
+                cuda_runtime = str(parsed or "")
+                break
+        return torch_version, cuda_runtime
 
     def _gpu_identity(self) -> tuple[str, str, str]:
         output = self._run(
@@ -573,9 +600,8 @@ class LocalSnapshotTools:
         oracle: Oracle,
         workdir: Path,
     ) -> SnapshotManifest:
-        import torch
-
         gpu_name, gpu_uuid, driver_version = self._gpu_identity()
+        torch_version, cuda_runtime = self._torch_identity()
         host_id_path = Path("/etc/machine-id")
         host_id = host_id_path.read_text().strip()
         revision = str(getattr(args, "revision", None) or "")
@@ -590,8 +616,8 @@ class LocalSnapshotTools:
             source_revision=source_revision,
             binary_revision=self._binary_revision(),
             python_version=platform.python_version(),
-            torch_version=torch.__version__,
-            cuda_runtime=str(torch.version.cuda or ""),
+            torch_version=torch_version,
+            cuda_runtime=cuda_runtime,
             driver_version=driver_version,
             criu_version=self._version([self.criu, "--version"]),
             cuda_checkpoint_version=self._sha256(Path(self.cuda_checkpoint)),
@@ -622,9 +648,8 @@ class LocalSnapshotTools:
             os.close(parent_fd)
 
     def current_identity(self, manifest: SnapshotManifest) -> SnapshotManifest:
-        import torch
-
         gpu_name, gpu_uuid, driver_version = self._gpu_identity()
+        torch_version, cuda_runtime = self._torch_identity()
         host_id = Path("/etc/machine-id").read_text().strip()
         source_revision = self._source_revision()
         return dataclasses.replace(
@@ -632,8 +657,8 @@ class LocalSnapshotTools:
             source_revision=source_revision,
             binary_revision=self._binary_revision(),
             python_version=platform.python_version(),
-            torch_version=torch.__version__,
-            cuda_runtime=str(torch.version.cuda or ""),
+            torch_version=torch_version,
+            cuda_runtime=cuda_runtime,
             driver_version=driver_version,
             criu_version=self._version([self.criu, "--version"]),
             cuda_checkpoint_version=self._sha256(Path(self.cuda_checkpoint)),

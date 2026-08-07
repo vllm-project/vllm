@@ -37,19 +37,19 @@ def validate_create_args(args: argparse.Namespace) -> None:
 
 def run_create(args: argparse.Namespace) -> None:
     validate_create_args(args)
-    from vllm.snapshot.controller import create_snapshot
+    from vllm_cli.snapshot.controller import create_snapshot
 
     create_snapshot(args)
 
 
 def run_inspect(args: argparse.Namespace) -> None:
-    from vllm.snapshot.manifest import inspect_snapshot
+    from vllm_cli.snapshot.manifest import inspect_snapshot
 
     print(json.dumps(inspect_snapshot(Path(args.snapshot_dir)), indent=2))
 
 
 def run_restore(args: argparse.Namespace) -> None:
-    from vllm.snapshot.controller import restore_snapshot
+    from vllm_cli.snapshot.controller import restore_snapshot
 
     restore_snapshot(args)
 

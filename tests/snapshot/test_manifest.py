@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from vllm.snapshot.manifest import (
+from vllm_cli.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
     SnapshotSecurityError,

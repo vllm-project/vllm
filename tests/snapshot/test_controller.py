@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import builtins
 import dataclasses
 import importlib.metadata
+import importlib.util
 import json
 import stat
 from contextlib import asynccontextmanager
@@ -12,21 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.snapshot.controller import (
-    LocalSnapshotTools,
-    ProcessInventory,
-    SnapshotCreateError,
-    SnapshotRestoreError,
-    create_snapshot,
-    restore_snapshot,
-)
-from vllm.snapshot.manifest import (
-    SnapshotCompatibilityError,
-    SnapshotManifest,
-    SocketIdentity,
-    read_manifest,
-    write_manifest_atomic,
-)
 from vllm.snapshot.server import (
     ListenerConfig,
     Oracle,
@@ -37,6 +24,21 @@ from vllm.snapshot.server import (
     read_release_marker,
     run_snapshot_child,
     write_ready_atomic,
+)
+from vllm_cli.snapshot.controller import (
+    LocalSnapshotTools,
+    ProcessInventory,
+    SnapshotCreateError,
+    SnapshotRestoreError,
+    create_snapshot,
+    restore_snapshot,
+)
+from vllm_cli.snapshot.manifest import (
+    SnapshotCompatibilityError,
+    SnapshotManifest,
+    SocketIdentity,
+    read_manifest,
+    write_manifest_atomic,
 )
 
 
@@ -469,6 +471,63 @@ def test_manifest_records_installed_binary_revision(
 
     assert manifest.source_revision == "source-sha"
     assert manifest.binary_revision == "binary-build"
+
+
+def test_torch_identity_does_not_import_torch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    torch_package = tmp_path / "torch"
+    torch_package.mkdir()
+    (torch_package / "version.py").write_text('cuda = "13.0"\n')
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "2.9.0")
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(submodule_search_locations=[str(torch_package)]),
+    )
+    real_import = builtins.__import__
+
+    def reject_torch_import(name, *args, **kwargs):
+        if name == "torch" or name.startswith("torch."):
+            raise AssertionError(f"snapshot identity imported {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_torch_import)
+
+    assert tools._torch_identity() == ("2.9.0", "13.0")
+
+
+def test_source_revision_does_not_import_vllm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    package_init = package / "__init__.py"
+    package_init.write_text("")
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(origin=str(package_init)),
+    )
+    monkeypatch.setattr(
+        tools,
+        "_run",
+        lambda command, **_kwargs: SimpleNamespace(
+            stdout="source-sha\n" if command[0] == "git" else ""
+        ),
+    )
+    real_import = builtins.__import__
+
+    def reject_vllm_import(name, *args, **kwargs):
+        if name == "vllm" or name.startswith("vllm."):
+            raise AssertionError(f"snapshot identity imported {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_vllm_import)
+
+    assert tools._source_revision() == "source-sha"
 
 
 def test_restore_resets_child_log_to_captured_size(

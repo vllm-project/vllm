@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+from vllm_cli.snapshot.types import Oracle
+
 EngineT = TypeVar("EngineT")
 
 
@@ -22,12 +24,6 @@ class SnapshotCanaryError(RuntimeError):
 
 class SnapshotBarrierError(RuntimeError):
     """The controller supplied an invalid snapshot release marker."""
-
-
-@dataclass(frozen=True)
-class Oracle:
-    token_ids: tuple[int, ...]
-    text: str
 
 
 @dataclass(frozen=True)
