@@ -46,7 +46,6 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
@@ -58,12 +57,14 @@ from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
 from vllm.model_executor.models.transformers.fusers import MLAFuser
 from vllm.model_executor.models.transformers.utils import (
+    attrsetter,
     can_enable_torch_compile,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
     named_state,
     replace_conv_class,
+    replace_embedding_class,
     replace_linear_class,
 )
 from vllm.model_executor.models.utils import (
@@ -82,17 +83,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
-
-
-class ScaledVocabParallelEmbedding(VocabParallelEmbedding):
-    """`VocabParallelEmbedding` that scales its output."""
-
-    def __init__(self, *args, embed_scale: float, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.embed_scale = embed_scale
-
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        return super().forward(input_) * self.embed_scale
 
 
 class Base(
@@ -179,24 +169,9 @@ class Base(
         # Input embeddings
         input_embeddings = self.model.get_input_embeddings()
         if not isinstance(input_embeddings, PPMissingLayer):
-            names = ("embedding_size", "hidden_size")
-            embedding_dim = getattr_iter(self.text_config, names, None)
-            assert embedding_dim is not None
-            embedding_kwargs = dict(
-                num_embeddings=self.text_config.vocab_size,
-                embedding_dim=embedding_dim,
-                org_num_embeddings=self.text_config.vocab_size,
-                quant_config=self.quant_config,
+            self.model.set_input_embeddings(
+                replace_embedding_class(input_embeddings, self.quant_config)
             )
-            embed_scale = getattr(input_embeddings, "embed_scale", None)
-            if embed_scale is not None:
-                # Some models scale embeddings inside the input embedding layer
-                new_input_embeddings = ScaledVocabParallelEmbedding(
-                    **embedding_kwargs, embed_scale=float(embed_scale)
-                )
-            else:
-                new_input_embeddings = VocabParallelEmbedding(**embedding_kwargs)
-            self.model.set_input_embeddings(new_input_embeddings)
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -379,16 +354,6 @@ class Base(
                 type(module),
                 tip,
             )
-
-        def attrsetter(attr: str) -> Callable[[object, object], None]:
-            """Set a possibly nested attribute, like the inverse of attrgetter."""
-            parent, _, name = attr.rpartition(".")
-
-            def setter(obj: object, value: object):
-                attr_parent = attrgetter(parent)(obj) if parent else obj
-                setattr(attr_parent, name, value)
-
-            return setter
 
         module_lists = []
         module_list_idx = None
