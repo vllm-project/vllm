@@ -889,6 +889,9 @@ class LlamaJsonParser(ParserEngine):
         # Named choices can be constrained to emit only bare parameters.
         self._named_bare_args_name: str | None = None
         self._held_ws: list[str] = []
+        # Content withheld because a forced tool choice is active.  Released
+        # at finish if no call was ever promoted -- see _filter_events.
+        self._held_forced: list[str] = []
         self._arg_scans: dict[int, _ArgScan] = {}
         self._properties_cache: dict[str, dict] = {}
         self._properties_tools: list[Tool] | None = None
@@ -901,6 +904,7 @@ class LlamaJsonParser(ParserEngine):
         self._phantom_count = 0
         self._drop_content = False
         self._held_ws.clear()
+        self._held_forced.clear()
         self._arg_scans.clear()
 
     def _check_skip_tool_parsing(
@@ -990,6 +994,16 @@ class LlamaJsonParser(ParserEngine):
                 delta = DeltaMessage(content=ws)
             else:
                 delta.content = (delta.content or "") + ws
+        # Same gap for text withheld under a forced tool choice: if no call
+        # was ever promoted it is the whole response, so it must not be lost
+        # when the engine has nothing else buffered.
+        if self._held_forced and not self._drop_content:
+            held = "".join(self._held_forced)
+            self._held_forced.clear()
+            if delta is None:
+                delta = DeltaMessage(content=held)
+            else:
+                delta.content = (delta.content or "") + held
         return delta
 
     def _try_extract_name(self, idx: int) -> str | None:
@@ -1049,8 +1063,20 @@ class LlamaJsonParser(ParserEngine):
         call_start: dict[int, int] = {}
         for event in events:
             if event.type == EventType.TEXT_CHUNK:
-                if self._suppress_content:
+                if self._drop_content:
                     self._held_ws.clear()
+                    self._held_forced.clear()
+                elif self._forced_tool_choice:
+                    # A forced tool choice constrains the model to emit only
+                    # tool calls, so the wire format's scaffolding (the "["
+                    # of the required-mode array) must not reach the client.
+                    # But if generation is cut before any call is promoted,
+                    # that text is all the client gets, and dropping it
+                    # returns an empty message.  Hold it instead and release
+                    # it at finish only if nothing was promoted; streaming is
+                    # append-only, so nothing held is ever retracted.
+                    self._held_ws.clear()
+                    self._held_forced.append(event.value)
                 elif not self._content_has_nonws and not event.value.strip():
                     self._held_ws.append(event.value)
                 else:
@@ -1088,16 +1114,26 @@ class LlamaJsonParser(ParserEngine):
                         self._tool_slots[dense_idx] = ToolCallSlot()
                     self._phantom_count += 1
                     del self._engine_to_dense[engine_idx]
-                    if accumulated and not self._suppress_content:
+                    # Gated on _drop_content, NOT _suppress_content: once a
+                    # real call has completed, later prose is dropped.  But a
+                    # forced tool choice must not suppress this restore -- if
+                    # generation is cut before any call is promoted, this text
+                    # is the entire response, and dropping it returns an empty
+                    # message to a client that asked for a specific tool.
+                    if accumulated and not self._drop_content:
                         self._flush_held_ws(out)
                         out.append(SemanticEvent(EventType.TEXT_CHUNK, accumulated))
                     continue
                 self._drop_content = True
                 self._held_ws.clear()
+                self._held_forced.clear()
             call_start.setdefault(dense_idx, len(out))
             out.append(SemanticEvent(event.type, event.value, dense_idx))
         if finished and not self._suppress_content:
             self._flush_held_ws(out)
+        if finished and not self._drop_content and self._held_forced:
+            out.append(SemanticEvent(EventType.TEXT_CHUNK, "".join(self._held_forced)))
+            self._held_forced.clear()
         return out
 
     @staticmethod
