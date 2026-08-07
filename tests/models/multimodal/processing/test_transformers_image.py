@@ -5,6 +5,7 @@ import pytest
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 
 
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
@@ -77,3 +78,27 @@ def test_image_multiple_inputs():
 
     assert len(result["mm_placeholders"]["image"]) == 2
     assert len(result["mm_kwargs"]["image"]) == 2
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    ["google/gemma-3-4b-it", "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
+)
+def test_image_cached_apply(model_id):
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    cache = MultiModalProcessorOnlyCache(model_config)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config, cache=cache)
+
+    image = ImageAsset("cherry_blossom").pil_image
+    image_token = mm_processor.info.get_hf_processor().image_token
+    prompt = f"{image_token} What is the content of this image?"
+
+    for _ in range(2):
+        result = mm_processor(
+            prompt=prompt,
+            mm_items=mm_processor.info.parse_mm_data({"image": image}),
+            hf_processor_mm_kwargs={},
+        )
+        assert len(result["mm_placeholders"]["image"]) == 1
+
+    assert cache.make_stats().hits == 1
