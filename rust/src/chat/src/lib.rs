@@ -97,6 +97,10 @@ pub struct ChatRequestProcessor {
     /// Effective model dtype reported by the engine.
     /// Absent for text-only frontends without an engine handshake.
     model_dtype: Option<ModelDtype>,
+    /// Tool-call parser selection used when preparing generation requests.
+    tool_call_parser: ParserSelection,
+    /// Reasoning parser selection used when preparing generation requests.
+    reasoning_parser: ParserSelection,
 }
 
 impl ChatRequestProcessor {
@@ -106,6 +110,8 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype: Some(model_dtype),
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
         }
     }
 
@@ -114,7 +120,20 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype: None,
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
         }
+    }
+
+    /// Configure the parser selections used to prepare generation requests.
+    pub fn with_parser_selections(
+        mut self,
+        tool_call_parser: ParserSelection,
+        reasoning_parser: ParserSelection,
+    ) -> Self {
+        self.tool_call_parser = tool_call_parser;
+        self.reasoning_parser = reasoning_parser;
+        self
     }
 
     async fn finalize_rendered_prompt(
@@ -196,10 +215,15 @@ impl ChatRequestProcessor {
     pub async fn prepare(
         &self,
         mut request: ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
     ) -> Result<(TextRequest, DynChatOutputProcessor)> {
         request.validate()?;
-        let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
+        let output_processor = self.backend.new_chat_output_processor(
+            &mut request,
+            NewChatOutputProcessorOptions {
+                tool_call_parser: &self.tool_call_parser,
+                reasoning_parser: &self.reasoning_parser,
+            },
+        )?;
         let text_request = self.prepare_text_request(request).await?;
         Ok((text_request, output_processor))
     }
@@ -213,10 +237,6 @@ impl ChatRequestProcessor {
 pub struct ChatLlm {
     text: TextLlm,
     processor: ChatRequestProcessor,
-    /// Tool-call parser selection.
-    tool_call_parser: ParserSelection,
-    /// Reasoning parser selection.
-    reasoning_parser: ParserSelection,
 }
 
 impl ChatLlm {
@@ -228,8 +248,6 @@ impl ChatLlm {
         Self {
             text,
             processor: ChatRequestProcessor::new(backend, model_dtype),
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
         }
     }
 
@@ -242,13 +260,13 @@ impl ChatLlm {
 
     /// Set tool-call parser selection.
     pub fn with_tool_call_parser(mut self, selection: ParserSelection) -> Self {
-        self.tool_call_parser = selection;
+        self.processor.tool_call_parser = selection;
         self
     }
 
     /// Set reasoning parser selection.
     pub fn with_reasoning_parser(mut self, selection: ParserSelection) -> Self {
-        self.reasoning_parser = selection;
+        self.processor.reasoning_parser = selection;
         self
     }
 
@@ -306,7 +324,7 @@ impl ChatLlm {
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
     pub fn tool_call_parser_name(&self) -> Option<&str> {
-        match &self.tool_call_parser {
+        match &self.processor.tool_call_parser {
             ParserSelection::Auto => {
                 ToolParserFactory::global().resolve_name_for_model(self.model_id())
             }
@@ -317,7 +335,7 @@ impl ChatLlm {
 
     /// Effective reasoning parser name for this model, if parsing is enabled.
     pub fn reasoning_parser_name(&self) -> Option<&str> {
-        match &self.reasoning_parser {
+        match &self.processor.reasoning_parser {
             ParserSelection::Auto => {
                 ReasoningParserFactory::global().resolve_name_for_model(self.model_id())
             }
@@ -328,16 +346,7 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
-        let (text_request, output_processor) = self
-            .processor
-            .prepare(
-                request,
-                NewChatOutputProcessorOptions {
-                    tool_call_parser: &self.tool_call_parser,
-                    reasoning_parser: &self.reasoning_parser,
-                },
-            )
-            .await?;
+        let (text_request, output_processor) = self.processor.prepare(request).await?;
         let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
