@@ -29,8 +29,8 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
-  # TODO: switch to nv_dev branch after it support situ
-  set(_DEEPGEMM_UPSTREAM_TAG "e21c821f39a2056d68067a466c64ddc942200106")
+  # Keep SM120 support from nv_dev while adding SITU activation support.
+  set(_DEEPGEMM_UPSTREAM_TAG "586032eba787dd99e3d1c069f8514ab01ca64906")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
