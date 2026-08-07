@@ -6,7 +6,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -135,6 +135,7 @@ class SecondaryTierManager(ABC):
         primary_kv_view: memoryview,
         tier_type: str,
         backpressure: dict[str, Any] | None = None,
+        backpressure_cls: Callable[..., BackpressureDetector] = EMABackpressureDetector,
     ) -> None:
         """
         Args:
@@ -143,6 +144,9 @@ class SecondaryTierManager(ABC):
             tier_type: Tier type identifier, set by SecondaryTierFactory
                 from the registered tier type.
             backpressure: Optional backpressure detector configuration.
+            backpressure_cls: Factory or class used to create the detector
+                from ``backpressure`` kwargs.  Defaults to
+                ``EMABackpressureDetector``.
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
@@ -153,7 +157,7 @@ class SecondaryTierManager(ABC):
         self.backpressure_config: dict[str, Any] | None = backpressure
         self._bp_detector: BackpressureDetector | None = None
         if backpressure is not None:
-            self._bp_detector = EMABackpressureDetector(**backpressure)
+            self._bp_detector = backpressure_cls(**backpressure)
 
     @property
     def block_size_bytes(self) -> int:
