@@ -1,11 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Adapter that combines reasoning and tool parsers.
 
 use vllm_tokenizer::DynTokenizer;
 
-use crate::reasoning::ReasoningParser;
-use crate::tool::{StructuralTagModel, Tool, ToolParser, ToolParserOutput};
-
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
+use crate::reasoning::ReasoningParser;
+use crate::tool::{StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 /// Unified parser that composes existing reasoning and tool parsers.
 pub struct CombinedParser {
@@ -77,8 +79,8 @@ impl UnifiedParser for CombinedParser {
             || self.tool.as_ref().is_some_and(|parser| parser.preserve_special_tokens())
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        self.tool.as_ref().and_then(|parser| parser.structural_tag_model())
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        self.tool.as_ref().and_then(|parser| parser.structural_tag_builder())
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
@@ -124,42 +126,17 @@ impl UnifiedParser for CombinedParser {
 mod tests {
     use std::sync::Arc;
 
-    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::CombinedParser;
     use crate::reasoning::{Qwen3ReasoningParser, ReasoningDelta, ReasoningParser};
     use crate::tool::{Qwen3XmlToolParser, Tool, ToolParser};
     use crate::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
 
-    struct FakeTokenizer;
-
-    impl Tokenizer for FakeTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(text.chars().map(u32::from).collect())
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(token_ids
-                .iter()
-                .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-                .collect())
-        }
-
-        fn token_to_id(&self, token: &str) -> Option<u32> {
-            match token {
-                "<think>" => Some(1),
-                "</think>" => Some(2),
-                _ => None,
-            }
-        }
+    fn tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<think>", 256)
+            .with_regular_token("</think>", 257)
     }
 
     fn test_tools() -> Vec<Tool> {
@@ -273,7 +250,7 @@ mod tests {
 
     #[test]
     fn combined_parser_emits_reasoning_and_text() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(tokenizer());
         let reasoning = Qwen3ReasoningParser::create(tokenizer).unwrap();
         let mut parser = CombinedParser::new(Some(reasoning), None);
 
@@ -292,10 +269,7 @@ mod tests {
     fn combined_parser_emits_tool_calls_from_visible_content() {
         let tool = Qwen3XmlToolParser::create(&test_tools()).unwrap();
         let mut parser = CombinedParser::new(None, Some(tool));
-        assert!(matches!(
-            parser.structural_tag_model(),
-            Some(crate::tool::StructuralTagModel::Qwen3)
-        ));
+        assert!(parser.structural_tag_builder().is_some());
 
         let output = collect(
             &mut parser,

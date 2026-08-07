@@ -31,7 +31,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import snapshot_download
+from vllm.transformers_utils.repo_utils import hf_api
 from PIL import Image
 from transformers import (
     AutoConfig,
@@ -66,6 +66,7 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
+from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -74,7 +75,7 @@ from torch._inductor.utils import fresh_cache
 
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+    from transformers import PythonBackend, TokenizersBackend
     from transformers.generation.utils import GenerateOutput
 
 
@@ -349,6 +350,20 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _R = TypeVar("_R")
 
 
+def _fix_v4_tied_weights_keys(model_cls: type) -> None:
+    """Convert a v4 list-format _tied_weights_keys to the transformers v5 dict form."""
+    tied = getattr(model_cls, "_tied_weights_keys", None)
+    if not isinstance(tied, list) or not tied:
+        return
+    result = {
+        k: "model.embed_tokens.weight"
+        for k in tied
+        if "lm_head" in k and k.endswith(".weight")
+    }
+    if result:
+        setattr(model_cls, "_tied_weights_keys", result)
+
+
 class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
@@ -474,6 +489,22 @@ class HfRunner:
                 trust_remote_code=trust_remote_code,
             )
         else:
+            if trust_remote_code and hasattr(self.config, "auto_map"):
+                cls_ref = self.config.auto_map.get(auto_cls.__name__)
+                if cls_ref is not None:
+                    from vllm.transformers_utils.dynamic_module import (
+                        try_get_class_from_dynamic_module,
+                    )
+
+                    model_cls = try_get_class_from_dynamic_module(
+                        cls_ref,
+                        model_name,
+                        trust_remote_code=trust_remote_code,
+                        warn_on_fail=False,
+                    )
+                    if model_cls is not None:
+                        _fix_v4_tied_weights_keys(model_cls)
+
             model = cast(
                 nn.Module,
                 auto_cls.from_pretrained(
@@ -499,7 +530,7 @@ class HfRunner:
             self.model = model
 
         if not skip_tokenizer_init:
-            self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
+            self.tokenizer: "PythonBackend | TokenizersBackend" = (
                 AutoTokenizer.from_pretrained(
                     tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
@@ -513,9 +544,15 @@ class HfRunner:
             # it will call torch.accelerator.device_count()
             from transformers import AutoProcessor
 
-            self.processor = AutoProcessor.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
+            # A concurrent refresh of the shared HF cache can briefly hide
+            # processor configuration files. Retry just as model config loading
+            # does in vllm.transformers_utils.config.
+            self.processor = with_retry(
+                lambda: AutoProcessor.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                ),
+                f"Error loading processor for {model_name}",
             )
         if skip_tokenizer_init:
             if self.processor is None:
@@ -642,10 +679,12 @@ class HfRunner:
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for inputs in all_inputs:
+            generate_kwargs = dict(kwargs)
+            generate_kwargs.setdefault("tokenizer", self.tokenizer)
             output_ids: torch.Tensor = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
-                **kwargs,
+                **generate_kwargs,
             )
             if self.processor is None:
                 raise RuntimeError(
@@ -724,6 +763,8 @@ class HfRunner:
 
         all_logprobs: list[list[torch.Tensor]] = []
         for inputs in all_inputs:
+            generate_kwargs = dict(kwargs)
+            generate_kwargs.setdefault("tokenizer", self.tokenizer)
             output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
@@ -731,7 +772,7 @@ class HfRunner:
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
-                **kwargs,
+                **generate_kwargs,
             )
             seq_logprobs = self._hidden_states_to_seq_logprobs(output.hidden_states)
             all_logprobs.append(seq_logprobs)
@@ -812,6 +853,8 @@ class HfRunner:
         all_output_strs: list[str] = []
 
         for inputs in all_inputs:
+            generate_kwargs = dict(kwargs)
+            generate_kwargs.setdefault("tokenizer", self.tokenizer)
             output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=use_cache,
@@ -819,7 +862,7 @@ class HfRunner:
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
                 return_dict_in_generate=True,
-                **kwargs,
+                **generate_kwargs,
             )
 
             # Encoder-decoder models return decoder_hidden_states instead of
@@ -1460,7 +1503,7 @@ _dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
 def dummy_opt_path():
     json_path = os.path.join(_dummy_opt_path, "config.json")
     if not os.path.exists(_dummy_opt_path):
-        snapshot_download(
+        hf_api().snapshot_download(
             repo_id="facebook/opt-125m",
             local_dir=_dummy_opt_path,
             ignore_patterns=["*.bin", "*.bin.index.json", "*.pt", "*.h5", "*.msgpack"],
@@ -1478,7 +1521,7 @@ def dummy_opt_path():
 def dummy_llava_path():
     json_path = os.path.join(_dummy_llava_path, "config.json")
     if not os.path.exists(_dummy_llava_path):
-        snapshot_download(
+        hf_api().snapshot_download(
             repo_id="llava-hf/llava-1.5-7b-hf",
             local_dir=_dummy_llava_path,
             ignore_patterns=[
@@ -1503,7 +1546,7 @@ def dummy_llava_path():
 def dummy_gemma2_embedding_path():
     json_path = os.path.join(_dummy_gemma2_embedding_path, "config.json")
     if not os.path.exists(_dummy_gemma2_embedding_path):
-        snapshot_download(
+        hf_api().snapshot_download(
             repo_id="BAAI/bge-multilingual-gemma2",
             local_dir=_dummy_gemma2_embedding_path,
             ignore_patterns=[
@@ -1587,7 +1630,13 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.debug(
+                "Client disconnected while serving test asset %s: %r", filename, e
+            )
+            self.close_connection = True
 
 
 def _find_free_port() -> int:
@@ -1686,33 +1735,46 @@ def disable_deepgemm_ue8m0(monkeypatch):
         is_deep_gemm_e8m0_used.cache_clear()
 
 
+def _should_clean_gpu_memory_between_tests() -> bool:
+    # This must stay opt-in: a function-scoped fixture cannot distinguish
+    # stale VRAM from allocations owned by longer-lived module/session fixtures.
+    return os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY", "0") == "1"
+
+
 @pytest.fixture(autouse=True)
 def clean_gpu_memory_between_tests():
-    if os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY", "0") != "1":
+    if not _should_clean_gpu_memory_between_tests():
         yield
         return
 
-    # Wait for GPU memory to be cleared before starting the test
     import gc
 
-    from tests.utils import wait_for_gpu_memory_to_clear
+    from tests.utils import wait_for_gpu_memory_to_clear, wait_for_rocm_memory_to_settle
 
     num_gpus = torch.accelerator.device_count()
-    if num_gpus > 0:
+
+    def _wait_for_settled_gpu_memory() -> None:
+        if num_gpus <= 0:
+            return
         try:
-            wait_for_gpu_memory_to_clear(
-                devices=list(range(num_gpus)),
-                threshold_ratio=0.1,
-            )
+            if current_platform.is_rocm():
+                wait_for_rocm_memory_to_settle()
+            else:
+                wait_for_gpu_memory_to_clear(
+                    devices=list(range(num_gpus)),
+                    threshold_ratio=0.1,
+                )
         except ValueError as e:
             logger.info("Failed to clean GPU memory: %s", e)
 
+    _wait_for_settled_gpu_memory()
+
     yield
 
-    # Clean up GPU memory after the test
     if torch.cuda.is_available():
         torch.accelerator.empty_cache()
         gc.collect()
+    _wait_for_settled_gpu_memory()
 
 
 @pytest.fixture
@@ -1724,6 +1786,22 @@ def use_fresh_inductor_cache():
     """
     with fresh_cache():
         yield
+
+
+@pytest.fixture
+def disable_vllm_compile_cache(monkeypatch, use_fresh_inductor_cache):
+    """
+    Use a fresh inductor cache AND disable vLLM's on-disk torch.compile cache.
+
+    This forces compilation (and any custom compile passes) to actually run
+    instead of being served from a warm cache left behind by previous runs
+    (e.g. on persistent CI agents). Use this for tests that inspect what
+    happens during compilation; use ``use_fresh_inductor_cache`` (or
+    ``fresh_vllm_cache``) instead when the vLLM compile cache must stay
+    enabled (e.g. cache save/load tests).
+    """
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    yield
 
 
 @pytest.fixture

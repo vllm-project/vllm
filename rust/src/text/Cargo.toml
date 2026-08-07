@@ -31,6 +31,7 @@ serial_test.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 vllm-llm = { workspace = true, features = ["test-util"] }
+vllm-tokenizer = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

@@ -9,6 +9,8 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
 import torch
@@ -16,6 +18,7 @@ import torch
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 pytestmark = pytest.mark.cpu_test
 
@@ -53,14 +56,14 @@ def _make_runner(
 
 
 def _gather(runner: EncoderRunner, *, num_scheduled: int, draft_lookahead: int):
-    # Single prefilling request, computed_prefill=0, prefill_len large.
+    # Single prefilling request, num_computed_tokens=0, prefill_len large.
     return runner.gather_mm_embeddings(
         req_ids=["req0"],
         total_num_scheduled_tokens=num_scheduled,
         num_scheduled_tokens=np.array([num_scheduled]),
         query_start_loc=np.array([0]),
         prefill_lens=np.array([1000]),
-        computed_prefill_lens=np.array([0]),
+        num_computed_tokens=np.array([0]),
         draft_lookahead=draft_lookahead,
     )
 
@@ -78,6 +81,7 @@ def test_draft_lookahead_uses_boundary_feature_when_cached():
 
     # f0 covers positions 0..6 (+1 skew); f1's first embed covers position 7.
     assert len(mm_embeds) == 2
+    assert [e.modality for e in mm_embeds] == ["image", "image"]
     assert bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 8
 
@@ -94,6 +98,7 @@ def test_draft_lookahead_tolerates_missing_boundary_feature():
 
     # Only f0 is gathered; f1's boundary position falls back silently.
     assert len(mm_embeds) == 1
+    assert [e.modality for e in mm_embeds] == ["image"]
     assert not bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 7
 
@@ -147,11 +152,75 @@ def test_multi_request_batch_gathers_per_request(draft_lookahead):
         num_scheduled_tokens=np.array([8, 8]),
         query_start_loc=np.array([0, 8]),
         prefill_lens=np.array([1000, 1000]),
-        computed_prefill_lens=np.array([0, 0]),
+        num_computed_tokens=np.array([0, 0]),
         draft_lookahead=draft_lookahead,
     )
 
     # Both requests contribute a feature; with the +1 skew each marks 7 of its
     # 8 positions (the skew drops one), otherwise all 8.
     assert len(mm_embeds) == 2
+    assert [e.modality for e in mm_embeds] == ["image", "image"]
     assert int(is_mm_embed.sum()) == (14 if draft_lookahead else 16)
+
+
+def test_gather_preserves_mixed_modalities():
+    """Modalities must be attached on tensors in gather order."""
+    video = MultiModalFeatureSpec(
+        data=None,
+        modality="video",
+        identifier="v0",
+        mm_position=PlaceholderRange(offset=0, length=4),
+    )
+    audio = MultiModalFeatureSpec(
+        data=None,
+        modality="audio",
+        identifier="a0",
+        mm_position=PlaceholderRange(offset=4, length=4),
+    )
+    runner = _make_runner([video, audio], cached=[video, audio])
+
+    mm_embeds, is_mm_embed = _gather(runner, num_scheduled=8, draft_lookahead=0)
+
+    assert len(mm_embeds) == 2
+    assert [e.modality for e in mm_embeds] == ["video", "audio"]
+    assert int(is_mm_embed.sum()) == 8
+
+
+def test_execute_mm_encoder_caches_outputs_without_gathering():
+    """An encoder instance encodes and publishes, and must stop there.
+
+    `ModelState.execute_mm_encoder` is the half of `get_mm_embeddings` that an
+    EPD encoder instance needs: it runs no language model, so gathering would
+    build an `inputs_embeds` nobody reads -- and the gather raises
+    `Encoder cache miss` for any scheduled item absent from the local cache,
+    which on a producer takes the whole engine down (the scheduler hands it
+    items the connector already holds, and a producer has no load path).
+    """
+    cache = EncoderCache()
+    state = MagicMock()
+    state.encoder_cache = cache
+    embedding = torch.ones(2, HIDDEN)
+    # (mm_hashes, [(modality, kwargs item), ...]), as prepare_mm_inputs returns.
+    state.encoder_runner.prepare_mm_inputs.return_value = (
+        ["hash0"],
+        [("image", MagicMock())],
+    )
+    state.encoder_runner.execute_mm_encoder.return_value = [embedding]
+
+    ModelState.execute_mm_encoder(state, {"req0": [0]})
+
+    assert cache.encoder_outputs == {"hash0": embedding}
+    state.encoder_runner.gather_mm_embeddings.assert_not_called()
+
+
+def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
+    """A step that schedules no encoder input must not touch the encoder."""
+    cache = EncoderCache()
+    state = MagicMock()
+    state.encoder_cache = cache
+    state.encoder_runner.prepare_mm_inputs.return_value = ([], [])
+
+    ModelState.execute_mm_encoder(state, {})
+
+    assert not cache.encoder_outputs
+    state.encoder_runner.execute_mm_encoder.assert_not_called()

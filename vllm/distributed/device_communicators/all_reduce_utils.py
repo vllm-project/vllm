@@ -47,6 +47,12 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
         6: 8 * MiB,  # 8 MB
         8: 4 * MiB,  # 4 MB
     },
+    "10.7": {  # sm_107 (Rubin): reuse 10.3 all-reduce thresholds
+        2: 4 * MiB,  # 4 MB
+        4: 4 * MiB,  # 4 MB
+        6: 8 * MiB,  # 8 MB
+        8: 4 * MiB,  # 4 MB
+    },
 }
 
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
@@ -63,6 +69,12 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         8: 128 * MiB,  # 128 MB
     },
     "10.3": {
+        2: 4 * MiB,  # 4 MB
+        4: 32 * MiB,  # 32 MB
+        6: 32 * MiB,  # 32 MB
+        8: 64 * MiB,  # 64 MB
+    },
+    "10.7": {  # sm_107 (Rubin): reuse 10.3 all-reduce thresholds
         2: 4 * MiB,  # 4 MB
         4: 32 * MiB,  # 32 MB
         6: 32 * MiB,  # 32 MB
@@ -132,6 +144,18 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
         # Use custom_AR (not symm_mem) for mid-range sizes
         return tensor_size <= lower_bound or tensor_size >= upper_bound
     return world_size > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
+
+
+def should_nccl_symm_mem_ag_rs() -> bool:
+    """Check whether NCCL symmetric memory should be used for
+    AllGather / ReduceScatter collectives."""
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled,
+    )
+
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+    return is_symmetric_memory_enabled()
 
 
 def producer(

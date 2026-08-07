@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias
@@ -88,6 +89,32 @@ class LogprobsTensors(NamedTuple):
             self.logprob_token_ids[mask],
             self.logprobs[mask],
             self.selected_token_ranks[mask],
+        )
+
+    @staticmethod
+    def cat(
+        tensors: Sequence["LogprobsTensors"],
+        cu_num_generated_tokens: list[int] | None = None,
+    ) -> "LogprobsTensors":
+        """Concatenate flattened logprob tensors."""
+        assert tensors
+        assert cu_num_generated_tokens is not None or all(
+            tensor.cu_num_generated_tokens is None for tensor in tensors
+        )
+        if len(tensors) == 1:
+            tensor = tensors[0]
+            if cu_num_generated_tokens is None:
+                return tensor
+            return tensor._replace(cu_num_generated_tokens=cu_num_generated_tokens)
+        return LogprobsTensors(
+            logprob_token_ids=torch.cat(
+                [tensor.logprob_token_ids for tensor in tensors]
+            ),
+            logprobs=torch.cat([tensor.logprobs for tensor in tensors]),
+            selected_token_ranks=torch.cat(
+                [tensor.selected_token_ranks for tensor in tensors]
+            ),
+            cu_num_generated_tokens=cu_num_generated_tokens,
         )
 
     @staticmethod
@@ -331,8 +358,10 @@ def make_empty_encoder_model_runner_output(
     # Give every request its own contiguous index
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
-    # No tokens generated yet ⇒ one empty list per request
-    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
+    # An encoder instance never samples, so it emits no tokens at all. The
+    # scheduler finishes these requests once their prompt is fully encoded
+    # (see `Scheduler.update_from_output`).
+    sampled_token_ids: list[list[int]] = [[] for _ in req_ids]
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]
