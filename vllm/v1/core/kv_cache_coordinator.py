@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
 
@@ -127,12 +128,9 @@ class KVCacheCoordinator(ABC):
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
-        self.eagle_group_ids: set[int] = {
-            i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
-        }
-        # Conservatively fall back to flag all groups when no group is flagged.
-        if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+        self.eagle_group_ids = KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+            kv_cache_config.kv_cache_groups, use_eagle
+        )
         # Lookahead hashes clear ``use_eagle``: groups stay flagged, none drops.
         self.drop_eagle_group_ids = self.eagle_group_ids if use_eagle else set()
 
@@ -869,10 +867,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 _max_length = curr_hit_length
                 # Eagle matches one extra drop unit (one hash unit for
                 # fine-grained managers, else one cache block) and then drops
-                # it, landing back at the candidate length. No margin for
-                # mamba: its finder never drops (draft models have no mamba
-                # layers), so the hit would grow past the candidate.
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                # it, landing back at the candidate length. Only managers
+                # that can honor the drop may receive that margin.
+                if drop_eagle_block and manager_cls.supports_eagle_cache_peek:
                     eagle_margin = eagle_proof_margin(
                         group_block_size,
                         self.hash_block_size,
@@ -958,7 +955,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             manager = self.single_type_managers[group_ids[0]]
             lookup_length = max_cache_hit_length
-            if use_eagle and not isinstance(spec, MambaSpec):
+            if use_eagle and manager_cls.supports_eagle_cache_peek:
                 eagle_margin = eagle_proof_margin(
                     manager.block_size,
                     self.hash_block_size,

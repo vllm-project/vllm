@@ -207,16 +207,16 @@ class SchedulerOffloadConfig(NamedTuple):
 
         retention_interval = vllm_config.cache_config.prefix_cache_retention_interval
 
-        eagle_groups = {
-            group.group_id
-            for group in spec.config.groups
-            if kv_cache_config.kv_cache_groups[group.group_id].is_eagle_group
-        }
-
         use_eagle_block_drop = (
             vllm_config.speculative_config is not None
             and vllm_config.speculative_config.use_eagle_block_drop()
         )
+        eagle_group_indices = KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+            [kv_cache_config.kv_cache_groups[g.group_id] for g in spec.config.groups],
+            use_eagle_block_drop,
+            fallback_to_capable_groups=False,
+        )
+        eagle_groups = {spec.config.groups[i].group_id for i in eagle_group_indices}
         if use_eagle_block_drop and not eagle_groups:
             # No group is annotated as holding drafter layers. This happens
             # when the drafter owns no KV cache (e.g. KV-sharing drafters) or
@@ -247,7 +247,9 @@ class SchedulerOffloadConfig(NamedTuple):
             tokens_per_block = group.tokens_per_block
             kv_cache_group = kv_cache_config.kv_cache_groups[group_id]
             kv_spec = kv_cache_group.kv_cache_spec
-            manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
+            manager_cls = KVCacheSpecRegistry.get_manager_class(
+                kv_spec, kv_cache_group.role
+            )
             assert manager_cls is not None, (
                 f"No manager found for KV cache spec {type(kv_spec).__name__}"
             )
@@ -657,6 +659,7 @@ class OffloadingConnectorScheduler:
             for config in self.config.kv_group_configs
             if self.config.supports_partial_tail
             and config.is_eagle_group
+            and config.manager_cls.supports_eagle_cache_peek
             and not config.requires_cow_source
         }
         self._max_eagle_proof_margin = max(

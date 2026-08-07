@@ -37,6 +37,27 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
+def test_mamba_rejects_eagle_cache_peek():
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=4)
+
+    with pytest.raises(AssertionError, match="cannot drop an EAGLE/MTP"):
+        MambaManager.find_longest_cache_hit(
+            block_hashes=[],
+            max_length=4,
+            kv_cache_group_ids=[0],
+            block_pool=pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=True,
+            alignment_tokens=4,
+        )
+
+
 def test_external_computed_blocks_do_not_corrupt_free_pool():
     block_size = 4
     spec = FullAttentionSpec(

@@ -25,10 +25,12 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheGroupRole,
+    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
     MambaSpec,
@@ -41,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import (
     _REGISTRY_KVCACHESPEC_LIST,
+    _REGISTRY_ROLE_MANAGERS,
     KVCacheSpecRegistry,
     register_kv_cache_spec,
 )
@@ -63,9 +66,12 @@ register_all_kvcache_specs(vllm_config)
 @pytest.fixture(autouse=True)
 def restore_kv_cache_spec_registry():
     registry = _REGISTRY_KVCACHESPEC_LIST.copy()
+    role_managers = _REGISTRY_ROLE_MANAGERS.copy()
     yield
     _REGISTRY_KVCACHESPEC_LIST.clear()
     _REGISTRY_KVCACHESPEC_LIST.update(registry)
+    _REGISTRY_ROLE_MANAGERS.clear()
+    _REGISTRY_ROLE_MANAGERS.update(role_managers)
 
 
 @dataclass(frozen=True)
@@ -166,6 +172,79 @@ def are_uniform_specs(*specs: KVCacheSpec) -> bool:
 
 class TestKVCacheSpecRegistry:
     """Test the core registry functionality."""
+
+    @pytest.mark.parametrize("wrapped", [False, True])
+    @pytest.mark.parametrize(
+        ("annotated", "use_eagle", "fallback", "expected"),
+        [
+            ((), True, True, {0}),
+            ((), True, False, set()),
+            ((0,), True, False, {0}),
+            ((), False, True, set()),
+            ((0,), False, True, {0}),
+        ],
+    )
+    def test_eagle_peek_groups_preserve_annotation_and_fallback_policy(
+        self, wrapped, annotated, use_eagle, fallback, expected
+    ):
+        specs = [make_spec(FullAttentionSpec), make_spec(MambaSpec)]
+        if wrapped:
+            specs = [
+                UniformTypeKVCacheSpecs(
+                    block_size=spec.block_size, kv_cache_specs={f"layer_{i}": spec}
+                )
+                for i, spec in enumerate(specs)
+            ]
+        groups = [
+            KVCacheGroupSpec([f"layer_{i}"], spec, is_eagle_group=i in annotated)
+            for i, spec in enumerate(specs)
+        ]
+
+        assert (
+            KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+                groups, use_eagle, fallback_to_capable_groups=fallback
+            )
+            == expected
+        )
+
+    def test_eagle_peek_uses_the_role_selected_manager(self):
+        class NoPeekManager(FullAttentionManager):
+            supports_eagle_cache_peek = False
+
+        KVCacheSpecRegistry.register_role_manager(
+            KVCacheGroupRole.DEFAULT, NoPeekManager
+        )
+        group = KVCacheGroupSpec(["layer"], make_spec(FullAttentionSpec))
+
+        assert (
+            KVCacheSpecRegistry.get_eagle_cache_peek_group_ids([group], True) == set()
+        )
+        with pytest.raises(
+            ValueError, match=r"not supported for KV cache groups \[0\]"
+        ):
+            KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+                [replace(group, is_eagle_group=True)], True
+            )
+
+    def test_eagle_peek_excludes_non_cacheable_groups(self):
+        spec = CircularBufferSpec(**spec_args_map[FullAttentionSpec])
+
+        assert (
+            KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+                [KVCacheGroupSpec(["ring"], spec)], True
+            )
+            == set()
+        )
+
+    def test_annotated_eagle_group_requires_a_registered_manager(self):
+        group = KVCacheGroupSpec(
+            ["layer"], _TrulyUnregisteredSpec(block_size=16), is_eagle_group=True
+        )
+
+        with pytest.raises(
+            ValueError, match=r"not supported for KV cache groups \[0\]"
+        ):
+            KVCacheSpecRegistry.get_eagle_cache_peek_group_ids([group], True)
 
     def test_builtin_kvcache_specs_registered(self):
         assert set(spec_manager_map) <= set(_REGISTRY_KVCACHESPEC_LIST)

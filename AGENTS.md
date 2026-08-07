@@ -1,6 +1,6 @@
 # Agent Instructions for vLLM
 
-> These instructions apply to **all** AI-assisted contributions to `vllm-project/vllm`.
+> These instructions apply to **all** contributions to `vllm-project/vllm`.
 > Breaching these guidelines can result in automatic banning.
 
 ## 1. Contribution Policy (Mandatory)
@@ -24,13 +24,12 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
 
 ### Accountability
 
-- Pure code-agent PRs are **not allowed**. A human submitter must understand and defend the change end-to-end.
+- A submitter must understand and defend the change end-to-end.
 - The submitting human must review every changed line and run relevant tests.
-- PR descriptions for AI-assisted work **must** include:
+- PR descriptions **must** include:
     - Why this is not duplicating an existing PR.
     - Test commands run and results.
     - Model evaluation results when the change affects output, accuracy, or serving.
-    - Clear statement that AI assistance was used.
 - User-visible changes (features, CLI args, config fields, env vars, models,
   hardware, defaults, deprecations) must update the rendered docs in the same PR;
   follow [Documenting User-Visible Changes](docs/contributing/README.md#documenting-user-visible-changes).
@@ -133,12 +132,11 @@ Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#3
 
 ### Commit messages
 
-Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`):
+Add a sign-off using a commit trailer:
 
 ```text
 Your commit message here
 
-Co-authored-by: Agent Name Here
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
