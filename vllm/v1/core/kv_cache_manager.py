@@ -215,6 +215,24 @@ class KVCacheManager:
         """Whether a local prefix cache lookup may be run for this request."""
         return self.enable_caching and not request.skip_reading_prefix_cache
 
+    def _find_longest_local_cache_hit(
+        self, request: Request
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int] | None:
+        """Find a local cache hit without creating blocks or emitting events."""
+        if not self.prefix_cache_lookup_enabled(request):
+            return None
+        return self.coordinator.find_longest_cache_hit(
+            request.block_hashes, request.num_tokens - 1
+        )
+
+    def get_num_local_computed_tokens(self, request: Request) -> int:
+        """Return the number of locally cached KV tokens without mutating state."""
+        cache_hit = self._find_longest_local_cache_hit(request)
+        if cache_hit is None:
+            return 0
+        _, hit_length, _ = cache_hit
+        return hit_length
+
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
         # Don't count a request that skipped the cache lookup.
         if not self.log_stats or not self.prefix_cache_lookup_enabled(request):
@@ -243,11 +261,8 @@ class KVCacheManager:
                   Pinned so ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL`` does not drop
                   the junction and defeat cross-request reuse.
         """
-        # We skip finding the prefix cache hit when prefix caching is
-        # disabled or the request is marked as skipping kv cache read
-        # (which happens when the request requires prompt logprobs
-        # or calls a pooling model with all pooling).
-        if not self.prefix_cache_lookup_enabled(request):
+        cache_hit = self._find_longest_local_cache_hit(request)
+        if cache_hit is None:
             return self.empty_kv_cache_blocks, 0, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
@@ -256,12 +271,7 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.num_tokens - 1
-        computed_blocks, num_new_computed_tokens, num_uncached = (
-            self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length
-            )
-        )
+        computed_blocks, num_new_computed_tokens, num_uncached = cache_hit
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers

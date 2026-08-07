@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
-SchedulerPolicy = Literal["fcfs", "priority"]
+SchedulerPolicy = Literal["fcfs", "priority", "residual_sjf"]
 
 
 @config
@@ -102,7 +102,17 @@ class SchedulerConfig:
     - "fcfs" means first come first served, i.e. requests are handled in order 
       of arrival.
     - "priority" means requests are handled based on given priority (lower
-      value means earlier handling) and time of arrival deciding any ties)."""
+      value means earlier handling) and time of arrival deciding any ties).
+    - "residual_sjf" means decoder-only text requests are handled by their
+      remaining local prefill work, with FCFS max-wait aging."""
+
+    residual_sjf_max_wait_ms: int = Field(default=10_000, gt=0)
+    """Maximum wait before a residual-SJF request receives FCFS priority.
+
+    This value controls the mean/tail tradeoff: smaller values make the policy
+    behave closer to FCFS with a flatter tail; larger values improve mean
+    TTFT/E2E at the cost of P95/P99. Start at 1/2 to 1/3 of the target P95 wait
+    and adjust after load testing against the P99 budget."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
@@ -225,6 +235,18 @@ class SchedulerConfig:
         return None if value is None else handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
+        if self.policy == "residual_sjf" and (
+            self.is_multimodal_model or is_encoder_decoder
+        ):
+            raise ValueError(
+                "residual_sjf supports decoder-only text generation models only."
+            )
+        if self.policy == "residual_sjf" and self.runner_type != "generate":
+            raise ValueError(
+                "residual_sjf requires the generate runner; "
+                f"runner_type={self.runner_type} is not supported."
+            )
+
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True
