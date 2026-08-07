@@ -9,7 +9,7 @@ actual NCCL communication.
 
 import os
 from dataclasses import dataclass
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -28,6 +28,16 @@ from ...utils import create_new_process_for_each_test
 
 # Use a tiny model for fast testing
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+def test_finish_weight_update_invalidates_prefix_cache():
+    llm = object.__new__(LLM)
+    llm.llm_engine = MagicMock()
+
+    LLM.finish_weight_update(llm)
+
+    llm.llm_engine.collective_rpc.assert_called_once_with("finish_weight_update")
+    llm.llm_engine.reset_prefix_cache.assert_called_once_with()
 
 
 # --- Mock Weight Transfer Engine ---

@@ -895,6 +895,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def finish_weight_update(self) -> None:
         """Finish the current weight update."""
         self.llm_engine.collective_rpc("finish_weight_update")
+        self.llm_engine.reset_prefix_cache()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

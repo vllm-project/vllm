@@ -59,10 +59,10 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     plugged in.
 
     Each engine owns its full weight-update lifecycle: `start_weight_update`,
-    `update_weights`, and `finish_weight_update`. Layerwise reloading (used by
-    checkpoint-format engines) is opted into per engine by running it inside
-    `start_weight_update`/`finish_weight_update`. Engines that apply weights in
-    place (e.g. sparse patches) leave those methods as no-ops.
+    `update_weights`, and `finish_weight_update`. Checkpoint-format engines use
+    this explicit boundary to defer model-wide post-load processing until the
+    trainer declares the update complete. Engines that apply weights in place
+    (e.g. sparse patches) leave those methods as no-ops.
 
     Subclasses should define:
         init_info_cls: Type of backend-specific initialization info
@@ -167,6 +167,9 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         that apply weights in place leave this as a no-op.
         """
         raise NotImplementedError
+
+    def abort_weight_update(self) -> None:
+        """Abort an active update and restore the serving model if needed."""
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """

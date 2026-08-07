@@ -70,10 +70,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     XDRotaryEmbedding,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-)
+from vllm.model_executor.model_loader.reload import ModelwiseReloader
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -5492,13 +5489,17 @@ class GPUModelRunner(
         # and reload runs outside the startup context that initial loading
         # had. Boundary-wide context rather than per-field snapshots so new
         # config consumers stay covered.
-        with reload_storage_guard(model):
-            with set_current_vllm_config(self.vllm_config):
+        with (
+            reload_storage_guard(model),
+            set_current_vllm_config(self.vllm_config),
+        ):
                 if is_checkpoint_format:
                     # load weights from checkpoint/ original model format
-                    initialize_layerwise_reload(model)
-                    loaded_weights = model.load_weights(weights_iterator)
-                    finalize_layerwise_reload(model, self.model_config)
+                    loaded_weights = ModelwiseReloader(
+                        model,
+                        self.model_config,
+                        self.device,
+                    ).reload(weights_iterator)
 
                 else:
                     # load weights from kernel format
@@ -6727,8 +6728,7 @@ class GPUModelRunner(
         # arena covers them; the manifest is what lets a reload notice if a
         # global cache rebinds an address a graph baked in.
         if os.environ.get("VLLM_RELOAD_GLOBAL_MANIFEST", "warn") != "off":
-            from vllm.model_executor.reload_manifest import (
-                record_global_storage)
+            from vllm.model_executor.reload_manifest import record_global_storage
             record_global_storage()
 
         return cuda_graph_size

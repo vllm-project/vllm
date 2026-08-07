@@ -1106,3 +1106,4 @@ class AsyncLLM(EngineClient):
     async def finish_weight_update(self) -> None:
         """Finish the current weight update."""
         await self.collective_rpc("finish_weight_update")
+        await self.engine_core.reset_prefix_cache_async()

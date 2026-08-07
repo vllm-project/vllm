@@ -15,10 +15,16 @@ from vllm.v1.worker.gpu_worker import Worker
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 
-    def __init__(self, raise_on_update: bool = False):
+    def __init__(
+        self,
+        raise_on_update: bool = False,
+        raise_on_finish: bool = False,
+    ):
         self.raise_on_update = raise_on_update
+        self.raise_on_finish = raise_on_finish
         self.started = False
         self.finished = False
+        self.aborted = False
         self.update_calls: list[dict] = []
 
     def start_weight_update(self) -> None:
@@ -31,6 +37,11 @@ class _RecordingEngine:
 
     def finish_weight_update(self) -> None:
         self.finished = True
+        if self.raise_on_finish:
+            raise ValueError("finish boom")
+
+    def abort_weight_update(self) -> None:
+        self.aborted = True
 
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
@@ -85,6 +96,18 @@ def test_update_resets_active_on_error():
         Worker.update_weights(worker, {"names": ["w"]})
 
     # A failed update ends the session so the next start is clean.
+    assert worker._weight_update_active is False
+    assert engine.aborted is True
+
+
+def test_finish_resets_active_on_error():
+    engine = _RecordingEngine(raise_on_finish=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(ValueError, match="finish boom"):
+        Worker.finish_weight_update(worker)
+
     assert worker._weight_update_active is False
 
 

@@ -8,9 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.config import set_current_vllm_config
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.model_executor.model_loader.reload import ModelwiseReloadSession
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -121,6 +124,7 @@ class NCCLWeightTransferEngine(
     ) -> None:
         super().__init__(config, vllm_config, device, model)
         self.model_update_group: PyNcclCommunicator | None = None
+        self.reload_session: ModelwiseReloadSession | None = None
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """
@@ -135,20 +139,33 @@ class NCCLWeightTransferEngine(
         )
 
     def start_weight_update(self) -> None:
-        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        """Open a model-wide transaction for incoming checkpoint weights."""
         from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
+            ModelwiseReloadSession,
         )
 
-        initialize_layerwise_reload(self.model)
+        session = ModelwiseReloadSession(
+            self.model,
+            self.model_config,
+            self.device,
+        )
+        session.start()
+        self.reload_session = session
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading after all weights have been received."""
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
+        """Run model-wide post-load processing and commit the update."""
+        session = self.reload_session
+        if session is None:
+            raise RuntimeError("NCCL weight update session is not active")
+        self.reload_session = None
+        with set_current_vllm_config(self.vllm_config):
+            session.finish()
 
-        finalize_layerwise_reload(self.model, self.model_config)
+    def abort_weight_update(self) -> None:
+        session = self.reload_session
+        self.reload_session = None
+        if session is not None:
+            session.abort()
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """
@@ -167,39 +184,46 @@ class NCCLWeightTransferEngine(
                 "NCCL weight transfer not initialized. "
                 "Call init_transfer_engine() first."
             )
+        if self.reload_session is None:
+            raise RuntimeError(
+                "NCCL weight update session is not active. "
+                "Call start_weight_update() first."
+            )
 
-        if update_info.packed:
-            # Build iterator of (name, (shape, dtype)) from update_info
-            def state_dict_info_iterator():
+        with set_current_vllm_config(self.vllm_config):
+            if update_info.packed:
+                # Build iterator of (name, (shape, dtype)) from update_info
+                def state_dict_info_iterator():
+                    for name, dtype_name, shape in zip(
+                        update_info.names, update_info.dtype_names, update_info.shapes
+                    ):
+                        dtype = getattr(torch, dtype_name)
+                        yield (name, (shape, dtype))
+
+                packed_nccl_broadcast_consumer(
+                    iterator=state_dict_info_iterator(),
+                    group=self.model_update_group,
+                    src=0,
+                    post_unpack_func=self.reload_session.load_weights,
+                    buffer_size_bytes=update_info.packed_buffer_size_bytes,
+                    num_buffers=update_info.packed_num_buffers,
+                    device=self.device,
+                )
+            else:
+                # Use simple one-by-one broadcasting
                 for name, dtype_name, shape in zip(
                     update_info.names, update_info.dtype_names, update_info.shapes
                 ):
                     dtype = getattr(torch, dtype_name)
-                    yield (name, (shape, dtype))
-
-            packed_nccl_broadcast_consumer(
-                iterator=state_dict_info_iterator(),
-                group=self.model_update_group,
-                src=0,
-                post_unpack_func=self.model.load_weights,
-                buffer_size_bytes=update_info.packed_buffer_size_bytes,
-                num_buffers=update_info.packed_num_buffers,
-                device=self.device,
-            )
-        else:
-            # Use simple one-by-one broadcasting
-            for name, dtype_name, shape in zip(
-                update_info.names, update_info.dtype_names, update_info.shapes
-            ):
-                dtype = getattr(torch, dtype_name)
-                weight = torch.empty(shape, dtype=dtype, device=self.device)
-                self.model_update_group.broadcast(
-                    weight, src=0, stream=torch.cuda.current_stream()
-                )
-                self.model.load_weights([(name, weight)])
-                del weight
+                    weight = torch.empty(shape, dtype=dtype, device=self.device)
+                    self.model_update_group.broadcast(
+                        weight, src=0, stream=torch.cuda.current_stream()
+                    )
+                    self.reload_session.load_weights([(name, weight)])
+                    del weight
 
     def shutdown(self) -> None:
+        self.abort_weight_update()
         if self.model_update_group is not None:
             # Clean up the communicator by removing the reference
             self.model_update_group = None
