@@ -33,6 +33,17 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     return device, group
 
 
+_INT32_MAX = torch.iinfo(torch.int32).max
+
+
+def neutralize_dead_dp_columns(tensor: torch.Tensor, dead_dp_ranks: set[int]) -> None:
+    """Fill dead ranks' zero columns with aggregate-neutral values"""
+    for r in dead_dp_ranks:
+        tensor[0][r] = _INT32_MAX
+        tensor[2][r] = 1
+        tensor[3][r] = _INT32_MAX
+
+
 def _run_ar(
     should_ubatch: bool,
     orig_num_tokens_per_ubatch: int,
@@ -51,6 +62,8 @@ def _run_ar(
     tensor_cpu[3][dp_rank] = cudagraph_mode
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
+    if dead_dp_ranks := get_dp_group().dead_dp_ranks:
+        neutralize_dead_dp_columns(tensor, dead_dp_ranks)
     return tensor
 
 

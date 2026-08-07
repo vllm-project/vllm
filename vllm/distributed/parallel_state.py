@@ -480,6 +480,10 @@ class GroupCoordinator:
         self.cpu_group = self_cpu_group
         self.device_group = self_device_group
 
+        # Dead DP slots under fault-tolerance scale-down (empty when FT is
+        # off); read by the DP allreduce to neutralize dead columns.
+        self.dead_dp_ranks: set[int] = set()
+
         from vllm.platforms import current_platform
 
         if current_platform.is_cuda_alike():
