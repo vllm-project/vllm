@@ -339,7 +339,8 @@ class TieringOffloadingManager(OffloadingManager):
         if detector is None:
             return
         was_under_pressure = detector.is_under_pressure()
-        detector.update(job_metadata.submit_time)
+        num_bytes = len(job_metadata.keys) * tier.block_size_bytes
+        detector.update(job_metadata.submit_time, num_bytes)
         if detector.is_under_pressure() != was_under_pressure:
             tier_idx = self._tier_index[tier]
             logger.info(

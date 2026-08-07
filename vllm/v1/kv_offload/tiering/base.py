@@ -146,12 +146,18 @@ class SecondaryTierManager(ABC):
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
+        shape = primary_kv_view.shape
+        self._block_size_bytes: int = shape[1] if shape and len(shape) > 1 else 1
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self.backpressure_config: dict[str, Any] | None = backpressure
         self._bp_detector: BackpressureDetector | None = None
         if backpressure is not None:
             self._bp_detector = EMABackpressureDetector(**backpressure)
+
+    @property
+    def block_size_bytes(self) -> int:
+        return self._block_size_bytes
 
     @property
     def bp_detector(self) -> BackpressureDetector | None:

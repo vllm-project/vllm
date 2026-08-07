@@ -37,9 +37,10 @@ from vllm.v1.kv_offload.tiering.manager import (
 )
 
 _BP_EMA_ALPHA = EMABackpressureDetector.DEFAULT_ALPHA
-_BP_HIGH_WATER_S = EMABackpressureDetector.DEFAULT_HIGH_WATER_S
-_BP_LOW_WATER_S = EMABackpressureDetector.DEFAULT_LOW_WATER_S
 _BP_WARMUP = EMABackpressureDetector.DEFAULT_WARMUP_COMPLETIONS
+# Water marks in s/MiB, scaled for the test's tiny 16-byte blocks.
+_BP_HIGH_WATER_S = 1000.0
+_BP_LOW_WATER_S = 500.0
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
@@ -121,7 +122,10 @@ class TestBackpressure:
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="delayed",
-            backpressure={},
+            backpressure={
+                "high_water_s": _BP_HIGH_WATER_S,
+                "low_water_s": _BP_LOW_WATER_S,
+            },
         )
         self.manager = TieringOffloadingManager(
             primary_tier=self.primary,
@@ -154,6 +158,8 @@ class TestBackpressure:
     def test_ema_updates_on_store_completion(self, setup):
         bp = self.tier.bp_detector
         fast_latency = 0.01
+        # EMA is in s/MiB; with 16-byte blocks, scale = MiB / block_bytes.
+        scale = EMABackpressureDetector._MIB / self.tier.block_size_bytes
 
         # During warmup, EMA stays at 0.
         for i in range(_BP_WARMUP - 1):
@@ -170,7 +176,8 @@ class TestBackpressure:
         self._backdate_held_jobs(fast_latency)
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
-        assert bp.store_latency_ema == pytest.approx(fast_latency, abs=0.01)
+        fast_s_per_mib = fast_latency * scale
+        assert bp.store_latency_ema == pytest.approx(fast_s_per_mib, rel=0.1)
 
         # After warmup, EMA updates normally.
         new_latency = 0.05
@@ -179,8 +186,9 @@ class TestBackpressure:
         self._backdate_held_jobs(new_latency)
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
-        expected = _BP_EMA_ALPHA * new_latency + (1 - _BP_EMA_ALPHA) * fast_latency
-        assert bp.store_latency_ema == pytest.approx(expected, abs=0.01)
+        new_s_per_mib = new_latency * scale
+        expected = _BP_EMA_ALPHA * new_s_per_mib + (1 - _BP_EMA_ALPHA) * fast_s_per_mib
+        assert bp.store_latency_ema == pytest.approx(expected, rel=0.1)
 
     def test_pressure_activates_above_high_water(self, setup):
         bp = self.tier.bp_detector
@@ -193,12 +201,12 @@ class TestBackpressure:
             self.tier.release_jobs()
             self._simulate_on_schedule_end()
 
-        keys = to_keys(range(2))
+        keys = to_keys([100])
         self._store_blocks(keys)
         self._simulate_on_schedule_end()
 
-        slow_latency = _BP_HIGH_WATER_S * 5
-        self._backdate_held_jobs(slow_latency)
+        # 0.1s for a single 16-byte block → ~6553 s/MiB, well above high water.
+        self._backdate_held_jobs(0.1)
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
 
@@ -230,16 +238,21 @@ class TestBackpressure:
     def test_hysteresis_prevents_oscillation(self, setup):
         bp = self.tier.bp_detector
         bp._completions = _BP_WARMUP
+        block_bytes = self.tier.block_size_bytes
 
-        # Set EMA between low and high water marks.
+        # Set EMA between low and high water marks (in s/MiB).
         mid = (_BP_LOW_WATER_S + _BP_HIGH_WATER_S) / 2
         bp.store_latency_ema = mid
+
+        # Raw seconds that produce `mid` s/MiB for a given number of blocks.
+        def mid_latency_s(num_blocks: int) -> float:
+            return mid * (num_blocks * block_bytes / EMABackpressureDetector._MIB)
 
         # When not under pressure, mid-range EMA should not activate.
         bp._under_pressure = False
         keys = to_keys(range(2))
         self._store_blocks(keys)
-        self._backdate_held_jobs(mid)
+        self._backdate_held_jobs(mid_latency_s(len(keys)))
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
         assert bp.is_under_pressure() is False
@@ -252,7 +265,7 @@ class TestBackpressure:
             self.primary.prepare_store([k], _CTX)
             self.primary.complete_store([k], _CTX)
         job_meta = self.manager.create_store_job(keys2, _CTX)
-        job_meta.submit_time = time.monotonic() - mid
+        job_meta.submit_time = time.monotonic() - mid_latency_s(len(keys2))
         self.tier.submit_store(job_meta)
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
