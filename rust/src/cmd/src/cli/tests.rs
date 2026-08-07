@@ -750,6 +750,7 @@ fn frontend_args_accept_json() {
                     ),
                     engine_start_index: 0,
                     engine_count: 1,
+                    data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
@@ -811,6 +812,8 @@ fn frontend_args_json_applies_defaults() {
         "ipc:///tmp/input.sock",
         "--output-address",
         "ipc:///tmp/output.sock",
+        "--engine-count",
+        "4",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -826,6 +829,7 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_logprobs, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
+    assert_eq!(args.into_config().configured_data_parallel_size, 4);
 }
 
 #[test]
@@ -1482,6 +1486,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     "<ipc output>",
                 ),
             },
+            configured_data_parallel_size: 4,
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             served_model_name: [],
@@ -1567,6 +1572,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 local_input_address: None,
                 local_output_address: None,
             },
+            configured_data_parallel_size: 4,
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             served_model_name: [],
@@ -1650,6 +1656,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
         "3",
         "--engine-count",
         "1",
+        "--data-parallel-size",
+        "4",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -1669,6 +1677,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 engine_count: 1,
                 ready_timeout: 600s,
             },
+            configured_data_parallel_size: 4,
             coordinator_mode: External {
                 address: "tcp://127.0.0.1:7000",
             },

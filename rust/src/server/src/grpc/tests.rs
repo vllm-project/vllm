@@ -1579,10 +1579,9 @@ async fn control_aggregates_multi_engine_capacity() {
         Llm::new(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
-    let service = ControlServiceImpl::new(Arc::new(AppState::new(
-        vec!["test-model".to_string()],
-        chat,
-    )));
+    let state =
+        AppState::new(vec!["test-model".to_string()], chat).with_configured_data_parallel_size(4);
+    let service = ControlServiceImpl::new(Arc::new(state));
 
     let server = pb::control_server::Control::get_server_info(
         &service,
@@ -1593,6 +1592,7 @@ async fn control_aggregates_multi_engine_capacity() {
     .into_inner();
     assert_eq!(server.max_model_len, 4_096);
     assert_eq!(server.total_kv_blocks, 30);
+    assert_eq!(server.parallelism.unwrap().data_parallel_size, 4);
 
     drop(engine_tasks);
 }
