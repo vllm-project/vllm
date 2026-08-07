@@ -39,6 +39,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -366,11 +367,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
-        # AITER backend requires weights to be marked as shuffled.
-        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
-
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
@@ -386,7 +382,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -487,8 +482,6 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     K3 is weight-only MXFP4 (W4A16) with SiTU activation, which the generic
     MXFP4 backend selector does not cover; route it to AITER on gfx950.
     """
-    from vllm.platforms import current_platform
-
     if not current_platform.is_rocm():
         return False
     from vllm._aiter_ops import rocm_aiter_ops
@@ -744,10 +737,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        from vllm.platforms.rocm import on_gfx1250
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
 
         uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
         )
         if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
@@ -759,14 +756,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
-
-        # AITER backend requires weights to be marked as shuffled.
-        if (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-            and not uses_triton_weight_format
-        ):
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
 
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
@@ -783,7 +772,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def _convert_k3_situ_weight_to_kernel_format(
@@ -816,6 +804,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_scale_raw.view(-1, w13_scale_raw.shape[-1]), num_experts, guinterleave
         )
         w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
+
+        w13.is_shuffled = True
+        w2.is_shuffled = True
+
         return w13, w2, w13_scale, w2_scale
 
     def process_weights_after_loading(self, layer):
@@ -839,10 +831,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        from vllm.platforms.rocm import on_gfx1250
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
 
         if self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
         ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
