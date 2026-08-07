@@ -148,11 +148,7 @@ class Learnable2DInterpPosEmb(nn.Module):
         return torch.cat(pos_embs)
 
     def forward(self, x: torch.Tensor, grid_hws: torch.Tensor) -> torch.Tensor:
-        # The per-image grids are needed as Python ints to build the
-        # positional embeddings.
-        with gpu_sync_allowed():
-            grid_hws_list = grid_hws.tolist()
-        pos_embs = self.get_pos_embeds(grid_hws_list)
+        pos_embs = self.get_pos_embeds(grid_hws.tolist())
         out = x + pos_embs
         return out
 
@@ -816,9 +812,14 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 merge_kernel_size=self.merge_kernel_size,
             )
 
-        hidden_states = self.patch_embed(pixel_values, grid_hw)
-        hidden_states = self.encoder(hidden_states, grid_hw)
-        hidden_states = patch_merger(
-            hidden_states, grid_hw, merge_kernel_size=self.merge_kernel_size
-        )
+        # Legacy path: patch_embed, encoder and patch_merger each iterate the
+        # per-image grids in Python, so all three read `grid_hw` back to the
+        # host. The `encoder_metadata` path above precomputes that outside the
+        # graph and does not sync.
+        with gpu_sync_allowed():
+            hidden_states = self.patch_embed(pixel_values, grid_hw)
+            hidden_states = self.encoder(hidden_states, grid_hw)
+            hidden_states = patch_merger(
+                hidden_states, grid_hw, merge_kernel_size=self.merge_kernel_size
+            )
         return hidden_states
