@@ -17,7 +17,6 @@ ALLOWED_UNSTABLE_LIBRARIES: tuple[str, ...] = (
     # _C_stable_libtorch, but these two modules still bind libtorch directly.
     "_C.abi3.so",
     "_rocm_C.abi3.so",
-    "vllm_flash_attn/_vllm_fa3_C.abi3.so",
     "third_party/deep_gemm/_C*.so",
 )
 
