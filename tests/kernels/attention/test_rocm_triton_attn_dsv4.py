@@ -38,20 +38,23 @@ HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
 
 
 @pytest.mark.parametrize(
-    ("eligible", "runtime_mode", "dtype", "expected_optimized"),
+    ("eligible", "runtime_mode", "dtype", "num_tokens", "expected_optimized"),
     [
-        (True, CUDAGraphMode.FULL, torch.bfloat16, True),
-        (True, CUDAGraphMode.NONE, torch.bfloat16, False),
-        (True, CUDAGraphMode.PIECEWISE, torch.bfloat16, False),
-        (False, CUDAGraphMode.FULL, torch.bfloat16, False),
-        (True, CUDAGraphMode.FULL, torch.float32, False),
+        (True, CUDAGraphMode.FULL, torch.bfloat16, 4, True),
+        (True, CUDAGraphMode.FULL, torch.bfloat16, 5, False),
+        (True, CUDAGraphMode.FULL, torch.bfloat16, 128, False),
+        (True, CUDAGraphMode.NONE, torch.bfloat16, 1, False),
+        (True, CUDAGraphMode.PIECEWISE, torch.bfloat16, 1, False),
+        (False, CUDAGraphMode.FULL, torch.bfloat16, 1, False),
+        (True, CUDAGraphMode.FULL, torch.float32, 1, False),
     ],
 )
-def test_dsv4_aiter_tgemm_is_limited_to_full_graph_capture(
+def test_dsv4_aiter_tgemm_is_limited_to_tuned_full_graph_shapes(
     monkeypatch,
     eligible: bool,
     runtime_mode: CUDAGraphMode,
     dtype: torch.dtype,
+    num_tokens: int,
     expected_optimized: bool,
 ) -> None:
     from vllm.models.deepseek_v4.amd import rocm
@@ -78,10 +81,16 @@ def test_dsv4_aiter_tgemm_is_limited_to_full_graph_capture(
         lambda *_args, **_kwargs: optimized_result
     )
 
-    result = attention.attn_gemm_parallel_execute(torch.empty((1, 1), dtype=dtype))
+    result = attention.attn_gemm_parallel_execute(
+        torch.empty((num_tokens, 1), dtype=dtype)
+    )
 
     assert result is (optimized_result if expected_optimized else base_result)
-    assert context_calls == int(eligible and dtype == torch.bfloat16)
+    assert context_calls == int(
+        eligible
+        and dtype == torch.bfloat16
+        and num_tokens <= rocm._GFX950_TGEMM_MAX_NUM_TOKENS
+    )
 
 
 def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:

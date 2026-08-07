@@ -443,6 +443,11 @@ class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLABackend):
         return DeepseekV4ROCMAiterMLASparseMetadataBuilder
 
 
+# Only M<=4 has tuned tgemm entries for both DSV4 compressor projections. The
+# base GEMM is faster at larger M and avoids AITER's M=128 ASM graph issue.
+_GFX950_TGEMM_MAX_NUM_TOKENS = 4
+
+
 class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4."""
 
@@ -470,6 +475,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         if (
             not self._tgemm_static_eligible
             or hidden_states.dtype != torch.bfloat16
+            or hidden_states.shape[0] > _GFX950_TGEMM_MAX_NUM_TOKENS
             or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
         ):
             return super().attn_gemm_parallel_execute(hidden_states)
