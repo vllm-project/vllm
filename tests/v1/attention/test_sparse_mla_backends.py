@@ -21,6 +21,11 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    GLOBAL_TOPK_MASK_MAX_BYTES,
+    _masked_mha_workspace_fits,
+    _topk_mask_shape,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
@@ -857,6 +862,38 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
 def test_split_prefill_chunks(seq_lens, max_buf, expected):
     out = split_prefill_chunks(seq_lens, max_buf)
     assert out == expected
+
+
+@pytest.mark.parametrize(
+    ("max_query_len", "expected"),
+    [(32768, True), (33024, False)],
+)
+def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expected):
+    """A 32K prefill needs the default workspace exactly; shrinking it would
+    push a supported request onto MQA."""
+    assert (
+        _masked_mha_workspace_fits(
+            batch_size=1,
+            max_query_len=max_query_len,
+            max_context_chunk_seq_len=0,
+            workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
+        )
+        is expected
+    )
+
+
+def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
+    """Request count and context chunk length are independent multipliers."""
+    base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
+    exact = math.prod(_topk_mask_shape(2, 2048, 2048))
+
+    assert _masked_mha_workspace_fits(**base, workspace_numel=exact)
+    assert not _masked_mha_workspace_fits(
+        **{**base, "batch_size": 3}, workspace_numel=exact
+    )
+    assert not _masked_mha_workspace_fits(
+        **{**base, "max_context_chunk_seq_len": 4096}, workspace_numel=exact
+    )
 
 
 PREFILL_BATCH_SPECS = {
