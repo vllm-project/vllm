@@ -13,6 +13,7 @@ import torch
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.notifications import EngineNotification
 
 if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.connector import AuxRequestOutput
@@ -297,6 +298,10 @@ class ModelRunnerOutput:
     cudagraph_stats: CUDAGraphStat | None = None
 
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
+
+    # Worker-originated engine events, forwarded by the engine core to
+    # frontends on EngineCoreOutputs.engine_notifications.
+    worker_notifications: list[EngineNotification] | None = None
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
