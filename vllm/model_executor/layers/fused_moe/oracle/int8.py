@@ -183,9 +183,10 @@ def make_int8_moe_quant_config(
     per_act_token_quant: bool = False,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
-    assert (a1_scale is None and a2_scale is None) or (
-        a1_scale is not None and a2_scale is not None
-    ), "a1_scale and a2_scale must both be provided or both be None"
+    if (a1_scale is None) != (a2_scale is None):
+        raise ValueError("a1_scale and a2_scale must both be provided or both be None")
+
+    scales_absent = a1_scale is None and a2_scale is None
 
     if int8_backend == Int8MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -196,7 +197,7 @@ def make_int8_moe_quant_config(
         assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(layer)
 
-    if a1_scale is None or a2_scale is None:
+    if scales_absent and not per_act_token_quant:
         return int8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -266,13 +267,7 @@ def convert_to_int8_moe_kernel_format(
             quant_config=_humming_int8_weight_schema(w13, layer.w13_weight_scale),
         )
         return layer.w13_weight, layer.w2_weight
-    elif int8_backend == Int8MoeBackend.CPU:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            prepare_int8_moe_layer_for_cpu,
-        )
-
-        w13, w2 = prepare_int8_moe_layer_for_cpu(w13, w2)
-    elif int8_backend != Int8MoeBackend.TRITON:
+    elif int8_backend not in (Int8MoeBackend.TRITON, Int8MoeBackend.CPU):
         raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
 
     return w13, w2

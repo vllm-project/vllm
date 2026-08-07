@@ -2560,8 +2560,7 @@ class NixlBaseConnectorWorker:
 
         # Drop the cached clock offset; it is re-measured on the next handshake.
         self._engine_clock_offset.pop(engine_id, None)
-        # Push P-side engines are tracked in _remote_agents but not in
-        # _engine_last_active (they don't participate in stale eviction), so
+        # A just-completed handshake may not have recorded activity yet, so
         # tolerate a missing entry.
         last_active = self._engine_last_active.pop(engine_id, None)
         if log_eviction and last_active is not None:
