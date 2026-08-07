@@ -28,20 +28,6 @@ uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VE
     pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_aarch64.whl --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 
-!!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc is installed and added to `LD_PRELOAD`:
-    ```bash
-    # install TCMalloc
-    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
-
-    # manually find the path
-    sudo find / -iname *libtcmalloc_minimal.so.4
-    TC_PATH=...
-
-    # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
-    ```
-
 The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
 
 #### Install the latest code

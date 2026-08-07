@@ -325,12 +325,13 @@ def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
         message = "vLLM server version %s, serving model %s"
     else:
         logo_template = Template(
-            "\n       ${b}█     █     █▄   ▄█${r}\n"
-            " ${o}▄▄${r} ${b}▄█${r} ${b}█     █     █ ▀▄▀ █${r}  version ${b}%s${r}\n"
-            "  ${o}█${r}${b}▄█▀${r} ${b}█     █     █     █${r}  model   ${b}%s${r}\n"
-            "   ${b}▀▀${r}  ${b}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
+            "\n       ${w}█     █     █▄   ▄█${r}\n"
+            " ${o}▄▄${r} ${b}▄█${r} ${w}█     █     █ ▀▄▀ █${r}  version ${w}%s${r}\n"
+            "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}  model   ${w}%s${r}\n"
+            "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
         )
         colors = {
+            "w": "\033[1m",  # bold, default foreground
             "o": "\033[93m",  # orange
             "b": "\033[94m",  # blue
             "r": "\033[0m",  # reset

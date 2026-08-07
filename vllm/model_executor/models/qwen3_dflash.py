@@ -35,6 +35,9 @@ from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    get_eagle3_aux_layers_from_config,
+)
 
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen3 import Qwen3ForCausalLM
@@ -67,6 +70,17 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
     )
+
+
+def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
+    spec_config = vllm_config.speculative_config
+    config = spec_config.draft_model_config.hf_config
+    aux_layers = get_eagle3_aux_layers_from_config(spec_config)
+    num_features_to_use = len(aux_layers) if aux_layers else config.num_hidden_layers
+    target_hidden_size = (
+        getattr(config, "target_hidden_size", None) or config.hidden_size
+    )
+    return target_hidden_size * num_features_to_use
 
 
 def _resolve_layer_attention(
@@ -395,17 +409,10 @@ class DFlashQwen3Model(nn.Module):
             ]
         )
         if self.use_aux_hidden_state:
-            num_features_to_use = self.config.num_hidden_layers
-            if "target_layer_ids" in drafter_config:
-                num_features_to_use = len(drafter_config["target_layer_ids"])
-            elif "layer_ids" in drafter_config:
-                num_features_to_use = len(drafter_config["layer_ids"])
-            if hasattr(self.config, "target_hidden_size"):
-                fc_input_size = self.config.target_hidden_size * num_features_to_use
-            else:
-                fc_input_size = self.config.hidden_size * num_features_to_use
             self.fc = ReplicatedLinear(
-                input_size=fc_input_size,
+                input_size=_get_dflash_fc_input_size(
+                    vllm_config,
+                ),
                 output_size=self.config.hidden_size,
                 bias=False,
                 params_dtype=vllm_config.model_config.dtype,

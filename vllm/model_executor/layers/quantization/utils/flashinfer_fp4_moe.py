@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
     align_trtllm_fp4_moe_hidden_dim_for_fi,
@@ -80,6 +81,28 @@ def interleave_linear_and_gate(
     return x
 
 
+def reorder_w13_to_w31_for_flashinfer_cutedsl(
+    activation: MoEActivation,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize gated w13 rows to the [up; gate] order used by FlashInfer."""
+    if activation == MoEActivation.SWIGLUOAI:
+        # gpt-oss checkpoints store w13 interleaved as [gate0, up0, gate1, ...].
+        gate, up = w13[:, 0::2], w13[:, 1::2]
+        gate_scale, up_scale = w13_scale[:, 0::2], w13_scale[:, 1::2]
+        return (
+            torch.cat([up, gate], dim=1).contiguous(),
+            torch.cat([up_scale, gate_scale], dim=1).contiguous(),
+        )
+
+    half = w13.shape[1] // 2
+    return (
+        torch.cat([w13[:, half:], w13[:, :half]], dim=1).contiguous(),
+        torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1).contiguous(),
+    )
+
+
 def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     layer: "RoutedExperts",
     w13: torch.Tensor,
@@ -103,22 +126,24 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     """Prepare weights for the CuteDSL wrapper-based NvFP4 MoE backend.
 
     Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper,
-    and interleaves w13 gate/linear rows.
+    and interleaves w13 gate/linear rows for gated activations. Non-gated
+    activations use a single w13 projection and keep its row order unchanged.
     """
     from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
 
     # Global scaling factors (same as other FlashInfer backends).
     num_experts = w13.shape[0]
-    a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
-    a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+    a13_scale = a13_scale.max().to(torch.float32).repeat(num_experts)
+    a2_scale = a2_scale.max().to(torch.float32).repeat(num_experts)
 
-    half = w13.shape[1] // 2
-    w13 = torch.cat([w13[:, half:], w13[:, :half]], dim=1)
-    w13_scale = torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1)
+    if layer.activation.is_gated:
+        w13, w13_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
+            layer.activation, w13, w13_scale
+        )
 
-    # Interleave up/gate rows for w13 weights and scales.
-    w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
-    w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
+        # Interleave up/gate rows for w13 weights and scales.
+        w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
+        w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
 
     # Convert w13 scale factors: linear → swizzled → MMA layout.
     w13_scale = swizzle_blockscale(w13_scale)
@@ -338,8 +363,8 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     # For some FI kernels, the input scales are shared by all experts.
     if is_global_sf_supported_for_nvfp4_backend(backend):
         num_experts = w13.shape[0]
-        a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
-        a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+        a13_scale = a13_scale.max().to(torch.float32).repeat(num_experts)
+        a2_scale = a2_scale.max().to(torch.float32).repeat(num_experts)
     else:
         a13_scale = a13_scale.max(dim=1).values.to(torch.float32)
 

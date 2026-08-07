@@ -21,7 +21,11 @@ def fa4_cutedsl_warmup(worker: Worker) -> None:
     if not vllm_config.model_config.use_mla:
         return
 
-    backend_cls = get_mla_prefill_backend(vllm_config)
+    try:
+        backend_cls = get_mla_prefill_backend(vllm_config)
+    except ValueError:
+        # fall back to top-k MQA prefill path.
+        return
     if backend_cls.get_name() != "FLASH_ATTN":
         return
 
