@@ -2500,3 +2500,125 @@ class TestBareArgsArmingRespectsTheSchema:
             armed_name({"type": "object", "properties": {"code": {"type": "string"}}})
             == "run_python"
         )
+
+
+class TestForcedChoiceKeepsUnpromotedText:
+    """A forced tool choice must not turn a truncated call into an empty reply.
+
+    Required and named choice suppress content, because the model is
+    constrained to emit only tool calls and the wire format's scaffolding --
+    the ``[`` of the required-mode array -- must not reach the client.  That
+    reasoning fails when generation stops before any call is promoted: the
+    text is then the whole response, and suppressing it hands the caller a
+    message with neither content nor tool calls.
+
+    ``auto`` returns the text in exactly this case, so forced choice losing
+    it is also a divergence between two paths that should agree.
+    """
+
+    # Plain dicts: vLLM's named-tool-choice validator indexes tools as
+    # mappings (protocol.py), so model objects raise there.
+    TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_cmd",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"],
+                },
+            },
+        }
+    ]
+    NAMED = {"type": "function", "function": {"name": "run_cmd"}}
+    TRUNCATED = '{"name": "run_cmd",'
+    COMPLETE = '{"name": "run_cmd", "parameters": {"cmd": "ls"}}'
+
+    @pytest.fixture
+    def parser_cls(self, monkeypatch):
+        # Pin the configuration rather than inherit it: with strict calling
+        # off, a named choice installs the parameters schema and arms
+        # bare-argument mode, which is a different code path with its own
+        # tests.  Leaving this implicit makes the class order-dependent.
+        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "1")
+        cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        assert cls is not None
+        return cls
+
+    def _request(self, tool_choice):
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "list files"}],
+            tools=self.TOOLS,
+            tool_choice=tool_choice,
+        )
+
+    def _adjusted(self, parser, tool_choice):
+        request = parser.adjust_request(self._request(tool_choice))
+        if tool_choice != "auto":
+            # Precondition: the structural tag is what keeps this on the
+            # envelope path.  Assert it, so a plumbing change fails here and
+            # says so rather than silently testing bare-argument mode.
+            structured = getattr(request, "structured_outputs", None)
+            assert getattr(structured, "structural_tag", None) is not None
+        return request
+
+    def _choices(self):
+        return [
+            pytest.param("required", id="required"),
+            pytest.param(self.NAMED, id="named"),
+            pytest.param("auto", id="auto"),
+        ]
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            pytest.param("required", id="required"),
+            pytest.param(
+                {"type": "function", "function": {"name": "run_cmd"}}, id="named"
+            ),
+            pytest.param("auto", id="auto"),
+        ],
+    )
+    def test_truncated_call_comes_back_as_content(
+        self, parser_cls, mock_tokenizer, tool_choice
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = self._adjusted(parser, tool_choice)
+
+        calls, content = parser._extract_tool_calls(
+            self.TRUNCATED, request, enable_auto_tools=True
+        )
+
+        assert not calls
+        # Every tool_choice must agree, and none may swallow the response.
+        assert content == self.TRUNCATED
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            pytest.param("required", id="required"),
+            pytest.param(
+                {"type": "function", "function": {"name": "run_cmd"}}, id="named"
+            ),
+            pytest.param("auto", id="auto"),
+        ],
+    )
+    def test_a_promoted_call_still_suppresses_content(
+        self, parser_cls, mock_tokenizer, tool_choice
+    ):
+        """The guard for the fix: suppression must survive where it belongs."""
+        parser = parser_cls(mock_tokenizer)
+        request = self._adjusted(parser, tool_choice)
+
+        calls, content = parser._extract_tool_calls(
+            self.COMPLETE, request, enable_auto_tools=True
+        )
+
+        assert [c.name for c in calls or []] == ["run_cmd"]
+        assert not content
