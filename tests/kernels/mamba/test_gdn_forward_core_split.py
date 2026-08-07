@@ -52,7 +52,7 @@ from tests.v1.attention.utils import (  # noqa: E402
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import set_current_vllm_config  # noqa: E402
+from vllm.config import SpeculativeConfig, set_current_vllm_config  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,
@@ -65,9 +65,13 @@ from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (  # noqa: E402
+    rmsnorm_fn,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
     FLA_CHUNK_SIZE,
 )
+from vllm.utils.torch_utils import _encode_layer_name  # noqa: E402
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
 )
@@ -300,3 +304,339 @@ def test_forward_core_split_matches_unified(
         atol = rtol = 6e-2
     torch.testing.assert_close(out_split, out_unified, atol=atol, rtol=rtol)
     torch.testing.assert_close(ssm_state_split, ssm_state_unified, atol=atol, rtol=rtol)
+
+
+class _TestGatedNorm:
+    def __init__(self, weight: torch.Tensor, eps: float) -> None:
+        self.weight = weight
+        self.bias = None
+        self.eps = eps
+        self.group_size = None
+        self.norm_before_gate = True
+        self.activation = "silu"
+
+    def __call__(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        return rmsnorm_fn(
+            x,
+            self.weight,
+            None,
+            z=z,
+            eps=self.eps,
+            norm_before_gate=True,
+            activation="silu",
+        )
+
+
+@torch.inference_mode()
+def test_rms_norm_gated_cuda_supports_inplace_output() -> None:
+    """The generic prefill/decode path can normalize its output in place."""
+    torch.manual_seed(2)
+    device = torch.device("cuda")
+    x = torch.randn(37, HV, V, dtype=torch.bfloat16, device=device)
+    output_gate = torch.randn_like(x)
+    norm = _TestGatedNorm(torch.randn(V, dtype=torch.float32, device=device), eps=1e-6)
+    expected = norm(x.clone(), output_gate)
+    layer = types.SimpleNamespace(norm=norm)
+    layer._rms_norm_gated_cuda = types.MethodType(
+        QwenGatedDeltaNetAttention._rms_norm_gated_cuda, layer
+    )
+
+    layer._rms_norm_gated_cuda(x, output_gate, x)
+
+    torch.testing.assert_close(x, expected, atol=3e-2, rtol=3e-2)
+
+
+def _build_mixed_mtp_layer(
+    vllm_config,
+    conv_state: torch.Tensor,
+    ssm_state: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    conv_weight: torch.Tensor,
+    norm_weight: torch.Tensor,
+    eps: float,
+):
+    """Build the smallest layer object that runs the mixed fused path."""
+    layer = types.SimpleNamespace(
+        prefix=PREFIX,
+        enable_packed_recurrent_decode=False,
+        disable_tp_for_ba_proj=False,
+        tp_size=1,
+        num_k_heads=1,
+        num_v_heads=8,
+        head_k_dim=K,
+        head_v_dim=V,
+        key_dim=K,
+        value_dim=8 * V,
+        activation="silu",
+        A_log=a_log,
+        dt_bias=dt_bias,
+        conv1d=types.SimpleNamespace(weight=conv_weight, bias=None),
+        kv_cache=(conv_state, ssm_state),
+        norm=_TestGatedNorm(norm_weight, eps),
+        layer_norm_epsilon=eps,
+        gdn_decode_kernel="phase_a",
+    )
+    with set_current_vllm_config(vllm_config):
+        layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    for name in (
+        "rearrange_mixed_qkv",
+        "_forward_core",
+        "_forward_core_decode_spec_post_conv_fused_norm",
+        "_forward_core_decode_spec_fused_norm",
+        "_can_use_fused_gdn_mtp_decode",
+        "_rms_norm_gated_cuda",
+        "_forward_core_fused_norm",
+        "_forward_core_fused_norm_packed",
+        "split_ba",
+    ):
+        setattr(
+            layer,
+            name,
+            types.MethodType(getattr(QwenGatedDeltaNetAttention, name), layer),
+        )
+    return layer
+
+
+@torch.inference_mode()
+def test_phase_a_forward_uses_packed_decode_entrypoint() -> None:
+    """Phase A keeps projected QKVZ and BA packed through the model op."""
+    device = torch.device("cuda")
+    num_tokens = 3
+    hidden_states = torch.empty(num_tokens, 1, dtype=torch.bfloat16, device=device)
+    mixed_qkvz = torch.randn(
+        num_tokens, CONV_DIM + VALUE_DIM, dtype=torch.bfloat16, device=device
+    )
+    ba = torch.randn(num_tokens, 2 * HV, dtype=torch.bfloat16, device=device)
+    layer = types.SimpleNamespace(
+        prefix=PREFIX,
+        enable_fused_gdn_decode=True,
+        norm=types.SimpleNamespace(
+            weight=torch.empty(V, dtype=torch.bfloat16, device=device)
+        ),
+        num_v_heads=HV,
+        tp_size=1,
+        head_v_dim=V,
+        in_proj_qkvz=lambda _: (mixed_qkvz, None),
+        in_proj_ba=lambda _: (ba, None),
+        _output_projection_normalized=lambda output: output,
+    )
+    layer.forward_cuda = types.MethodType(
+        QwenGatedDeltaNetAttention.forward_cuda, layer
+    )
+
+    def packed_op(
+        actual_qkvz: torch.Tensor,
+        actual_ba: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        layer_name: str,
+    ) -> None:
+        assert actual_qkvz is mixed_qkvz
+        assert actual_ba is ba
+        assert layer_name == _encode_layer_name(PREFIX)
+        output.fill_(1)
+
+    with (
+        patch.object(
+            torch.ops.vllm,
+            "qwen_gdn_attention_core_fused_norm_packed",
+            side_effect=packed_op,
+        ) as packed_mock,
+        patch.object(torch.ops.vllm, "qwen_gdn_attention_core") as triton_mock,
+    ):
+        output = layer.forward_cuda(hidden_states)
+
+    packed_mock.assert_called_once()
+    triton_mock.assert_not_called()
+    torch.testing.assert_close(output, torch.ones_like(output))
+
+
+@torch.inference_mode()
+def test_mixed_prefill_mtp_uses_fused_decode() -> None:
+    """Continuous batching keeps MTP decode fused when prefill is present."""
+    torch.manual_seed(1)
+    device = torch.device("cuda")
+    num_spec = 3
+    spec_tokens = num_spec + 1
+    prefill_tokens = 64
+    local_h = 1
+    local_hv = 8
+    conv_dim = 2 * local_h * K + local_hv * V
+    eps = 1e-6
+
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.mamba_cache_mode = "none"
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=num_spec
+    )
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=MambaSpec(
+            block_size=BLOCK_SIZE,
+            shapes=((16, 64),),
+            dtypes=(torch.float16,),
+            num_speculative_blocks=num_spec,
+        ),
+        layer_names=[PREFIX],
+        vllm_config=vllm_config,
+        device=device,
+    )
+    batch = BatchSpec(
+        seq_lens=[128, 96],
+        query_lens=[spec_tokens, prefill_tokens],
+    )
+    common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    )
+    common.block_table_tensor.add_(1)
+    with set_current_vllm_config(vllm_config):
+        metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common,
+            num_accepted_tokens=torch.ones(
+                batch.batch_size, dtype=torch.int32, device=device
+            ),
+            num_decode_draft_tokens_cpu=torch.tensor([num_spec, -1], dtype=torch.int32),
+        )
+
+    assert metadata.num_spec_decodes == 1
+    assert metadata.num_prefills == 1
+    assert metadata.spec_token_indx is not None
+    assert metadata.non_spec_token_indx is not None
+    assert metadata.spec_token_prefix_len == spec_tokens
+
+    state_indices = (
+        metadata.spec_state_indices_tensor,
+        metadata.non_spec_state_indices_tensor,
+    )
+    pool_size = max(int(indices.max().item()) for indices in state_indices) + 1
+    conv_state_shape, temporal_state_shape = (
+        MambaStateShapeCalculator.gated_delta_net_state_shape(
+            1, local_h, local_hv, K, V, CONV_KERNEL
+        )
+    )
+    conv_state_seed = 0.05 * torch.randn(
+        pool_size, *conv_state_shape, dtype=torch.bfloat16, device=device
+    )
+    ssm_state_seed = 0.01 * torch.randn(
+        pool_size, *temporal_state_shape, dtype=torch.float32, device=device
+    )
+    a_log = 0.1 * torch.randn(local_hv, dtype=torch.float32, device=device)
+    dt_bias = 0.1 * torch.randn(local_hv, dtype=torch.float32, device=device)
+    conv_weight = 0.1 * torch.randn(
+        conv_dim, 1, CONV_KERNEL, dtype=torch.bfloat16, device=device
+    )
+    norm_weight = torch.randn(V, dtype=torch.float32, device=device)
+    num_tokens = batch.compute_num_tokens()
+    mixed_qkv = 0.1 * torch.randn(
+        num_tokens, conv_dim, dtype=torch.bfloat16, device=device
+    )
+    a = 0.1 * torch.randn(num_tokens, local_hv, dtype=torch.bfloat16, device=device)
+    b = 0.1 * torch.randn_like(a)
+    output_gate = 0.1 * torch.randn(
+        num_tokens, local_hv, V, dtype=torch.bfloat16, device=device
+    )
+    mixed_qkvz = torch.cat((mixed_qkv, output_gate.flatten(1)), dim=-1)
+    ba = torch.cat((b, a), dim=-1)
+    context = types.SimpleNamespace(attn_metadata={PREFIX: metadata})
+
+    reference_layer = _build_mixed_mtp_layer(
+        vllm_config,
+        conv_state_seed.clone(),
+        ssm_state_seed.clone(),
+        a_log,
+        dt_bias,
+        conv_weight,
+        norm_weight,
+        eps,
+    )
+    reference_out = torch.zeros_like(output_gate)
+    with patch.object(
+        qwen_gdn_linear_attn, "get_forward_context", return_value=context
+    ):
+        reference_layer._forward_core(
+            mixed_qkv=mixed_qkv.clone(),
+            b=b,
+            a=a,
+            core_attn_out=reference_out,
+        )
+    reference_out = reference_layer.norm(reference_out, output_gate)
+
+    fused_layer = _build_mixed_mtp_layer(
+        vllm_config,
+        conv_state_seed.clone(),
+        ssm_state_seed.clone(),
+        a_log,
+        dt_bias,
+        conv_weight,
+        norm_weight,
+        eps,
+    )
+    context.no_compile_layers = {PREFIX: fused_layer}
+    fused_out = torch.zeros_like(output_gate)
+    fused_op = qwen_gdn_linear_attn.ops.fused_gdn_decode_post_conv_mtp
+    with (
+        patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=context),
+        patch.object(
+            qwen_gdn_linear_attn.ops,
+            "fused_gdn_decode_post_conv_mtp",
+            wraps=fused_op,
+        ) as fused_mock,
+    ):
+        torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
+            mixed_qkvz.clone(),
+            ba,
+            fused_out,
+            layer_name=_encode_layer_name(PREFIX),
+        )
+
+    assert fused_mock.call_count == 1
+
+    indexed_metadata = dataclasses.replace(metadata, spec_token_prefix_len=None)
+    indexed_layer = _build_mixed_mtp_layer(
+        vllm_config,
+        conv_state_seed.clone(),
+        ssm_state_seed.clone(),
+        a_log,
+        dt_bias,
+        conv_weight,
+        norm_weight,
+        eps,
+    )
+    indexed_context = types.SimpleNamespace(
+        attn_metadata={PREFIX: indexed_metadata},
+        no_compile_layers={PREFIX: indexed_layer},
+    )
+    indexed_out = torch.zeros_like(output_gate)
+    with patch.object(
+        qwen_gdn_linear_attn,
+        "get_forward_context",
+        return_value=indexed_context,
+    ):
+        torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
+            mixed_qkvz.clone(),
+            ba,
+            indexed_out,
+            layer_name=_encode_layer_name(PREFIX),
+        )
+
+    torch.testing.assert_close(fused_out, indexed_out, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(
+        fused_layer.kv_cache[0], indexed_layer.kv_cache[0], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        fused_layer.kv_cache[1],
+        indexed_layer.kv_cache[1],
+        atol=3e-2,
+        rtol=3e-2,
+    )
+    torch.testing.assert_close(
+        fused_layer.kv_cache[0], reference_layer.kv_cache[0], atol=0, rtol=0
+    )
+    torch.testing.assert_close(fused_out, reference_out, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(
+        fused_layer.kv_cache[1],
+        reference_layer.kv_cache[1],
+        atol=3e-2,
+        rtol=3e-2,
+    )

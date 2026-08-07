@@ -251,6 +251,26 @@ class TestEnvWithChoices:
                 env_func()
 
 
+def test_qwen3_5_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
+    env_func = environment_variables["VLLM_QWEN3_5_GDN_DECODE_KERNEL"]
+    monkeypatch.delenv("VLLM_QWEN3_5_GDN_DECODE_KERNEL", raising=False)
+    assert env_func() == "triton"
+
+    for value in ("triton", "phase_a"):
+        monkeypatch.setenv("VLLM_QWEN3_5_GDN_DECODE_KERNEL", value)
+        assert env_func() == value
+
+    for value in (
+        "phase_a_packed",
+        "phase_b_grouped",
+        "phase_b_cluster",
+        "invalid",
+    ):
+        monkeypatch.setenv("VLLM_QWEN3_5_GDN_DECODE_KERNEL", value)
+        with pytest.raises(ValueError, match="VLLM_QWEN3_5_GDN_DECODE_KERNEL"):
+            env_func()
+
+
 class TestEnvListWithChoices:
     """Test cases for env_list_with_choices function."""
 

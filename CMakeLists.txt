@@ -1121,7 +1121,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(FUSED_KDA_DECODE_ARCHS)
     set(FUSED_KDA_DECODE_SRC
-      "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel.cu")
+      "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel.cu"
+      "csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${FUSED_KDA_DECODE_SRC}"
       CUDA_ARCHS "${FUSED_KDA_DECODE_ARCHS}")
