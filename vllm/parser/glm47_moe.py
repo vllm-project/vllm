@@ -41,14 +41,19 @@ ARG_KEY_END = "</arg_key>"
 ARG_VALUE_START = "<arg_value>"
 ARG_VALUE_END = "</arg_value>"
 
+# The opening ``<arg_value>`` tag is optional: GLM-4.7-family models
+# sporadically skip it under load (e.g. ``<arg_key>k</arg_key>value</arg_value>``)
+# while the value and closing tag stay intact. The closing ``</arg_value>``
+# still delimits the value, so well-formed output is unaffected while the
+# recoverable, malformed call no longer silently collapses to ``{}``.
 _ARG_RE = re.compile(
     r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*?)</arg_value>",
+    r"(?:<arg_value>)?(?P<value>.*?)</arg_value>",
     re.DOTALL,
 )
 _PARTIAL_ARG_RE = re.compile(
     r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*)$",
+    r"(?:<arg_value>)?(?P<value>.*)$",
     re.DOTALL,
 )
 
