@@ -32,6 +32,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
+    initialize_kv_cache_layout,
     resolve_kv_cache_layout,
     set_kv_cache_layout,
 )
@@ -493,7 +494,9 @@ def _test_backend_correctness(
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
     attn_backends = tuple(backend.get_class() for backend in backend_to_test)
-    layout = resolve_kv_cache_layout(attn_backends)
+    for attn_backend in attn_backends:
+        initialize_kv_cache_layout(attn_backend, vllm_config.cache_config)
+    layout = resolve_kv_cache_layout()
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
         v_contexts=v_contexts,

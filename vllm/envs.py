@@ -230,6 +230,7 @@ if TYPE_CHECKING:
         Literal[
             "LBNHC",
             "LBHNC",
+            "LHBNC",
             "NHC",
             "HNC",
             "NHD",
@@ -1734,6 +1735,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Where N=num_states, H=num_heads and C=state_content. The default value
     # will leave the layout choice to the backend. Mind that backends may only
     # implement and support a subset of all possible layouts.
+    # Note: LHBNC hoists the head dim outside the block dim; backends reject
+    # it at selection time via AttentionBackend.supports_kv_cache_layout()
+    # unless they explicitly support head-plane addressing.
     "VLLM_KV_CACHE_LAYOUT": env_with_choices(
         "VLLM_KV_CACHE_LAYOUT",
         None,

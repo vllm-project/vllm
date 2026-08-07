@@ -191,6 +191,19 @@ def _layout_from_name(layout_name: str) -> KVCacheLayout:
         ) from None
 
 
+def _validate_backend_supports_layout(
+    backend: type[AttentionBackend], layout: KVCacheLayout
+) -> None:
+    if not backend.supports_kv_cache_layout(layout):
+        supported = [
+            m.name for m in KVCacheLayout if backend.supports_kv_cache_layout(m)
+        ]
+        raise ValueError(
+            f"KV cache layout {layout.name} is not supported by the "
+            f"{backend.get_name()} attention backend. Supported layouts: {supported!r}."
+        )
+
+
 def initialize_kv_cache_layout(
     backend: type[AttentionBackend], cache_config=None
 ) -> None:
@@ -204,7 +217,8 @@ def initialize_kv_cache_layout(
     global _RESOLVED_KV_CACHE_LAYOUT
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         return
-    layout_name = backend.get_required_kv_cache_layout()
+    required = backend.get_required_kv_cache_layout()
+    layout_name = required
     if layout_name is not None:
         logger.info_once(
             "Using %s KV cache layout for %s backend.",
@@ -214,6 +228,7 @@ def initialize_kv_cache_layout(
     elif _RESOLVED_KV_CACHE_LAYOUT is not None:
         # A previously selected backend's requirement (or the default chain)
         # already published; a no-requirement backend must not clobber it.
+        _validate_backend_supports_layout(backend, _RESOLVED_KV_CACHE_LAYOUT)
         if cache_config is not None and cache_config.kv_cache_layout is None:
             cache_config.kv_cache_layout = _RESOLVED_KV_CACHE_LAYOUT.name
         return
@@ -222,6 +237,8 @@ def initialize_kv_cache_layout(
     if layout_name is None:
         layout_name = get_kv_connector_cache_layout()
     layout = _layout_from_name(layout_name or "LBNHC")
+    if required is None:
+        _validate_backend_supports_layout(backend, layout)
     _RESOLVED_KV_CACHE_LAYOUT = layout
     if cache_config is not None:
         cache_config.kv_cache_layout = layout.name

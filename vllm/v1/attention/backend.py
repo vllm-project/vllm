@@ -24,7 +24,12 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import (
+        AttentionSpec,
+        KVCacheLayout,
+        KVCacheSpec,
+        KVQuantMode,
+    )
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
@@ -91,6 +96,14 @@ class AttentionBackend(ABC):
     @classmethod
     def get_required_kv_cache_layout(cls) -> str | None:
         return None
+
+    @classmethod
+    def supports_kv_cache_layout(cls, layout: "KVCacheLayout") -> bool:
+        """Whether this backend's kernels can consume caches allocated with
+        ``layout``. Generic attention kernels address a block as a single
+        strided [H, N, C] region, so layouts that hoist the head dim outside
+        the block dim (e.g. LHBNC) need explicit backend support."""
+        return not layout.heads_outside_blocks
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

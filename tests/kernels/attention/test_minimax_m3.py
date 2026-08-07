@@ -16,10 +16,7 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.models.minimax_m3.common.sparse_attention import (
-    MiniMaxM3SparseTritonImpl,
-    minimax_m3_use_aiter_sparse_pa,
-)
+from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     resolve_kv_cache_layout,
@@ -933,8 +930,8 @@ def test_main_cache_layout_contract():
     # The old separate K/V-axis shape is no longer the logical shape.
     assert logical != (nb, 2, bs, h, d)
 
-    assert KVCacheLayout.LBHNC.layer_stride_order == (0, 1, 2, 3)
-    assert KVCacheLayout.LBNHC.layer_stride_order == (0, 2, 1, 3)
+    assert KVCacheLayout.LBHNC.layer_view_order == (0, 1, 2, 3)
+    assert KVCacheLayout.LBNHC.layer_view_order == (0, 2, 1, 3)
 
     try:
         set_kv_cache_layout("HND")
@@ -962,43 +959,6 @@ def test_unknown_layout_raises():
             resolve_kv_cache_layout()
     finally:
         set_kv_cache_layout(None)
-
-
-def test_aiter_sparse_pa_cache_uses_separate_head_groups(monkeypatch):
-    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
-
-    monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
-    monkeypatch.setattr(
-        sparse_attn_mod.rocm_aiter_ops,
-        "is_shuffle_kv_cache_enabled",
-        lambda: True,
-    )
-
-    assert minimax_m3_use_aiter_sparse_pa(1)
-    with pytest.raises(ValueError, match="num_kv_heads == 1"):
-        minimax_m3_use_aiter_sparse_pa(2)
-
-    spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=1,
-        head_size=HEAD_DIM,
-        head_size_v=HEAD_DIM,
-        dtype=DTYPE,
-        separate_kv_head_groups=True,
-    )
-    num_blocks = 7
-    raw = torch.empty(num_blocks * spec.page_size_bytes, dtype=torch.int8)
-    kv_cache = reshape_kv_cache(
-        raw,
-        spec,
-        num_blocks,
-        num_layer_slots=1,
-        layout=KVCacheLayout.LBHNC,
-    )[0]
-    assert kv_cache.shape == (num_blocks, 2, BLOCK_SIZE, HEAD_DIM)
-    key_cache, value_cache = kv_cache.unbind(1)
-    assert key_cache.is_contiguous()
-    assert value_cache.is_contiguous()
 
 
 def test_indexer_cache_squeezes_to_contiguous_3d():

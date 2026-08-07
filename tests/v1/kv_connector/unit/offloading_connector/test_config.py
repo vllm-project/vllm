@@ -71,8 +71,7 @@ def _make_kv_cache_config() -> KVCacheConfig:
     num_blocks = 16
     kv_tensor = KVCacheTensor(
         size=num_blocks * 8,
-        shared_by=["layer"],
-        block_stride=0,
+        shared_by=[["layer"]],
     )
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -94,18 +93,13 @@ def _make_kv_cache_config() -> KVCacheConfig:
 def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
     num_blocks = 4
     if packed:
-        kv_cache_tensors = [
-            KVCacheTensor(
-                size=64,
-                shared_by=[layer_name],
-                block_stride=16,
-            )
-            for layer_name in ("layer0", "layer1")
-        ]
+        # Packed layout under the standardized slot model: both layers are
+        # slots of one shared allocation.
+        kv_cache_tensors = [KVCacheTensor(size=64, shared_by=[["layer0"], ["layer1"]])]
     else:
         kv_cache_tensors = [
-            KVCacheTensor(size=40, shared_by=["layer0"]),
-            KVCacheTensor(size=24, shared_by=["layer1"]),
+            KVCacheTensor(size=40, shared_by=[["layer0"]]),
+            KVCacheTensor(size=24, shared_by=[["layer1"]]),
         ]
 
     return KVCacheConfig(
@@ -260,18 +254,12 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.cache.blocks_per_chunk == 2
 
 
-def test_rejects_partially_packed_tensor_layout():
-    kv_cache_config = _make_sizing_kv_cache_config(packed=False)
-    kv_cache_config.kv_cache_tensors[0].block_stride = 16
-
-    with pytest.raises(AssertionError):
-        build_offloading_config(_make_vllm_config(), kv_cache_config)
-
-
 def test_zero_blocks_skips_tensor_layout_validation():
+    # Partially-packed layouts are no longer expressible: packing is
+    # structural (layer slots of one tensor) rather than a per-tensor
+    # block_stride flag, so the old rejects-partially-packed test is gone.
     kv_cache_config = _make_sizing_kv_cache_config(packed=False)
     kv_cache_config.num_blocks = 0
-    kv_cache_config.kv_cache_tensors[0].block_stride = 16
 
     offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
 

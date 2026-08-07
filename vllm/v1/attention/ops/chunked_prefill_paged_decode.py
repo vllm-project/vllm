@@ -7,6 +7,8 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import math
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -300,9 +302,12 @@ def chunked_prefill_paged_decode(
         # addressing: K as [B, H, hs//x, N, x] and V as [B, H, hs, N]. Both
         # are pure permuted views of the standardized [B, H, N, hs] halves
         # (the kernel threads every dim's stride), so no bytes move and no
-        # kernel changes are needed.
-        x = 16 // key_cache.element_size()
+        # kernel changes are needed. x is just the view's vectorization width,
+        # so it only has to divide head_size: use the largest power of two
+        # that does, capped at the historical 16 bytes (which non-power-of-2
+        # head sizes like 24 don't divide).
         head_size = key_cache.shape[3]
+        x = math.gcd(16 // key_cache.element_size(), head_size)
         k_cache_x = key_cache.unflatten(-1, (head_size // x, x)).permute(0, 1, 3, 2, 4)
         v_cache_t = value_cache.permute(0, 1, 3, 2)
         context_attention_fwd(
