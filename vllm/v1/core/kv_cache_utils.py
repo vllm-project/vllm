@@ -798,17 +798,17 @@ def generate_eagle_block_hash_extra_keys(
     end_token_idx: int,
     start_mm_idx: int,
 ) -> tuple[tuple[Any, ...], int]:
-    block_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+    block_extra_keys, next_block_mm_idx = generate_block_hash_extra_keys(
         request,
         start_token_idx,
         end_token_idx,
         start_mm_idx,
     )
-    successor_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+    successor_extra_keys, _ = generate_block_hash_extra_keys(
         request,
         end_token_idx,
         end_token_idx + 1,
-        curr_mm_idx,
+        next_block_mm_idx,
     )
     return (
         (
@@ -816,7 +816,7 @@ def generate_eagle_block_hash_extra_keys(
             request.all_token_ids[end_token_idx],
             successor_extra_keys,
         ),
-        curr_mm_idx,
+        next_block_mm_idx,
     )
 
 

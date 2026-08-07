@@ -81,9 +81,9 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     @property
     def supports_eagle_prefix_cache_hashing(self) -> bool:
-        # Keep producer and consumer keys identical so decode-generated KV can
-        # be reused by a later prefill request.
-        return self._vllm_config.cache_config.enable_prefix_caching
+        # Capability must not depend on a node-local APC setting: P and D must
+        # select the same protocol when another connector shares hashes.
+        return True
 
     @property
     def prefer_cross_layer_blocks(self) -> bool:

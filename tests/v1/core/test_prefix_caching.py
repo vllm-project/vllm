@@ -2841,6 +2841,8 @@ def test_eagle_kv_event_reconstructs_hash_with_coarser_cache_block(
         list(range(cache_block_size * 2 + 1)),
         hash_block_size,
         sha256,
+        mm_positions=[PlaceholderRange(offset=3, length=2)],
+        mm_hashes=["image"],
         use_eagle_hashes=True,
     )
     blocks = pool.get_new_blocks(2)
