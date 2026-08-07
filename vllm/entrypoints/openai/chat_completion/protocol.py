@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
     structured_outputs_from_response_format,
+    validate_cache_salt,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -512,6 +513,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:chat-completion-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data):
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     @model_validator(mode="before")
     @classmethod

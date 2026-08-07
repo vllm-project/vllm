@@ -27,6 +27,28 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
+_CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+_MAX_CACHE_SALT_LENGTH = 128
+
+
+def validate_cache_salt(cache_salt: object) -> None:
+    """Validate cache salts before they reach downstream cache backends."""
+    if cache_salt is None:
+        return
+    if not isinstance(cache_salt, str) or not cache_salt:
+        raise VLLMValidationError(
+            "Parameter 'cache_salt' must be a non-empty string if provided.",
+            parameter="cache_salt",
+        )
+    if len(cache_salt) > _MAX_CACHE_SALT_LENGTH or any(
+        char in _CACHE_SALT_FORBIDDEN_CHARS for char in cache_salt
+    ):
+        raise VLLMValidationError(
+            "Parameter 'cache_salt' must be at most 128 characters and must "
+            "not contain '@', '/', '\\\\', or NUL.",
+            parameter="cache_salt",
+        )
+
 
 class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
