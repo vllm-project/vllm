@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsMultiModalEmbeddings
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
@@ -242,7 +243,7 @@ class InklingMultiTokenPredictor(nn.Module):
         return hidden
 
 
-class InklingMTP(nn.Module):
+class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
