@@ -66,6 +66,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
 
@@ -147,7 +148,11 @@ class Learnable2DInterpPosEmb(nn.Module):
         return torch.cat(pos_embs)
 
     def forward(self, x: torch.Tensor, grid_hws: torch.Tensor) -> torch.Tensor:
-        pos_embs = self.get_pos_embeds(grid_hws.tolist())
+        # The per-image grids are needed as Python ints to build the
+        # positional embeddings.
+        with gpu_sync_allowed():
+            grid_hws_list = grid_hws.tolist()
+        pos_embs = self.get_pos_embeds(grid_hws_list)
         out = x + pos_embs
         return out
 

@@ -98,6 +98,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import get_processor_cls_name_from_config
 from vllm.transformers_utils.utils import convert_model_repo_to_path
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -536,8 +537,10 @@ class Glm4vVisionEmbeddings(nn.Module):
         total_seq = h_coords.shape[0]
         device = pos_embed_weight.device
 
-        # Move coordinates to correct device
-        h_coords, w_coords = h_coords.to(device), w_coords.to(device)
+        # Move coordinates to correct device. These are built with
+        # `torch.arange` on the host, so this is a blocking H2D.
+        with gpu_sync_allowed():
+            h_coords, w_coords = h_coords.to(device), w_coords.to(device)
 
         # Handle empty sequence case
         if total_seq == 0:

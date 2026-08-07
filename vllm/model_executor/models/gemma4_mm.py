@@ -1344,13 +1344,17 @@ class Gemma4ForConditionalGeneration(
             single_pos_ids = pixel_position_ids[orig_idx].unsqueeze(0)
             padding_positions = (single_pos_ids == -1).all(dim=-1)
 
-            pooled_states, valid_mask = vt.pooler(
-                hidden_states=single_hidden,
-                pixel_position_ids=single_pos_ids,
-                padding_positions=padding_positions,
-                output_length=output_length,
-            )
-            valid_states = pooled_states[valid_mask]
+            # The pooler goes through HuggingFace's mask builder, which probes
+            # `padding_mask.all()`, and the mask indexing below needs the
+            # selected count on the host.
+            with gpu_sync_allowed():
+                pooled_states, valid_mask = vt.pooler(
+                    hidden_states=single_hidden,
+                    pixel_position_ids=single_pos_ids,
+                    padding_positions=padding_positions,
+                    output_length=output_length,
+                )
+                valid_states = pooled_states[valid_mask]
 
             if getattr(vt.config, "standardize", False):
                 valid_states = (valid_states - vt.std_bias) * vt.std_scale
