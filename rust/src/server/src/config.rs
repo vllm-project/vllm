@@ -10,6 +10,7 @@ use axum::http::{HeaderName, HeaderValue, Method};
 use educe::Educe;
 use serde::Serialize;
 use serde_json::Value;
+use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 
@@ -184,6 +185,9 @@ pub struct Config {
     pub chat_template: Option<String>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Maximum number of input items allowed per prompt for each modality.
+    /// Unspecified modalities are unlimited.
+    pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the
@@ -203,7 +207,7 @@ pub struct Config {
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,
-    /// TCP port for the gRPC Generate service. When `None`, no gRPC server is
+    /// TCP port for the gRPC Inference service. When `None`, no gRPC server is
     /// started.
     pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.

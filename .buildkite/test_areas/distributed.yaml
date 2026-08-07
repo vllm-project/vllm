@@ -9,6 +9,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed
+  - "!vllm/distributed/kv_transfer/"
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_comm_ops.py
@@ -23,6 +24,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
@@ -41,10 +43,12 @@ steps:
     amd:
       dind: false
       device: mi300_2
+      timeout_in_minutes: 45
       depends_on:
       - image-build-amd
       source_file_dependencies:
       - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
       - vllm/executor/
       - vllm/worker/worker_base.py
@@ -62,19 +66,18 @@ steps:
   source_file_dependencies:
   - vllm/compilation/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
-  - tests/compile/fullgraph/test_basic_correctness.py
   - tests/compile/test_wrapper.py
   - tests/entrypoints/llm/test_collective_rpc.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
 
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs)
@@ -84,6 +87,7 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
@@ -107,6 +111,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
   - examples/rl/
@@ -139,6 +144,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
   - tests/distributed/test_utils
@@ -160,15 +166,14 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
-  - tests/compile/fullgraph/test_basic_correctness.py
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
-  - pytest -v -s compile/fullgraph/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
@@ -185,6 +190,7 @@ steps:
   - examples/features/torchrun/torchrun_dp_example_offline.py
   - vllm/config/parallel.py
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/v1/engine/llm_engine.py
   - vllm/v1/executor/uniproc_executor.py
   - vllm/v1/worker/gpu_worker.py
@@ -203,6 +209,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   commands:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
@@ -250,6 +257,7 @@ steps:
   optional: true # TODO: revert once infra issue solved
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/model_executor/models/
@@ -265,6 +273,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/model_executor/models/

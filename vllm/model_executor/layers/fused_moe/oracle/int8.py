@@ -24,7 +24,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -41,19 +40,11 @@ def _get_priority_backends(
     """
     Get available backends in priority order based on platform and config.
     """
-    _AVAILABLE_BACKENDS = [
+    return [
         Int8MoeBackend.TRITON,
         Int8MoeBackend.HUMMING,
         Int8MoeBackend.CPU,
     ]
-
-    def _move_to_front(backends: list[Int8MoeBackend], backend: Int8MoeBackend) -> None:
-        backends.insert(0, backends.pop(backends.index(backend)))
-
-    if current_platform.is_cpu():
-        _move_to_front(_AVAILABLE_BACKENDS, Int8MoeBackend.CPU)
-
-    return _AVAILABLE_BACKENDS
 
 
 def backend_to_kernel_cls(
@@ -78,14 +69,13 @@ def backend_to_kernel_cls(
             HummingGroupedExperts,
             HummingIndexedExperts,
         ]
-
     elif backend == Int8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            ArmCPUExpertsInt8,
             CPUExpertsInt8,
         )
 
-        return [CPUExpertsInt8]
-
+        return [ArmCPUExpertsInt8, CPUExpertsInt8]
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 
@@ -176,7 +166,9 @@ def select_int8_moe_backend(
                 logger.debug_once(_make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
-        "No Int8 MoE backend supports the deployment configuration."
+        "No Int8 MoE backend supports the deployment configuration "
+        f"(weight_key={weight_key}, activation_key={activation_key}). "
+        "Set `VLLM_LOGGING_LEVEL=DEBUG` to see per-backend unsupported reasons."
     )
 
 
@@ -191,9 +183,10 @@ def make_int8_moe_quant_config(
     per_act_token_quant: bool = False,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
-    assert (a1_scale is None and a2_scale is None) or (
-        a1_scale is not None and a2_scale is not None
-    ), "a1_scale and a2_scale must both be provided or both be None"
+    if (a1_scale is None) != (a2_scale is None):
+        raise ValueError("a1_scale and a2_scale must both be provided or both be None")
+
+    scales_absent = a1_scale is None and a2_scale is None
 
     if int8_backend == Int8MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -204,7 +197,7 @@ def make_int8_moe_quant_config(
         assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(layer)
 
-    if a1_scale is None or a2_scale is None:
+    if scales_absent and not per_act_token_quant:
         return int8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -274,13 +267,7 @@ def convert_to_int8_moe_kernel_format(
             quant_config=_humming_int8_weight_schema(w13, layer.w13_weight_scale),
         )
         return layer.w13_weight, layer.w2_weight
-    elif int8_backend == Int8MoeBackend.CPU:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            prepare_int8_moe_layer_for_cpu,
-        )
-
-        w13, w2 = prepare_int8_moe_layer_for_cpu(w13, w2)
-    elif int8_backend != Int8MoeBackend.TRITON:
+    elif int8_backend not in (Int8MoeBackend.TRITON, Int8MoeBackend.CPU):
         raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
 
     return w13, w2
