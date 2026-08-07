@@ -8,7 +8,8 @@ import torch
 from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float8E4M3FN, Float32, Int64, Uint8, Uint16, Uint32
 
-from vllm.cute_utils import TORCH_TO_CUTE_DTYPE, cvt
+from vllm.cute_utils import _TORCH_TO_CUTE_DTYPE, cvt
+from vllm.platforms import current_platform
 
 
 def _make_fake_tensor(dtype, shape, divisibility):
@@ -33,10 +34,14 @@ def is_fused_q_cutedsl_supported(
     quantize_mqa: bool,
 ) -> bool:
     if not (
-        quantize_mqa
+        current_platform.has_device_capability(100)
+        and quantize_mqa
         and q_pe.dtype == ql_nope.dtype == torch.bfloat16
         and q_pe.shape[-1] == 64
         and ql_nope.shape[-1] == 512
+        # One warp per head group; a non-multiple would trip the kernel's own
+        # assert instead of falling back to Triton.
+        and q_pe.shape[1] % 4 == 0
     ):
         return False
     return not has_indexer or (
@@ -69,15 +74,15 @@ def fused_q_cutedsl(
     _, num_idx_heads, idx_dim = idx_q.shape
 
     if has_indexer:
-        idx_rope_type = TORCH_TO_CUTE_DTYPE[idx_rope_cache.dtype]
-        idx_weights_type = TORCH_TO_CUTE_DTYPE[idx_weights.dtype]
+        idx_rope_type = _TORCH_TO_CUTE_DTYPE[idx_rope_cache.dtype]
+        idx_weights_type = _TORCH_TO_CUTE_DTYPE[idx_weights.dtype]
     else:
         idx_dim = num_idx_heads = 0
         idx_q = idx_rope_cache = idx_q_fp8 = None
         idx_weights = idx_weights_out = None
         idx_rope_type = idx_weights_type = None
 
-    rope_type = TORCH_TO_CUTE_DTYPE[rope_cache.dtype]
+    rope_type = _TORCH_TO_CUTE_DTYPE[rope_cache.dtype]
     compiled = FusedQKernel.compile(
         rope_dim,
         nope_dim,
@@ -453,8 +458,8 @@ class FusedQKernel:
             w = idx_weights[token_id, head_id].to(Float32)
             idx_weights_out[token_id, head_id] = w * scale * weight_scale
 
-    @cache
     @staticmethod
+    @cache
     def compile(
         rope_dim: int,
         nope_dim: int,

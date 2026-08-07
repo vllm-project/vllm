@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
@@ -286,7 +287,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(
@@ -307,7 +308,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(
@@ -328,7 +329,7 @@ class TestRenderPrompt:
         )
 
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="maximum context length is",
         ):
             renderer.tokenize_prompts(

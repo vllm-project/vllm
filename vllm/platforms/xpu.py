@@ -110,6 +110,23 @@ class XPUPlatform(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
+    supported_quantization: list[str] = [
+        "awq",
+        "gptq",
+        "auto_awq",
+        "auto_gptq",
+        "inc",
+        "fp8",
+        "deepseek_v4_fp8",
+        "mxfp4",
+        "mxfp8",
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "online",
+        "gpt_oss_mxfp4",
+        "modelopt",
+        "compressed-tensors",
+    ]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -282,6 +299,11 @@ class XPUPlatform(Platform):
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
+        else:
+            logger.warning_once(
+                "XPU Graph support is experimental and currently only supports "
+                "single-GPU execution."
+            )
 
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode
@@ -294,7 +316,6 @@ class XPUPlatform(Platform):
             "fuse_act_padding": "Activation + padding fusion",
             "fuse_rope_kvcache": "RoPE + KV cache fusion",
             "fuse_rope_kvcache_cat_mla": "RoPE + KV cache + MLA fusion",
-            "enable_qk_norm_rope_fusion": "QK Norm + RoPE fusion",
         }
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():
@@ -439,7 +460,7 @@ class XPUPlatform(Platform):
         # use fused kernels where available when no codegen
         cc = vllm_config.compilation_config
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
-        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
 
         return IrOpPriorityConfig.with_default(default)
 
