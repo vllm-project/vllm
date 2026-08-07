@@ -454,15 +454,29 @@ def prepare_humming_layer(
         input_schema = HummingInputSchema()
 
     # ReplicatedLinear has no TP partitioning and so does not set
-    # input_size_per_partition; for it that is just input_size. Use hasattr
-    # rather than getattr's default arg, which is evaluated eagerly and would
-    # raise on layers lacking input_size (e.g. ParallelLMHead).
+    # input_size_per_partition; for it that is just input_size. ParallelLMHead
+    # (a VocabParallelEmbedding, not a LinearBase) has neither attribute --
+    # its create_weights call passes embedding_dim as the equivalent
+    # input-side size (the embedding dimension is never TP-sharded, only the
+    # vocab dimension is). Use hasattr rather than getattr's default arg,
+    # which is evaluated eagerly and would raise on layers lacking input_size.
     if hasattr(layer, "input_size_per_partition"):
         input_size_per_partition = layer.input_size_per_partition
-    else:
+    elif hasattr(layer, "input_size"):
         input_size_per_partition = layer.input_size
+    else:
+        input_size_per_partition = layer.embedding_dim
+
+    # ParallelLMHead (a VocabParallelEmbedding, not a LinearBase) likewise has
+    # no output_partition_sizes; its create_weights call passes
+    # [num_embeddings_per_partition] as the equivalent output-side shard size.
+    if hasattr(layer, "output_partition_sizes"):
+        output_partition_sizes = layer.output_partition_sizes
+    else:
+        output_partition_sizes = [layer.num_embeddings_per_partition]
+
     shape_k_stacks = [input_size_per_partition]
-    shape_n_stacks = layer.output_partition_sizes
+    shape_n_stacks = output_partition_sizes
 
     # Step 1: convert weight and input schemas to humming standard format
     weight_schema, tensors = weight_schema.convert_humming(
@@ -489,16 +503,21 @@ def prepare_humming_layer(
         param = torch.nn.Parameter(tensor, requires_grad=False)
         setattr(layer, name, param)
 
+    # ParallelLMHead also has no has_bias (LinearBase sets self.has_bias =
+    # bias in __init__); it registers an actual "bias" parameter (or None)
+    # instead, so presence of that parameter is the equivalent signal.
+    has_bias = layer.has_bias if hasattr(layer, "has_bias") else layer.bias is not None
+
     # Step 2: transform weight (humming standard format) for forwarding
     HummingMethod.prepare_layer_meta(
         layer=layer,
-        shape_n=sum(layer.output_partition_sizes),
+        shape_n=sum(output_partition_sizes),
         shape_k=input_size_per_partition,
         weight_schema=weight_schema,
         input_schema=input_schema,
         pad_n_to_multiple=256,
         pad_k_to_multiple=128,
-        has_bias=layer.has_bias,
+        has_bias=has_bias,
         torch_dtype=layer.params_dtype,
     )
 
