@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -9,6 +10,7 @@ from typing import Literal
 import torch
 from typing_extensions import override
 
+import vllm.version
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.logger import init_logger
@@ -235,6 +237,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
             0,
         )
+        self._version_metadata_added = False
 
     def _build_profiler_table(
         self,
@@ -258,9 +261,36 @@ class TorchProfilerWrapper(WorkerProfiler):
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
+    def _maybe_add_version_metadata(self) -> None:
+        """Stamp the vLLM version (which embeds the git commit) into the trace.
+
+        add_metadata_json is a no-op until Kineto is initialized, which with a
+        schedule only happens after the WAIT phase, so stamp once it's live.
+        """
+        if self._version_metadata_added:
+            return
+        # None while the schedule is still in the WAIT phase.
+        if self.profiler.profiler is None:
+            return
+        try:
+            self.profiler.add_metadata_json(
+                "vllm_version", json.dumps(vllm.version.__version__)
+            )
+            self.profiler.add_metadata_json(
+                "vllm_version_tuple",
+                json.dumps([str(p) for p in vllm.version.__version_tuple__]),
+            )
+        except Exception as e:
+            logger.warning("Failed to add vLLM version to profiler metadata: %s", e)
+        # Mark done even on failure, to avoid retrying every step.
+        self._version_metadata_added = True
+
     @override
     def _start(self) -> None:
         self.profiler.start()
+        # No-schedule case: Kineto is live immediately. With a schedule this
+        # no-ops and _profiler_step stamps it once WAIT ends.
+        self._maybe_add_version_metadata()
 
     @override
     def _stop(self) -> None:
@@ -296,6 +326,8 @@ class TorchProfilerWrapper(WorkerProfiler):
         """
         if self._uses_schedule:
             self.profiler.step()
+            # Stamp once the schedule leaves WAIT and Kineto is live.
+            self._maybe_add_version_metadata()
             # Track warmup steps - only count active steps toward max_iterations
             if self._warmup_steps_remaining > 0:
                 self._warmup_steps_remaining -= 1
