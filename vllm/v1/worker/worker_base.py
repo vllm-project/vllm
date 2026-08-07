@@ -176,11 +176,7 @@ class WorkerBase:
         raise NotImplementedError
 
     def take_notifications(self) -> list["EngineNotification"]:
-        """Drain notifications published in this worker process.
-
-        Gathered from every rank, so producers on non-output ranks are not
-        discarded. See vllm/v1/notifications.py.
-        """
+        """Drain notifications published in this worker process."""
         return take_worker_notifications() or []
 
     @property

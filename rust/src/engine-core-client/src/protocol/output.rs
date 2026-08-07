@@ -164,7 +164,6 @@ struct WireEngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     start_wave: Option<u32>,
-    /// Rare engine-level event notifications (see `notifications.rs`).
     #[serde(default)]
     engine_notifications: Option<Vec<EngineNotification>>,
 }

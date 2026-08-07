@@ -238,9 +238,7 @@ class EngineCore:
 
         self._idle_state_callbacks: list[Callable] = []
 
-        # Notifications waiting on the in-process frontend (EngineCoreProc
-        # overrides _publish_notifications to broadcast instead). Additive in
-        # emission order, like scheduler_stats: nothing dropped.
+        # In-process frontend only; EngineCoreProc broadcasts instead.
         self._pending_notifications: list[EngineNotification] = []
         self._last_notification_gather = 0.0
 
@@ -744,12 +742,7 @@ class EngineCore:
         return engine_core_outputs, model_executed
 
     def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
-        """Queue notifications for the frontend.
-
-        Additive (like scheduler_stats): nothing gets dropped. The in-process
-        engine buffers until the next step's outputs; EngineCoreProc overrides
-        this to broadcast to every frontend right away.
-        """
+        """Queue notifications for the frontend."""
         self._pending_notifications.extend(notifications)
 
     def _flush_notifications(
@@ -766,16 +759,12 @@ class EngineCore:
     def gather_worker_notifications(self) -> None:
         """Collect notifications from every worker rank and publish them.
 
-        A rank-0-only reply would discard producers on the other ranks (e.g.
-        per-rank transfer metrics from a weight-loader plugin), so this keeps
-        all of them. Callers own the cadence: this is an rpc round trip, not
-        something to run per step.
+        An rpc round trip; callers own the cadence.
         """
         try:
             per_rank = self.model_executor.collective_rpc("take_notifications")
         except Exception:
-            # Never fail an engine operation for a metrics channel. Workers
-            # without the method (e.g. out-of-tree platforms) land here too.
+            # Workers without the method (out-of-tree platforms) land here.
             logger.warning_once(
                 "Could not gather worker notifications; events published in "
                 "workers will not reach the frontend."
@@ -1421,8 +1410,7 @@ class EngineCoreProc(EngineCore):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
-        # Producers that publish during model load have already run, and no
-        # event will prompt a gather on their behalf.
+        # Load-time producers have already run; nothing else will gather them.
         self.gather_worker_notifications()
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
@@ -1439,10 +1427,8 @@ class EngineCoreProc(EngineCore):
     def _maybe_gather_worker_notifications(self) -> None:
         """Poll workers for spontaneously published notifications.
 
-        Off unless VLLM_WORKER_NOTIFICATION_POLL_INTERVAL is set. Deliberately
-        here rather than inside step(): the gather is an rpc that queues behind
-        any in-flight execute_model, so issuing it between steps keeps it to a
-        round trip instead of stalling on a rank mid-forward.
+        Between steps, not inside one: the rpc queues behind any in-flight
+        execute_model and would otherwise stall on a rank mid-forward.
         """
         interval = envs.VLLM_WORKER_NOTIFICATION_POLL_INTERVAL
         if not interval:
@@ -1892,12 +1878,10 @@ class EngineCoreProc(EngineCore):
         return tracker
 
     def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
-        """Broadcast notifications to every connected frontend.
+        """Broadcast to every frontend.
 
-        One-shot deltas must reach all clients: attaching to a single
-        client's step outputs (as scheduler_stats does) would leave every
-        other frontend permanently stale, and an idle engine has no step
-        outputs at all.
+        Attaching to one client's step outputs would leave the others stale,
+        and an idle engine has no step outputs at all.
         """
         for client_index in range(len(self.addresses.outputs)):
             self.output_queue.put_nowait(

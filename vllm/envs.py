@@ -840,10 +840,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))) > 0.0
         else 10.0
     ),
-    # Interval in seconds at which the engine core polls workers for
-    # notifications (see vllm/v1/notifications.py). 0 disables polling; events
-    # from producers that publish during model load are still gathered once at
-    # startup, and in-tree producers gather on their own state changes.
+    # Seconds between engine-core polls for worker notifications, 0 to
+    # disable. See vllm/v1/notifications.py.
     "VLLM_WORKER_NOTIFICATION_POLL_INTERVAL": lambda: max(
         0.0, float(os.getenv("VLLM_WORKER_NOTIFICATION_POLL_INTERVAL", "0."))
     ),
