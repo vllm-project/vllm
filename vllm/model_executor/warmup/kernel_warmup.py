@@ -259,10 +259,15 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # When autotuning with number of tokens m, flashinfer will autotune
     # operations for all number of tokens up to m, so we only need to
     # run with the max number of tokens.
+    # Randomize inputs to avoid every token pick the same experts,
+    # which lead to some EP ranks receiving no tokens and skipping their
+    # MoE kernel entirely, and cause hang due to all-reduce collective
+    # during synchronized autotuning.
     dummy_run_kwargs = dict(
         num_tokens=runner.scheduler_config.max_num_batched_tokens,
         skip_eplb=True,
         is_profile=True,
+        randomize_inputs=True,
     )
 
     # Read cached autotune results and broadcast to all ranks.
