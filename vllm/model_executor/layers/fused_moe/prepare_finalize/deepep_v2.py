@@ -127,8 +127,22 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
 
+        # arange(num_local_experts) + rank_expert_offset. Rank-constant, so it
+        # is built once per device instead of once per layer per step.
+        self._global_expert_ids_cache: torch.Tensor | None = None
+
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
+
+    def _global_expert_ids(self, num_local: int, device: torch.device) -> torch.Tensor:
+        ids = self._global_expert_ids_cache
+        if ids is None or ids.numel() != num_local or ids.device != device:
+            ids = (
+                torch.arange(num_local, dtype=torch.int64, device=device)
+                + self.rank_expert_offset
+            )
+            self._global_expert_ids_cache = ids
+        return ids
 
     def output_is_reduced(self) -> bool:
         return True
@@ -243,23 +257,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             expert_x, expert_x_scale = recv_x, None
 
+        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+            recv_expert_num_tokens,
+            device=expert_x.device,
+        )
+
         if recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
             total_tokens = sum(recv_expert_num_tokens)
             if total_tokens > 0:
-                recv_topk_idx = torch.empty(
-                    total_tokens,
-                    dtype=torch.int64,
-                    device=expert_x.device,
+                recv_topk_idx = torch.repeat_interleave(
+                    self._global_expert_ids(
+                        len(recv_expert_num_tokens), expert_x.device
+                    ),
+                    expert_tokens_meta.expert_num_tokens,
+                    output_size=total_tokens,
                 )
-                offset = 0
-                for i, count in enumerate(recv_expert_num_tokens):
-                    if count > 0:
-                        recv_topk_idx[offset : offset + count].fill_(
-                            i + self.rank_expert_offset
-                        )
-                        offset += count
             else:
                 recv_topk_idx = torch.empty(
                     0,
