@@ -38,10 +38,15 @@ from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
     maybe_prefix,
 )
+from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .kernels import fused_eh_norm
+from .glm52_low_latency_gemm import (
+    build_glm52_plan,
+    enable_glm52_low_latency_gemm,
+    run_glm52_plan,
+)
 from .model import DeepseekV32DecoderLayer
 
 
@@ -56,6 +61,11 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self._eh_plan = (
+            build_glm52_plan(self.eh_proj.weight, vllm_config.model_config.dtype)
+            if config.model_type == "glm_moe_dsa"
+            else None
+        )
 
         topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -91,7 +101,9 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             self.hnorm.weight,
             self.enorm.variance_epsilon,
         )
-        hidden_states = self.eh_proj(eh_input)
+        hidden_states = run_glm52_plan(self._eh_plan, eh_input, self.eh_proj.weight)
+        if hidden_states is None:
+            hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
@@ -199,6 +211,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.model = DeepseekV32MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if self.config.model_type == "glm_moe_dsa":
+            enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
         self.set_moe_parameters()
 
     def set_moe_parameters(self):

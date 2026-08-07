@@ -224,8 +224,10 @@ httpx==0.28.1
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.22.0
+huggingface-hub==1.26.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   accelerate
     #   datasets
     #   evaluate
@@ -373,7 +375,7 @@ mcp==1.28.1
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.5
+mistral-common==1.11.6
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

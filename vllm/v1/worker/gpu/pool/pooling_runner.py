@@ -12,11 +12,14 @@ from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import PoolerOutput
+from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.states import RequestState
 
-_SUPPORTED_TASKS: frozenset[PoolingTask] = frozenset({"embed", "classify"})
+_SUPPORTED_TASKS: frozenset[PoolingTask] = frozenset(
+    {"embed", "classify", "token_embed", "token_classify", "embed&token_classify"}
+)
 
 
 class PoolingRunner:
@@ -27,16 +30,20 @@ class PoolingRunner:
         model_tasks = tuple(sorted(self.model.pooler.get_supported_tasks()))
         selected_task = self.model_config.get_pooling_task(model_tasks)
         if selected_task not in _SUPPORTED_TASKS:
+            hint = (
+                "Set an explicitly supported task or VLLM_USE_V2_MODEL_RUNNER=0."
+                if _SUPPORTED_TASKS.intersection(model_tasks)
+                else "Set VLLM_USE_V2_MODEL_RUNNER=0 to use this model."
+            )
             raise ValueError(
-                "Model Runner V2 supports only sequence-level pooling tasks "
+                "Model Runner V2 supports pooling tasks "
                 f"{sorted(_SUPPORTED_TASKS)}, but this model selects "
-                f"{selected_task!r} from {list(model_tasks)}. Set an explicitly "
-                "supported task or VLLM_USE_V2_MODEL_RUNNER=0."
+                f"{selected_task!r} from {list(model_tasks)}. {hint}"
             )
         self.supported_tasks = frozenset(self.get_supported_tasks(model))
         if not self.supported_tasks:
             raise ValueError(
-                "Model Runner V2 supports only sequence-level pooling tasks "
+                "Model Runner V2 supports pooling tasks "
                 f"{sorted(_SUPPORTED_TASKS)}, but this model supports "
                 f"{list(model_tasks)}. "
                 "Set VLLM_USE_V2_MODEL_RUNNER=0 to use this model."
@@ -44,6 +51,7 @@ class PoolingRunner:
         self.pooling_params: dict[int, PoolingParams] = {}
         self.pooling_states: dict[int, PoolingStates] = {}
         self.prompt_token_ids: dict[int, torch.Tensor] = {}
+        self.late_interaction_runner = LateInteractionRunner()
 
     @staticmethod
     def get_supported_tasks(model: nn.Module) -> list[PoolingTask]:
@@ -53,6 +61,7 @@ class PoolingRunner:
 
     def add_request(
         self,
+        req_id: str,
         req_index: int,
         pooling_params: PoolingParams,
         prompt_token_ids: list[int],
@@ -64,6 +73,7 @@ class PoolingRunner:
                 f"Supported tasks: {sorted(self.supported_tasks)}"
             )
         self.model.pooler.get_pooling_updates(task).apply(pooling_params)
+        self.late_interaction_runner.register_request(req_id, pooling_params)
         self.pooling_params[req_index] = pooling_params
         self.pooling_states[req_index] = PoolingStates()
         if pooling_params.requires_token_ids:
@@ -76,6 +86,12 @@ class PoolingRunner:
         if state := self.pooling_states.pop(req_index, None):
             state.clean()
         self.prompt_token_ids.pop(req_index, None)
+
+    def on_requests_finished(self, req_ids: set[str]) -> None:
+        self.late_interaction_runner.on_requests_finished(req_ids)
+
+    def clear(self) -> None:
+        self.late_interaction_runner.clear()
 
     def _get_pooling_metadata(
         self,
@@ -134,8 +150,13 @@ class PoolingRunner:
             query_start_loc_gpu=input_batch.query_start_loc[: num_reqs + 1],
         )
         pooler_output = self.model.pooler(hidden_states, pooling_metadata)
-
         finished_mask = pooling_metadata.get_pooling_cursor().is_finished().tolist()
+        pooler_output = self.late_interaction_runner.postprocess_pooler_output(
+            raw_pooler_output=pooler_output,
+            pooling_params=pooling_metadata.pooling_params,
+            req_ids=input_batch.req_ids,
+            finished_mask=finished_mask,
+        )
         return pooler_output, finished_mask
 
     def _dummy_pooler_run_task(

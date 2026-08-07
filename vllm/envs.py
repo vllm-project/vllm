@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
-    VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_CPU_ATTN_SPLIT_KV: bool = True
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
     VLLM_CPU_INT4_W4A8: bool = True
@@ -131,8 +130,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
+    VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
@@ -195,6 +196,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -227,6 +229,7 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
+    VLLM_RAISE_ON_LOGIT_NANS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
     ] = "NONE"
@@ -239,6 +242,7 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_ENABLE_COHERE_API: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
@@ -269,7 +273,6 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
-    VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
@@ -867,8 +870,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ
         else None
     ),
-    # (CPU backend only) whether to use SGL kernels, optimized for small batch.
-    "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
     # (CPU backend only) whether to enable attention spilt KV.
     "VLLM_CPU_ATTN_SPLIT_KV": lambda: bool(
         int(os.getenv("VLLM_CPU_ATTN_SPLIT_KV", "1"))
@@ -1004,7 +1005,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
-    # - "identity": returns raw video bytes for model processor to handle.
     #
     # Custom backend implementations can be registered
     # via `@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and
@@ -1211,6 +1211,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
+    # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
+    # interleaved flydsl kernels instead of the default a16w4 separated path.
+    # This is the only flag users need: vLLM picks the kernels by passing
+    # gate_mode to AITER and sets the AITER-side workaround env at init.
+    "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
+    ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
     #       for large batches
@@ -1230,6 +1237,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
+    ),
+    # Small-head (<16) AITER MLA decode kernel selection. Small head counts
+    # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through
+    # the Gluon small-head kernel or through the padded persistent-scheduling
+    # (PS) ASM kernel. "auto" (default) keeps Gluon for head counts that divide
+    # 16 where a Gluon build exists (gfx950/CDNA4) and otherwise uses the padded
+    # PS ASM decode; "gluon" forces the Gluon path wherever a build exists;
+    # "asm" forces the padded PS ASM decode. On gfx942/CDNA3 there is no Gluon
+    # build, so the ASM path is always used regardless of this setting.
+    "VLLM_ROCM_AITER_MLA_ASM_PADDING": env_with_choices(
+        "VLLM_ROCM_AITER_MLA_ASM_PADDING",
+        "auto",
+        ["auto", "gluon", "asm"],
+        case_sensitive=False,
     ),
     # Whether to use aiter mha ops.
     # By default is enabled.
@@ -1322,12 +1343,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
     ),
-    # Divisor for dynamic query scale factor calculation for FP8 KV Cache
-    "Q_SCALE_CONSTANT": lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
-    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
-    "K_SCALE_CONSTANT": lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
-    # Divisor for dynamic value scale factor calculation for FP8 KV Cache
-    "V_SCALE_CONSTANT": lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(
         int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))
@@ -1527,6 +1542,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
+    # are replicated on every rank, so each rank streams the whole weight to
+    # serve its own token shard. Shard them across TP instead: the MLP then
+    # all-gathers the full token set, computes this rank's partial, and
+    # reduce-scatters (which both sums across TP and restores the sequence
+    # sharding). Trades weight bandwidth and resident memory for two collectives
+    # per layer, so it only wins at low token counts: intended for decode
+    # instances in a P/D disaggregated deployment, not for prefill or unified
+    # serving.
+    "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "0"))
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -1709,6 +1736,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # or bad hardware but it may add compute overhead.
     "VLLM_COMPUTE_NANS_IN_LOGITS": lambda: bool(
         int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))
+        or int(os.getenv("VLLM_RAISE_ON_LOGIT_NANS", "0"))
+    ),
+    # Raise an exception when generated logits contain NaNs. Enabling this
+    # also enables the NaN computation required to detect them.
+    "VLLM_RAISE_ON_LOGIT_NANS": lambda: bool(
+        int(os.getenv("VLLM_RAISE_ON_LOGIT_NANS", "0"))
     ),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
@@ -1752,6 +1785,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
+    ),
+    # If set to 1, expose the Cohere Chat v2 API at ``POST /cohere/v2/chat``.
+    # Default off
+    "VLLM_ENABLE_COHERE_API": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
@@ -1895,11 +1933,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
-    # Enable the experimental Kimi K3 latent-MoE tail fusion.
-    # Currently supported only on SM100 with TP=8/16 and BF16.
-    "VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION": lambda: bool(
-        int(os.getenv("VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION", "0"))
-    ),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))

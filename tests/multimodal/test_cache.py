@@ -144,7 +144,8 @@ def _compare_caches(
         for _ in range(int(item_capacity / hit_rate))
     ]
     all_hashes = [
-        MultiModalHasher.hash_kwargs(item=item.get_data()) for item in all_items
+        MultiModalHasher.hash_kwargs("blake3", item=item.get_data())
+        for item in all_items
     ]
 
     prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)

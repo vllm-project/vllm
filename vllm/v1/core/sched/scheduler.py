@@ -94,6 +94,7 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+        self.is_encoder_only = vllm_config.is_encoder_only
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -129,6 +130,9 @@ class Scheduler(SchedulerInterface):
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         self.defer_block_free = False
+        # Whether a preempted request's in-flight output must be dropped; see
+        # KVConnectorBase_V1.requires_kv_delivery.
+        self.requires_kv_delivery = False
         kv_transfer_config = self.vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
@@ -151,6 +155,8 @@ class Scheduler(SchedulerInterface):
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
             if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
+
+            self.requires_kv_delivery = self.connector.requires_kv_delivery
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -363,10 +369,11 @@ class Scheduler(SchedulerInterface):
     ) -> int:
         """Clip a prefill chunk so it ends where Mamba state must be cached.
 
-        In "align" cache mode the SSM state is only materialized at chunk
-        ends, so chunk ends are steered onto cacheable positions: block
-        boundaries by default, plus mandatory early stops (the prompt's
-        partial-tail hash boundary, a detected shared-prefix junction).
+        In "align" cache mode reusable SSM states are materialized at block
+        boundaries, plus mandatory early stops (the prompt's partial-tail hash
+        boundary, a detected shared-prefix junction). If a block is larger
+        than the configured prefill chunk limit, intermediate chunks keep
+        private running state until they reach the next cacheable position.
         """
         start = (
             request.num_computed_tokens
@@ -375,7 +382,8 @@ class Scheduler(SchedulerInterface):
         )
         # Split only during prefill: `request.num_tokens - 1` extends this to
         # resumed requests replaying their output tokens.
-        if start >= max(request.num_prompt_tokens, request.num_tokens - 1):
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if start >= prefill_end:
             return num_new_tokens
 
         block_size = self.cache_config.block_size
@@ -387,11 +395,19 @@ class Scheduler(SchedulerInterface):
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
-        # Until `last_cache_position`, chunk ends must land on block
-        # boundaries. May yield an empty chunk (budget cannot reach the next
-        # boundary); the caller then skips the request.
-        if end < last_cache_position:
-            end = end // block_size * block_size
+        # Invariant: slot p holds the state after exactly (p + 1) * block_size
+        # tokens. State is written at chunk ends, so chunk ends must be block
+        # aligned. Exempt: the prompt's last chunk, whose slot decode advances
+        # to the boundary. A block too wide for one chunk advances sub-block
+        # and re-aligns at the next boundary.
+        if end < prefill_end:
+            max_prefill_tokens = self.max_num_scheduled_tokens
+            long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+            if long_prefill_threshold > 0:
+                max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
+            aligned_end = end // block_size * block_size
+            if aligned_end > start or block_size <= max_prefill_tokens:
+                end = aligned_end
 
         next_block_boundary = (start // block_size + 1) * block_size
         tail_boundary = (
@@ -400,12 +416,9 @@ class Scheduler(SchedulerInterface):
             else 0
         )
         stops = (
-            # Resumed mid-block (fine-grained partial hash hit): re-align to
-            # the block grid before running on, so the crossed boundary's
-            # state is materialized (unless it is past the cacheable range).
-            next_block_boundary
-            if start % block_size != 0 and next_block_boundary <= last_cache_position
-            else 0,
+            # Same invariant: a chunk starting mid-block stops at the boundary
+            # rather than running past it.
+            next_block_boundary if start % block_size != 0 else 0,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
             # Fine-grained hits: the prompt's partial-tail entry can only be
@@ -580,7 +593,16 @@ class Scheduler(SchedulerInterface):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
-                        self.running.remove(preempted_req)
+                        # Record the index of the preemption victim to
+                        # maintain accurate loop state.
+                        victim_index = self.running.index(preempted_req)
+                        del self.running[victim_index]
+                        # Decrement the loop cursor if the removed request
+                        # preceded the current iteration, preventing the
+                        # silent omission of the subsequent request.
+                        if victim_index < req_index:
+                            req_index -= 1
+
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
@@ -598,11 +620,14 @@ class Scheduler(SchedulerInterface):
                                     for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
-                            req_index -= 1
                     else:
                         preempted_req = self.running.pop()
 
-                    self._preempt_request(preempted_req, scheduled_timestamp)
+                    self._preempt_request(
+                        preempted_req,
+                        scheduled_timestamp,
+                        drop_stale_output=self.requires_kv_delivery,
+                    )
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
@@ -1265,7 +1290,8 @@ class Scheduler(SchedulerInterface):
 
         drop_stale_output: drop (rather than deliver) any in-flight output; used
         by reset_prefix_cache, whose same-step resume would otherwise deliver
-        tokens out of order.
+        tokens out of order, and for connectors with a pending KV hand-off,
+        which the preemption's block free would leave without valid KV.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
@@ -1794,6 +1820,17 @@ class Scheduler(SchedulerInterface):
                 )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
+            elif (
+                self.is_encoder_only
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                # An encoder instance runs the encoder and publishes the
+                # embeddings instead of sampling, so it stops as soon as the
+                # whole prompt is consumed. Encoder inputs are never scheduled
+                # past a multi-modal item the encoder cache could not admit, so
+                # a consumed prompt also means every item in it was encoded.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
