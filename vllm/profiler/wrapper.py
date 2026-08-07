@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -8,6 +9,8 @@ from typing import Literal
 
 import torch
 from typing_extensions import override
+
+import vllm.version
 
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
@@ -261,6 +264,20 @@ class TorchProfilerWrapper(WorkerProfiler):
     @override
     def _start(self) -> None:
         self.profiler.start()
+        # Stamp the vLLM version (setuptools_scm string embeds the git commit
+        # for source installs) into the trace metadata so the source locations
+        # in "Call stack" frames can be pinned to the exact commit that
+        # produced the trace.
+        try:
+            self.profiler.add_metadata_json(
+                "vllm_version", json.dumps(vllm.version.__version__)
+            )
+            self.profiler.add_metadata_json(
+                "vllm_version_tuple",
+                json.dumps([str(p) for p in vllm.version.__version_tuple__]),
+            )
+        except Exception as e:
+            logger.warning("Failed to add vLLM version to profiler metadata: %s", e)
 
     @override
     def _stop(self) -> None:
