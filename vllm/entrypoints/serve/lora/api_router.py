@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 
-
-import model_hosting_container_standards.sagemaker as sagemaker_standards
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
@@ -27,6 +26,17 @@ def attach_router(app: FastAPI):
     if not envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         """If LoRA dynamic loading & unloading is not enabled, do nothing."""
         return
+
+    snapshot = [
+        (h, h.level)
+        for logger in (logging.getLogger(), logging.getLogger("vllm"))
+        for h in logger.handlers
+    ]
+    import model_hosting_container_standards.sagemaker as sagemaker_standards
+
+    for handler, level in snapshot:
+        handler.setLevel(level)
+
     logger.warning(
         "LoRA dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!"
