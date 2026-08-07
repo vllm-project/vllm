@@ -693,22 +693,26 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     _unregister_process_group(pg.group_name)
 
 
-def reinit_gloo_group(
-    group_coordinator,
+def reinit_gloo_pg(
+    pg: ProcessGroup,
     master_ip: str,
     port: int,
     rank: int,
     size: int,
-) -> None:
-    """Destroy and recreate a Gloo cpu_group on *group_coordinator*."""
-    if group_coordinator.cpu_group is not None:
-        stateless_destroy_torch_distributed_process_group(group_coordinator.cpu_group)
-    group_coordinator.cpu_group = stateless_init_torch_distributed_process_group(
+    return_store: bool = False,
+):
+    """Destroy pg and create a replacement Gloo process group.
+
+    Returns the new group, or ``(group, store)`` when *return_store* is set.
+    """
+    stateless_destroy_torch_distributed_process_group(pg)
+    return stateless_init_torch_distributed_process_group(
         master_ip,
         port,
         rank,
         size,
         backend="gloo",
+        return_store=return_store,
     )
 
 

@@ -20,7 +20,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
-    reinit_gloo_group,
+    reinit_gloo_pg,
 )
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
@@ -104,9 +104,8 @@ def redistribute_expert_placement(
         if not missing_logical:
             continue
 
-        # Reusable slots grouped by owning EP rank: an over-replicated
-        # (>1) expert can spare a slot without losing coverage. Each entry
-        # is (replica_count, phys_idx).
+        # Spare slots by owning EP rank: an expert with >1 replica can give
+        # up a slot without losing coverage. Values: (replica_count, phys_idx).
         spare_slots_by_rank: dict[int, list[tuple[int, int]]] = {}
         for phys_idx, logical_id in enumerate(layer_p2l):
             if logical_id >= 0 and replica_count.get(logical_id, 0) > 1:
@@ -258,7 +257,9 @@ def reinit_eplb_gloo_groups(
         group = get_group()
         if group is None or group.cpu_group is None:
             continue
-        reinit_gloo_group(group, master_ip, port, group.rank_in_group, group.world_size)
+        group.cpu_group = reinit_gloo_pg(
+            group.cpu_group, master_ip, port, group.rank_in_group, group.world_size
+        )
         logger.info("[FT] Reinited %s Gloo group on port %d", port_key, port)
 
 
@@ -274,3 +275,19 @@ def refresh_eplb_communicator_group(model_runner: GPUModelRunner) -> None:
     for ms in eplb_state.model_states.values():
         if hasattr(ms.communicator, "_cpu_group"):
             ms.communicator._cpu_group = new_cpu_group
+
+
+def reset_eplb_async_state(model_runner: GPUModelRunner) -> None:
+    """Clear stale EPLB async state after fault or scale-down."""
+    eplb_state = getattr(model_runner, "eplb_state", None)
+    if eplb_state is None:
+        return
+
+    for ms in eplb_state.model_states.values():
+        ms.rebalanced = False
+        ms.pending_result = None
+        ms.expert_load_pass.zero_()
+        ms.expert_load_window.zero_()
+
+    eplb_state.expert_rearrangement_step = 0
+    eplb_state.expert_load_window_step = 0
