@@ -355,6 +355,23 @@ class Executor(ABC):
         if not self.sleeping_tags:
             self.is_sleeping = False
 
+    def compute_weight_checksums(self) -> dict:
+        """Return SHA-256 digests for all named parameters across workers.
+
+        Worker keys are prefixed with their tensor-parallel rank (e.g.
+        ``"0:model.layers.0.self_attn.q_proj.weight"``), so shards of the same
+        logical weight are distinct entries.  Merging is therefore a true,
+        non-destructive union: one rank's shard digest no longer overwrites
+        another rank's for the same logical weight.
+
+        For TP=1 the list has one element and we return it directly.
+        """
+        results: list[dict] = self.collective_rpc("compute_weight_checksums")
+        combined: dict = {}
+        for worker_result in results:
+            combined.update(worker_result)
+        return combined
+
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:

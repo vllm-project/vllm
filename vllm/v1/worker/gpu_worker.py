@@ -254,6 +254,44 @@ class Worker(WorkerBase):
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
 
+    def compute_weight_checksums(self) -> dict[str, str]:
+        """Return SHA-256 hex digests for every named parameter AND buffer.
+
+        Both named_parameters() and named_buffers() are included because some
+        quantization schemes (e.g. custom quantizers, LoRA) register
+        weight-bearing tensors as buffers, not as parameters.
+
+        Copies each tensor to CPU before hashing so the result is the same
+        regardless of which GPU the worker is on.  Non-persistent buffers
+        (RoPE sin/cos caches recomputed from config) are skipped because they
+        vary across restarts even when weights are unchanged.
+        """
+        import hashlib
+
+        # Skip patterns for buffers that are recomputed from configuration,
+        # not from checkpoint data.
+        _SKIP_PATTERNS = (
+            "rotary_emb.cos_cached",
+            "rotary_emb.sin_cached",
+            "rotary_emb.cos_sin_cache",
+        )
+
+        tp_rank = get_tp_group().rank_in_group
+
+        checksums: dict[str, str] = {}
+        model = self.model_runner.model
+        for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
+            if any(pat in name for pat in _SKIP_PATTERNS):
+                continue
+            if not tensor.is_floating_point() and not tensor.is_integer():
+                continue  # skip bool / object tensors that can't be byte-viewed
+            try:
+                raw = tensor.data.contiguous().cpu().view(torch.uint8).numpy().tobytes()
+            except Exception:  # pragma: no cover — exotic dtype
+                continue
+            checksums[f"{tp_rank}:{name}"] = hashlib.sha256(raw).hexdigest()
+        return checksums
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
             current_platform.is_cuda_alike()
