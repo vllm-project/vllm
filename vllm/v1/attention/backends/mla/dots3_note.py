@@ -11,11 +11,13 @@ from dataclasses import dataclass
 import torch
 
 import vllm._custom_ops as ops
-import vllm.envs as envs
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonDecodeMetadata,
     MLACommonMetadata,
+    QueryLenSupport,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
@@ -34,14 +36,135 @@ from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLABackend,
     TritonMLAImpl,
     TritonMLAMetadataBuilder,
-    _compute_num_kv_splits,
 )
-from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+
+
+@triton.jit
+def _gather_swa_kv_kernel(
+    kv_cache_ptr,
+    block_table_ptr,
+    seq_lens_ptr,
+    kv_out_ptr,
+    valid_out_ptr,
+    k_scale_ptr,
+    kv_cache_stride_block,
+    kv_cache_stride_token,
+    kv_cache_stride_dim,
+    block_table_stride_req,
+    kv_out_stride_req,
+    kv_out_stride_token,
+    kv_out_stride_dim,
+    valid_out_stride_req,
+    valid_out_stride_token,
+    GATHER_LEN: tl.constexpr,
+    KV_DIM: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    token_block_idx = tl.program_id(1)
+    dim_block_idx = tl.program_id(2)
+
+    seq_len = tl.load(seq_lens_ptr + req_idx).to(tl.int32)
+    gather_start = tl.maximum(seq_len - GATHER_LEN, 0)
+    token_offsets = token_block_idx * BLOCK_T + tl.arange(0, BLOCK_T)
+    logical_tokens = gather_start + token_offsets
+    logical_valid = (token_offsets < GATHER_LEN) & (logical_tokens < seq_len)
+
+    logical_pages = logical_tokens // PAGE_SIZE
+    page_offsets = logical_tokens - logical_pages * PAGE_SIZE
+    physical_pages = tl.load(
+        block_table_ptr + req_idx * block_table_stride_req + logical_pages,
+        mask=logical_valid,
+        other=-1,
+    ).to(tl.int64)
+    physical_valid = logical_valid & (physical_pages >= 0)
+
+    dim_offsets = dim_block_idx * BLOCK_D + tl.arange(0, BLOCK_D)
+    values = tl.load(
+        kv_cache_ptr
+        + physical_pages[:, None] * kv_cache_stride_block
+        + page_offsets[:, None] * kv_cache_stride_token
+        + dim_offsets[None, :] * kv_cache_stride_dim,
+        mask=physical_valid[:, None] & (dim_offsets[None, :] < KV_DIM),
+        other=0.0,
+    )
+    if values.dtype.is_fp8():
+        values = values.to(tl.float32) * tl.load(k_scale_ptr)
+    tl.store(
+        kv_out_ptr
+        + req_idx * kv_out_stride_req
+        + token_offsets[:, None] * kv_out_stride_token
+        + dim_offsets[None, :] * kv_out_stride_dim,
+        values,
+        mask=(token_offsets[:, None] < GATHER_LEN) & (dim_offsets[None, :] < KV_DIM),
+    )
+    tl.store(
+        valid_out_ptr
+        + req_idx * valid_out_stride_req
+        + token_offsets * valid_out_stride_token,
+        physical_valid,
+        mask=(dim_block_idx == 0) & (token_offsets < GATHER_LEN),
+    )
+
+
+@triton.jit
+def _apply_swa_score_mask_kernel(
+    scores_ptr,
+    seq_lens_ptr,
+    valid_ptr,
+    scores_stride_req,
+    scores_stride_head,
+    scores_stride_query,
+    scores_stride_token,
+    valid_stride_req,
+    valid_stride_token,
+    GATHER_LEN: tl.constexpr,
+    WINDOW_SIZE: tl.constexpr,
+    QUERY_LEN: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    query_idx = tl.program_id(2)
+
+    token_offsets = tl.arange(0, BLOCK_T)
+    seq_len = tl.load(seq_lens_ptr + req_idx).to(tl.int32)
+    gather_start = tl.maximum(seq_len - GATHER_LEN, 0)
+    kv_positions = gather_start + token_offsets
+    query_position = seq_len - QUERY_LEN + query_idx
+    page_valid = tl.load(
+        valid_ptr + req_idx * valid_stride_req + token_offsets * valid_stride_token,
+        mask=token_offsets < GATHER_LEN,
+        other=0,
+    ).to(tl.int1)
+    valid = (
+        (token_offsets < GATHER_LEN)
+        & page_valid
+        & (kv_positions <= query_position)
+        & (kv_positions >= query_position - WINDOW_SIZE + 1)
+        & (query_position >= 0)
+    )
+    tl.store(
+        scores_ptr
+        + req_idx * scores_stride_req
+        + head_idx * scores_stride_head
+        + query_idx * scores_stride_query
+        + token_offsets * scores_stride_token,
+        tl.full((BLOCK_T,), -3.4028234663852886e38, tl.float32),
+        mask=(token_offsets < GATHER_LEN) & ~valid,
+    )
+
+
+@dataclass
+class Dots3NoteDecodeMetadata(MLACommonDecodeMetadata):
+    query_len: int
 
 
 @dataclass
@@ -183,6 +306,8 @@ class Dots3NoteFlashAttnPrefillBackend(FlashAttnPrefillBackend):
 class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
     """Keep decode on MQA and route prefill/mixed batches through FA3."""
 
+    query_len_support = QueryLenSupport.UNIFORM
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         self.sliding_window = kv_cache_spec.sliding_window
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -191,20 +316,37 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
         if not is_workspace_manager_initialized():
             return
         batch = self.vllm_config.scheduler_config.max_num_seqs
-        q_num_heads = self.num_heads * self.dcp_world_size
-        max_splits = _compute_num_kv_splits(
-            self.sliding_window, current_platform.num_compute_units()
-        )
+        max_query_len = self.reorder_batch_threshold or 1
+        gather_len = (self.sliding_window + max_query_len - 1 + 7) // 8 * 8
         current_workspace_manager().get_simultaneous(
             (
                 (
                     batch,
-                    q_num_heads,
-                    max_splits,
-                    self.mla_dims.kv_lora_rank + 1,
+                    gather_len,
+                    self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
-                torch.float32,
+                self.model_config.dtype,
             ),
+            ((batch, gather_len), torch.bool),
+        )
+
+    def _build_decode(
+        self,
+        block_table_tensor: torch.Tensor,
+        seq_lens_device: torch.Tensor,
+        max_seq_len: int,
+        query_start_loc_cpu: torch.Tensor,
+        query_start_loc_device: torch.Tensor,
+        num_decode_tokens: int,
+        dcp_tot_seq_lens_device: torch.Tensor | None,
+    ) -> Dots3NoteDecodeMetadata:
+        del max_seq_len, query_start_loc_device, num_decode_tokens
+        query_len = int(query_start_loc_cpu[1] - query_start_loc_cpu[0])
+        return Dots3NoteDecodeMetadata(
+            block_table=block_table_tensor,
+            seq_lens=seq_lens_device,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            query_len=query_len,
         )
 
     def build(
@@ -324,6 +466,101 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
         )
         self.sliding_window = sliding_window
 
+    def _forward_swa_mqa(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        decode: Dots3NoteDecodeMetadata,
+        k_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, None]:
+        query_len = decode.query_len
+        num_tokens, num_heads, head_size = q.shape
+        assert num_tokens % query_len == 0
+        assert head_size == self.head_size
+        num_reqs = num_tokens // query_len
+        block_table = decode.block_table[:num_reqs]
+        seq_lens = decode.seq_lens[:num_reqs]
+        gather_len = (self.sliding_window + query_len - 1 + 7) // 8 * 8
+
+        workspace_specs = (
+            ((num_reqs, gather_len, head_size), q.dtype),
+            ((num_reqs, gather_len), torch.bool),
+        )
+        if is_workspace_manager_initialized():
+            kv_latent, kv_valid = current_workspace_manager().get_simultaneous(
+                *workspace_specs
+            )
+        else:
+            kv_latent = torch.empty(
+                workspace_specs[0][0], dtype=q.dtype, device=q.device
+            )
+            kv_valid = torch.empty(
+                workspace_specs[1][0], dtype=torch.bool, device=q.device
+            )
+
+        block_t = 8
+        block_d = 128
+        _gather_swa_kv_kernel[
+            (
+                num_reqs,
+                triton.cdiv(gather_len, block_t),
+                triton.cdiv(head_size, block_d),
+            )
+        ](
+            kv_cache,
+            block_table,
+            seq_lens,
+            kv_latent,
+            kv_valid,
+            k_scale,
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            block_table.stride(0),
+            kv_latent.stride(0),
+            kv_latent.stride(1),
+            kv_latent.stride(2),
+            kv_valid.stride(0),
+            kv_valid.stride(1),
+            GATHER_LEN=gather_len,
+            KV_DIM=head_size,
+            BLOCK_T=block_t,
+            BLOCK_D=block_d,
+            PAGE_SIZE=kv_cache.shape[1],
+            num_warps=4,
+        )
+
+        q = q.view(num_reqs, query_len, num_heads, head_size)
+        scores = torch.bmm(
+            q.reshape(num_reqs, query_len * num_heads, head_size),
+            kv_latent.transpose(1, 2),
+        ).view(num_reqs, query_len, num_heads, gather_len)
+        scores = scores.float()
+        scores.mul_(self.scale)
+        scores_by_head = scores.transpose(1, 2)
+        _apply_swa_score_mask_kernel[(num_reqs, num_heads, query_len)](
+            scores_by_head,
+            seq_lens,
+            kv_valid,
+            scores_by_head.stride(0),
+            scores_by_head.stride(1),
+            scores_by_head.stride(2),
+            scores_by_head.stride(3),
+            kv_valid.stride(0),
+            kv_valid.stride(1),
+            GATHER_LEN=gather_len,
+            WINDOW_SIZE=self.sliding_window,
+            QUERY_LEN=query_len,
+            BLOCK_T=triton.next_power_of_2(gather_len),
+            num_warps=4,
+        )
+        probs = torch.softmax(scores, dim=-1).to(q.dtype)
+        output = torch.bmm(
+            probs.reshape(num_reqs, query_len * num_heads, gather_len),
+            kv_latent[..., : self.kv_lora_rank],
+        )
+        return output.view(num_tokens, num_heads, self.kv_lora_rank), None
+
     def forward_mha(
         self,
         q: torch.Tensor,
@@ -427,57 +664,14 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
 
-        batch, q_num_heads = q.shape[:2]
-        output = torch.zeros(
-            batch,
-            q_num_heads,
-            self.kv_lora_rank,
-            dtype=q.dtype,
-            device=q.device,
-        )
-        lse = torch.zeros(batch, q_num_heads, dtype=q.dtype, device=q.device)
-        num_kv_splits = (
-            1
-            if envs.VLLM_BATCH_INVARIANT
-            else _compute_num_kv_splits(
-                min(attn_metadata.max_seq_len, self.sliding_window), self._sm_count
-            )
-        )
-        logits_shape = (
-            batch,
-            q_num_heads,
-            num_kv_splits,
-            self.kv_lora_rank + 1,
-        )
-        if is_workspace_manager_initialized():
-            (attn_logits,) = current_workspace_manager().get_simultaneous(
-                (logits_shape, torch.float32),
-            )
-        else:
-            attn_logits = torch.empty(
-                logits_shape, dtype=torch.float32, device=q.device
-            )
-
-        kv_cache = kv_c_and_k_pe_cache.unsqueeze(2)
-        kv_c_cache = kv_cache[..., : self.kv_lora_rank]
-        decode_attention_fwd(
+        decode = attn_metadata.decode
+        assert isinstance(decode, Dots3NoteDecodeMetadata)
+        return self._forward_swa_mqa(
             q,
-            kv_cache,
-            kv_c_cache,
-            output,
-            lse,
-            attn_metadata.decode.block_table,
-            attn_metadata.decode.seq_lens,
-            attn_logits,
-            num_kv_splits,
-            self.scale,
-            kv_cache.size(1),
-            k_scale=layer._k_scale,
-            v_scale=layer._k_scale,
-            is_mla=True,
-            sliding_window=self.sliding_window,
+            kv_c_and_k_pe_cache,
+            decode,
+            layer._k_scale,
         )
-        return output, lse
 
 
 class Dots3NotePackedSparseBackend(FlashAttnMLASparseBackend):
