@@ -47,6 +47,9 @@ message GenerateRequest {
   int32 priority = 12;
 
   optional string session_id = 13;
+
+  // Multimodal inputs aligned with placeholder markers in token_ids.
+  repeated MediaItem media = 14;
 }
 
 message RandomSampling {
@@ -201,4 +204,26 @@ message CandidateTokenInfo {
 // Token ids used for prompt
 message TokenIds {
   repeated uint32 ids = 1;
+}
+
+// ======================================================================================
+// Media
+// ======================================================================================
+
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  MODALITY_IMAGE = 1;
+  MODALITY_VIDEO = 2;
+  MODALITY_AUDIO = 3;
+}
+
+message MediaItem {
+  Modality modality = 1;
+  oneof source {
+    string url = 2;       // http:// or https://
+    string data_uri = 3;  // data:
+    bytes raw_bytes = 4;
+  }
+  string mime_type = 5;
+  string uuid = 6;
 }
