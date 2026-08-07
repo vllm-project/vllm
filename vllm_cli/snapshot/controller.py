@@ -446,7 +446,8 @@ class LocalSnapshotTools:
         if io_uring_pids:
             raise SnapshotCreateError(
                 "snapshot tree owns io_uring state that CRIU cannot dump; set "
-                "kernel.io_uring_disabled=2 before starting vLLM "
+                "kernel.io_uring_disabled=1 before starting an unprivileged "
+                "vLLM process, or use =2 to disable it host-wide "
                 f"(pids: {', '.join(map(str, io_uring_pids))})"
             )
         sockets = _validate_tcp_connections(

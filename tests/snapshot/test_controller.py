@@ -510,7 +510,7 @@ def test_inventory_rejects_io_uring_state_before_criu(
     monkeypatch.setattr(tools, "_cuda_pids", lambda: (101,))
     monkeypatch.setattr(tools, "_io_uring_pids", lambda _process_tree: (101,))
 
-    with pytest.raises(SnapshotCreateError, match="kernel.io_uring_disabled=2"):
+    with pytest.raises(SnapshotCreateError, match="kernel.io_uring_disabled=1"):
         tools.inventory(100)
 
 
