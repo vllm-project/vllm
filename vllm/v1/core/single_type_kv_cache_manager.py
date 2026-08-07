@@ -454,15 +454,8 @@ class SingleTypeKVCacheManager(ABC):
         if self.use_eagle:
             # Eagle proves a boundary by matching one aligned unit past it and
             # dropping back, so a boundary is only reachable when that unit
-            # exists. A prompt ending within one unit of its last aligned
-            # boundary cannot supply it -- SWA's `shift` block falls outside
-            # the prompt, and mamba has no shift at all (draft models have no
-            # recurrent layers), leaving nothing to prove it. Rewind one unit
-            # unconditionally rather than detect the case per group: it costs
-            # one unit of hit length when the unit does exist, and avoids
-            # retaining a boundary that nothing can reach. Mirrors
-            # `last_cache_position` in Scheduler._mamba_block_aligned_split,
-            # which is where these states get materialized.
+            # exists. Rewind one unit unconditionally to avoid retaining a 
+            # boundary that eagle cannot reach.
             replay_boundary = max(
                 request.num_prompt_tokens
                 // self.scheduler_block_size
