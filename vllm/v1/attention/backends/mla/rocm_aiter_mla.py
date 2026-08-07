@@ -1035,7 +1035,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         prefill_metadata = attn_metadata.prefill
         has_context = prefill_metadata.chunked_context is not None
 
-        if has_context:
+        # FP8 prefill can perturb greedy decoding for short prompts, where its
+        # speedup is negligible. Retain it for long, context-free prefill.
+        if prefill_metadata.max_query_len < 1024 or has_context:
             return super().forward_mha(
                 q,
                 kv_c_normed,
