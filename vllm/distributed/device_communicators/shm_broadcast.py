@@ -637,14 +637,14 @@ class ShmTensorArena:
             return
         self._pin_attempted = True
         try:
-            if not torch.cuda.is_available():
+            if not current_platform.is_cuda_alike():
                 return
             import ctypes
 
             buf = self.shared_memory.buf
             assert buf is not None
             ptr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
-            ret = torch.cuda.cudart().cudaHostRegister(ptr, self.total_bytes, 0)
+            ret = current_platform.cudart().cudaHostRegister(ptr, self.total_bytes, 0)
             self._pinned = int(ret) == 0
             logger.info(
                 "ShmTensorArena: cudaHostRegister(%d MB) -> %s",
@@ -681,7 +681,7 @@ class ShmTensorArena:
         which runs after the previous step's H2D was enqueued on that same
         stream, so the event is ordered strictly after that H2D."""
         try:
-            event = torch.cuda.Event()
+            event = current_platform.Event()
             event.record()
             return event
         except Exception:
