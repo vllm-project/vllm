@@ -145,32 +145,45 @@ class TestBackpressure:
     def _backdate_held_jobs(self, age_s: float):
         """Set submit_time on all in-flight store jobs so they appear
         to have taken ``age_s`` seconds when completed."""
+        self.manager._processed_jobs_this_step = False
         now = time.monotonic()
         for job_id, meta in self.manager._transfer_jobs.items():
             if not meta.is_promotion and meta.submit_time > 0:
                 meta.submit_time = now - age_s
 
     def test_ema_updates_on_store_completion(self, setup):
-        keys = to_keys(range(2))
-        self._store_blocks(keys)
-
-        # Jobs are held — no completion yet.
-        self._simulate_on_schedule_end()
-        bp = self.manager._bp_detectors[self.tier]
-        assert bp.store_latency_ema == 0.0
-
-        # Backdate and release: simulate a fast store.
+        bp = self.tier.bp_detector
         fast_latency = 0.01
+
+        # During warmup, EMA stays at 0.
+        for i in range(_BP_WARMUP - 1):
+            keys = to_keys([300 + i])
+            self._store_blocks(keys)
+            self._backdate_held_jobs(fast_latency)
+            self.tier.release_jobs()
+            self._simulate_on_schedule_end()
+            assert bp.store_latency_ema == 0.0
+
+        # Final warmup sample seeds EMA with the mean.
+        keys = to_keys([400])
+        self._store_blocks(keys)
         self._backdate_held_jobs(fast_latency)
         self.tier.release_jobs()
         self._simulate_on_schedule_end()
+        assert bp.store_latency_ema == pytest.approx(fast_latency, abs=0.01)
 
-        assert bp.store_latency_ema == pytest.approx(
-            _BP_EMA_ALPHA * fast_latency, abs=0.01
-        )
+        # After warmup, EMA updates normally.
+        new_latency = 0.05
+        keys = to_keys([401])
+        self._store_blocks(keys)
+        self._backdate_held_jobs(new_latency)
+        self.tier.release_jobs()
+        self._simulate_on_schedule_end()
+        expected = _BP_EMA_ALPHA * new_latency + (1 - _BP_EMA_ALPHA) * fast_latency
+        assert bp.store_latency_ema == pytest.approx(expected, abs=0.01)
 
     def test_pressure_activates_above_high_water(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
 
         # Warm up the detector with fast completions first.
         for i in range(_BP_WARMUP):
@@ -193,7 +206,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is True
 
     def test_pressure_clears_below_low_water(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
         bp.store_latency_ema = _BP_HIGH_WATER_S * 2
         bp._under_pressure = True
         bp._completions = _BP_WARMUP
@@ -215,7 +228,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is False
 
     def test_hysteresis_prevents_oscillation(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
         bp._completions = _BP_WARMUP
 
         # Set EMA between low and high water marks.
@@ -246,7 +259,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is True
 
     def test_stores_skipped_under_pressure(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
         bp._under_pressure = True
         initial_blocks = self.tier.get_num_blocks()
 
@@ -259,7 +272,7 @@ class TestBackpressure:
         assert self.tier.get_num_blocks() == initial_blocks
 
     def test_stores_resume_after_pressure_clears(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
 
         # Start under pressure — stores skipped.
         bp._under_pressure = True
@@ -274,7 +287,7 @@ class TestBackpressure:
         assert all(k in self.tier.blocks for k in keys2)
 
     def test_dropped_store_count_tracked(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
         bp._under_pressure = True
         policy = self.manager._bp_policy
         assert policy.pop_stores_dropped(self.tier) == (0, 0)
@@ -288,7 +301,7 @@ class TestBackpressure:
         assert policy._blocks_dropped.get(self.tier, 0) == 3
 
     def test_metrics_reported_via_get_stats(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
         bp._under_pressure = True
         bp.store_latency_ema = 2.5
         policy = self.manager._bp_policy
@@ -302,16 +315,16 @@ class TestBackpressure:
         ema_key = TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA
         stores_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
         blocks_key = TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED
-        assert reduced[f"{ema_key}:('0_delayed',)"] == pytest.approx(2.5)
-        assert reduced[f"{stores_key}:('0_delayed',)"] == 5
-        assert reduced[f"{blocks_key}:('0_delayed',)"] == 12
+        assert reduced[f"{ema_key}:('1:delayed',)"] == pytest.approx(2.5)
+        assert reduced[f"{stores_key}:('1:delayed',)"] == 5
+        assert reduced[f"{blocks_key}:('1:delayed',)"] == 12
 
         # Dropped counts reset after get_stats.
         assert policy._stores_dropped.get(self.tier, 0) == 0
         assert policy._blocks_dropped.get(self.tier, 0) == 0
 
     def test_reset_cache_clears_backpressure(self, setup):
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
         bp.store_latency_ema = 5.0
         bp._under_pressure = True
 
@@ -335,7 +348,7 @@ class TestBackpressure:
         self.manager.on_new_request(ctx)
 
         # Activate pressure.
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
         bp._under_pressure = True
         initial_blocks = self.tier.get_num_blocks()
 
@@ -355,7 +368,7 @@ class TestBackpressure:
         for b in blocks:
             self.tier.blocks[b] = True
 
-        bp = self.manager._bp_detectors[self.tier]
+        bp = self.tier.bp_detector
         bp._under_pressure = True
 
         # Lookups should still initiate promotion.

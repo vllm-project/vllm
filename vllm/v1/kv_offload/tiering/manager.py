@@ -21,7 +21,7 @@ Key Design Principles:
 """
 
 import time
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -47,10 +47,8 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.backpressure import (
-    BackpressureDetector,
     BackpressurePolicy,
     DropStorePolicy,
-    EMABackpressureDetector,
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
@@ -185,7 +183,6 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
-        detector_factory: Callable[[], BackpressureDetector] | None = None,
         policy: BackpressurePolicy | None = None,
     ):
         """
@@ -195,7 +192,6 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
-            detector_factory: Factory for per-tier backpressure detectors.
             policy: Backpressure remediation policy.
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
@@ -235,13 +231,6 @@ class TieringOffloadingManager(OffloadingManager):
             tier: i for i, tier in enumerate(self.secondary_tiers)
         }
 
-        self._bp_detectors: dict[SecondaryTierManager, BackpressureDetector] = {}
-        for tier in self.secondary_tiers:
-            bp_config = tier.backpressure_config
-            if detector_factory is not None:
-                self._bp_detectors[tier] = detector_factory()
-            elif bp_config is not None:
-                self._bp_detectors[tier] = EMABackpressureDetector(**bp_config)
         self._bp_policy: BackpressurePolicy = policy or DropStorePolicy()
 
         # Buffers manager-level observations (e.g. lookup delay) between
@@ -335,7 +324,7 @@ class TieringOffloadingManager(OffloadingManager):
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
     ) -> bool:
-        detector = self._bp_detectors.get(tier)
+        detector = tier.bp_detector
         if detector is None:
             return True
         if not self._bp_policy.should_store(tier, detector):
@@ -346,7 +335,7 @@ class TieringOffloadingManager(OffloadingManager):
     def _update_backpressure(
         self, tier: SecondaryTierManager, job_metadata: JobMetadata
     ) -> None:
-        detector = self._bp_detectors.get(tier)
+        detector = tier.bp_detector
         if detector is None:
             return
         was_under_pressure = detector.is_under_pressure()
@@ -739,7 +728,6 @@ class TieringOffloadingManager(OffloadingManager):
             block_ids=primary_blocks_spec.block_ids,
             is_promotion=False,
             req_context=req_context,
-            submit_time=time.monotonic(),
         )
         self._transfer_jobs[job_id] = job_metadata
         return job_metadata
@@ -906,8 +894,9 @@ class TieringOffloadingManager(OffloadingManager):
             del self._req_state[req_id]
         self._processed_jobs_this_step = False
 
-        for detector in self._bp_detectors.values():
-            detector.reset()
+        for tier in self.secondary_tiers:
+            if tier.bp_detector is not None:
+                tier.bp_detector.reset()
         self._bp_policy.reset()
 
     @override
@@ -926,7 +915,10 @@ class TieringOffloadingManager(OffloadingManager):
             else:
                 stats.aggregate(tier_stats)
 
-        for tier, detector in self._bp_detectors.items():
+        for tier in self.secondary_tiers:
+            detector = tier.bp_detector
+            if detector is None:
+                continue
             label = (f"{self._tier_index[tier] + 1}:{tier.tier_type}",)
             ema = detector.stats.get("store_latency_ema")
             if ema is not None:

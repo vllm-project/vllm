@@ -24,8 +24,6 @@ class BackpressureDetector(ABC):
 
     def update(self, submit_time: float) -> None:
         """Update pressure state from a completed store job's submit_time."""
-        if submit_time <= 0:
-            return
         elapsed = time.monotonic() - submit_time
         self.on_store_completed(elapsed)
 
@@ -66,12 +64,17 @@ class EMABackpressureDetector(BackpressureDetector):
         self._under_pressure: bool = False
         # Number of store completions observed (for warmup gating).
         self._completions: int = 0
+        # Samples collected during warmup; used to seed the EMA.
+        self._warmup_samples: list[float] = []
 
     def on_store_completed(self, elapsed_s: float) -> None:
-        self._ema = self._alpha * elapsed_s + (1 - self._alpha) * self._ema
         self._completions += 1
-        if self._completions < self._warmup_completions:
+        if self._completions <= self._warmup_completions:
+            self._warmup_samples.append(elapsed_s)
+            if self._completions == self._warmup_completions:
+                self._ema = sum(self._warmup_samples) / len(self._warmup_samples)
             return
+        self._ema = self._alpha * elapsed_s + (1 - self._alpha) * self._ema
         if self._ema > self._high:
             self._under_pressure = True
         elif self._ema < self._low:
@@ -84,6 +87,7 @@ class EMABackpressureDetector(BackpressureDetector):
         self._ema = 0.0
         self._under_pressure = False
         self._completions = 0
+        self._warmup_samples.clear()
 
     @property
     def store_latency_ema(self) -> float:

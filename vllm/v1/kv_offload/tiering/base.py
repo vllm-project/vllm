@@ -4,9 +4,10 @@
 Abstract interfaces and data types for the secondary tiering layer.
 """
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -21,6 +22,10 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+)
+from vllm.v1.kv_offload.tiering.backpressure import (
+    BackpressureDetector,
+    EMABackpressureDetector,
 )
 
 if TYPE_CHECKING:
@@ -55,7 +60,7 @@ class JobMetadata:
     block_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
-    submit_time: float = 0.0
+    submit_time: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -144,6 +149,13 @@ class SecondaryTierManager(ABC):
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self.backpressure_config: dict[str, Any] | None = backpressure
+        self._bp_detector: BackpressureDetector | None = None
+        if backpressure is not None:
+            self._bp_detector = EMABackpressureDetector(**backpressure)
+
+    @property
+    def bp_detector(self) -> BackpressureDetector | None:
+        return self._bp_detector
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
