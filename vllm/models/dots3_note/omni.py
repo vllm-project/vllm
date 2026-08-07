@@ -1,0 +1,230 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""vLLM composition layer for Dots3 NOTE image and audio encoders."""
+
+from collections.abc import Iterable
+
+import torch
+from torch import nn
+
+from vllm.config import VllmConfig
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    IntermediateTensors,
+    WeightsMapper,
+    maybe_prefix,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
+from .audio import OmniAudioConfig, OmniAudioModel
+from .model import Dot3NoteForCausalLM as Dot3NoteLanguageModelForCausalLM
+from .processor import (
+    AUDIO_END,
+    AUDIO_PAD,
+    AUDIO_START,
+    IMAGE_END,
+    IMAGE_PAD,
+    IMAGE_START,
+    DotsNoteOmniDummyInputsBuilder,
+    DotsNoteOmniMultiModalProcessor,
+    DotsNoteOmniProcessingInfo,
+    load_note_subconfig,
+)
+from .vision import DotsMoEVitConfig, DotsMoEVitModel
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    DotsNoteOmniMultiModalProcessor,
+    info=DotsNoteOmniProcessingInfo,
+    dummy_inputs=DotsNoteOmniDummyInputsBuilder,
+)
+class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+    """NOTE language model with checkpoint-local ``new_ve`` and ``new_ae`` towers."""
+
+    supports_encoder_tp_data = True
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+            "mtp.": "language_model.mtp.",
+        }
+    )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return f"{IMAGE_START}{IMAGE_PAD}{IMAGE_END}"
+        if modality.startswith("audio"):
+            return f"{AUDIO_START}{AUDIO_PAD}{AUDIO_END}"
+        raise ValueError(f"Unsupported modality: {modality}")
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+        model_config = vllm_config.model_config
+        self.config = model_config.hf_config
+        self.quant_config = vllm_config.quant_config
+        self.multimodal_config = model_config.multimodal_config
+
+        vision_config_dict = load_note_subconfig(
+            model_config.model,
+            model_config.revision,
+            "new_ve",
+        )
+        audio_config_dict = load_note_subconfig(
+            model_config.model,
+            model_config.revision,
+            "new_ae",
+        )
+        image_enabled = (
+            vision_config_dict is not None
+            and self.multimodal_config.get_limit_per_prompt("image") > 0
+        )
+        audio_enabled = (
+            audio_config_dict is not None
+            and self.multimodal_config.get_limit_per_prompt("audio") > 0
+        )
+
+        self.secondary_weights: list[DefaultModelLoader.Source] = []
+        with self._mark_tower_model(vllm_config, {"image", "audio"}):
+            self.visual = (
+                DotsMoEVitModel(DotsMoEVitConfig(**vision_config_dict))
+                if image_enabled
+                else None
+            )
+            self.audio_tower = (
+                OmniAudioModel(OmniAudioConfig(**audio_config_dict))
+                if audio_enabled
+                else None
+            )
+            # The native encoder service casts each complete tower before
+            # loading its checkpoint.  This also converts explicitly-created
+            # floating buffers (for example RoPE tables and router state),
+            # which merely constructing under vLLM's default dtype does not.
+            if self.visual is not None:
+                self.visual.to(dtype=model_config.dtype)
+            if self.audio_tower is not None:
+                self.audio_tower.to(dtype=model_config.dtype)
+        if image_enabled:
+            self.secondary_weights.append(
+                DefaultModelLoader.Source(
+                    model_or_path=model_config.model,
+                    revision=model_config.revision,
+                    subfolder="new_ve",
+                    prefix="visual.",
+                )
+            )
+
+        if audio_enabled:
+            self.secondary_weights.append(
+                DefaultModelLoader.Source(
+                    model_or_path=model_config.model,
+                    revision=model_config.revision,
+                    subfolder="new_ae",
+                    prefix="audio_tower.",
+                )
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Dot3NoteLanguageModelForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _process_image_input(
+        self,
+        pixel_values: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        if self.visual is None:
+            return ()
+        image_embeds = self.visual(pixel_values, image_grid_thw)
+        merge_size = self.visual.spatial_merge_size
+        sizes = (image_grid_thw.prod(-1) // merge_size**2).tolist()
+        return image_embeds.split(sizes)
+
+    def _process_audio_input(
+        self,
+        audio_values: torch.Tensor,
+        audio_lengths: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        if self.audio_tower is None:
+            return ()
+        if audio_values.dtype != torch.int32:
+            raise TypeError(
+                "NOTE audio values must carry float32 waveform bits as int32, "
+                f"got {audio_values.dtype}"
+            )
+        waveforms = audio_values.contiguous().view(torch.float32)
+        audio_embeds, item_lengths = self.audio_tower(waveforms, audio_lengths)
+        return audio_embeds.split(item_lengths)
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        multimodal_embeddings: list[torch.Tensor] = []
+        handled: set[str] = set()
+        for input_key in kwargs:
+            if input_key == "pixel_values" and "image" not in handled:
+                pixel_values = kwargs.get("pixel_values")
+                image_grid_thw = kwargs.get("image_grid_thw")
+                if isinstance(pixel_values, torch.Tensor) and isinstance(
+                    image_grid_thw, torch.Tensor
+                ):
+                    multimodal_embeddings.extend(
+                        self._process_image_input(pixel_values, image_grid_thw)
+                    )
+                handled.add("image")
+            elif input_key == "audio_values" and "audio" not in handled:
+                audio_values = kwargs.get("audio_values")
+                audio_lengths = kwargs.get("audio_lengths")
+                if isinstance(audio_values, torch.Tensor) and isinstance(
+                    audio_lengths, torch.Tensor
+                ):
+                    multimodal_embeddings.extend(
+                        self._process_audio_input(audio_values, audio_lengths)
+                    )
+                handled.add("audio")
+        return tuple(multimodal_embeddings)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self.language_model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+        )
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        return self.language_model.compute_logits(hidden_states)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        return AutoWeightsLoader(self).load_weights(
+            weights,
+            mapper=self.hf_to_vllm_mapper,
+        )
+
+    def process_weights_after_loading(self) -> None:
+        if self.visual is not None:
+            self.visual.process_weights_after_loading()
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            tower_model=["visual", "audio_tower"],
+        )
