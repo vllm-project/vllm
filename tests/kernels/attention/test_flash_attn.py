@@ -281,4 +281,4 @@ def test_fa4_fp8_per_head_descales() -> None:
         "hqk,khd->qhd", torch.softmax(scores.float(), dim=-1), value_broadcast
     )
 
-    torch.testing.assert_close(output, reference, atol=0.2, rtol=0.2)
+    torch.testing.assert_close(output.float(), reference, atol=0.2, rtol=0.2)
