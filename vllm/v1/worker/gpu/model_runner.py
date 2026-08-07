@@ -133,7 +133,6 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     maybe_build_ubatch_runner,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.ubatch_utils import get_num_ubatches
 from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 
 logger = init_logger(__name__)
@@ -268,7 +267,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
-            num_ubatches=get_num_ubatches(self.parallel_config),
         )
         if self.use_pp:
             self.pp_handler = PPHandler(
@@ -527,7 +525,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_state,
             self.attn_groups,
             self.kv_cache_config,
-            self.input_buffers,
+            self.max_num_reqs,
             self.decode_query_len,
         )
         initialize_mamba_ssu_backend(

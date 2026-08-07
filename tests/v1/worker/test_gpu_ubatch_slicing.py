@@ -46,8 +46,18 @@ def _make_buffers() -> InputBuffers:
         max_num_reqs=MAX_NUM_REQS,
         max_num_tokens=MAX_NUM_TOKENS,
         device=torch.device("cpu"),
-        num_ubatches=2,
     )
+
+
+def _make_ubatch_buffers(num_ubatches: int = 2) -> list[tuple[torch.Tensor, ...]]:
+    """The per-microbatch (query_start_loc, seq_lens) buffers UBatchRunner owns."""
+    return [
+        (
+            torch.zeros(MAX_NUM_REQS + 1, dtype=torch.int32),
+            torch.zeros(MAX_NUM_REQS, dtype=torch.int32),
+        )
+        for _ in range(num_ubatches)
+    ]
 
 
 def _make_input_batch(
@@ -135,10 +145,11 @@ def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
     v1_ubatches = split_attn_metadata(ubatch_slices, v1_metadata)
 
     buffers = _make_buffers()
+    ubatch_buffers = _make_ubatch_buffers()
     input_batch = _make_input_batch(query_lens, seq_lens, buffers)
 
     for i, (ubatch_slice, v1_ubatch) in enumerate(zip(ubatch_slices, v1_ubatches)):
-        v2_ubatch = slice_input_batch(input_batch, ubatch_slice, i, buffers)
+        v2_ubatch = slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
 
         assert v2_ubatch.num_reqs == v1_ubatch.num_reqs
         assert v2_ubatch.num_tokens == v1_ubatch.num_actual_tokens
@@ -170,14 +181,15 @@ def test_microbatches_do_not_share_buffers():
     assert ubatch_slices is not None
 
     buffers = _make_buffers()
+    ubatch_buffers = _make_ubatch_buffers()
     input_batch = _make_input_batch(query_lens, seq_lens, buffers)
 
-    first = slice_input_batch(input_batch, ubatch_slices[0], 0, buffers)
+    first = slice_input_batch(input_batch, ubatch_slices[0], *ubatch_buffers[0])
     first_query_start_loc = first.query_start_loc.clone()
     first_seq_lens = first.seq_lens.clone()
 
     # Slicing the second microbatch must not disturb the first.
-    slice_input_batch(input_batch, ubatch_slices[1], 1, buffers)
+    slice_input_batch(input_batch, ubatch_slices[1], *ubatch_buffers[1])
 
     torch.testing.assert_close(first.query_start_loc, first_query_start_loc)
     torch.testing.assert_close(first.seq_lens, first_seq_lens)
@@ -207,7 +219,9 @@ def test_trailing_microbatch_absorbs_cudagraph_padding():
         num_tokens_padded=num_tokens_padded,
     )
 
-    last = slice_input_batch(input_batch, ubatch_slices_padded[-1], 1, buffers)
+    last = slice_input_batch(
+        input_batch, ubatch_slices_padded[-1], *_make_ubatch_buffers()[1]
+    )
 
     # Two real decodes plus two padded rows.
     assert last.num_reqs == 2
@@ -291,7 +305,7 @@ def _make_execution_runner(vllm_config: VllmConfig) -> UBatchRunner:
         model_state=cast(ModelState, None),
         attn_groups=[],
         kv_cache_config=cast(KVCacheConfig, None),
-        input_buffers=_make_buffers(),
+        max_num_reqs=MAX_NUM_REQS,
         decode_query_len=1,
     )
 
@@ -306,6 +320,23 @@ def _make_ubatch_state(
         ],
         num_tokens_after_padding=sum(s.num_tokens for s in ubatch_slices),
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_runner_allocates_one_buffer_pair_per_microbatch():
+    """All microbatches are live at once, so none may share rebase buffers."""
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(
+            enable_dbo=True, all2all_backend="deepep_low_latency"
+        ),
+    )
+    runner = _make_execution_runner(vllm_config)
+
+    for buffers in (runner.ubatch_query_start_loc, runner.ubatch_seq_lens):
+        assert len(buffers) == runner.num_ubatches
+        storages = {b.untyped_storage().data_ptr() for b in buffers}
+        assert len(storages) == runner.num_ubatches
 
 
 class _YieldingModel(torch.nn.Module):

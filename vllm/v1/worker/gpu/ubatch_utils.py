@@ -24,7 +24,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -50,8 +50,8 @@ class UBatchState(NamedTuple):
 def slice_input_batch(
     input_batch: InputBatch,
     ubatch_slice: UBatchSlice,
-    ubatch_idx: int,
-    input_buffers: InputBuffers,
+    query_start_loc_buf: torch.Tensor,
+    seq_lens_buf: torch.Tensor,
 ) -> InputBatch:
     """Build the sub-`InputBatch` a single microbatch runs on.
 
@@ -61,11 +61,11 @@ def slice_input_batch(
     one owns.
 
     Everything except `query_start_loc` and `seq_lens` is a view of the buffers
-    the full batch already uses, so slicing costs no allocation. Those two need
-    to be rebased onto the microbatch's token range, so they are written into
-    the per-microbatch buffers of `input_buffers`; all writes are plain tensor
-    ops on persistent memory, which keeps the result usable under CUDA graph
-    capture and replay.
+    the full batch already uses, so slicing costs no allocation. Those two have
+    to be rebased onto the microbatch's token range, so the caller passes in
+    buffers to write them to -- one pair per microbatch, since all microbatches
+    are live at once. The writes are plain tensor ops on caller-owned memory, so
+    the result stays usable under CUDA graph capture and replay.
 
     The sub-batch describes the forward pass only (attention metadata and model
     inputs). Sampling runs once over the merged batch, so `logits_indices`,
@@ -73,10 +73,6 @@ def slice_input_batch(
     must not be read off a sub-batch.
     """
     assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
-    assert ubatch_idx < len(input_buffers.ubatch_query_start_loc), (
-        f"No microbatch buffers for ubatch {ubatch_idx}; InputBuffers was "
-        f"created with num_ubatches={input_buffers.num_ubatches}"
-    )
 
     req_start = ubatch_slice.request_slice.start
     req_stop = ubatch_slice.request_slice.stop
@@ -92,7 +88,7 @@ def slice_input_batch(
 
     query_start_loc = _slice_query_start_loc(
         input_batch.query_start_loc,
-        input_buffers.ubatch_query_start_loc[ubatch_idx][: num_reqs_padded + 1],
+        query_start_loc_buf[: num_reqs_padded + 1],
         req_start,
         req_stop,
         tok_start,
@@ -106,7 +102,7 @@ def slice_input_batch(
 
     seq_lens = _slice_seq_lens(
         input_batch.seq_lens,
-        input_buffers.ubatch_seq_lens[ubatch_idx][:num_reqs_padded],
+        seq_lens_buf[:num_reqs_padded],
         input_batch.query_start_loc,
         query_start_loc,
         req_start,
@@ -265,7 +261,7 @@ class UBatchRunner:
         model_state: ModelState,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        input_buffers: InputBuffers,
+        max_num_reqs: int,
         decode_query_len: int,
     ):
         self.vllm_config = vllm_config
@@ -275,7 +271,19 @@ class UBatchRunner:
         self.model_state = model_state
         self.attn_groups = attn_groups
         self.kv_cache_config = kv_cache_config
-        self.input_buffers = input_buffers
+        # `query_start_loc` and `seq_lens` are the only model inputs a
+        # microbatch cannot take as a view of the full batch's buffers -- both
+        # get rebased onto the microbatch's own token range. All microbatches
+        # are live at once, so each needs its own, and allocating them up front
+        # keeps their addresses stable across CUDA graph replays.
+        self.ubatch_query_start_loc = [
+            torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
+            for _ in range(self.num_ubatches)
+        ]
+        self.ubatch_seq_lens = [
+            torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+            for _ in range(self.num_ubatches)
+        ]
         self.decode_query_len = decode_query_len
         self.comm_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
@@ -319,7 +327,12 @@ class UBatchRunner:
         slot_mappings_by_layer = []
         is_padding = []
         for i, ubatch_slice in enumerate(ubatch_slices):
-            ubatch = slice_input_batch(input_batch, ubatch_slice, i, self.input_buffers)
+            ubatch = slice_input_batch(
+                input_batch,
+                ubatch_slice,
+                self.ubatch_query_start_loc[i],
+                self.ubatch_seq_lens[i],
+            )
             ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
             ubatch_block_tables = tuple(
                 block_table[ubatch_slice.request_slice] for block_table in block_tables
@@ -475,7 +488,7 @@ def maybe_build_ubatch_runner(
     model_state: ModelState,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    input_buffers: InputBuffers,
+    max_num_reqs: int,
     decode_query_len: int,
 ) -> UBatchRunner | None:
     """Build the microbatch runner, or None when DBO is not in use.
@@ -497,6 +510,6 @@ def maybe_build_ubatch_runner(
         model_state,
         attn_groups,
         kv_cache_config,
-        input_buffers,
+        max_num_reqs,
         decode_query_len,
     )
