@@ -18,6 +18,7 @@ use crate::routes::openai::utils::types::{
 };
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
+    resolve_session_id,
 };
 
 /// Lowered chat request plus the public response metadata carried by every SSE
@@ -123,6 +124,11 @@ pub(super) fn prepare_chat_request(
         request.response_format.as_ref(),
         &request.structured_outputs,
     )?;
+    let session_id = resolve_session_id(
+        &ctx,
+        request.session_id.as_deref(),
+        request.vllm_xargs.as_ref(),
+    );
 
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
@@ -172,11 +178,12 @@ pub(super) fn prepare_chat_request(
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
-        priority: request.priority.unwrap_or(0),
+        priority: ctx.priority.or(request.priority).unwrap_or(0),
         documents: request.documents,
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
+        session_id,
         lora_request: lora_resolution.lora_request.clone(),
     };
 
@@ -1239,6 +1246,66 @@ mod tests {
         )
         .expect("request is valid");
         assert_eq!(prepared.chat_request.data_parallel_rank, Some(7));
+    }
+
+    #[test]
+    fn prepare_chat_request_threads_header_session_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-ID", "header-session".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.session_id.as_deref(),
+            Some("header-session")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_header_priority_overrides_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Vllm-Priority", "-5".parse().unwrap());
+        let request = ChatCompletionRequest {
+            priority: Some(10),
+            ..base_request()
+        };
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.priority, -5);
+    }
+
+    #[test]
+    fn prepare_chat_request_ignores_correlation_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Correlation-ID", "correlation-header".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.session_id, None);
+    }
+
+    #[test]
+    fn prepare_chat_request_ignores_empty_session_header_without_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Session-ID", "".parse().unwrap());
+        headers.insert("X-Correlation-ID", "correlation-header".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.session_id, None);
     }
 
     #[test]
