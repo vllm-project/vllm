@@ -381,7 +381,7 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
             device=self.device,
         )
         metadata.prefill.chunked_context = None
-        metadata.prefill.sliding_window = sliding_metadata
+        metadata.prefill.sliding_window = sliding_metadata  # type: ignore[attr-defined]
         if metadata.num_decodes > 0 and metadata.num_prefills > 0:
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             for chunk in sliding_metadata.chunks:
@@ -674,30 +674,64 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
         )
 
 
-class Dots3NotePackedSparseBackend(FlashAttnMLASparseBackend):
-    """NOTE DSA backend that accepts block-padded BF16 cache pages."""
+class Dots3NotePaddedSparseBackend(FlashAttnMLASparseBackend):
+    """NOTE DSA backend for cache rows padded to the SWA latent width."""
 
     @staticmethod
     def get_name() -> str:
-        return "DOTS3_NOTE_PACKED_MLA_SPARSE"
+        return "DOTS3_NOTE_PADDED_MLA_SPARSE"
 
     @staticmethod
-    def get_impl_cls() -> type["Dots3NotePackedSparseImpl"]:
-        return Dots3NotePackedSparseImpl
+    def get_impl_cls() -> type["Dots3NotePaddedSparseImpl"]:
+        return Dots3NotePaddedSparseImpl
 
 
-class Dots3NotePackedSparseImpl(FlashAttnMLASparseImpl):
-    """Pack selected KV rows before reusing the existing FA3 sparse kernel."""
+class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
+    """Read top-k KV directly from uniformly padded cache rows."""
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        assert self.topk_indices_buffer is not None
-        num_rows, topk = self.topk_indices_buffer.shape
-        self.packed_block_table = torch.arange(
-            num_rows * topk,
-            dtype=torch.int32,
-            device=self.topk_indices_buffer.device,
-        ).view(num_rows, topk)
+    def _logical_cache(self, kv_cache: torch.Tensor) -> torch.Tensor:
+        assert kv_cache.shape[-1] >= self.head_size
+        return kv_cache[..., : self.head_size]
+
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        super().do_kv_cache_update(
+            kv_c_normed,
+            k_pe,
+            self._logical_cache(kv_cache),
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+        )
+
+    def forward_mha(  # type: ignore[override]
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashAttnMLASparseMetadata,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+    ) -> None:
+        super().forward_mha(
+            q,
+            kv_c_normed,
+            k_pe,
+            self._logical_cache(kv_c_and_k_pe_cache),
+            attn_metadata,
+            k_scale,
+            output,
+            output_scale,
+        )
 
     def forward_mqa(
         self,
@@ -708,14 +742,14 @@ class Dots3NotePackedSparseImpl(FlashAttnMLASparseImpl):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if not isinstance(q, tuple):
             raise NotImplementedError(
-                "Dots3NotePackedSparseImpl expects split (q_nope, q_rope) input."
+                "Dots3NotePaddedSparseImpl expects split (q_nope, q_rope) input."
             )
         q_nope, q_rope = q
         num_actual_toks = q_rope.shape[0]
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
-        global_indices, valid_counts = triton_convert_req_index_to_global_index(
+        topk_indices, valid_counts = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
             topk_indices,
@@ -723,14 +757,34 @@ class Dots3NotePackedSparseImpl(FlashAttnMLASparseImpl):
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
-        kv_cache = kv_c_and_k_pe_cache.view(
-            -1, attn_metadata.block_size, self.head_size
+        physical_head_size = kv_c_and_k_pe_cache.shape[-1]
+        block_stride, token_stride, head_stride = kv_c_and_k_pe_cache.stride()
+        if (
+            token_stride != physical_head_size
+            or head_stride != 1
+            or block_stride % physical_head_size != 0
+        ):
+            raise RuntimeError(
+                "Dots3 NOTE padded DSA cache must contain contiguous token rows; "
+                f"got shape={tuple(kv_c_and_k_pe_cache.shape)} and "
+                f"stride={kv_c_and_k_pe_cache.stride()}"
+            )
+        block_row_stride = block_stride // physical_head_size
+        block_indices = torch.div(
+            topk_indices,
+            attn_metadata.block_size,
+            rounding_mode="floor",
         )
-        safe_indices = global_indices.clamp_min(0).to(torch.int64)
-        packed_kv = kv_cache[
-            safe_indices // attn_metadata.block_size,
-            safe_indices % attn_metadata.block_size,
-        ].view(-1, self.head_size)
+        block_indices.clamp_min_(0).mul_(block_row_stride - attn_metadata.block_size)
+        topk_indices.add_(block_indices)
+
+        num_cache_rows = (
+            kv_c_and_k_pe_cache.shape[0] - 1
+        ) * block_row_stride + attn_metadata.block_size
+        kv_cache = kv_c_and_k_pe_cache.as_strided(
+            (num_cache_rows, physical_head_size),
+            (physical_head_size, 1),
+        )
         cu_seqlens_q = torch.arange(
             num_actual_toks + 1,
             dtype=torch.int32,
@@ -738,14 +792,14 @@ class Dots3NotePackedSparseImpl(FlashAttnMLASparseImpl):
         )
         output = flash_attn_varlen_func(
             q=q_rope,
-            k=packed_kv[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1),
-            v=packed_kv[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1),
+            k=kv_cache[:, self.kv_lora_rank : self.head_size].unsqueeze(1).unsqueeze(1),
+            v=kv_cache[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1),
             q_v=q_nope,
             max_seqlen_q=1,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_k=topk_indices.shape[1],
             seqused_k=valid_counts,
-            block_table=self.packed_block_table[:num_actual_toks],
+            block_table=topk_indices,
             softmax_scale=self.scale,
             causal=True,
             fa_version=3,

@@ -4,6 +4,7 @@
 
 import copy
 from collections.abc import Iterable, Iterator
+from dataclasses import replace
 
 import torch
 from torch import nn
@@ -52,10 +53,10 @@ from vllm.models.deepseek_v32.nvidia.model import (
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.dots3_note import (
     Dots3NoteFlashAttnPrefillBackend,
-    Dots3NotePackedSparseBackend,
-    Dots3NotePackedSparseImpl,
+    Dots3NotePaddedSparseBackend,
     Dots3NoteTritonMLABackend,
 )
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 
 def _padded_mlp_size(
@@ -119,6 +120,7 @@ class Dot3NoteMoE(DeepseekV2MoE):
         gather_output = self.is_sequence_parallel and not already_sequence_parallel
         if gather_output:
             hidden_states = sequence_parallel_chunk(hidden_states)
+        assert self.shared_experts is not None
         output = super().forward(
             hidden_states, already_sequence_parallel=True
         ) + self.shared_experts(hidden_states)
@@ -198,6 +200,21 @@ def _forward_note_mla(
     return attention.o_proj(attn_out)[0]
 
 
+class Dots3NotePaddedMLAAttention(MLAAttention):
+    """MLA layer whose physical cache rows match NOTE's SWA rows."""
+
+    def __init__(self, *args, physical_head_size: int, **kwargs) -> None:
+        kwargs["attn_backend"] = Dots3NotePaddedSparseBackend
+        super().__init__(*args, **kwargs)
+        assert physical_head_size >= self.head_size
+        self.physical_head_size = physical_head_size
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MLAAttentionSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        assert isinstance(spec, MLAAttentionSpec)
+        return replace(spec, head_size=self.physical_head_size)
+
+
 class Dot3NoteFullAttention(DeepseekV2MLAAttention):
     """NOTE DSA on the existing DeepSeek sparse MLA attention."""
 
@@ -237,27 +254,32 @@ class Dot3NoteFullAttention(DeepseekV2MLAAttention):
         )
         wrapper = self._modules.pop("mla_attn")
         inner_attention = wrapper.mla_attn
-        inner_attention.attn_backend = Dots3NotePackedSparseBackend
-        inner_attention.impl = Dots3NotePackedSparseImpl(
+        vllm_config.compilation_config.static_forward_context.pop(
+            inner_attention.layer_name
+        )
+        prefill_backend_cls = (
+            type(inner_attention.prefill_backend)
+            if inner_attention.prefill_backend is not None
+            else None
+        )
+        wrapper.mla_attn = Dots3NotePaddedMLAAttention(
             num_heads=inner_attention.num_heads,
-            head_size=inner_attention.head_size,
             scale=inner_attention.scale,
-            num_kv_heads=inner_attention.num_kv_heads,
-            alibi_slopes=None,
-            sliding_window=None,
-            kv_cache_dtype=inner_attention.kv_cache_dtype,
-            logits_soft_cap=None,
-            attn_type="decoder",
-            kv_sharing_target_layer_name=None,
             q_lora_rank=inner_attention.q_lora_rank,
             kv_lora_rank=inner_attention.kv_lora_rank,
             qk_nope_head_dim=inner_attention.qk_nope_head_dim,
             qk_rope_head_dim=inner_attention.qk_rope_head_dim,
-            qk_head_dim=inner_attention.qk_head_dim,
             v_head_dim=inner_attention.v_head_dim,
             kv_b_proj=inner_attention.kv_b_proj,
+            dcp_q_replicate=inner_attention.dcp_q_replicate,
+            cache_config=vllm_config.cache_config,
+            quant_config=quant_config,
+            prefix=inner_attention.layer_name,
+            use_sparse=True,
             indexer=wrapper.indexer,
             topk_indices_buffer=topk_indices_buffer,
+            prefill_backend_cls=prefill_backend_cls,
+            physical_head_size=(config.swa_kv_lora_rank + config.swa_qk_rope_head_dim),
         )
         gate_type = config.attention_gate_type
         gate_cls = ReplicatedLinear if gate_type == "headwise" else ColumnParallelLinear
@@ -595,16 +617,6 @@ class Dot3NoteModel(DeepseekV32Model):
         pad_shape[dim] = pad
         return torch.cat([loaded_weight, loaded_weight.new_zeros(pad_shape)], dim=dim)
 
-    @staticmethod
-    def _to_deepseek_indexer_layout(weight: torch.Tensor) -> torch.Tensor:
-        """Swap NOTE [NoPE, RoPE] rows to the reused [RoPE, NoPE] layout."""
-        head_dim = 128
-        half_dim = head_dim // 2
-        rows = weight.reshape(-1, head_dim, *weight.shape[1:])
-        return torch.cat([rows[:, half_dim:], rows[:, :half_dim]], dim=1).reshape_as(
-            weight
-        )
-
     def _adapt_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterator[tuple[str, torch.Tensor]]:
@@ -621,15 +633,6 @@ class Dot3NoteModel(DeepseekV32Model):
                         and self.config.layer_types[layer_idx] == "sliding_attention"
                     ):
                         continue
-
-                if name.endswith(
-                    (
-                        ".indexer.wq_b.weight",
-                        ".indexer.k_norm.weight",
-                        ".indexer.k_norm.bias",
-                    )
-                ):
-                    weight = self._to_deepseek_indexer_layout(weight)
 
                 projection = next(
                     (
@@ -663,12 +666,8 @@ class Dot3NoteModel(DeepseekV32Model):
                         group_shape=group_shape,
                         out_dtype=torch.bfloat16,
                     )
-                    if projection == "wk":
-                        dequantized = self._to_deepseek_indexer_layout(dequantized)
                     yield f"{layer_prefix}.{projection}.weight", dequantized
                     continue
-                if name.endswith(".indexer.wk.weight"):
-                    weight = self._to_deepseek_indexer_layout(weight)
             yield name, self._pad_dense_mlp_weight(name, weight)
         if pending_indexer_fp8:
             missing = ", ".join(

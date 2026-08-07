@@ -22,6 +22,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .audio import OmniAudioConfig, OmniAudioModel
 from .model import Dot3NoteForCausalLM as Dot3NoteLanguageModelForCausalLM
@@ -72,6 +73,16 @@ class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.multimodal_config = model_config.multimodal_config
+        assert self.multimodal_config is not None
+
+        added_tokens = get_hf_file_to_dict(
+            "added_tokens.json",
+            model_config.model,
+            model_config.revision,
+        )
+        if added_tokens is None or IMAGE_PAD not in added_tokens:
+            raise ValueError("NOTE tokenizer is missing the image padding token")
+        self.config.image_token_index = int(added_tokens[IMAGE_PAD])
 
         vision_config_dict = load_note_subconfig(
             model_config.model,
@@ -94,16 +105,18 @@ class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.secondary_weights: list[DefaultModelLoader.Source] = []
         with self._mark_tower_model(vllm_config, {"image", "audio"}):
-            self.visual = (
-                DotsMoEVitModel(DotsMoEVitConfig(**vision_config_dict))
-                if image_enabled
-                else None
-            )
-            self.audio_tower = (
-                OmniAudioModel(OmniAudioConfig(**audio_config_dict))
-                if audio_enabled
-                else None
-            )
+            self.visual: DotsMoEVitModel | None
+            if image_enabled:
+                assert vision_config_dict is not None
+                self.visual = DotsMoEVitModel(DotsMoEVitConfig(**vision_config_dict))
+            else:
+                self.visual = None
+            self.audio_tower: OmniAudioModel | None
+            if audio_enabled:
+                assert audio_config_dict is not None
+                self.audio_tower = OmniAudioModel(OmniAudioConfig(**audio_config_dict))
+            else:
+                self.audio_tower = None
             # The native encoder service casts each complete tower before
             # loading its checkpoint.  This also converts explicitly-created
             # floating buffers (for example RoPE tables and router state),
