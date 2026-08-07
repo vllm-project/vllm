@@ -1695,27 +1695,27 @@ def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
         pytest.param(
             "draft_model",
             _draft_config("/train/checkpoints/6", speculators_model_type="dflash"),
-            ("dflash", False),
+            "dflash",
             id="declared-dflash-at-neutral-path",
         ),
         pytest.param(
             "draft_model",
             _draft_config("/train/checkpoints/6", speculators_model_type="peagle"),
-            ("eagle3", True),
-            id="declared-peagle-implies-parallel-drafting",
+            "eagle3",
+            id="declared-peagle-maps-to-eagle3",
         ),
         # A checkpoint that declares itself outranks an unrelated algorithm
         # name in whatever directory it happens to be stored under.
         pytest.param(
             "draft_model",
             _draft_config("/bench/eagle3_vs_mtp/ckpt", model_type="deepseek_mtp"),
-            ("mtp", False),
+            "mtp",
             id="declared-mtp-beats-eagle3-in-path",
         ),
         pytest.param(
             "draft_model",
             _draft_config("/bench/eagle3_vs_medusa/ckpt", model_type="medusa"),
-            ("medusa", False),
+            "medusa",
             id="declared-medusa-beats-eagle3-in-path",
         ),
         pytest.param(
@@ -1723,27 +1723,27 @@ def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
             _draft_config(
                 "/bench/dflash_vs_dspark/ckpt", architectures=["Qwen3DSparkModel"]
             ),
-            ("dspark", False),
+            "dspark",
             id="declared-dspark-arch-beats-dflash-in-path",
         ),
         # Checkpoints that declare nothing still fall back to the path name.
         pytest.param(
             "draft_model",
             _draft_config("yuhuili/EAGLE-LLaMA3-Instruct-8B"),
-            ("eagle", False),
+            "eagle",
             id="undeclared-falls-back-to-path-eagle",
         ),
         pytest.param(
             "draft_model",
             _draft_config("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
-            ("eagle3", False),
+            "eagle3",
             id="undeclared-falls-back-to-path-eagle3",
         ),
         # An explicit method is never second-guessed.
         pytest.param(
             "eagle3",
             _draft_config("/train/checkpoints/6", speculators_model_type="dflash"),
-            ("eagle3", False),
+            "eagle3",
             id="explicit-method-wins",
         ),
     ],
@@ -1761,6 +1761,28 @@ def test_speculative_method_resolution(method, draft_model_config, expected):
 def test_unresolvable_speculative_method_raises():
     with pytest.raises(NotImplementedError, match="Unsupported speculative method"):
         SpeculativeConfig._resolve_method("medusa", _draft_config("/some/ckpt"), 5)
+
+
+@pytest.mark.parametrize(
+    "hf_attrs, method, expected",
+    [
+        # peagle runs as eagle3 but drafts in parallel, so the declared
+        # algorithm has to be consulted rather than the resolved method.
+        pytest.param({"speculators_model_type": "peagle"}, "eagle3", True, id="peagle"),
+        pytest.param(
+            {"speculators_model_type": "eagle3"}, "eagle3", False, id="eagle3"
+        ),
+        pytest.param({"speculators_model_type": "dflash"}, "dflash", True, id="dflash"),
+        # Checkpoints that declare nothing fall back to the resolved method.
+        pytest.param({}, "dflash", True, id="undeclared-dflash"),
+        pytest.param({}, "dspark", True, id="undeclared-dspark"),
+        pytest.param({}, "eagle3", False, id="undeclared-eagle3"),
+        pytest.param({}, "draft_model", False, id="undeclared-draft-model"),
+    ],
+)
+def test_parallel_drafting_follows_declared_algorithm(hf_attrs, method, expected):
+    hf_config = SimpleNamespace(model_type="llama", **hf_attrs)
+    assert SpeculativeConfig._uses_parallel_drafting(hf_config, method) is expected
 
 
 def test_draft_sample_method_probabilistic_is_accepted():

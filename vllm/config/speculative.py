@@ -79,6 +79,13 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
+# Algorithms that draft every speculative token in one forward pass. This is a
+# property of the algorithm, so it is keyed by the algorithm the checkpoint
+# declares (`speculators_model_type`) and falls back to the resolved method for
+# checkpoints that declare nothing. Note `peagle` (Parallel Eagle) is listed
+# rather than `eagle3`: it runs as the eagle3 method but drafts in parallel.
+PARALLEL_DRAFTING_ALGORITHMS = frozenset({"peagle", "dflash", "dspark"})
+
 
 @config
 class SpeculativeConfig:
@@ -703,11 +710,23 @@ class SpeculativeConfig:
         return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
     @staticmethod
+    def _uses_parallel_drafting(
+        hf_config: PretrainedConfig, method: SpeculativeMethod
+    ) -> bool:
+        """Whether the draft checkpoint drafts all speculative tokens at once.
+
+        Keyed on the algorithm the checkpoint declares, which still reads
+        `peagle` after `peagle` has been mapped onto the `eagle3` method.
+        """
+        algorithm = getattr(hf_config, "speculators_model_type", method)
+        return algorithm in PARALLEL_DRAFTING_ALGORITHMS
+
+    @staticmethod
     def _resolve_method(
         method: SpeculativeMethod | None,
         draft_model_config: ModelConfig,
         num_speculative_tokens: int,
-    ) -> tuple[SpeculativeMethod, bool]:
+    ) -> SpeculativeMethod:
         """Resolve the speculative method to use for a draft checkpoint.
 
         Evidence is consulted in decreasing order of reliability: a method the
@@ -723,32 +742,32 @@ class SpeculativeConfig:
             num_speculative_tokens: Draft length, only used to warn about MTP.
 
         Returns:
-            The resolved method, and whether it implies parallel drafting.
+            The resolved method.
 
         Raises:
             NotImplementedError: If the method cannot be resolved.
         """
         if method in ("eagle", "eagle3", "dflash", "dspark"):
-            return method, False
+            return method
 
         hf_config = draft_model_config.hf_config
 
         # Speculators-format checkpoints declare their algorithm in config.json.
         speculators_model_type = getattr(hf_config, "speculators_model_type", None)
         if speculators_model_type is not None:
+            # Mirrors SpeculatorsConfig.build_vllm_speculative_config.
             if speculators_model_type == "peagle":
-                # Mirrors SpeculatorsConfig.build_vllm_speculative_config.
-                return "eagle3", True
-            return speculators_model_type, False
+                return "eagle3"
+            return speculators_model_type
         if (
             "Qwen3DSparkModel" in draft_model_config.architectures
             or "Gemma4DSparkModel" in draft_model_config.architectures
         ):
-            return "dspark", False
+            return "dspark"
         if hf_config.model_type == "medusa":
-            return "medusa", False
+            return "medusa"
         if hf_config.model_type == "mlp_speculator":
-            return "mlp_speculator", False
+            return "mlp_speculator"
         if hf_config.model_type in get_args(MTPModelTypes):
             if num_speculative_tokens > 1 and hf_config.model_type not in (
                 "step3p5_mtp",
@@ -759,7 +778,7 @@ class SpeculativeConfig:
                     "multiple times of forward on same MTP layer"
                     ",which may result in lower acceptance rate"
                 )
-            return "mtp", False
+            return "mtp"
 
         # Checkpoints that declare nothing, recognized by name. examples:
         # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -768,16 +787,16 @@ class SpeculativeConfig:
         # deepseek-ai/dspark_qwen3_8b_block7
         model = draft_model_config.model.lower()
         if "eagle-" in model:
-            return "eagle", False
+            return "eagle"
         if "eagle3" in model:
-            return "eagle3", False
+            return "eagle3"
         if "dflash" in model:
-            return "dflash", False
+            return "dflash"
         if "dspark" in model:
-            return "dspark", False
+            return "dspark"
 
         if method == "draft_model":
-            return method, False
+            return method
         raise NotImplementedError(f"Unsupported speculative method: '{method}'")
 
     def __post_init__(self):
@@ -982,12 +1001,22 @@ class SpeculativeConfig:
                         draft_hf.vocab_size = target_vocab
                         draft_hf.truncated_vocab_size = target_vocab
 
-                self.method, parallel_drafting = SpeculativeConfig._resolve_method(
+                detected_method = SpeculativeConfig._resolve_method(
                     self.method,
                     self.draft_model_config,
                     self.num_speculative_tokens,
                 )
-                if parallel_drafting:
+                if detected_method != self.method:
+                    logger.info(
+                        "Auto-detected speculative method '%s' for draft model "
+                        "'%s'. Pass `method` in --speculative-config to override.",
+                        detected_method,
+                        self.draft_model_config.model,
+                    )
+                self.method = detected_method
+                if SpeculativeConfig._uses_parallel_drafting(
+                    self.draft_model_config.hf_config, self.method
+                ):
                     self.parallel_drafting = True
 
                 if self.method in ("eagle", "eagle3"):
@@ -1049,9 +1078,6 @@ class SpeculativeConfig:
                         and getattr(hf, "block_size", None) is not None
                     ):
                         hf.n_predict = hf.block_size
-
-                if self.method in ("dflash", "dspark"):
-                    self.parallel_drafting = True
 
                 if (
                     self.method == "dspark"
