@@ -515,7 +515,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 sampling_params=sampling_params,
                 context=context,
                 lora_request=lora_request,
-                priority=request.priority,
+                priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs
