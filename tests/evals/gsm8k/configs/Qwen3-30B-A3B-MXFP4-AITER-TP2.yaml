@@ -1,5 +1,5 @@
-# NOTE: this model was produced from Qwen/Qwen3.5-35B-A3B-FP8
-model_name: "amd/Qwen3.5-35B-A3B-MXFP4"
+# Note: this model was produced from Qwen3-30B-A3B (BF16)
+model_name: "amd-quark/Qwen3-30B-A3B-MXFP4"
 accuracy_threshold: 0.89
 tolerance: 0.03
 num_questions: 1319
