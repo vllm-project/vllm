@@ -141,7 +141,7 @@ def test_online_prequantized_compatibility(
     }
 
     if raises_conflict:
-        with pytest.raises(ValueError, match="checkpoint-quantized layer"):
+        with pytest.raises(ValueError, match="pre-quantized layer"):
             ColumnParallelLinear(**layer_kwargs)
     else:
         layer = ColumnParallelLinear(**layer_kwargs)
@@ -189,11 +189,104 @@ def test_activation_only_override_keeps_checkpoint_config(monkeypatch) -> None:
     monkeypatch.setattr(weight_utils, "get_quantization_config", lambda _: quant_cls)
 
     result = weight_utils.get_quant_config(
-        model_config, cast(LoadConfig, SimpleNamespace())
+        model_config, cast(LoadConfig, SimpleNamespace(download_dir=None))
     )
 
     assert result is checkpoint_config
     assert result.online_quant_config is None
+
+
+def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -> None:
+    """An online overlay must not bypass checkpoint sidecar config loading."""
+    checkpoint_config = SimpleNamespace(online_quant_config=None)
+
+    def set_online_quantization(args) -> None:
+        checkpoint_config.online_quant_config = args
+
+    checkpoint_config.set_online_quantization = set_online_quantization
+    loaded_configs: list[dict] = []
+
+    class SidecarQuantizationConfig:
+        @staticmethod
+        def get_config_filenames() -> list[str]:
+            return ["quantize_config.json"]
+
+        @staticmethod
+        def from_config(config: dict):
+            loaded_configs.append(config)
+            return checkpoint_config
+
+    (tmp_path / "quantize_config.json").write_text("{}")
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            quantization="awq",
+            quantization_config=QuantizationConfigArgs(linear="mxfp8"),
+            hf_config=SimpleNamespace(
+                quantization_config=None,
+                compression_config=None,
+                text_config=None,
+            ),
+            hf_overrides={},
+            model=str(tmp_path),
+            revision=None,
+        ),
+    )
+    monkeypatch.setattr(
+        weight_utils,
+        "get_quantization_config",
+        lambda _: SidecarQuantizationConfig,
+    )
+
+    result = weight_utils.get_quant_config(
+        model_config, cast(LoadConfig, SimpleNamespace(download_dir=None))
+    )
+
+    assert result is checkpoint_config
+    assert loaded_configs == [{}]
+    assert result.online_quant_config is model_config.quantization_config
+
+
+def test_checkpoint_quantization_rejects_online_shorthand() -> None:
+    """A checkpoint quant method cannot be replaced by an online shorthand."""
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            quantization="fp8_per_channel",
+            model_arch_config=SimpleNamespace(
+                quantization_config={"quant_method": "mxfp4"}
+            ),
+            hf_config=SimpleNamespace(model_type=None),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not match the quantization"):
+        ModelConfig._verify_quantization(model_config)
+
+
+def test_modelopt_mxfp8_checkpoint_rejects_mxfp8_shorthand() -> None:
+    """An online MXFP8 shorthand cannot replace a ModelOpt MXFP8 checkpoint."""
+
+    ######################
+    # TODO We need to clarify whether `vllm serve MiniMax-M3 --quantization mxfp8`
+    # is meant to be accepted at the moment.
+    ######################
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            quantization="mxfp8",
+            model_arch_config=SimpleNamespace(
+                quantization_config={
+                    "quant_method": "modelopt",
+                    "quantization": {"quant_algo": "MXFP8"},
+                }
+            ),
+            hf_config=SimpleNamespace(model_type=None),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not match the quantization"):
+        ModelConfig._verify_quantization(model_config)
 
 
 @pytest.mark.skipif(

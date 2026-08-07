@@ -351,12 +351,17 @@ def get_quant_config(
             )
 
     # Online quantization doesn't read from checkpoint configs - it quantizes
-    # fp16/bf16 weights on the fly during loading.
-    if model_config.quantization_config is not None:
+    # fp16/bf16 weights on the fly during loading. Checkpoint quantizers must
+    # continue below to load their sidecar config before applying an overlay.
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+
+    if (
+        quant_cls is OnlineQuantizationConfig
+        and model_config.quantization_config is not None
+    ):
         from vllm.config.quantization import QuantizationConfigArgs
-        from vllm.model_executor.layers.quantization.online.base import (
-            OnlineQuantizationConfig,
-        )
 
         assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
         return OnlineQuantizationConfig(args=model_config.quantization_config)

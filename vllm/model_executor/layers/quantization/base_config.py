@@ -233,7 +233,7 @@ class QuantizationConfig(ABC):
         )
         if checkpoint_is_quantized and online_is_quantized:
             raise ValueError(
-                "Cannot apply requested online quantization {online_method} to "
+                f"Cannot apply requested online quantization {online_method} to "
                 f"pre-quantized layer {prefix}: {base_quant_method} was selected "
                 "by the checkpoint quantization config."
             )
