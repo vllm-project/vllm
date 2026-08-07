@@ -247,10 +247,7 @@ class LoRAModelManager:
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
         limit_per_prompt = max(mm_budget.mm_max_items_per_prompt.values())
-        max_lora_tokens = min(
-            mm_budget.get_encoder_budget(),
-            max_num_batched_tokens,
-        )
+        max_lora_tokens = mm_budget.get_encoder_budget()
         lora_token_counts_by_modality = [
             self.model.get_mm_lora_token_counts(
                 modality=modality,
