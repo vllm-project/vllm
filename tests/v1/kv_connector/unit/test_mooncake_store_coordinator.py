@@ -3,6 +3,7 @@
 
 from math import lcm
 
+import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
@@ -545,13 +546,13 @@ def _mamba(block_size=16):
 def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     """Full+Mamba with eagle must not overrun the attention-verified hit.
 
-    ``MambaManager`` ignores ``drop_eagle_block`` (a Mamba block at position
+    ``MambaManager`` cannot honor ``drop_eagle_block`` (a Mamba block at position
     p IS the recurrent state after (p + 1) * block_size tokens; there is
     nothing to recompute), so granting the Mamba group the one-block eagle
     peek margin lets it match one block PAST the eagle-pruned full-attention
     hit, and adopting that length resumes the recurrent state ahead of the
-    verified token prefix (#43559). Gating the margin on ``not
-    isinstance(spec, MambaSpec)`` pins the hit to the attention-verified 48.
+    verified token prefix (#43559). Gating the margin on the manager capability
+    pins the hit to the attention-verified 48.
     """
     groups = [
         KVCacheGroupSpec(["L0"], _full(16)),
@@ -567,6 +568,24 @@ def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     # FullAttn matches 4 blocks, eagle pops 1 -> 48 verified tokens. The
     # Mamba group must serve its state@48 snapshot, not peek to state@64.
     assert hit == 48
+
+
+def test_eagle_fallback_excludes_manager_without_cache_peek_support():
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _mamba(16)),
+    ]
+
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+
+    assert coord.eagle_group_ids == {0}
+
+
+def test_explicit_eagle_group_without_cache_peek_support_fails_closed():
+    groups = [KVCacheGroupSpec(["L0"], _mamba(16), is_eagle_group=True)]
+
+    with pytest.raises(ValueError, match=r"not supported for KV cache groups \[0\]"):
+        _make_coord(groups, hash_block_size=16, use_eagle=True)
 
 
 def test_eagle_flag_propagates_to_all_merged_swa_groups():

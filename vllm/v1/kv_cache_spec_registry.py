@@ -9,6 +9,7 @@ subclasses without modifying vLLM core code. Out-of-tree platforms can define
 custom specs and managers by using the @register_kv_cache_spec decorator.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -18,7 +19,7 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-    from vllm.v1.kv_cache_interface import KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,39 @@ class KVCacheSpecRegistry:
                 return _REGISTRY_KVCACHESPEC_LIST[base].manager_class
 
         return None
+
+    @classmethod
+    def get_eagle_cache_peek_group_ids(
+        cls,
+        kv_cache_groups: Sequence["KVCacheGroupSpec"],
+        use_eagle: bool,
+    ) -> set[int]:
+        """Resolve EAGLE groups without granting unsupported cache peeks."""
+        group_ids = {
+            i for i, group in enumerate(kv_cache_groups) if group.is_eagle_group
+        }
+        if not use_eagle:
+            return group_ids
+
+        unsupported_group_ids = []
+        for i in group_ids:
+            manager_cls = cls.get_manager_class(kv_cache_groups[i].kv_cache_spec)
+            if manager_cls is not None and not manager_cls.supports_eagle_cache_peek:
+                unsupported_group_ids.append(i)
+        if unsupported_group_ids:
+            raise ValueError(
+                "EAGLE/MTP cache peek is not supported for KV cache groups "
+                f"{unsupported_group_ids}"
+            )
+        if group_ids:
+            return group_ids
+
+        capable_group_ids = set()
+        for i, group in enumerate(kv_cache_groups):
+            manager_cls = cls.get_manager_class(group.kv_cache_spec)
+            if manager_cls is not None and manager_cls.supports_eagle_cache_peek:
+                capable_group_ids.add(i)
+        return capable_group_ids
 
     @classmethod
     def get_uniform_type_base_spec(
