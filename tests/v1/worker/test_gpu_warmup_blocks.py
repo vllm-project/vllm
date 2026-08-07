@@ -77,6 +77,7 @@ def _make_runner(
         num_speculative_steps=num_spec_steps,
         decode_query_len=num_spec_steps + 1,
         is_pooling_model=False,
+        is_encoder_only=False,
         is_encoder_decoder=False,
         is_last_pp_rank=True,
         max_num_reqs=4,
