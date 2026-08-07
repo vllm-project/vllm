@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the in-process engine-notification buffer.
+"""Tests for the engine-notification buffer and cross-rank gather.
 
-Hits the real `EngineCore` buffer helpers without a model: they only touch
-`_pending_notifications`, so a bare instance is enough.
+Bare `EngineCore` instances: the helpers only touch `_pending_notifications`,
+so no model is needed.
 """
 
 import queue
@@ -23,7 +23,7 @@ from vllm.v1.notifications import (
 
 @pytest.fixture(autouse=True)
 def _drain_worker_buffer():
-    """The worker buffer is process-local; don't leak events between tests."""
+    """Process-local buffer; don't leak events between tests."""
     take_worker_notifications()
     yield
     take_worker_notifications()
@@ -36,11 +36,7 @@ def _bare_engine_core() -> EngineCore:
 
 
 def test_notifications_accumulate_additively():
-    """Everything queued before a flush comes out, in order.
-
-    The additive contract: no coalescing (e.g. latest-per-type), or counter
-    increments would get lost.
-    """
+    """Additive: no coalescing, or counter increments would get lost."""
     engine_core = _bare_engine_core()
 
     first = CustomNotification(key="my_plugin", payload={"n": 1})
@@ -103,18 +99,17 @@ def test_worker_publish_take_roundtrip():
     publish_worker_notification(event)
 
     assert take_worker_notifications() == [event]
-    # Second take drained; None rather than [] keeps the empty step allocation-free.
+    # None rather than [], so the quiet path allocates nothing.
     assert take_worker_notifications() is None
 
 
 def test_empty_drain_allocates_nothing():
-    """The per-step common case: no producer installed, no list built."""
+    """No producer installed builds no list."""
     assert take_worker_notifications() is None
 
 
 def test_worker_notifications_survive_until_the_first_drain():
-    """Producers that only run during model load publish before any step, so
-    the buffer must hold rather than require a step to be in flight."""
+    """Load-time producers publish before any gather runs."""
     first = CustomNotification(key="my_plugin", payload={"n": 1})
     second = CustomNotification(key="my_plugin", payload={"n": 2})
     publish_worker_notification(first)
@@ -124,7 +119,7 @@ def test_worker_notifications_survive_until_the_first_drain():
 
 
 def _gathering_engine_core(per_rank) -> EngineCore:
-    """An EngineCore whose executor answers take_notifications with per_rank."""
+    """EngineCore whose executor answers take_notifications with per_rank."""
     engine_core = _bare_engine_core()
     executor = SimpleNamespace(collective_rpc=lambda method: per_rank)
     engine_core.model_executor = executor
@@ -132,11 +127,7 @@ def _gathering_engine_core(per_rank) -> EngineCore:
 
 
 def test_gather_keeps_every_rank():
-    """The point of gathering: a rank-0-only reply would drop the rest.
-
-    Per-rank producers (e.g. a weight loader reporting each TP rank's transfer)
-    are the reason this cannot collapse to outputs[0].
-    """
+    """A rank-0-only reply would drop per-rank producers entirely."""
     rank0 = CustomNotification(key="my_plugin", payload={"rank": 0})
     rank1 = CustomNotification(key="my_plugin", payload={"rank": 1})
     rank2 = CustomNotification(key="my_plugin", payload={"rank": 2})
@@ -160,7 +151,7 @@ def test_gather_publishes_nothing_when_all_ranks_are_quiet():
 
 
 def test_gather_tolerates_ranks_that_cannot_report():
-    """Workers without the method reply None; that must not break the merge."""
+    """A worker without the method replies None."""
     event = CustomNotification(key="my_plugin", payload={"rank": 1})
     engine_core = _gathering_engine_core([None, [event]])
 
@@ -187,11 +178,10 @@ def test_gather_never_raises_into_the_engine():
 
 
 def test_engine_core_outputs_round_trip_over_the_wire():
-    """EngineCoreOutputs is array_like, so the appended field is positional.
+    """array_like, so the field is positional and always present.
 
-    omit_defaults does not trim trailing fields for array_like structs, so
-    every message carries the extra element once this field exists; non-Python
-    frontends decode by position and reject a longer array than they know.
+    omit_defaults does not trim trailing fields, and non-Python frontends
+    reject an array longer than they know.
     """
     event = CustomNotification(key="my_plugin", payload={"count": 5})
     encoded = msgspec.msgpack.encode(
@@ -209,8 +199,7 @@ def test_engine_core_outputs_round_trip_over_the_wire():
 
 
 def test_proc_broadcasts_to_every_frontend():
-    """One-shot events must reach all API servers, not just one client's
-    step outputs, or every other frontend stays permanently stale."""
+    """Every API server gets the event, not just one."""
     proc = EngineCoreProc.__new__(EngineCoreProc)
     proc.addresses = SimpleNamespace(outputs=["a", "b", "c"])
     proc.output_queue = queue.Queue()
