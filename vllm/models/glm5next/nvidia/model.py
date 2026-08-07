@@ -35,9 +35,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.mhc import (
+    MHCFusedPostPreOp,
     MHCPostOp,
     MHCPreOp,
-    MHCFusedPostPreOp,
     hc_contract,
     hc_expand,
 )
@@ -173,9 +173,7 @@ class Glm5NextMoE(nn.Module):
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            params_dtype=self.router_dtype,
             out_dtype=self.router_dtype,
-            force_fp32_compute=self.router_dtype == torch.float32,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
@@ -431,14 +429,22 @@ class Glm5NextDecoderLayer(nn.Module):
                 x = hc_expand(x, self.n)
             residual = x
             post, comb, x = self.hc_pre(
-                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base,
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
                 norm_weight=self.input_layernorm.weight.data,
                 norm_eps=self.input_layernorm.variance_epsilon,
             )
         else:
             residual, post, comb, x = self.hc_fused_post_pre(
-                x, residual, post, comb,
-                self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base,
+                x,
+                residual,
+                post,
+                comb,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
                 norm_weight=self.input_layernorm.weight.data,
                 norm_eps=self.input_layernorm.variance_epsilon,
             )
@@ -450,8 +456,13 @@ class Glm5NextDecoderLayer(nn.Module):
 
         # Fuse post-attn hc_post + pre-FFN hc_pre (+ RMSNorm) into one kernel.
         residual, post, comb, x = self.hc_fused_post_pre(
-            x, residual, post, comb,
-            self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base,
+            x,
+            residual,
+            post,
+            comb,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
             norm_weight=self.post_attention_layernorm.weight.data,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
         )
