@@ -430,15 +430,22 @@ def test_draft_model_enables_async_scheduling_by_default():
     assert cfg.scheduler_config.async_scheduling is True
 
 
-def test_dflash_max_num_new_slots_for_drafting():
+@pytest.mark.parametrize(
+    ("method", "expected_slots"),
+    [
+        ("eagle3", 7),
+        ("dflash", 8),
+    ],
+)
+def test_parallel_drafting_max_num_new_slots(method, expected_slots):
     speculative_config = SpeculativeConfig(
         model="ngram",
         num_speculative_tokens=8,
     )
-    speculative_config.method = "dflash"
+    speculative_config.method = method
     speculative_config.parallel_drafting = True
 
-    assert speculative_config.max_num_new_slots_for_drafting == 8
+    assert speculative_config.max_num_new_slots_for_drafting == expected_slots
 
 
 @dataclass
