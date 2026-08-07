@@ -166,6 +166,11 @@ class CpuPlatform(Platform):
         scheduler_config.async_scheduling = False
 
         parallel_config = vllm_config.parallel_config
+        if parallel_config.nnodes > 1 and (
+            parallel_config.data_parallel_size > 1
+            or parallel_config.enable_expert_parallel
+        ):
+            raise NotImplementedError("CPU DP/EP is single-node only.")
         if (
             os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", "1") == "1"
             and parallel_config.distributed_executor_backend == "uni"
