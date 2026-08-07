@@ -13,6 +13,41 @@ from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
+@pytest.mark.parametrize(
+    ("image_mean", "image_std", "rescale_factor", "is_identity"),
+    [
+        ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0, True),
+        ([0.5, 0.5, 0.5], [0.25, 0.25, 0.25], 1 / 255, False),
+    ],
+)
+def test_fused_input_norm_initialization_on_device(
+    monkeypatch: pytest.MonkeyPatch,
+    image_mean: list[float],
+    image_std: list[float],
+    rescale_factor: float,
+    is_identity: bool,
+):
+    """Identity detection must not synchronize the accelerator."""
+    original_allclose = torch.allclose
+
+    def cpu_allclose(input: torch.Tensor, other: torch.Tensor, *args, **kwargs):
+        assert input.device.type == "cpu"
+        assert other.device.type == "cpu"
+        return original_allclose(input, other, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "allclose", cpu_allclose)
+    with torch.device("cuda"):
+        input_norm = FusedInputNorm(image_mean, image_std, rescale_factor)
+
+    assert input_norm.is_identity is is_identity
+    if is_identity:
+        assert input_norm.weight is None
+        assert input_norm.bias is None
+    else:
+        assert input_norm.weight.device.type == "cuda"
+        assert input_norm.bias.device.type == "cuda"
+
+
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"),
