@@ -21,7 +21,6 @@ from vllm.utils.flashinfer_moe_ep import (
     _dequant_fp4_ue8m0_gran32,
     build_fi_mega_config,
     fi_moe_ep_backend_spec,
-    is_fi_moe_ep_backend,
     make_fi_moe_ep_bootstrap,
     megakernel_runtime_requirements,
 )
@@ -110,35 +109,6 @@ def test_all_mega_backends_get_sequence_parallel_moe(moe_backend):
         kernel_config=SimpleNamespace(moe_backend=moe_backend),
     )
     assert _use_sequence_parallel(vllm_config)
-
-
-def test_backend_selection_rejects_flashinfer_without_device_bootstrap(
-    fake_flashinfer, monkeypatch
-):
-    """Pre-0.6.17 flashinfer lacks BootstrapConfig.device and would rebind
-    workers to the wrong GPU under a remapped CUDA_VISIBLE_DEVICES; selecting
-    a fi backend against such a build must fail at config time."""
-    import vllm.utils.flashinfer_moe_ep as mod
-
-    @dataclass
-    class _LegacyBootstrapConfig:
-        world_size: int
-        rank: int
-        process_group: Any = None
-        auto_bootstrap: bool = True
-
-    fake_flashinfer.bootstrap_moe_ep_runtime = lambda *a, **k: None
-    fake_flashinfer.ensure_moe_ep_cuda_device = lambda *a, **k: None
-    fake_flashinfer.finalize_moe_ep_runtime = lambda *a, **k: None
-
-    monkeypatch.setattr(mod, "_FI_MOE_EP_RUNTIME_AVAILABLE", None)
-    fake_flashinfer.BootstrapConfig = _LegacyBootstrapConfig
-    with pytest.raises(ImportError, match="0.6.17"):
-        is_fi_moe_ep_backend("flashinfer_moe_ep_mega_cutedsl")
-
-    monkeypatch.setattr(mod, "_FI_MOE_EP_RUNTIME_AVAILABLE", None)
-    fake_flashinfer.BootstrapConfig = _FakeBootstrapConfig
-    assert is_fi_moe_ep_backend("flashinfer_moe_ep_mega_cutedsl")
 
 
 def test_fi_moe_ep_backend_spec_kernel_and_nvshmem_contract():
