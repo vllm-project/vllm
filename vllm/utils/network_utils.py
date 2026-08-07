@@ -166,6 +166,28 @@ def get_open_port() -> int:
     return _get_open_port()
 
 
+def bind_ephemeral(
+    host: str = "",
+    port: int = 0,
+    *,
+    family: socket.AddressFamily | int | None = None,
+    reuse: bool = False,
+) -> tuple[socket.socket, int]:
+    """Bind and hold a TCP port until its consumer takes the socket."""
+    if family is None:
+        family = socket.AF_INET6 if is_valid_ipv6_address(host) else socket.AF_INET
+    listen_socket = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        if reuse:
+            listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_socket.bind((host, port))
+        listen_socket.listen()
+    except Exception:
+        listen_socket.close()
+        raise
+    return listen_socket, listen_socket.getsockname()[1]
+
+
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of unique open ports.
 
