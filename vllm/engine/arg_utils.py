@@ -626,6 +626,10 @@ class EngineArgs:
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
 
     watermark: float = SchedulerConfig.watermark
+    session_affinity_window: int = SchedulerConfig.session_affinity_window
+    session_affinity_min_blocks: int = SchedulerConfig.session_affinity_min_blocks
+    session_affinity_max_wait_s: float = SchedulerConfig.session_affinity_max_wait_s
+    session_affinity_ttl_s: float = SchedulerConfig.session_affinity_ttl_s
 
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
@@ -1539,6 +1543,22 @@ class EngineArgs:
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
         )
         scheduler_group.add_argument(
+            "--session-affinity-window",
+            **scheduler_kwargs["session_affinity_window"],
+        )
+        scheduler_group.add_argument(
+            "--session-affinity-min-blocks",
+            **scheduler_kwargs["session_affinity_min_blocks"],
+        )
+        scheduler_group.add_argument(
+            "--session-affinity-max-wait-s",
+            **scheduler_kwargs["session_affinity_max_wait_s"],
+        )
+        scheduler_group.add_argument(
+            "--session-affinity-ttl-s",
+            **scheduler_kwargs["session_affinity_ttl_s"],
+        )
+        scheduler_group.add_argument(
             "--scheduler-reserve-full-isl",
             **scheduler_kwargs["scheduler_reserve_full_isl"],
         )
@@ -2314,6 +2334,10 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            session_affinity_window=self.session_affinity_window,
+            session_affinity_min_blocks=self.session_affinity_min_blocks,
+            session_affinity_max_wait_s=self.session_affinity_max_wait_s,
+            session_affinity_ttl_s=self.session_affinity_ttl_s,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
