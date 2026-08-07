@@ -15,7 +15,8 @@ Snapshots currently require all of the following:
 
 - Linux on x86-64 with one NVIDIA GPU.
 - Tensor, pipeline, and data parallel size 1.
-- One HTTP API server.
+- One plaintext TCP HTTP API server without built-in API authentication,
+  custom middleware, TLS, or a Unix domain socket.
 - [CRIU](https://github.com/checkpoint-restore/criu),
   [cuda-checkpoint](https://github.com/NVIDIA/cuda-checkpoint), and NVIDIA's
   CRIU CUDA plugin installed on the host.
@@ -46,10 +47,11 @@ snapshot, and stops the source process tree. The artifact is published by an
 atomic manifest write only after the CRIU dump completes. Snapshot creation is
 an offline preparation step and is not part of the restore latency.
 
-The artifact contains process memory, CUDA state, engine arguments, an exact
-software and hardware identity, and the canary output. Treat it as sensitive
-data. vLLM creates the snapshot directory with mode `0700` and its manifest
-with mode `0600`.
+The artifact contains process memory, CUDA state, engine arguments, a recorded
+software and hardware compatibility identity, and the canary output. This is a
+strict compatibility check over the recorded fields, not a cryptographic proof
+of every installed binary. Treat the artifact as sensitive data. vLLM creates
+the snapshot directory with mode `0700` and its manifest with mode `0600`.
 
 ## Inspect a snapshot
 

@@ -7,7 +7,9 @@ import dataclasses
 import importlib.metadata
 import importlib.util
 import json
+import socket
 import stat
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +25,7 @@ from vllm.snapshot.server import (
     parse_control_args,
     read_release_marker,
     run_snapshot_child,
+    wait_for_release_marker,
     write_ready_atomic,
 )
 from vllm_cli.snapshot.controller import (
@@ -173,6 +176,36 @@ def test_release_marker_supplies_listener(tmp_path: Path):
     assert read_release_marker(release_path) == ListenerConfig(
         host="127.0.0.1", port=9000
     )
+
+
+@pytest.mark.asyncio
+async def test_release_wait_does_not_count_time_spent_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    release_path = tmp_path / "release.json"
+
+    class FrozenLoop:
+        def __init__(self) -> None:
+            self.times = iter((0.0, 3600.0))
+
+        def time(self) -> float:
+            return next(self.times)
+
+    async def release_after_poll(_delay: float) -> None:
+        release_path.write_text(
+            json.dumps({"release": True, "host": "127.0.0.1", "port": 9000})
+        )
+
+    monkeypatch.setattr("vllm.snapshot.server.asyncio.get_running_loop", FrozenLoop)
+    monkeypatch.setattr("vllm.snapshot.server.asyncio.sleep", release_after_poll)
+
+    listener = await wait_for_release_marker(
+        release_path,
+        timeout_s=1.0,
+        poll_interval_s=0.05,
+    )
+
+    assert listener == ListenerConfig(host="127.0.0.1", port=9000)
 
 
 @pytest.mark.parametrize(
@@ -576,3 +609,48 @@ def test_restore_resets_child_log_to_captured_size(
     )
 
     assert tools.restore(artifact) == 100
+
+
+def test_release_refuses_an_occupied_listener(tmp_path: Path):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    tools = LocalSnapshotTools()
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+
+        with pytest.raises(SnapshotRestoreError, match="already in use"):
+            tools.release(artifact, "127.0.0.1", port)
+
+    assert not (artifact / "release.json").exists()
+
+
+def test_ipv6_wildcard_uses_loopback_for_correctness_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tools = LocalSnapshotTools()
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self) -> bytes:
+            return b'{"choices":[{"token_ids":[12095],"text":" Paris"}]}'
+
+    def fake_urlopen(request: urllib.request.Request, timeout: int) -> FakeResponse:
+        assert timeout == 120
+        requested_urls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert tools.request_oracle("::", 8000, _controller_manifest()) == Oracle(
+        token_ids=(12095,), text=" Paris"
+    )
+    assert requested_urls == ["http://[::1]:8000/v1/completions"]

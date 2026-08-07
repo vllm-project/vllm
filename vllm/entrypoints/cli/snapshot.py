@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import platform
 import typing
 from pathlib import Path
@@ -31,6 +32,22 @@ def validate_create_args(args: argparse.Namespace) -> None:
         raise ValueError("snapshot create currently supports the HTTP frontend only")
     if args.headless:
         raise ValueError("snapshot create requires an API frontend")
+    if args.api_key or os.environ.get("VLLM_API_KEY"):
+        raise ValueError("snapshot create does not support API authentication")
+    if args.uds:
+        raise ValueError("snapshot create does not support Unix domain sockets")
+    if any(
+        (
+            args.ssl_keyfile,
+            args.ssl_certfile,
+            args.ssl_ca_certs,
+            args.enable_ssl_refresh,
+            args.ssl_ciphers,
+        )
+    ):
+        raise ValueError("snapshot create does not support TLS")
+    if args.middleware:
+        raise ValueError("snapshot create does not support custom middleware")
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("snapshot create requires Linux x86_64")
 

@@ -168,12 +168,13 @@ async def wait_for_release_marker(
         raise ValueError("release timeout must be positive")
     if poll_interval_s <= 0:
         raise ValueError("release poll interval must be positive")
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
+    remaining_s = timeout_s
     while not path.exists():
-        if loop.time() >= deadline:
+        if remaining_s <= 0:
             raise TimeoutError(f"release marker not found before timeout: {path}")
-        await asyncio.sleep(poll_interval_s)
+        delay_s = min(poll_interval_s, remaining_s)
+        await asyncio.sleep(delay_s)
+        remaining_s -= delay_s
     return read_release_marker(path)
 
 

@@ -696,6 +696,19 @@ class LocalSnapshotTools:
         return int(self._run([*self._privileged(), "cat", str(pidfile)]).stdout)
 
     def release(self, artifact: Path, host: str | None, port: int) -> None:
+        if not 1 <= port <= 65535:
+            raise SnapshotRestoreError(f"snapshot restore port is invalid: {port}")
+        family = socket.AF_INET6 if host and ":" in host else socket.AF_INET
+        with socket.socket(family=family, type=socket.SOCK_STREAM) as listener_probe:
+            listener_probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                listener_probe.bind((host or "", port))
+            except OSError as error:
+                address = f"{host or '0.0.0.0'}:{port}"
+                raise SnapshotRestoreError(
+                    f"snapshot restore address is already in use: {address}"
+                ) from error
+
         path = artifact / "release.json"
         temporary = artifact / "release.json.tmp"
         payload = json.dumps(
@@ -715,8 +728,10 @@ class LocalSnapshotTools:
         os.replace(temporary, path)
 
     def _connect_host(self, host: str | None) -> str:
-        if not host or host in {"0.0.0.0", "::"}:
+        if not host or host == "0.0.0.0":
             return "127.0.0.1"
+        if host == "::":
+            return "::1"
         return host
 
     def wait_listener(self, root_pid: int, host: str | None, port: int) -> None:
@@ -739,6 +754,8 @@ class LocalSnapshotTools:
     def request_oracle(
         self, host: str | None, port: int, manifest: SnapshotManifest
     ) -> Oracle:
+        connect_host = self._connect_host(host)
+        url_host = f"[{connect_host}]" if ":" in connect_host else connect_host
         payload = json.dumps(
             {
                 "model": manifest.model,
@@ -750,7 +767,7 @@ class LocalSnapshotTools:
             }
         ).encode()
         request = urllib.request.Request(
-            f"http://{self._connect_host(host)}:{port}/v1/completions",
+            f"http://{url_host}:{port}/v1/completions",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
