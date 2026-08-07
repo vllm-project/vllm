@@ -8,7 +8,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
-    reinit_gloo_group,
+    reinit_gloo_pg,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -22,6 +22,7 @@ from vllm.v1.worker.sentinel.eplb_redistribute import (
     refresh_eplb_communicator_group,
     reinit_eplb_gloo_groups,
     reload_experts_from_disk,
+    reset_eplb_async_state,
 )
 
 if TYPE_CHECKING:
@@ -43,9 +44,6 @@ class WorkerSentinel:
 
     def __init__(self, worker: "Worker"):
         self.worker = worker
-        self.dp_rank = worker.parallel_config.data_parallel_rank
-        self.dp_size = worker.parallel_config.data_parallel_size
-        self.data_parallel_master_ip = worker.parallel_config.data_parallel_master_ip
         all2all_backend = worker.parallel_config.all2all_backend
         if all2all_backend not in FT_BACKEND_SET:
             raise ValueError(
@@ -61,43 +59,48 @@ class WorkerSentinel:
     def retry(self, ft_request: FaultToleranceRequest):
         torch.accelerator.synchronize()
         params = ft_request.params
-        self.data_parallel_master_ip = params["dp_master_ip"]
-        self.worker.parallel_config.data_parallel_master_ip = (
-            self.data_parallel_master_ip
-        )
+        master_ip = params["dp_master_ip"]
+        self.worker.parallel_config.data_parallel_master_ip = master_ip
         self._clean_worker_state()
-        self._reset_eplb_async_state()
-        if self.dp_size > 1:
-            get_ep_all2all_manager().clean_buffers()
+        reset_eplb_async_state(self.worker.model_runner)
+        if self.worker.parallel_config.data_parallel_size > 1:
+            mgr = get_ep_all2all_manager()
+            mgr.clean_buffers()
+            # clean_buffers wiped the mask; replay masks for the cumulative dead set.
+            tp_size = self.worker.parallel_config.tensor_parallel_size
+            for ep_rank in compute_dead_ep_ranks(params["dead_dp_ranks"], tp_size):
+                mgr.update_mask(ep_rank, masked=True)
             world_size = self.worker.parallel_config.world_size
             port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
-            reinit_gloo_group(
-                get_dp_group(),
-                self.data_parallel_master_ip,
-                port,
-                self.dp_rank,
-                self.dp_size,
+            dp_group = get_dp_group()
+            dp_group.cpu_group = reinit_gloo_pg(
+                dp_group.cpu_group,
+                master_ip=master_ip,
+                port=port,
+                rank=params["dp_group_rank"],
+                size=params["dp_group_size"],
             )
-            reinit_eplb_gloo_groups(params, self.data_parallel_master_ip)
-            refresh_eplb_communicator_group(self.worker.model_runner)
+            dp_group.dead_dp_ranks = set(params["dead_dp_ranks"])
+
+            if not self.worker.model_runner.eep_eplb_suppressed:
+                reinit_eplb_gloo_groups(params, master_ip)
+                refresh_eplb_communicator_group(self.worker.model_runner)
 
     def scale_down(self, ft_request: FaultToleranceRequest):
         torch.accelerator.synchronize()
         params = ft_request.params
-        self.data_parallel_master_ip = params["dp_master_ip"]
-        self.worker.parallel_config.data_parallel_master_ip = (
-            self.data_parallel_master_ip
-        )
-        removed_dp_ranks = params["removed_dp_ranks"]
-        new_dp_size = params["new_dp_size"]
-        new_dp_rank = params["new_dp_rank"]
+        master_ip = params["dp_master_ip"]
+        self.worker.parallel_config.data_parallel_master_ip = master_ip
+        # Cumulative dead set in original DP coordinates (covers ranks removed
+        # by earlier scale-downs, whose masks clean_buffers wiped).
+        dead_dp_ranks = params["dead_dp_ranks"]
         tp_size = self.worker.parallel_config.tensor_parallel_size
 
         self._clean_worker_state()
         mgr = get_ep_all2all_manager()
         mgr.clean_buffers()
 
-        dead_ep_ranks = compute_dead_ep_ranks(removed_dp_ranks, tp_size)
+        dead_ep_ranks = compute_dead_ep_ranks(dead_dp_ranks, tp_size)
         for ep_rank in sorted(dead_ep_ranks):
             mgr.update_mask(ep_rank, masked=True)
 
@@ -106,31 +109,24 @@ class WorkerSentinel:
 
         world_size = self.worker.parallel_config.world_size
         port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
-        reinit_gloo_group(
-            get_dp_group(),
-            self.data_parallel_master_ip,
-            port,
-            new_dp_rank,
-            new_dp_size,
+        dp_group = get_dp_group()
+        dp_group.cpu_group = reinit_gloo_pg(
+            dp_group.cpu_group,
+            master_ip=master_ip,
+            port=port,
+            rank=params["dp_group_rank"],
+            size=params["dp_group_size"],
         )
-        self.worker.parallel_config.data_parallel_size = new_dp_size
-        self.worker.parallel_config.data_parallel_rank = new_dp_rank
-        self.dp_rank = new_dp_rank
-        self.dp_size = new_dp_size
-
-        if self.worker.use_v2_model_runner:
-            runner = cast("GPUModelRunnerV2", self.worker.model_runner)
-            runner.dp_size = new_dp_size
-            runner.dp_rank = new_dp_rank
+        dp_group.dead_dp_ranks = set(dead_dp_ranks)
 
         self.worker.model_runner.eep_eplb_suppressed = True
-        self._reset_eplb_async_state()
+        reset_eplb_async_state(self.worker.model_runner)
 
         logger.info(
-            "[FT] Worker scale_down complete: dp_size=%d, dp_rank=%d, "
-            "dead_ep_ranks=%s, eplb_suppressed=True",
-            new_dp_size,
-            new_dp_rank,
+            "[FT] Worker scale_down complete: dp_group_size=%d, "
+            "dp_group_rank=%d, dead_ep_ranks=%s, eplb_suppressed=True",
+            params["dp_group_size"],
+            params["dp_group_rank"],
             sorted(dead_ep_ranks),
         )
 
@@ -159,7 +155,7 @@ class WorkerSentinel:
             p2l, num_logical, num_local_experts
         )
         rebuild_logical_expert_maps(p2l, l2p, lrc)
-        self._rebuild_expert_maps(p2l)
+        self.rebuild_model_expert_maps(p2l)
 
         if reassignments:
             reload_experts_from_disk(
@@ -176,13 +172,9 @@ class WorkerSentinel:
             len(reassignments),
         )
 
-    def _rebuild_expert_maps(self, p2l: torch.Tensor) -> None:
-        """Rebuild each FusedMoE layer's _expert_map from p2l table."""
-        model = self.worker.model_runner.model
-        moe_layers = getattr(model, "moe_layers", None)
-        if moe_layers is None:
-            return
-
+    def rebuild_model_expert_maps(self, p2l: torch.Tensor) -> None:
+        """Rebuild each FusedMoE layer's model-side _expert_map from p2l."""
+        moe_layers = self.worker.model_runner.model.moe_layers
         ep_rank = get_ep_group().rank_in_group
         for layer_idx, layer in enumerate(moe_layers):
             # v2 runner wraps FusedMoE in MoERunner; the expert map lives on
@@ -220,11 +212,7 @@ class WorkerSentinel:
             return
         active_rank_bound = surviving[-1] + 1
 
-        moe_layers = getattr(self.worker.model_runner.model, "moe_layers", None)
-        if moe_layers is None:
-            return
-
-        for layer in moe_layers:
+        for layer in self.worker.model_runner.model.moe_layers:
             routed = getattr(layer, "routed_experts", layer)
             quant_method = getattr(routed, "quant_method", None)
             moe_kernel = getattr(quant_method, "moe_kernel", None)
@@ -242,21 +230,6 @@ class WorkerSentinel:
             active_rank_bound,
             sorted(dead_ep_ranks),
         )
-
-    def _reset_eplb_async_state(self) -> None:
-        """Clear stale EPLB async state after fault or scale-down."""
-        eplb_state = getattr(self.worker.model_runner, "eplb_state", None)
-        if eplb_state is None:
-            return
-
-        for ms in eplb_state.model_states.values():
-            ms.rebalanced = False
-            ms.pending_result = None
-            ms.expert_load_pass.zero_()
-            ms.expert_load_window.zero_()
-
-        eplb_state.expert_rearrangement_step = 0
-        eplb_state.expert_load_window_step = 0
 
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner

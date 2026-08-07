@@ -63,7 +63,8 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    group = get_dp_group().cpu_group
+    dp_group = get_dp_group()
+    group = dp_group.cpu_group
     tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
@@ -72,6 +73,11 @@ def sync_cudagraph_and_dp_padding(
     tensor[4][dp_rank] = int(allow_ubatching)
     tensor[5][dp_rank] = num_reqs
     dist.all_reduce(tensor, group=group)
+
+    # Under FT scale-down, dead ranks never write their column; keep its
+    # zero out of the min-aggregated cg_mode row.
+    for r in dp_group.dead_dp_ranks:
+        tensor[1][r] = torch.iinfo(torch.int32).max
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
