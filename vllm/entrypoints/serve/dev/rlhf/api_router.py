@@ -226,6 +226,161 @@ async def weight_info(raw_request: Request):
     return JSONResponse(content={"weight_version": weight_version})
 
 
+# ---------------------------------------------------------------------------
+# Weight checksum (checksum / reset / compare)
+# ---------------------------------------------------------------------------
+
+
+def _merge_weight_checksums(
+    per_engine: list[dict[str, str]],
+) -> dict[str, str]:
+    """Merge engine results using the complete parallel-rank-qualified key."""
+    merged: dict[str, str] = {}
+    for engine_checksums in per_engine:
+        duplicate_keys = merged.keys() & engine_checksums.keys()
+        if duplicate_keys:
+            duplicates = ", ".join(sorted(duplicate_keys))
+            raise RuntimeError(f"Duplicate weight checksum keys: {duplicates}")
+        merged.update(engine_checksums)
+    return merged
+
+
+class _WeightCheckerState:
+    """Store the first checksum result in a verification cycle.
+
+    Operations that mutate the baseline must be externally serialized.
+    """
+
+    def __init__(self):
+        self.baseline: dict[str, str] | None = None
+
+    def store_if_absent(self, checksums: dict[str, str]) -> bool:
+        """Store checksums unless a comparison baseline already exists."""
+        if self.baseline is not None:
+            return False
+        self.baseline = dict(checksums)
+        return True
+
+    def has_baseline(self) -> bool:
+        """Return whether a comparison baseline is currently stored."""
+        return self.baseline is not None
+
+    def compare(self, current: dict[str, str]) -> tuple[bool, list[str]]:
+        """Compare the current checksums with the stored baseline.
+
+        Args:
+            current: Complete rank-qualified keys mapped to SHA-256 digests.
+
+        Returns:
+            A tuple containing whether all tensors match and the names of changed,
+            added, or missing tensors.
+
+        Raises:
+            RuntimeError: If no baseline has been stored.
+        """
+        if self.baseline is None:
+            raise RuntimeError("No checksum baseline; call action='checksum' first")
+        mismatches = sorted(
+            key
+            for key in self.baseline.keys() | current.keys()
+            if self.baseline.get(key) != current.get(key)
+        )
+        # Compare is one-shot: clear the baseline so a second compare fails.
+        self.baseline = None
+        return not mismatches, mismatches
+
+
+@router.post("/weight_checker")
+async def weight_checker(raw_request: Request) -> JSONResponse:
+    """Checksum, reset, or compare model weights.
+
+    Request body::
+
+        {"action": "compare"}    -> compare current weights against the baseline
+        {"action": "checksum"}   -> return SHA-256 and store the first baseline
+        {"action": "reset"}      -> overwrite GPU weights with random values
+
+    Responses (all 200 on success):
+
+    * **compare**:  ``{"match": bool, "mismatches": [str]}``
+    * **checksum**: ``{"checksums": {name: hex_str}}``
+    * **reset**:    ``{"status": "reset"}``
+
+    Use case in RL: checksum the current weights, reset them, transfer the
+    original weights, checksum again, and compare with the first checksum.
+    A successful transfer is expected to match the baseline.
+    """
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+    action = body.get("action")
+    if action not in ("compare", "checksum", "reset"):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=f"action must be one of checksum|reset|compare, got {action!r}",
+        )
+
+    client = engine_client(raw_request)
+    checker: _WeightCheckerState = raw_request.app.state.weight_checker
+
+    if action == "reset":
+        # Overwrite every weight-bearing tensor with random values on the GPU
+        await client.reset_weights()
+        return JSONResponse(content={"status": "reset"})
+
+    # Avoid an expensive checksum RPC when compare cannot succeed. compare()
+    # repeats this check to keep the state object safe when used directly.
+    if action == "compare" and not checker.has_baseline():
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="No checksum baseline; call action='checksum' first",
+        )
+
+    per_engine: list[dict[str, str]] = (
+        await client.compute_weight_checksums_all()
+    )
+    if not per_engine:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            detail="No engine returned weight checksums",
+        )
+    try:
+        checksums = _merge_weight_checksums(per_engine)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            detail=str(exc),
+        ) from exc
+
+    if action == "checksum":
+        baseline_created = checker.store_if_absent(checksums)
+        return JSONResponse(
+            content={
+                "checksums": checksums,
+                "engines": per_engine,
+                "baseline_created": baseline_created,
+            }
+        )
+
+    # action == "compare"
+    try:
+        match, mismatches = checker.compare(checksums)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=str(exc),
+        ) from exc
+
+    return JSONResponse(
+        content={
+            "match": match,
+            "mismatches": mismatches,
+        }
+    )
+
+
 @router.get("/get_world_size")
 async def get_world_size(
     raw_request: Request,
@@ -247,4 +402,8 @@ async def get_world_size(
 
 
 def attach_router(app: FastAPI):
+    # Initialize per-request state objects on the app.
+    if not hasattr(app.state, "weight_checker"):
+        app.state.weight_checker = _WeightCheckerState()
+
     app.include_router(router)

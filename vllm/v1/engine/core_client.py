@@ -1193,6 +1193,12 @@ class AsyncMPClient(MPClient):
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
 
+    async def compute_weight_checksums_all_async(self) -> list[dict[str, str]]:
+        return [await self.call_utility_async("compute_weight_checksums")]
+
+    async def reset_weights_all_async(self) -> None:
+        await self.call_utility_async("reset_weights")
+
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
 
@@ -1532,6 +1538,25 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 ]
             )
         )[0]
+
+    async def compute_weight_checksums_all_async(self) -> list[dict]:
+        # Return results from all engines.
+        return (
+            await asyncio.gather(
+                *[
+                    self._call_utility_async("compute_weight_checksums", engine=engine)
+                    for engine in self.core_engines
+                ]
+            )
+        )
+
+    async def reset_weights_all_async(self) -> None:
+        await asyncio.gather(
+            *[
+                self._call_utility_async("reset_weights", engine=engine)
+                for engine in self.core_engines
+            ]
+        )
 
     @staticmethod
     async def process_engine_outputs(
