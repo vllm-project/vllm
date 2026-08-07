@@ -3325,3 +3325,55 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
         )
+
+
+def test_apply_prefix_caching_local_exceeds_remote():
+    """Decoder allocated more blocks than the prefiller produced.
+
+    A disagg proxy that appends the first sampled token to the decode
+    prompt can start a fresh local block with no remote counterpart. The
+    extra trailing local block must be trimmed so both sides line up 1:1,
+    instead of failing the previous ``num_local_blocks <= len(remote)``
+    assertion.
+    """
+    stub = SimpleNamespace(_has_mamba=False)
+
+    new_local, new_remote = NixlConnectorWorker._apply_prefix_caching(
+        stub,
+        [[10, 11, 12]],
+        [[20, 21]],
+        remote_physical_per_logical=1,
+    )
+
+    assert new_local == [[10, 11]]
+    assert new_remote == [[20, 21]]
+
+
+def test_apply_prefix_caching_local_below_remote():
+    """Partial local prefix cache hit reads only the matching remote suffix."""
+    stub = SimpleNamespace(_has_mamba=False)
+
+    new_local, new_remote = NixlConnectorWorker._apply_prefix_caching(
+        stub,
+        [[10, 11]],
+        [[20, 21, 22, 23]],
+        remote_physical_per_logical=1,
+    )
+
+    assert new_local == [[10, 11]]
+    assert new_remote == [[22, 23]]
+
+
+def test_apply_prefix_caching_equal_counts_unchanged():
+    """Matching block counts pass through untouched."""
+    stub = SimpleNamespace(_has_mamba=False)
+
+    new_local, new_remote = NixlConnectorWorker._apply_prefix_caching(
+        stub,
+        [[10, 11, 12]],
+        [[20, 21, 22]],
+        remote_physical_per_logical=1,
+    )
+
+    assert new_local == [[10, 11, 12]]
+    assert new_remote == [[20, 21, 22]]
