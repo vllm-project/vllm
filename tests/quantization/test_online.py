@@ -40,6 +40,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
+DEVICE = current_platform.device_type
+
 
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
@@ -260,9 +262,7 @@ def test_online_linear_tp_weight_quant_matches_unsharded(
 ) -> None:
     """TP shards pack the same FP8 values and scales as the unsharded weight."""
     torch.manual_seed(0)
-    weight = torch.randn(
-        32, 64, device=current_platform.device_type, dtype=torch.bfloat16
-    )
+    weight = torch.randn(32, 64, device=DEVICE, dtype=torch.bfloat16)
     weight[-1, -1] = 64.0
 
     full_weight, full_scale = _quantize_linear(weight, scheme, False)
@@ -320,10 +320,8 @@ def test_online_moe_tp_weight_quant_matches_ep(monkeypatch, scheme: str) -> None
         pytest.skip("FP8 is not supported on this GPU type.")
 
     torch.manual_seed(0)
-    weight = torch.randn(
-        2, 32, 32, device=current_platform.device_type, dtype=torch.bfloat16
-    )
-    weight[:, -1, -1] = torch.tensor([32.0, 64.0], device=current_platform.device_type)
+    weight = torch.randn(2, 32, 32, device=DEVICE, dtype=torch.bfloat16)
+    weight[:, -1, -1] = torch.tensor([32.0, 64.0], device=DEVICE)
 
     ep_out = _quantize_moe(weight, scheme, 1)
 
