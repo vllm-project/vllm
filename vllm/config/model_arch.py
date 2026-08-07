@@ -47,6 +47,9 @@ class ModelArchitectureConfig:
     num_experts: int
     """Number of experts in the model."""
 
+    num_experts_per_token: int
+    """Number of routed experts selected per token."""
+
     quantization_config: dict[str, Any] | None
     """Quantization configuration dictionary containing quantization parameters."""
 
