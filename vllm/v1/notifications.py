@@ -27,13 +27,16 @@ class CustomNotification(
     msgspec.Struct,
     tag="custom",
     omit_defaults=True,  # type: ignore[call-arg]
-    gc=False,
-):  # type: ignore[call-arg]
+):
     """Open escape hatch for out-of-tree producers (plugins).
 
     The union fails fast on unknown tags, so plugins can't add their own struct
     type. Instead they emit this: namespace under `key`, and place event data
     in `payload`. Frontends that don't know the `key` just ignore it.
+
+    Left GC-tracked, unlike its siblings: `payload` is arbitrary
+    plugin-supplied data, and a cycle routed through an untracked struct would
+    never be collected.
     """
 
     key: str
@@ -64,9 +67,15 @@ def publish_worker_notification(notification: EngineNotification) -> None:
     _worker_notifications.append(notification)
 
 
-def take_worker_notifications() -> list[EngineNotification]:
-    """Drain everything queued in this worker process since the last call."""
+def take_worker_notifications() -> list[EngineNotification] | None:
+    """Drain everything queued in this worker process since the last call.
+
+    Returns None rather than an empty list so the common case (no producer
+    installed) allocates nothing on the per-step path.
+    """
     global _worker_notifications
+    if not _worker_notifications:
+        return None
     pending = _worker_notifications
     _worker_notifications = []
     return pending
