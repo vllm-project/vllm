@@ -62,6 +62,9 @@ class SpeculatorsConfig(PretrainedConfig):
         # Apply anything specific to the supported algorithm
         algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
         algo_updater(config_dict=config_dict, pre_trained_config=pre_trained_config)
+        # Preserve the declared algorithm so SpeculativeConfig can resolve
+        # `method` from the checkpoint itself, not the checkpoint path.
+        pre_trained_config["speculators_model_type"] = speculators_model_type
         return pre_trained_config
 
     @classmethod
