@@ -523,7 +523,11 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cpu()
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -677,7 +681,11 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cpu()
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -880,7 +888,11 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cpu()
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -1023,7 +1035,36 @@ class CPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
         return (
             current_platform.is_cpu()
             and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
         )
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+        if not supported:
+            return supported, reason
+        # convert_weight_packed (shared VNNI prepack) requires the w13
+        # OC/IC and w2 OC/IC to be multiples of TILE_N=16/TILE_K=32; the
+        # w1 gate-up kernel additionally requires the intermediate size
+        # itself (not 2x) to be a multiple of 32 (moe_int8.cpp), which
+        # dominates. Net effect: both dims must be multiples of 32.
+        if moe_config.hidden_dim % 32 != 0:
+            return False, "kernel requires hidden dim divisible by 32"
+        if moe_config.intermediate_size_per_partition % 32 != 0:
+            return False, "kernel requires intermediate dim divisible by 32"
+        return True, None
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
