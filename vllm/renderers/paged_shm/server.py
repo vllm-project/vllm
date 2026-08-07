@@ -8,7 +8,7 @@ from multiprocessing.synchronize import Event
 
 import zmq
 
-from vllm.config.multimodal import MultiModalConfig
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path
 
@@ -245,7 +245,7 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
         if server is not None:
             with contextlib.suppress(Exception):
                 server.close()
-        logger.info("PagedShmServer stopped.")
+        logger.info("[shutdown] PagedShmServer stopped.")
 
 
 class PagedShmServerProc:
@@ -269,7 +269,7 @@ class PagedShmServerProc:
         self.address = self.parent_conn.recv()
         self.parent_conn.close()
 
-    def close(self):
+    def shutdown(self):
         self.stop_event.set()
         self.proc.join(timeout=5)
         if self.proc.is_alive():
@@ -278,8 +278,9 @@ class PagedShmServerProc:
 
 
 def maybe_start_paged_shm_server(
-    multimodal_config: MultiModalConfig | None,
+    model_config: ModelConfig,
 ) -> PagedShmServerProc | None:
+    multimodal_config = model_config.multimodal_config
     if multimodal_config is None:
         return None
 

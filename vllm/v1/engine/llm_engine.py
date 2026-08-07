@@ -23,6 +23,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
+from vllm.renderers.paged_shm.server import maybe_start_paged_shm_server
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -131,6 +132,9 @@ class LLMEngine:
                 self._finalizer = weakref.finalize(
                     self, LLMEngine._cleanup_instance_caches, model
                 )
+
+        self.paged_shm_server = maybe_start_paged_shm_server(self.model_config)
+        self.engine_core.resources.append(self.paged_shm_server)
 
         if self.external_launcher_dp:
             # If we use DP in external launcher mode, we reuse the

@@ -23,7 +23,7 @@ def server_address():
     server = PagedShmServerProc(size=1024 * 1024, block_size=4096)
     server.start()
     yield server.address
-    server.close()
+    server.shutdown()
 
 
 @pytest_asyncio.fixture
