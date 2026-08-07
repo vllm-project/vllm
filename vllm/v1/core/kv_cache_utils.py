@@ -432,8 +432,8 @@ def _gen_mm_extra_hash_keys(
 ) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
-    (mm_hash, start_offset) that indicate a mm input contained in the
-    block and its starting offset in the block tokens.
+    ("mm", mm_hash, start_offset) tuples that indicate a mm input contained
+    in the block and its starting offset in the block tokens.
 
     Args:
         request: The request object.
@@ -478,7 +478,7 @@ def _gen_mm_extra_hash_keys(
             # relative to the start of the block so prefix-cache keys stay
             # distinct when the same MM item appears at different positions
             # within otherwise-identical placeholder blocks.
-            extra_keys.append((mm_feature.identifier, offset - start_token_idx))
+            extra_keys.append(("mm", mm_feature.identifier, offset - start_token_idx))
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
@@ -494,7 +494,7 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str]]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
@@ -506,12 +506,12 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
     """
     if not request.lora_request:
         return []
-    return [request.lora_request.lora_name]
+    return [("lora", request.lora_request.lora_name)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
     request: Request, start_token_idx: int, end_token_idx: int
-) -> list[bytes]:
+) -> list[tuple[str, bytes]]:
     """Generate extra keys related to prompt embeds for block hash computation.
 
     Args:
@@ -532,7 +532,7 @@ def _gen_prompt_embeds_extra_hash_keys(
         # Hash prompt embeds once per block and cache on request
         embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
         request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
-    return [embeds_hash]
+    return [("prompt_embeds", embeds_hash)]
 
 
 def generate_block_hash_extra_keys(
@@ -555,9 +555,11 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
-    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[str] = (
-        [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
+    lora_extra_keys = _gen_lora_extra_hash_keys(request)
+    cache_salt_keys: list[tuple[str, str]] = (
+        [("cache_salt", request.cache_salt)]
+        if (start_token_idx == 0 and request.cache_salt)
+        else []
     )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx

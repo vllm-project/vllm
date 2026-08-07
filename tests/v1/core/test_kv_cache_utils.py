@@ -503,12 +503,12 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == (("hash1", 0),)
+    assert extra_keys == (("mm", "hash1", 0),)
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == (("hash1", -3),)
+    assert extra_keys == (("mm", "hash1", -3),)
     assert next_mm_idx == 1
 
     # Test with no overlap
@@ -518,7 +518,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == (("hash1", 0), ("hash2", 10))
+    assert extra_keys == (("mm", "hash1", 0), ("mm", "hash2", 10))
     assert next_mm_idx == 2
 
 
@@ -546,9 +546,9 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # salt is added for the first token
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 1, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 10, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
 
     # no salt added for other tokens
     extra_keys, _ = generate_block_hash_extra_keys(request, 1, 2, 0)
@@ -569,7 +569,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == (("hash1", 0), "salt")
+    assert extra_keys == (("mm", "hash1", 0), ("cache_salt", "salt"))
     assert next_mm_idx == 1
 
 
@@ -587,13 +587,13 @@ def test_generate_block_hash_extra_keys_prompt_embeds():
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
     expected_embeds = prompt_embeds[0:5]
     expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
-    assert extra_keys == (expected_hash,)
+    assert extra_keys == (("prompt_embeds", expected_hash),)
 
     # Test with prompt embeds for the second block
     extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
     expected_embeds = prompt_embeds[5:10]
     expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
-    assert extra_keys == (expected_hash,)
+    assert extra_keys == (("prompt_embeds", expected_hash),)
 
 
 def test_generate_block_hash_extra_keys_prompt_embeds_cached(monkeypatch):
@@ -657,7 +657,7 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
-    assert extra_keys == ("test_lora_adapter",)
+    assert extra_keys == (("lora", "test_lora_adapter"),)
 
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
@@ -694,9 +694,11 @@ def test_request_block_hasher(hash_fn):
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
     assert block_hashes[0] == hash_fn(
-        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("hash1", 0),))
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("mm", "hash1", 0),))
     )
-    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
+    assert block_hashes[1] == hash_fn(
+        (block_hashes[0], (3, 4, 5), (("mm", "hash2", 0),))
+    )
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -2503,7 +2505,7 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (block1_embeds_hash,),
+            (("prompt_embeds", block1_embeds_hash),),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -2515,7 +2517,7 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (block2_embeds_hash,),
+            (("prompt_embeds", block2_embeds_hash),),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -2552,7 +2554,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (("hash1", 0), block1_embeds_hash),
+            (("mm", "hash1", 0), ("prompt_embeds", block1_embeds_hash)),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -2564,7 +2566,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (("hash2", 0), block2_embeds_hash),
+            (("mm", "hash2", 0), ("prompt_embeds", block2_embeds_hash)),
         )
     )
     assert block_hashes[1] == expected_hash2

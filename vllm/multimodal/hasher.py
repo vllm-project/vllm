@@ -4,7 +4,6 @@
 import functools
 import hashlib
 import pickle
-import uuid
 from collections.abc import Callable, Iterable
 
 import numpy as np
@@ -60,12 +59,6 @@ class MultiModalHasher:
             return (np.array(obj).tobytes(),)
 
         if isinstance(obj, Image.Image):
-            exif = obj.getexif()
-            if Image.ExifTags.Base.ImageID in exif and isinstance(
-                exif[Image.ExifTags.Base.ImageID], uuid.UUID
-            ):
-                return (exif[Image.ExifTags.Base.ImageID].bytes,)
-
             data = {"mode": obj.mode, "data": np.asarray(obj)}
             palette = obj.palette
             if palette is not None:
@@ -76,12 +69,6 @@ class MultiModalHasher:
             return cls.iter_item_to_bytes("image", data)
 
         if isinstance(obj, MediaWithBytes) and isinstance(obj.media, Image.Image):
-            exif = obj.media.getexif()
-            if Image.ExifTags.Base.ImageID in exif and isinstance(
-                exif[Image.ExifTags.Base.ImageID], uuid.UUID
-            ):
-                return (exif[Image.ExifTags.Base.ImageID].bytes,)
-
             if obj.io_config:
                 return cls.iter_item_to_bytes(
                     "image",
