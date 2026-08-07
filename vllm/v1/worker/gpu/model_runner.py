@@ -245,6 +245,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else 1
         )
         # General request states.
+        use_dense_all_token_ids = (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        )
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -253,6 +257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             device=self.device,
             num_prefill_lookahead=num_prefill_lookahead,
+            use_dense_all_token_ids=use_dense_all_token_ids,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -265,6 +270,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
             )
+
+        # Inject RequestState into speculators that consume the persistent
+        # token store directly (e.g. NgramGPUSpeculator).
+        if self.speculator is not None and hasattr(self.speculator, "req_states"):
+            self.speculator.req_states = self.req_states
 
         # Samplers and decode_query_len created in load_model() after
         # model_state exists (num_new_sampled_tokens_per_step from ModelState).
@@ -1624,7 +1634,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            draft_tokens = self.speculator.propose(
+            draft_tokens, num_valid_draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings_by_layer,
@@ -1639,10 +1649,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-
-        if self.num_speculative_steps > 0:
-            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
+            # Pass num_valid_draft_tokens so variable-length drafters (ngram_gpu)
+            # can truncate drafts in async scheduling mode.
+            self.draft_tokens_handler.set_draft_tokens(
+                input_batch, draft_tokens, num_valid_draft_tokens
+            )
+        elif self.num_speculative_steps > 0:
+            # Diffusion LLMs use draft tokens but have no speculator
+            # (i.e. self.speculator is None).
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
