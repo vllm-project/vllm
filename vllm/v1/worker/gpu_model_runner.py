@@ -6200,13 +6200,13 @@ class GPUModelRunner(
                     | Gemma4Proposer,
                 )
                 assert self.speculative_config is not None
-                # Eagle currently only supports PIECEWISE cudagraphs.
-                # Therefore only use cudagraphs if the main model uses PIECEWISE
-                # NOTE(lucas): this is a hack, need to clean up.
+                # The draft model uses the same cudagraph mode as the target
+                # model: FULL for uniform decode, PIECEWISE for mixed batches.
                 use_cudagraphs = (
                     (
                         is_graph_capturing
-                        and cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                        and cudagraph_runtime_mode
+                        in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL)
                     )
                     or (
                         not is_graph_capturing
@@ -6229,6 +6229,7 @@ class GPUModelRunner(
                     use_cudagraphs=use_cudagraphs,
                     is_graph_capturing=is_graph_capturing,
                     slot_mappings=slot_mappings,
+                    target_cudagraph_mode=cudagraph_runtime_mode,
                 )
 
         # We register layerwise NVTX hooks here after the first dynamo tracing is

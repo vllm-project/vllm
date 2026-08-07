@@ -496,6 +496,11 @@ class Worker(WorkerBase):
                 getattr(self.parallel_config, "_api_process_count", 1),
             )
 
+        # Warmup: run a forward pass before the profiling window so that
+        # JIT-compiled kernel code (e.g. FlashInfer, custom ops) is produced
+        # outside the measurement.
+        self.model_runner.profile_run()
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(

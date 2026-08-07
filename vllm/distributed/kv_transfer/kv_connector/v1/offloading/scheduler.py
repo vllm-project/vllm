@@ -351,10 +351,21 @@ class RequestOffloadState:
                 "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
             )
 
-    def update_offload_keys(self) -> None:
+    def update_offload_keys(self, limit_by_block_ids: bool = False) -> None:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
+            max_chunks = len(group_state.offload_keys)
+            if limit_by_block_ids:
+                num_known_blocks = len(group_state.block_ids)
+                blocks_per_chunk = (
+                    group_config.tokens_per_chunk // group_config.tokens_per_block
+                )
+                max_chunks = (
+                    num_known_blocks // blocks_per_chunk
+                    if blocks_per_chunk > 0
+                    else num_known_blocks
+                )
             for req_block_hash in islice(
                 self.req.block_hashes,
                 group_config.hashes_per_chunk * len(group_state.offload_keys)
@@ -363,6 +374,8 @@ class RequestOffloadState:
                 None,
                 group_config.hashes_per_chunk,
             ):
+                if limit_by_block_ids and len(group_state.offload_keys) >= max_chunks:
+                    break
                 group_state.offload_keys.append(
                     make_offload_key(req_block_hash, group_config.group_idx)
                 )
@@ -1586,6 +1599,7 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
+        block_ids: tuple[list[int], ...] | None = None,
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
@@ -1609,9 +1623,17 @@ class OffloadingConnectorScheduler:
 
         self._maybe_observe_lookup_async_delay(req_status)
 
+        # Sync final block IDs into group states so update_offload_keys
+        # can limit to chunks with known block assignments.
+        if block_ids is not None:
+            for group_state, group_block_ids in zip(
+                req_status.group_states, block_ids
+            ):
+                group_state.block_ids.extend(group_block_ids)
+
         # Update offload keys with final block hash so _build_store_jobs can
         # create store jobs for the last block(s) on the next schedule step.
-        req_status.update_offload_keys()
+        req_status.update_offload_keys(limit_by_block_ids=True)
 
         # Keep req_status alive: _build_store_jobs will process finished_req_ids
         # on the next step and handle cleanup after creating store jobs.

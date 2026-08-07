@@ -214,6 +214,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
+        target_cudagraph_mode=None,
     ) -> None:
         """
         Key differences to default dummy_run:
