@@ -3541,7 +3541,7 @@ class GPUModelRunner(
             req_ids=self.input_batch.req_ids.copy(),
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
             kv_connector_output=kv_connector_output,
-            worker_notifications=take_worker_notifications() or None,
+            worker_notifications=take_worker_notifications(),
         )
 
         if raw_pooler_output is None or not any(finished_mask):
@@ -4864,7 +4864,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
-                worker_notifications=take_worker_notifications() or None,
+                worker_notifications=take_worker_notifications(),
                 routed_experts=None,
             )
 
