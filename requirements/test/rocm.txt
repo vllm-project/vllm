@@ -131,6 +131,8 @@ cloudpickle==3.1.2
     # via
     #   -r requirements/test/../common.txt
     #   tilelang
+cohere==7.0.8
+    # via -r requirements/test/rocm.in
 cohere-melody==0.9.0
     # via -r requirements/test/rocm.in
 colorama==0.4.6
@@ -231,9 +233,11 @@ fastapi-cloud-cli==0.16.1
     # via fastapi-cli
 fastar==0.10.0
     # via fastapi-cloud-cli
+fastavro==1.12.2
+    # via cohere
 fastparquet==2026.3.0
     # via genai-perf
-fastsafetensors==0.3.2
+fastsafetensors==0.3.3
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
@@ -336,6 +340,7 @@ httpx==0.27.2
     # via
     #   -r requirements/test/rocm.in
     #   anthropic
+    #   cohere
     #   fastapi
     #   fastapi-cloud-cli
     #   huggingface-hub
@@ -346,8 +351,10 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.22.0
+huggingface-hub==1.26.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   accelerate
     #   datasets
     #   evaluate
@@ -497,7 +504,7 @@ mcp==1.27.0
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.5
+mistral-common==1.11.6
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -832,6 +839,7 @@ pydantic==2.12.5
     #   -r requirements/test/../common.txt
     #   albumentations
     #   anthropic
+    #   cohere
     #   compressed-tensors
     #   datamodel-code-generator
     #   fastapi
@@ -849,7 +857,9 @@ pydantic==2.12.5
     #   ray
     #   xgrammar
 pydantic-core==2.41.5
-    # via pydantic
+    # via
+    #   cohere
+    #   pydantic
 pydantic-extra-types==2.11.1
     # via
     #   fastapi
@@ -956,7 +966,7 @@ rapidfuzz==3.12.1
     # via
     #   -r requirements/test/rocm.in
     #   jiwer
-ray==2.54.0
+ray==2.55.1
     # via -r requirements/test/rocm.in
 redis==7.3.0
     # via tensorizer
@@ -978,6 +988,7 @@ requests==2.32.5
     #   -r requirements/test/../common.txt
     #   azure-core
     #   buildkite-test-collector
+    #   cohere
     #   datasets
     #   docker
     #   evaluate
@@ -1193,6 +1204,7 @@ tokenizers==0.22.2
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
+    #   cohere
     #   transformers
 torch-c-dlpack-ext==0.1.5
     # via tilelang
@@ -1214,7 +1226,7 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers==5.13.1
+transformers==5.14.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1243,6 +1255,8 @@ typer==0.24.1
     #   fastsafetensors
     #   perceptron
     #   transformers
+types-requests==2.33.0.20260712
+    # via cohere
 typing-extensions==4.15.0
     # via
     #   -c requirements/common.txt
@@ -1257,6 +1271,7 @@ typing-extensions==4.15.0
     #   azure-identity
     #   azure-storage-blob
     #   chz
+    #   cohere
     #   fastapi
     #   grpcio
     #   huggingface-hub
@@ -1302,6 +1317,7 @@ urllib3==2.6.3
     #   responses
     #   sentry-sdk
     #   tritonclient
+    #   types-requests
 uvicorn==0.42.0
     # via
     #   fastapi

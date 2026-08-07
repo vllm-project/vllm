@@ -814,6 +814,8 @@ def nvfp4_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     is_scale_swizzled: bool = True,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -833,6 +835,8 @@ def nvfp4_moe_quant_config(
         per_out_ch_quant=False,
         block_shape=None,
         is_scale_swizzled=is_scale_swizzled,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
@@ -1134,9 +1138,9 @@ class FusedMoEParallelConfig:
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
-            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
-            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
+            tp_size_ (int): `tp_size` passed into the FusedMoEFactory constructor.
+            pcp_size_ (int): `pcp_size` passed into the FusedMoEFactory constructor.
+            dp_size_ (int): `dp_size` passed into the FusedMoEFactory constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 
@@ -1314,6 +1318,10 @@ class FusedMoEConfig:
     swiglu_alpha: float | None = None
     swiglu_beta: float | None = None
 
+    # SituGLU parameters used by Kimi sit(u/v2) activations.
+    activation_situ_beta: float | None = None
+    activation_situ_linear_beta: float | None = None
+
     max_capture_size: int = 0
 
     # Set by __post_init__
@@ -1370,6 +1378,11 @@ class FusedMoEConfig:
     @property
     def is_act_and_mul(self) -> bool:
         return self.activation.is_gated
+
+    @property
+    def w13_num_shards(self) -> int:
+        """Number of shards fused into w13: gate and up for gated, up only."""
+        return 2 if self.is_act_and_mul else 1
 
     @property
     def tp_size(self):

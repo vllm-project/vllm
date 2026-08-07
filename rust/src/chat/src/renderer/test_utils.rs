@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -16,8 +17,9 @@ use crate::request::{
 /// Options for constructing a [`ChatRequest`] from a fixture file.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FixtureRequestOptions {
-    /// Whether to set the template kwarg `[enable_]thinking=true`.
-    pub enable_thinking: bool,
+    /// Optional thinking toggle applied only when the fixture does not already
+    /// set `thinking` / `enable_thinking` in [`FixtureRequest::template_kwargs`].
+    pub enable_thinking: Option<bool>,
     /// Whether fixtures ending in an assistant message should omit the
     /// trailing generation prompt.
     pub no_generation_prompt_when_last_assistant: bool,
@@ -46,6 +48,15 @@ pub(crate) struct FixtureRequest {
     messages: Vec<FixtureMessage>,
     add_generation_prompt: Option<bool>,
     reasoning_effort: Option<ReasoningEffort>,
+    /// Standard response format passed to model-specific renderers.
+    #[serde(default)]
+    response_format: Option<Value>,
+    /// Extra chat-template kwargs (thinking, preserve_thinking, …).
+    #[serde(default)]
+    template_kwargs: HashMap<String, Value>,
+    /// When omitted, defaults to `auto` if tools are present, otherwise `none`.
+    #[serde(default)]
+    tool_choice: Option<ChatToolChoice>,
 }
 
 impl FixtureFile {
@@ -57,6 +68,9 @@ impl FixtureFile {
                 messages,
                 add_generation_prompt: None,
                 reasoning_effort: None,
+                response_format: None,
+                template_kwargs: HashMap::new(),
+                tool_choice: None,
             },
         }
     }
@@ -69,6 +83,7 @@ pub(crate) enum FixtureMessage {
         content: FixtureContent,
     },
     Developer {
+        #[serde(default)]
         content: FixtureContent,
         #[serde(default)]
         tools: Vec<FixtureTool>,
@@ -96,6 +111,12 @@ pub(crate) enum FixtureMessage {
 pub(crate) enum FixtureContent {
     Text(String),
     Parts(Vec<FixtureContentPart>),
+}
+
+impl Default for FixtureContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +157,13 @@ struct FixtureToolCallFunction {
 
 impl FixtureRequest {
     fn into_chat_request(self, options: FixtureRequestOptions) -> ChatRequest {
+        let tools = to_chat_tools(&self.tools);
+        let tool_choice = self.tool_choice.unwrap_or(if tools.is_empty() {
+            ChatToolChoice::None
+        } else {
+            ChatToolChoice::Auto
+        });
+
         let mut request = ChatRequest {
             request_id: "renderer-fixture".to_string(),
             messages: self
@@ -144,12 +172,8 @@ impl FixtureRequest {
                 .enumerate()
                 .map(|(index, message)| fixture_message_to_chat_message(index, message))
                 .collect(),
-            tools: to_chat_tools(&self.tools),
-            tool_choice: if self.tools.is_empty() {
-                ChatToolChoice::None
-            } else {
-                ChatToolChoice::Auto
-            },
+            tools,
+            tool_choice,
             ..ChatRequest::for_test()
         };
 
@@ -162,9 +186,15 @@ impl FixtureRequest {
             request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
         }
         request.chat_options.reasoning_effort = self.reasoning_effort;
-        if options.enable_thinking {
-            for key in ["thinking", "enable_thinking"] {
-                request.chat_options.template_kwargs.insert(key.to_string(), Value::Bool(true));
+        request.chat_options.response_format = self.response_format;
+        request.chat_options.template_kwargs.extend(self.template_kwargs);
+
+        // Options supply a default thinking toggle only when the fixture did not.
+        if let Some(thinking) = options.enable_thinking {
+            let kwargs = &mut request.chat_options.template_kwargs;
+            if !kwargs.contains_key("thinking") && !kwargs.contains_key("enable_thinking") {
+                kwargs.insert("thinking".to_string(), Value::Bool(thinking));
+                kwargs.insert("enable_thinking".to_string(), Value::Bool(thinking));
             }
         }
 
