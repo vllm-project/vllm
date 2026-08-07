@@ -50,9 +50,6 @@ message GenerateRequest {
 
   // Multimodal inputs aligned with placeholder markers in token_ids.
   repeated MediaItem media = 14;
-
-  // Global data-parallel rank advertised by the Control service.
-  optional uint32 data_parallel_rank = 15;
 }
 
 message RandomSampling {

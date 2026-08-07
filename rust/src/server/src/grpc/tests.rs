@@ -852,14 +852,19 @@ async fn unary_generate_unconnected_data_parallel_rank_returns_invalid_argument(
     )
     .await;
 
+    let mut request = tonic::Request::new(pb::GenerateRequest {
+        request_id: "test-unconnected-dp-rank".to_string(),
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "x-data-parallel-rank",
+        "0".parse().expect("valid metadata value"),
+    );
+
     let status = client
-        .generate(pb::GenerateRequest {
-            request_id: "test-unconnected-dp-rank".to_string(),
-            model: "test-model".to_string(),
-            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
-            data_parallel_rank: Some(0),
-            ..Default::default()
-        })
+        .generate(request)
         .await
         .expect_err("rank 0 should not select globally ranked engine 3");
 
