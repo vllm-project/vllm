@@ -591,12 +591,14 @@ def choose_scaled_mm_linear_kernel(
     linear_backend = _get_linear_backend()
     if linear_backend != "auto":
         filtered = _filter_kernels_by_backend(linear_backend, platform_kernels)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for this layer type."
+        if filtered:
+            platform_kernels = filtered
+        else:
+            logger.debug(
+                "--linear-backend=%s has no kernel for this layer type, "
+                "falling back to auto-selection.",
+                linear_backend,
             )
-        platform_kernels = filtered
 
     for kernel in platform_kernels:
         is_supported_and_can_implement, failure_reason = (
@@ -755,12 +757,14 @@ def choose_mp_linear_kernel(
     linear_backend = _get_linear_backend()
     if linear_backend != "auto":
         filtered = _filter_kernels_by_backend(linear_backend, platform_kernels)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for mixed-precision layers."
+        if filtered:
+            platform_kernels = filtered
+        else:
+            logger.debug(
+                "--linear-backend=%s has no kernel for mixed-precision "
+                "layers, falling back to auto-selection.",
+                linear_backend,
             )
-        platform_kernels = filtered
 
     failure_reasons = []
     for kernel in platform_kernels:
@@ -806,12 +810,14 @@ def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
     linear_backend = _get_linear_backend()
     if linear_backend != "auto":
         filtered = _filter_kernels_by_backend(linear_backend, possible)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for MXFP8 layers."
+        if filtered:
+            possible = filtered
+        else:
+            logger.debug(
+                "--linear-backend=%s has no kernel for MXFP8 layers, "
+                "falling back to auto-selection.",
+                linear_backend,
             )
-        possible = filtered
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -857,12 +863,14 @@ def init_mxfp4_linear_kernel(
     # Apply --linear-backend filtering when set.
     if linear_backend != "auto":
         filtered = _filter_kernels_by_backend(linear_backend, possible)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for MXFP4 layers."
+        if filtered:
+            possible = filtered
+        else:
+            logger.debug(
+                "--linear-backend=%s has no kernel for MXFP4 layers, "
+                "falling back to auto-selection.",
+                linear_backend,
             )
-        possible = filtered
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -1044,12 +1052,14 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     # Apply --linear-backend filtering when set.
     if linear_backend != "auto":
         filtered = _filter_kernels_by_backend(linear_backend, possible)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for NVFP4 layers."
+        if filtered:
+            possible = filtered
+        else:
+            logger.debug(
+                "--linear-backend=%s has no kernel for NVFP4 layers, "
+                "falling back to auto-selection.",
+                linear_backend,
             )
-        possible = filtered
 
     failure_reasons = []
     for kernel_cls in possible:

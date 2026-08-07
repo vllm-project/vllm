@@ -205,16 +205,21 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
         return set(envs.VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS) or None
 
     from vllm.model_executor.kernels.linear import (
+        FlashInferB12xNvFp4LinearKernel,
         FlashInferCuteDslNvFp4LinearKernel,
     )
 
     for module in runner.get_model().modules():
         for holder_name in ("quant_method", "scheme"):
             kernel = getattr(getattr(module, holder_name, None), "kernel", None)
-            # CuTe-DSL mm_fp4 tuning JIT-compiles every tactic and its
-            # fallback is already the heuristic; all mm_fp4 backends share
-            # the "fp4_gemm" op name, so skip only when cute-dsl is selected.
-            if isinstance(kernel, FlashInferCuteDslNvFp4LinearKernel):
+            # CuTe-DSL and b12x mm_fp4 tuning JIT-compiles every tactic into
+            # separate CUDA modules that permanently occupy VRAM. Their
+            # fallback heuristics are already good; skip fp4_gemm tuning.
+            if isinstance(
+                kernel,
+                (FlashInferCuteDslNvFp4LinearKernel,
+                 FlashInferB12xNvFp4LinearKernel),
+            ):
                 return {"fp4_gemm"}
     return None
 

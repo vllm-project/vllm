@@ -496,6 +496,15 @@ class Worker(WorkerBase):
                 getattr(self.parallel_config, "_api_process_count", 1),
             )
 
+        # Warmup: run a forward pass before the profiling window so that
+        # JIT-compiled kernel code (e.g. FlashInfer) is produced outside the
+        # measurement. On first launch those kernels don't yet exist; their
+        # code lives in GPU memory permanently (CUDA driver level, not freed
+        # by torch.empty_cache). If compilation happens inside the
+        # memory_profiling context it inflates non_torch_increase and shrinks
+        # the KV-cache budget.
+        self.model_runner.profile_run()
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
