@@ -281,6 +281,17 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        """Whether this backend can run a batch whose device query_start_loc disagrees
+        with the CPU one; backends that plan off the CPU query lengths must opt out.
+
+        Currently only verification requests are affected: adaptive verification trims
+        their drafts on device, so the CPU lengths bound them from above. The
+        decode/prefill split point and the CPU prefill query lengths both stay correct.
+        """
+        return True
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         try:
             return cls.get_impl_cls().supports_pcp
@@ -334,6 +345,7 @@ class AttentionBackend(ABC):
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
         use_pcp: bool = False,
+        use_adaptive_verification: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -376,6 +388,14 @@ class AttentionBackend(ABC):
             invalid_reasons.append("KV connector not supported")
         if use_pcp and not cls.supports_pcp():
             invalid_reasons.append("PCP not supported")
+        if (
+            use_adaptive_verification
+            and not cls.supports_device_cpu_query_lens_mismatch()
+        ):
+            invalid_reasons.append(
+                "device-cpu query lens mismatch not supported, "
+                "this is needed for adaptive verification"
+            )
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -632,8 +652,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
-    # Do not access directly. See supports_device_cpu_query_lens_mismatch().
-    _supports_device_cpu_query_lens_mismatch: ClassVar[bool] = True
     # Whether the builder constructor requires the block-table width.
     requires_block_table_width: ClassVar[bool] = False
 
@@ -658,21 +676,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
-
-    @classmethod
-    def supports_device_cpu_query_lens_mismatch(
-        cls: type["AttentionMetadataBuilder"],
-        vllm_config: "VllmConfig",
-        kv_cache_spec: "KVCacheSpec",
-    ) -> bool:
-        """Whether this backend can run a batch whose device query_start_loc disagrees
-        with the CPU one; backends that plan off the CPU query lengths must opt out.
-
-        Currently only verification requests are affected: adaptive verification trims
-        their drafts on device, so the CPU lengths bound them from above. The
-        decode/prefill split point and the CPU prefill query lengths both stay correct.
-        """
-        return cls._supports_device_cpu_query_lens_mismatch
 
     def _init_reorder_batch_threshold(
         self,

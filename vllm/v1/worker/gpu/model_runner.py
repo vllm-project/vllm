@@ -74,8 +74,8 @@ from vllm.v1.worker.gpu.async_utils import (
 )
 from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
-    get_device_cpu_query_lens_mismatch_support,
     get_kv_cache_spec,
+    get_query_lens_mismatch_unsupported_backend,
     init_attn_backend,
     init_kv_cache,
 )
@@ -510,10 +510,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
         if getattr(self.speculator, "enable_adaptive_verification", False):
-            supported, backend = get_device_cpu_query_lens_mismatch_support(
-                self.attn_groups, self.vllm_config
-            )
-            if not supported:
+            # The selector rejects unsupported backends, but models that
+            # hard-wire theirs (e.g. DeepSeek-V4) never go through it.
+            backend = get_query_lens_mismatch_unsupported_backend(self.attn_groups)
+            if backend is not None:
                 raise ValueError(
                     "Adaptive verification trims verification requests on device, which"
                     f" the {backend} attention backend does not support. support. Pass "
@@ -1034,9 +1034,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # batch_idx -> req_id
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        # Drafts-first ordering is only required by adaptive verification
-        # (compact_batch assumes verification requests lead); keep main's
-        # ordering untouched otherwise.
+        # Drafts-first ordering is required by adaptive verification
         req_ids = sort_batch_req_ids(
             num_tokens_per_req,
             draft_tokens if self.adaptive_verification is not None else {},
@@ -1083,9 +1081,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         scheduled_num_tokens = num_scheduled_tokens
         if adaptive_verification is not None:
-            # The GPU may regrant trimmed drafts unevenly, but never beyond a
-            # request's scheduled count: the pre-trim counts remain the
-            # per-request upper bound for CPU-side metadata.
+            # num_scheduled_tokens represents the draft budget evenly distributed across
+            # all verification requests, `reallocate_drafts` will unevenly assign the
+            # draft budget to requests on the GPU side only.
             num_scheduled_tokens = adaptive_verification.compact_batch(
                 num_draft_tokens_per_req,
                 num_scheduled_tokens,
@@ -1373,24 +1371,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and scheduler_output.scheduled_spec_decode_tokens
             and not dummy_run
         ):
-            if self.adaptive_verification.cost_tables is None:
-                # No FULL graphs were captured (enforce_eager, or the attention
-                # backend lacks varlen support), so step costs could not be
-                # profiled. Consistent across ranks: TP shares curves via
-                # broadcast and PP is rejected at config time.
-                logger.warning_once(
-                    "DSpark adaptive verification disabled: no cudagraph cost "
-                    "profile is available. Falling back to fixed-length "
-                    "verification."
-                )
-                self.adaptive_verification = None
-            else:
-                num_toks = self.adaptive_verification.get_num_tokens(
-                    scheduler_output.num_scheduled_tokens,
-                    scheduler_output.scheduled_spec_decode_tokens,
-                )
-                # Trimming drafts makes the batch non-uniform.
-                uniform_tok_count = None
+            num_toks = self.adaptive_verification.get_num_tokens(
+                scheduler_output.num_scheduled_tokens,
+                scheduler_output.scheduled_spec_decode_tokens,
+            )
+            # Trimming drafts makes the batch non-uniform.
+            uniform_tok_count = None
 
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,

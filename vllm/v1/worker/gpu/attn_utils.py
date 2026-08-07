@@ -180,24 +180,20 @@ def init_attn_backend(
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
-def get_device_cpu_query_lens_mismatch_support(
+def get_query_lens_mismatch_unsupported_backend(
     attn_groups: list[list[AttentionGroup]],
-    vllm_config: VllmConfig,
-) -> tuple[bool, str | None]:
-    """Whether every backend tolerates a device/CPU query length mismatch.
-    See AttentionMetadataBuilder.supports_device_cpu_query_lens_mismatch() for details.
+) -> str | None:
+    """Name the first backend needing the CPU query lengths to be exact, if any.
 
-    Returns the aggregate answer and, when it is False, the first backend that does not.
+    The attention selector already excludes these when adaptive verification is
+    enabled, but models that hard-wire their backend never consult it. See
+    AttentionBackend.supports_device_cpu_query_lens_mismatch().
     """
     for groups in attn_groups:
         for group in groups:
-            builder = group.get_metadata_builder(0)
-            if not builder.supports_device_cpu_query_lens_mismatch(
-                vllm_config,
-                group.kv_cache_spec,
-            ):
-                return False, group.backend.__name__
-    return True, None
+            if not group.backend.supports_device_cpu_query_lens_mismatch():
+                return group.backend.__name__
+    return None
 
 
 def _allocate_kv_cache(

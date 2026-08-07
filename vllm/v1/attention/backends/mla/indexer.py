@@ -128,6 +128,12 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     def supports_pcp(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Only the varlen paged MQA logits kernel takes per-request query
+        # lengths from device tensors; otherwise the indexer needs uniform ones.
+        return _supports_varlen_paged_mqa_logits()
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V32_INDEXER"
@@ -476,16 +482,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         if _supports_varlen_paged_mqa_logits():
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
-
-    @classmethod
-    def supports_device_cpu_query_lens_mismatch(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: KVCacheSpec,
-    ) -> bool:
-        # Only the varlen paged MQA logits kernel takes per-request query lengths from
-        # device tensors; otherwise the indexer needs uniform ones.
-        return _supports_varlen_paged_mqa_logits()
 
     def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)

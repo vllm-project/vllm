@@ -109,11 +109,12 @@ class DSparkSpeculator(DFlashSpeculator):
                 device=self.device,
             )
         if self.enable_adaptive_verification and model.model.confidence_head is None:
-            logger.warning_once(
-                "DSpark checkpoint has no confidence head; disabling adaptive "
-                "verification and using fixed-length verification."
+            raise ValueError(
+                "Adaptive verification needs a DSpark checkpoint with a confidence "
+                "head, and this one has none. Pass "
+                "enable_adaptive_verification=false in the speculative config to verify"
+                " a fixed number of drafts instead."
             )
-            self.enable_adaptive_verification = False
         return model
 
     def _sample_logits(

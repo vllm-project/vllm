@@ -2350,6 +2350,16 @@ class VllmConfig:
 
             if (
                 speculative_config.enable_adaptive_verification
+                and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            ):
+                # The draft budget divides by step costs profiled from captured
+                # cudagraphs; eager execution captures none.
+                unsupported.append(
+                    "adaptive verification with enforce_eager/cudagraph_mode=none"
+                )
+
+            if (
+                speculative_config.enable_adaptive_verification
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
                 # Cost curves and confidences currently only exist on the last PP rank;
