@@ -83,9 +83,7 @@ DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 MOONCAKE_TRANSFER_FAIL = -800
-_PRESSURE_CODES = frozenset(
-    (MOONCAKE_NO_AVAILABLE_HANDLE, MOONCAKE_TRANSFER_FAIL)
-)
+_PRESSURE_CODES = frozenset((MOONCAKE_NO_AVAILABLE_HANDLE, MOONCAKE_TRANSFER_FAIL))
 _T = TypeVar("_T")
 
 
@@ -602,7 +600,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[g_idx]
             if self.dcp_size > 1 and put_step > 1:
-                put_step_rank = self.tp_rank // self.dcp_size
+                put_step_rank = (self.tp_rank // self.dcp_size) % put_step
             else:
                 put_step_rank = (self.tp_rank + g_idx) % put_step
             # Always include the boundary block: its sub-hash key is written
@@ -787,7 +785,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 # Rotate the stride phase per group to balance load across ranks.
                 put_step = self.group_put_steps[g_idx]
                 if self.dcp_size > 1 and put_step > 1:
-                    put_step_rank = self.tp_rank // self.dcp_size
+                    put_step_rank = (self.tp_rank // self.dcp_size) % put_step
                 else:
                     put_step_rank = (self.tp_rank + g_idx) % put_step
                 for start, end, block_hash in db.process_tokens(
@@ -950,10 +948,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         len(keys),
                         keys[0] if keys else "N/A",
                     )
-                    if (
-                        _PRESSURE_CODES & set(failed_codes)
-                        and not self._mark_request_skipped_for_pressure(req_id)
-                    ):
+                    if _PRESSURE_CODES & set(
+                        failed_codes
+                    ) and not self._mark_request_skipped_for_pressure(req_id):
                         logger.warning(
                             "Detected Mooncake CPU/disk offloading pressure "
                             "(NO_AVAILABLE_HANDLE); skipping future store "
@@ -1405,9 +1402,7 @@ class MooncakeStoreWorker:
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
         )
-        self._group_put_steps: tuple[int, ...] = (
-            self._compute_group_put_steps()
-        )
+        self._group_put_steps: tuple[int, ...] = self._compute_group_put_steps()
         self.token_dbs = [
             ChunkedTokenDatabase(
                 dataclasses.replace(
@@ -1466,8 +1461,7 @@ class MooncakeStoreWorker:
 
     def _compute_group_put_steps(self) -> tuple[int, ...]:
         return tuple(
-            self._spec_put_step(group.kv_cache_spec)
-            for group in self._kv_cache_groups
+            self._spec_put_step(group.kv_cache_spec) for group in self._kv_cache_groups
         )
 
     def _init_lookup_key_prefixes(self) -> None:
