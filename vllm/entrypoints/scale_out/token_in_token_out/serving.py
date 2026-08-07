@@ -200,6 +200,15 @@ class ServingTokens(GenerateBaseServing):
                 skip_mm_cache=True,
             )
 
+        input_length = self._extract_prompt_len(engine_input)
+        if self.model_config.enable_return_routed_experts:
+            prompt_start = sampling_params.routed_experts_prompt_start
+            if not 0 <= prompt_start < input_length:
+                return self.create_error_response(
+                    "sampling_params.routed_experts_prompt_start must be in the "
+                    f"range [0, {input_length}), got {prompt_start}."
+                )
+
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
 
@@ -211,7 +220,7 @@ class ServingTokens(GenerateBaseServing):
             sampling_params.max_tokens = get_max_tokens(
                 max_model_len=self.model_config.max_model_len,
                 max_tokens=None,
-                input_length=self._extract_prompt_len(engine_input),
+                input_length=input_length,
                 default_sampling_params=self.default_sampling_params,
                 override_max_tokens=self.override_max_tokens,
             )
