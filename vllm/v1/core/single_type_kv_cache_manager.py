@@ -1589,13 +1589,12 @@ class MambaManager(SingleTypeKVCacheManager):
                     )
 
                 if blocks_allocated:
-                    # reuse previous speculative blocks in this step
+                    # Relocate exclusively owned speculative scratch blocks.
                     for block_idx in range(
                         prev_block_len - self.num_speculative_blocks, prev_block_len
                     ):
                         if block_idx < num_skipped_blocks:
-                            req_blocks.append(req_blocks[block_idx])
-                            req_blocks[block_idx] = self._null_block
+                            self._relocate_speculative_block(req_blocks, block_idx)
                         else:
                             break
                 num_new_blocks = num_required_blocks - len(req_blocks)
@@ -1650,6 +1649,17 @@ class MambaManager(SingleTypeKVCacheManager):
                 self._partial_hit_reqs.pop(request_id, None)
                 returned_blocks.extend(new_blocks)
                 return returned_blocks
+
+    def _relocate_speculative_block(
+        self, req_blocks: list[KVCacheBlock], block_idx: int
+    ) -> None:
+        block = req_blocks[block_idx]
+        assert self.block_pool.is_block_writable(block), (
+            "Speculative Mamba blocks must be exclusively owned and unhashed "
+            "before relocation"
+        )
+        req_blocks.append(block)
+        req_blocks[block_idx] = self._null_block
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         if self.mamba_cache_mode == "align":

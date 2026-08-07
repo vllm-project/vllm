@@ -14,16 +14,48 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    MambaManager,
     RSWAManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    MambaSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+    )
+    block_pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    block = block_pool.get_new_blocks(1)[0]
+    blocks = [block]
+
+    manager._relocate_speculative_block(blocks, 0)
+
+    assert blocks == [block_pool.null_block, block]
+    assert block.ref_cnt == 1
+
+    pinned_block = block_pool.get_new_blocks(1)[0]
+    block_pool.touch((pinned_block,))
+    with pytest.raises(AssertionError, match="exclusively owned and unhashed"):
+        manager._relocate_speculative_block([pinned_block], 0)
 
 
 def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):
