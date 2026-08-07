@@ -398,6 +398,8 @@ class ModelConfig:
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
+    paged_shm_size: InitVar[int | str | None] = None
+    paged_shm_block_size: InitVar[int | str | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -530,6 +532,8 @@ class ModelConfig:
         mm_ipc_gpu_memory_gb: float | None,
         mm_device_do_normalize: bool | None,
         mm_processor_device: MMProcessorDevice | None,
+        paged_shm_size: int | None,
+        paged_shm_block_size: int | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -798,6 +802,8 @@ class ModelConfig:
                 mm_device_do_normalize=self._resolve_mm_device_do_normalize(
                     mm_device_do_normalize
                 ),
+                paged_shm_size=paged_shm_size,
+                paged_shm_block_size=paged_shm_block_size,
             )
 
             mm_config_kwargs = {
