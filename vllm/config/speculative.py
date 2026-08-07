@@ -907,6 +907,22 @@ class SpeculativeConfig:
                 # Automatically detect the method
                 if self.method in ("eagle", "eagle3", "dflash", "dspark"):
                     pass
+                # Speculators-format checkpoints declare their algorithm in
+                # config.json; trust it before the name heuristics below, which
+                # miss checkpoints saved under paths with no algorithm hint.
+                elif (
+                    speculators_model_type := getattr(
+                        self.draft_model_config.hf_config,
+                        "speculators_model_type",
+                        None,
+                    )
+                ) is not None:
+                    if speculators_model_type == "peagle":
+                        # Mirrors SpeculatorsConfig.build_vllm_speculative_config.
+                        self.method = "eagle3"
+                        self.parallel_drafting = True
+                    else:
+                        self.method = speculators_model_type
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
                 # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
