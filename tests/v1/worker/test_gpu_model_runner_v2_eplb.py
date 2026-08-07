@@ -108,8 +108,10 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     )
     monkeypatch.setattr(
         eplb,
-        "is_mixture_of_experts",
-        lambda loaded_model: getattr(loaded_model, "is_moe", False),
+        "get_mixture_of_experts_model",
+        lambda loaded_model: (
+            loaded_model if getattr(loaded_model, "is_moe", False) else None
+        ),
     )
 
     runner = _make_runner(is_last_pp_rank=False)
@@ -138,7 +140,7 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
         "init_model_state",
         lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
     )
-    monkeypatch.setattr(eplb, "is_mixture_of_experts", lambda *_: True)
+    monkeypatch.setattr(eplb, "get_mixture_of_experts_model", lambda model: model)
 
     runner = _make_runner(is_last_pp_rank=False)
     mrv2.GPUModelRunner.load_model(runner, load_dummy_weights=True)
@@ -153,7 +155,7 @@ def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
     FakeEplbState.instances.clear()
     FakeEplbState.from_mapping_kwargs = None
     monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
-    monkeypatch.setattr(eplb, "is_mixture_of_experts", lambda *_: True)
+    monkeypatch.setattr(eplb, "get_mixture_of_experts_model", lambda model: model)
 
     runner = _make_runner(model=SimpleNamespace(is_moe=True))
     mapping = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)
