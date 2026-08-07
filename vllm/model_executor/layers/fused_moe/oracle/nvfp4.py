@@ -190,6 +190,7 @@ def select_nvfp4_moe_backend(
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
         NvFp4MoeBackend.HUMMING,
@@ -261,8 +262,8 @@ def select_nvfp4_moe_backend(
                 f"Model sets swiglu_limit={config.swiglu_limit}, but the "
                 f"explicitly requested moe_backend={runner_backend!r} does "
                 f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm', "
-                f"'flashinfer_cutlass', 'cutlass', 'marlin', or 'humming' "
-                f"instead."
+                f"'flashinfer_cutlass', 'flashinfer_cutedsl', 'cutlass', "
+                f"'marlin', or 'humming' instead."
             )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
@@ -471,6 +472,8 @@ def make_nvfp4_moe_quant_config(
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
     swiglu_limit: float | None = None,
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.HUMMING:
@@ -497,6 +500,8 @@ def make_nvfp4_moe_quant_config(
             a2_gscale=a2_scale,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
 
@@ -521,6 +526,8 @@ def make_nvfp4_moe_quant_config(
                 NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             )
         ),
+        gemm1_alpha=swiglu_alpha,
+        gemm1_beta=swiglu_beta,
         gemm1_clamp_limit=swiglu_limit,
     )
 
