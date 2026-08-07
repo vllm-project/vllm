@@ -12,6 +12,14 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp8.b12x import warmup_b12x_mxfp8_linear
+from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
+    warmup_b12x_block_fp8_linear,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.b12x_tensor import (
+    warmup_b12x_tensor_fp8_linear,
+)
+from vllm.model_executor.layers.fused_moe.b12x_moe import warmup_b12x_moe
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
@@ -113,15 +121,16 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
+    compilation_config = worker.vllm_config.compilation_config
+    cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
+
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
     # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
     deepseek_v4_mhc_warmup(
         worker.get_model(),
         max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=(
-            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
-        ),
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
@@ -155,6 +164,67 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+
+    b12x_linear_max_tokens = worker.scheduler_config.max_num_batched_tokens
+    b12x_linear_output_dtype = getattr(
+        getattr(worker, "model_config", None),
+        "dtype",
+        torch.bfloat16,
+    )
+    warmed_block_fp8 = warmup_b12x_block_fp8_linear(
+        worker.get_model(),
+        max_tokens=b12x_linear_max_tokens,
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
+        output_dtype=b12x_linear_output_dtype,
+    )
+    if warmed_block_fp8:
+        logger.info(
+            "Warmed up %d B12X block-FP8 linear GEMM signatures.",
+            warmed_block_fp8,
+        )
+
+    warmed_mxfp8 = warmup_b12x_mxfp8_linear(
+        worker.get_model(),
+        max_tokens=b12x_linear_max_tokens,
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
+        output_dtype=b12x_linear_output_dtype,
+    )
+    if warmed_mxfp8:
+        logger.info("Warmed up %d B12X MXFP8 linear GEMM signatures.", warmed_mxfp8)
+
+    warmed_tensor_fp8 = warmup_b12x_tensor_fp8_linear(
+        worker.get_model(),
+        max_tokens=b12x_linear_max_tokens,
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
+        output_dtype=b12x_linear_output_dtype,
+    )
+    if warmed_tensor_fp8:
+        logger.info(
+            "Warmed up %d B12X tensor FP8 linear GEMM signatures.",
+            warmed_tensor_fp8,
+        )
+
+    moe_token_counts = [
+        worker.scheduler_config.max_num_batched_tokens,
+        *cudagraph_capture_sizes,
+        *(
+            size
+            for size in (getattr(compilation_config, "compile_sizes", None) or [])
+            if isinstance(size, int)
+        ),
+    ]
+    max_num_scheduled_tokens = getattr(
+        worker.scheduler_config,
+        "max_num_scheduled_tokens",
+        None,
+    )
+    if max_num_scheduled_tokens is not None:
+        moe_token_counts.append(max_num_scheduled_tokens)
+    warmup_b12x_moe(
+        worker.get_model(),
+        max_tokens=max(moe_token_counts),
+        token_counts=moe_token_counts,
+    )
 
     minimax_m3_msa_warmup(worker)
 

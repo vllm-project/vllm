@@ -665,7 +665,13 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
 ) -> None:
     captured = {}
     expected_quant_config = object()
-    expected_kernel = object()
+    expected_kernel = SimpleNamespace(
+        fused_experts=SimpleNamespace(
+            process_weights_after_loading=lambda layer: captured.update(
+                {"processed_layer": layer}
+            )
+        )
+    )
     expected_experts_cls = object()
 
     monkeypatch.setattr(
@@ -728,6 +734,7 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
     assert captured["kernel_kwargs"]["moe_config"] is expected_moe_config
     assert captured["kernel_kwargs"]["experts_cls"] is expected_experts_cls
     assert captured["kernel_kwargs"]["routing_tables"] == "routing-tables"
+    assert captured["processed_layer"] is layer
     assert method.moe_kernel is expected_kernel
 
 

@@ -130,6 +130,7 @@ MoEBackend = Literal[
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "flashinfer_b12x",
+    "b12x",
     "marlin",
     "humming",
     "triton_unfused",
@@ -141,13 +142,13 @@ MoEBackend = Literal[
 
 LinearBackend = Literal[
     "auto",
-    "b12x",
     "cutlass",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "flashinfer_trtllm",
     "flashinfer_cudnn",
     "flashinfer_b12x",
+    "b12x",
     "marlin",
     "humming",
     "triton",
@@ -193,7 +194,6 @@ class KernelConfig:
     """Backend for MoE expert computation kernels. Available options:
 
     - "auto": Automatically select the best backend based on model and hardware
-    - "b12x": Use B12X kernels for SM12x FP8 and FP4 linear layers
     - "triton": Use Triton-based fused MoE kernels
     - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
       activation format ([E_local, max_num_tokens, K])
@@ -205,6 +205,7 @@ class KernelConfig:
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
+    - "b12x": Use native B12X FP4 MoE kernels on SM12x
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
@@ -225,6 +226,7 @@ class KernelConfig:
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
+    - "b12x": Use native B12X FP8 and FP4 linear kernels on SM12x
     - "marlin": Use Marlin kernels
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels
