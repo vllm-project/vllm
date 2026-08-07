@@ -175,6 +175,14 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return self.mm_processor.cache
 
+    def discard_mm_cache_entries(self, mm_hashes: Mapping[str, list[str]]) -> None:
+        mm_processor_cache = self.mm_processor_cache
+        if mm_processor_cache is None:
+            return
+        for hashes in mm_hashes.values():
+            for mm_hash in hashes:
+                mm_processor_cache.discard_sender_cache_item(mm_hash)
+
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         mm_cache_stats = self._mm_cache_stats
         if mm_cache_stats is None:

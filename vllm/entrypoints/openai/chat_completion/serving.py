@@ -54,7 +54,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.inputs import EngineInput, MultiModalPlaceholders
+from vllm.inputs import EngineInput, MultiModalHashes, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -284,16 +284,24 @@ class OpenAIServingChat(GenerateBaseServing):
                 request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
             )
 
-            max_tokens = get_max_tokens(
-                max_model_len,
-                request.max_completion_tokens
-                if request.max_completion_tokens is not None
-                else request.max_tokens,
-                self._extract_prompt_len(engine_input),
-                self.default_sampling_params,
-                self.override_max_tokens,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-            )
+            try:
+                max_tokens = get_max_tokens(
+                    max_model_len,
+                    request.max_completion_tokens
+                    if request.max_completion_tokens is not None
+                    else request.max_tokens,
+                    self._extract_prompt_len(engine_input),
+                    self.default_sampling_params,
+                    self.override_max_tokens,
+                    truncate_prompt_tokens=request.truncate_prompt_tokens,
+                )
+            except ValueError:
+                for rendered_input in engine_inputs:
+                    if mm_hashes := cast(
+                        MultiModalHashes | None, rendered_input.get("mm_hashes")
+                    ):
+                        self.renderer.discard_mm_cache_entries(mm_hashes)
+                raise
 
             sampling_params: SamplingParams | BeamSearchParams
             if request.use_beam_search:

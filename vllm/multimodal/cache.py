@@ -299,6 +299,10 @@ class BaseMultiModalProcessorCache(
         """Close the underlying cache, if needed."""
         pass
 
+    def discard_sender_cache_item(self, mm_hash: str) -> None:
+        """Discard a sender-side cache item after a rejected request."""
+        pass
+
     @abstractmethod
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """
@@ -368,6 +372,10 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         self._cache.touch(mm_hash)
 
     @override
+    def discard_sender_cache_item(self, mm_hash: str) -> None:
+        self._cache.pop(mm_hash, None)
+
+    @override
     def clear_cache(self) -> None:
         self._cache.clear()
 
@@ -424,6 +432,10 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         self._cache.touch(mm_hash)
+
+    @override
+    def discard_sender_cache_item(self, mm_hash: str) -> None:
+        self._cache.pop(mm_hash, None)
 
     @override
     def clear_cache(self) -> None:
