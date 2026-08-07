@@ -34,7 +34,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
-    prepare_communication_buffer_for_model,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -329,9 +328,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Do not rely on pooling_runner here, since this information is needed
             # on the first PP rank, while pooling_runner is only initialized
             # on the last PP rank.
-            tasks.extend(
-                PoolingRunner.get_supported_tasks(self.model, self.model_config)
-            )
+            tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
@@ -368,11 +365,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             format_gib(m.consumed_memory),
             time_after_load - time_before_load,
         )
-
-        if not load_dummy_weights:
-            prepare_communication_buffer_for_model(self.model)
-            if self.speculator is not None:
-                prepare_communication_buffer_for_model(self.speculator.model)
 
         # Initialize the components that require the model.
         self.model_state = init_model_state(
@@ -552,6 +544,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.supports_mm_inputs,
             self.req_states,
             self.block_tables,
+            cls=self.pcp_manager_cls,
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
@@ -1049,11 +1042,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             draft_tokens if self.adaptive_verification is not None else {},
             self.decode_query_len,
         )
-        numtoks_iter = map(num_tokens_per_req.get, req_ids)
+        numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
-        idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
-        idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
+        idx_mapping_iter = map(self.req_states.req_id_to_index.__getitem__, req_ids)
+        idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.intp, count=num_reqs)
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         # Get the number of draft tokens for each request.
@@ -1896,6 +1889,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     ########### EPLB methods end ###########
+
+    # Out-of-tree hardware runners can select a PCP manager class.
+    @property
+    def pcp_manager_cls(self) -> type[pcp.PCPManager]:
+        return pcp.PCPManager
 
 
 class ExecuteModelState(NamedTuple):
