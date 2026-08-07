@@ -77,6 +77,9 @@ from vllm.model_executor.kernels.linear.mxfp4 import (
 from vllm.model_executor.kernels.linear.mxfp4.aiter import (
     AiterMxfp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.b12x import (
+    B12xMxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.emulation import (
     EmulationMxfp4LinearKernel,
 )
@@ -128,6 +131,9 @@ from vllm.model_executor.kernels.linear.mxfp8.xpu import (
 from vllm.model_executor.kernels.linear.nvfp4 import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.nvfp4.b12x import (
+    B12xNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
     CutlassNvFp4LinearKernel,
@@ -239,7 +245,9 @@ def _get_linear_backend() -> str:
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "b12x": {
         B12xFp8BlockScaledMMKernel,
+        B12xMxFp4LinearKernel,
         B12xMxfp8LinearKernel,
+        B12xNvFp4LinearKernel,
         B12xTensorFP8ScaledMMLinearKernel,
     },
     "cutlass": {
@@ -515,6 +523,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        B12xNvFp4LinearKernel,
         FlashInferCuteDslNvFp4LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
         FlashInferB12xNvFp4LinearKernel,
@@ -542,6 +551,7 @@ _POSSIBLE_MXFP6_KERNELS: dict[PlatformEnum, list[type[MxFp6LinearKernel]]] = {
 
 _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        B12xMxFp4LinearKernel,
         FlashInferMxFp4LinearKernel,
         MarlinMxFp4LinearKernel,
         HummingMxFp4LinearKernel,
@@ -1192,6 +1202,8 @@ __all__ = [
     "Mxfp8LinearKernel",
     "Mxfp8LinearLayerConfig",
     "B12xMxfp8LinearKernel",
+    "B12xMxFp4LinearKernel",
+    "B12xNvFp4LinearKernel",
     "init_mxfp4_linear_kernel",
     "MxFp4LinearKernel",
     "MxFp4LinearLayerConfig",
