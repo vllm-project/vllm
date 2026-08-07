@@ -7,6 +7,8 @@ from typing import Any
 import torch
 from torch import nn
 
+import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -19,6 +21,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -128,12 +131,124 @@ class KimiRoutedOutputTransform(nn.Module):
         super().__init__()
         self.norm = norm
         self.up_proj = up_proj
+        self.register_buffer("_latent_tail_fp8_weight", None, persistent=False)
+        self.register_buffer("_latent_tail_fp8_scale", None, persistent=False)
+
+    @torch.no_grad()
+    def finalize_fp8_weight(self) -> None:
+        if not envs.VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8:
+            return
+        try:
+            from aiter.ops.flydsl.latent_moe_tail_fp8 import (
+                quantize_latent_moe_tail_weight,
+            )
+        except (ImportError, ModuleNotFoundError):
+            logger.warning_once(
+                "AITER does not provide the Kimi-K3 FP8 latent-tail kernel; "
+                "using the BF16 latent-tail path."
+            )
+            return
+
+        try:
+            (
+                self._latent_tail_fp8_weight,
+                self._latent_tail_fp8_scale,
+            ) = quantize_latent_moe_tail_weight(self.up_proj.weight)
+        except ValueError as error:
+            logger.warning_once(
+                "Kimi-K3 FP8 latent-tail prepack is unsupported (%s); "
+                "using the BF16 latent-tail path.",
+                error,
+            )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
         hidden_states, _ = self.up_proj(hidden_states)
         return hidden_states
+
+    def forward_with_shared(
+        self,
+        hidden_states: torch.Tensor,
+        shared_output: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Fuse the supported local tail, or return ``None`` for fallback."""
+
+        if self.norm is None or not rocm_aiter_ops.is_enabled():
+            return None
+        if (
+            envs.VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8
+            and self._latent_tail_fp8_weight is not None
+            and self._latent_tail_fp8_scale is not None
+        ):
+            try:
+                from aiter.ops.flydsl.latent_moe_tail_fp8 import (
+                    latent_moe_tail_fp8,
+                    supports_latent_moe_tail_fp8,
+                )
+            except (ImportError, ModuleNotFoundError):
+                pass
+            else:
+                if supports_latent_moe_tail_fp8(
+                    hidden_states,
+                    shared_output,
+                    self.norm.weight,
+                    self._latent_tail_fp8_weight,
+                    self._latent_tail_fp8_scale,
+                    self.norm.variance_epsilon,
+                ):
+                    return latent_moe_tail_fp8(
+                        hidden_states,
+                        shared_output,
+                        self.norm.weight,
+                        self._latent_tail_fp8_weight,
+                        self._latent_tail_fp8_scale,
+                        self.norm.variance_epsilon,
+                    )
+        try:
+            from aiter.ops.flydsl.latent_moe_tail import (
+                latent_moe_tail,
+                supports_latent_moe_tail,
+            )
+        except (ImportError, ModuleNotFoundError):
+            return None
+
+        up_weight = self.up_proj.weight
+        if not supports_latent_moe_tail(
+            hidden_states,
+            shared_output,
+            self.norm.weight,
+            up_weight,
+            self.norm.variance_epsilon,
+        ):
+            return None
+        return latent_moe_tail(
+            hidden_states,
+            shared_output,
+            self.norm.weight,
+            up_weight,
+            self.norm.variance_epsilon,
+        )
+
+
+class KimiAMDLatentMoERunner(MoERunner):
+    """Use the AMD local-tail primitive after routed/shared reductions."""
+
+    def apply_routed_output_transform_and_add_shared(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        transform = self.routed_output_transform
+        if shared_output is not None and isinstance(
+            transform, KimiRoutedOutputTransform
+        ):
+            result = transform.forward_with_shared(fused_output, shared_output)
+            if result is not None:
+                return result
+        return super().apply_routed_output_transform_and_add_shared(
+            shared_output, fused_output
+        )
 
 
 def _apply_attn_res(
@@ -289,6 +404,7 @@ class KimiMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
+            runner_cls=KimiAMDLatentMoERunner if self.use_latent_moe else None,
         )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -983,6 +1099,16 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             loaded_params.add(name)
         return loaded_params
 
+    def finalize_latent_tail_fp8_weights(self) -> None:
+        if not envs.VLLM_ROCM_USE_KIMI_K3_LATENT_TAIL_FP8:
+            return
+        for layer in self.layers[self.start_layer : self.end_layer]:
+            if not isinstance(layer, KimiDecoderLayer):
+                continue
+            mlp = layer.mlp
+            if isinstance(mlp, KimiMoE) and mlp.routed_output_transform is not None:
+                mlp.routed_output_transform.finalize_fp8_weight()
+
 
 class KimiLinearForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
@@ -1084,4 +1210,6 @@ class KimiLinearForCausalLM(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        self.model.finalize_latent_tail_fp8_weights()
+        return loaded
