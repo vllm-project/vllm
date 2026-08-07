@@ -394,6 +394,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        self.check_version("5.10.0", "multi-modal models support")
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
