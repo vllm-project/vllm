@@ -373,6 +373,20 @@ def test_rms_norm(
                 # them) and checking how many the max diff error shows up on (just
                 # a few bad elements should still be considered acceptable).
                 ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
+                if not ok and quant_dtype == current_platform.fp8_dtype():
+                    # The fused kernel keeps fp32 intermediates while the
+                    # reference norm rounds through bf16 before quantizing, so
+                    # a value landing on an E4M3 rounding tie can flip one fp8
+                    # step (e.g. 288 vs 320 for a scaled value of 304.0) and
+                    # exceed the dequantized tolerance. Scales already matched
+                    # strictly above; accept a bounded count of isolated 1-ULP
+                    # flips, mirroring the ROCm relaxation.
+                    ulp = fp8_ulp_distance(ref_out, ops_out)
+                    max_outliers = ulp.numel() // 100_000 + 8
+                    ok = (
+                        int(ulp.max()) <= 1
+                        and int((ulp > 0).sum().item()) <= max_outliers
+                    )
         assert ok
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual)
