@@ -333,6 +333,8 @@ def test_num_lookahead_tokens_per_method(method: str, expected: int):
     """
 
     class _Config:
+        speculative_config: SpeculativeConfig | None = None
+        diffusion_config = None
         num_speculative_tokens = VllmConfig.num_speculative_tokens
         num_lookahead_tokens = VllmConfig.num_lookahead_tokens
 
@@ -342,18 +344,17 @@ def test_num_lookahead_tokens_per_method(method: str, expected: int):
 
     config = _Config()
     config.speculative_config = speculative_config
-    config.diffusion_config = None
 
     assert config.num_lookahead_tokens == expected
 
 
 def test_num_lookahead_tokens_without_speculation():
     class _Config:
+        speculative_config: SpeculativeConfig | None = None
+        diffusion_config = None
         num_speculative_tokens = VllmConfig.num_speculative_tokens
         num_lookahead_tokens = VllmConfig.num_lookahead_tokens
 
     config = _Config()
-    config.speculative_config = None
-    config.diffusion_config = None
 
     assert config.num_lookahead_tokens == 0
