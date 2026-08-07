@@ -38,7 +38,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor current_main_kv, Tensor request_block_ids, "
       "Tensor request_num_blocks, Tensor request_num_tokens, "
       "Tensor request_active, Tensor req_id_per_token, "
-      "Tensor topk_logical_ids, "
+      "Tensor live_topk_logical_ids, Tensor positions, "
+      "Tensor! saved_topk_logical_ids, Tensor tp_fence_token, "
       "Tensor! resident_main_kv, Tensor! resident_logical_ids, "
       "Tensor! resident_last_access, "
       "Tensor! newest_main_kv, Tensor! newest_logical_ids, "
@@ -52,11 +53,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor request_num_blocks, Tensor request_num_tokens, "
       "Tensor request_active, Tensor req_id_per_token, "
       "Tensor newest_main_kv, "
-      "Tensor newest_logical_ids, Tensor miss_logical_ids, "
+      "Tensor! newest_logical_ids, Tensor miss_logical_ids, "
       "Tensor miss_victim_slots, Tensor miss_counts, Tensor hit_counts, "
       "Tensor! resident_main_kv, Tensor! resident_logical_ids, "
-      "Tensor! resident_last_access, bool is_host_writer, int block_size) -> "
-      "()");
+      "Tensor! resident_last_access, Tensor! provisional_slots, "
+      "Tensor positions, Tensor! tp_fence_token, "
+      "bool is_host_writer, int block_size, bool finalize, "
+      "int finalize_phase) -> ()");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.

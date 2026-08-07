@@ -17,6 +17,7 @@ import regex as re
 import torch
 import torch.distributed as dist
 
+import vllm._custom_ops as ops
 from vllm.distributed.parallel_state import GroupCoordinator, in_the_same_node_as
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 from vllm.v1.kv_cache_interface import (
@@ -333,6 +334,74 @@ class SparseMLAOffloadManager:
         if not self._is_host_writer:
             raise PermissionError("only TP-local rank 0 may write shared Main KV")
         return self._host_views[layer_name]
+
+    def _fence_mtp_target(self) -> None:
+        self._require_open()
+        token = self._local_buffers["tp_fence_token"]
+        token.fill_(-1)
+        self._tp_group.broadcast(token, src=0)
+
+    def _fence_mtp_step(self, current_draft_step: torch.Tensor) -> None:
+        self._require_open()
+        token = self._local_buffers["tp_fence_token"]
+        token.copy_(current_draft_step)
+        self._tp_group.broadcast(token, src=0)
+
+    def _finalize_mtp_batch(
+        self, idx_mapping: torch.Tensor, num_computed_tokens: torch.Tensor
+    ) -> None:
+        self._require_open()
+        buffers = self._local_buffers
+        buffers["tp_fence_token"].zero_()
+        request_num_tokens = buffers["request_num_tokens"]
+        num_reqs = idx_mapping.shape[0]
+        if (
+            idx_mapping.device != request_num_tokens.device
+            or idx_mapping.dtype != torch.int32
+            or idx_mapping.ndim != 1
+            or num_reqs > request_num_tokens.shape[0]
+            or num_computed_tokens.device != request_num_tokens.device
+            or num_computed_tokens.dtype != torch.int32
+            or num_computed_tokens.ndim != 1
+        ):
+            raise ValueError("invalid sparse MLA MTP finalize boundary")
+        torch.index_select(
+            num_computed_tokens,
+            0,
+            idx_mapping,
+            out=request_num_tokens[:num_reqs],
+        )
+        for finalize_phase in range(2):
+            for layer_index, layer_name in enumerate(self._plan.main_layer_names):
+                layer_view = self._layer_views[layer_name]
+                host_view = layer_view.main_host_kv_uva
+                if host_view is None:
+                    host_view = layer_view.main_host_kv
+                provisional = buffers["provisional_slots"][layer_index]
+                ops.sparse_mla_offload_transfer(
+                    host_view,
+                    buffers["request_block_ids"],
+                    buffers["request_num_blocks"],
+                    request_num_tokens,
+                    buffers["request_active"],
+                    idx_mapping,
+                    buffers["newest_main_kv"][layer_index],
+                    buffers["newest_logical_ids"][layer_index],
+                    provisional,
+                    provisional,
+                    provisional[..., 0],
+                    provisional[..., 0],
+                    buffers["resident_main_kv"][layer_index],
+                    buffers["resident_logical_ids"][layer_index],
+                    buffers["resident_last_access"][layer_index],
+                    provisional,
+                    num_computed_tokens,
+                    buffers["tp_fence_token"],
+                    layer_view.is_host_writer,
+                    host_view.shape[1],
+                    True,
+                    finalize_phase,
+                )
 
     def _prepare_decode_batch(
         self,

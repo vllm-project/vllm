@@ -668,7 +668,10 @@ void sparse_mla_cache_plan(const torch::stable::Tensor& current_main_kv,
                            const torch::stable::Tensor& request_num_tokens,
                            const torch::stable::Tensor& request_active,
                            const torch::stable::Tensor& req_id_per_token,
-                           const torch::stable::Tensor& topk_logical_ids,
+                           const torch::stable::Tensor& live_topk_logical_ids,
+                           const torch::stable::Tensor& positions,
+                           torch::stable::Tensor& saved_topk_logical_ids,
+                           const torch::stable::Tensor& tp_fence_token,
                            torch::stable::Tensor& resident_main_kv,
                            torch::stable::Tensor& resident_logical_ids,
                            torch::stable::Tensor& resident_last_access,
@@ -690,15 +693,18 @@ void sparse_mla_offload_transfer(
     const torch::stable::Tensor& request_active,
     const torch::stable::Tensor& req_id_per_token,
     const torch::stable::Tensor& newest_main_kv,
-    const torch::stable::Tensor& newest_logical_ids,
+    torch::stable::Tensor& newest_logical_ids,
     const torch::stable::Tensor& miss_logical_ids,
     const torch::stable::Tensor& miss_victim_slots,
     const torch::stable::Tensor& miss_counts,
     const torch::stable::Tensor& hit_counts,
     torch::stable::Tensor& resident_main_kv,
     torch::stable::Tensor& resident_logical_ids,
-    torch::stable::Tensor& resident_last_access, bool is_host_writer,
-    int64_t block_size);
+    torch::stable::Tensor& resident_last_access,
+    torch::stable::Tensor& provisional_slots,
+    const torch::stable::Tensor& positions,
+    torch::stable::Tensor& tp_fence_token, bool is_host_writer,
+    int64_t block_size, bool finalize, int64_t finalize_phase);
 
 // Extract function to gather quantized K cache
 void cp_gather_indexer_k_quant_cache(

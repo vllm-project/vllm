@@ -181,27 +181,32 @@ def _get_sparse_mla_offload_context(layer_name: LayerNameType):
     metadata = context.attn_metadata.get(name)
     if metadata is None or not hasattr(metadata, "req_id_per_token"):
         raise RuntimeError(f"missing sparse MLA metadata for {name!r}")
-    return layer_view, metadata.req_id_per_token
+    return layer_view, metadata.req_id_per_token, getattr(metadata, "positions", None)
 
 
-def sparse_mla_cache_plan(
+def _sparse_mla_cache_plan(
     current_main_kv: torch.Tensor,
-    topk_logical_ids: torch.Tensor,
+    live_topk_logical_ids: torch.Tensor,
+    positions: torch.Tensor,
     layer_name: LayerNameType,
 ) -> torch.Tensor:
-    layer_view, req_id_per_token = _get_sparse_mla_offload_context(layer_name)
+    layer_view, req_id_per_token, _ = _get_sparse_mla_offload_context(layer_name)
     main_host_kv_uva = layer_view.main_host_kv_uva
     if main_host_kv_uva is None:
         raise RuntimeError("sparse MLA offload requires a CUDA Host view")
     buffers = layer_view.local_buffers
+    token_rows = current_main_kv.shape[0]
     ops.sparse_mla_cache_plan(
         current_main_kv,
         buffers["request_block_ids"],
         buffers["request_num_blocks"],
         buffers["request_num_tokens"],
         buffers["request_active"],
-        req_id_per_token,
-        topk_logical_ids,
+        req_id_per_token[:token_rows],
+        live_topk_logical_ids,
+        positions[:token_rows],
+        buffers["topk_logical_ids"],
+        buffers["tp_fence_token"],
         buffers["resident_main_kv"],
         buffers["resident_logical_ids"],
         buffers["resident_last_access"],
@@ -218,17 +223,53 @@ def sparse_mla_cache_plan(
     return current_main_kv.new_empty(0)
 
 
+def sparse_mla_cache_plan(
+    current_main_kv: torch.Tensor,
+    live_topk_logical_ids: torch.Tensor,
+    positions_or_layer_name: torch.Tensor | LayerNameType,
+    layer_name: LayerNameType | None = None,
+) -> torch.Tensor:
+    if layer_name is not None:
+        assert isinstance(positions_or_layer_name, torch.Tensor)
+        return _sparse_mla_cache_plan(
+            current_main_kv,
+            live_topk_logical_ids,
+            positions_or_layer_name,
+            layer_name,
+        )
+    resolved_layer_name = positions_or_layer_name
+    assert not isinstance(resolved_layer_name, torch.Tensor)
+    name = _resolve_layer_name(resolved_layer_name)
+    context = get_forward_context()
+    assert isinstance(context.attn_metadata, dict)
+    metadata = context.attn_metadata[name]
+    positions = getattr(metadata, "positions", None)
+    if positions is None:
+        raise RuntimeError("missing sparse MLA offload positions")
+    return _sparse_mla_cache_plan(
+        current_main_kv, live_topk_logical_ids, positions, resolved_layer_name
+    )
+
+
 def sparse_mla_cache_plan_fake(
     current_main_kv: torch.Tensor,
-    topk_logical_ids: torch.Tensor,
+    live_topk_logical_ids: torch.Tensor,
     layer_name: LayerNameType,
 ) -> torch.Tensor:
     return current_main_kv.new_empty(0)
 
 
+def _sparse_mla_cache_plan_registered(
+    current_main_kv: torch.Tensor,
+    live_topk_logical_ids: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    return sparse_mla_cache_plan(current_main_kv, live_topk_logical_ids, layer_name)
+
+
 direct_register_custom_op(
     op_name="sparse_mla_cache_plan",
-    op_func=sparse_mla_cache_plan,
+    op_func=_sparse_mla_cache_plan_registered,
     fake_impl=sparse_mla_cache_plan_fake,
 )
 
@@ -274,7 +315,11 @@ def sparse_mla_offload_attention(
     cache_plan_dep: torch.Tensor,
 ) -> None:
     del current_main_kv, cache_plan_dep
-    layer_view, req_id_per_token = _get_sparse_mla_offload_context(layer_name)
+    layer_view, req_id_per_token, positions = _get_sparse_mla_offload_context(
+        layer_name
+    )
+    if positions is None:
+        raise RuntimeError("missing sparse MLA offload positions")
     main_host_kv_uva = layer_view.main_host_kv_uva
     side_stream = layer_view.side_stream
     if main_host_kv_uva is None or side_stream is None:
@@ -312,7 +357,7 @@ def sparse_mla_offload_attention(
             buffers["request_num_blocks"],
             buffers["request_num_tokens"],
             buffers["request_active"],
-            req_id_per_token,
+            req_id_per_token[:token_rows],
             buffers["newest_main_kv"],
             buffers["newest_logical_ids"],
             buffers["miss_logical_ids"],
@@ -322,8 +367,13 @@ def sparse_mla_offload_attention(
             buffers["resident_main_kv"],
             buffers["resident_logical_ids"],
             buffers["resident_last_access"],
+            buffers["provisional_slots"],
+            positions[:token_rows],
+            buffers["tp_fence_token"],
             layer_view.is_host_writer,
             main_host_kv_uva.shape[1],
+            False,
+            0,
         )
         ready_event.record(side_stream)
 
