@@ -323,7 +323,7 @@ class LLMEngine:
                 # Record even when this step produced no request outputs:
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
-                    iteration_stats=iteration_stats if outputs.outputs else None,
+                    iteration_stats=iteration_stats,
                     mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
                 if outputs.outputs:
