@@ -23,7 +23,7 @@ NUM_K_HEADS = 4
 NUM_V_HEADS = 8
 HEAD_K_DIM = 128
 HEAD_V_DIM = 128
-CHUNK_SIZE = 64  # matches FLA_CHUNK_SIZE used by vLLM's own kernel warmup
+CHUNK_SIZE = 64  
 
 
 def _build_inputs(qkv_dtype: torch.dtype, seed: int = 0):

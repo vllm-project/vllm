@@ -163,8 +163,6 @@ def _log_gdn_backend_decision(
         )
 
 
-# specialized flashinfer backed cuda kernel function used within high performance inference frameworks
-# like vllm to accelerate the gated delta net (GDN) or gated delta rule attention mechanism.
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -259,7 +257,7 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
     ):
-        o, final_state = fi_chunk_gated_delta_rule(  # check what this is
+        o, final_state = fi_chunk_gated_delta_rule(  
             q=q,
             k=k,
             v=v,
@@ -1080,8 +1078,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, T)
 
         try:
-            # tries the chunk_gated_delta rule, if it doesn't work, logs that the kernel warmup failed for layer... "language_model" in our case
-            # language model must be a layer of the qwen model which makes sense
             self.chunk_gated_delta_rule(
                 q=q,
                 k=k,
