@@ -194,9 +194,6 @@ class QuantizationConfig(ABC):
             The quantize method. None if the given layer doesn't support quant
             method.
         """
-        # TODO: QuantizationConfig subclasses should rename their `get_quant_method`
-        # implementation to `get_base_quant_method`, and `get_effective_quant_method`
-        # should be renamed to `get_quant_method` (composed).
         raise NotImplementedError
 
     def set_online_quantization(self, online_args: Any) -> None:
