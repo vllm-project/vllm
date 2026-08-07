@@ -1,19 +1,20 @@
 ARG BASE_IMAGE=ubuntu:22.04
 ARG PYTHON_VERSION=3.12
-ARG TORCH_VERSION=2.13.0+rocm7.14.0
-ARG TORCHVISION_VERSION=0.28.0+rocm7.14.0
-ARG TORCHAUDIO_VERSION=2.11.0.2+rocm7.14.0
+ARG TORCH_VERSION=2.12.0+rocm7.14.0
+ARG TORCHVISION_VERSION=0.27.0+rocm7.14.0
+ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.1.0"
+ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
 
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
-ARG ROCM_WHEELS_MULTIARCH_URL=https://repo.amd.com/rocm/whl-multi-arch/
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL=https://repo.amd.com/rocm/whl-multi-arch/ # For pre-built GPU images, packages, etc.
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://rocm.nightlies.amd.com/whl-multi-arch/torch/ # For torch, triton, etc. wheels with latest fixes.
 ARG ROCM_SDK_VERSION=7.14.0
 
 # Build configuration
@@ -76,17 +77,20 @@ RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cyth
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install ROCm SDK via TheRock
-ARG ROCM_WHEELS_MULTIARCH_URL
+ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
 ARG ROCM_SDK_VERSION
-RUN pip install --index-url ${ROCM_WHEELS_MULTIARCH_URL} \
+RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch wheels via TheRock
+# Install PyTorch wheels (nightly for latest torch, release as fallback)
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 ARG TORCH_VERSION
 ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
-RUN pip install --index-url ${ROCM_WHEELS_MULTIARCH_URL} \
+RUN pip install \
+    --index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+    --extra-index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}"
@@ -105,7 +109,7 @@ SHELL ["/bin/bash", "-c"]
 RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
     && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
-        && pip install --index-url ${ROCM_WHEELS_MULTIARCH_URL} \
+        && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
             amd-torch-device-${arch}==${TORCH_VER} \
             rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}; \
     done
@@ -184,19 +188,6 @@ RUN cd mori \
     && git submodule update --init --recursive \
     && ln -sfn ${ROCM_PATH} /opt/rocm \
     && mkdir -p /usr/lib64 && ln -sf /usr/lib/x86_64-linux-gnu/libc.so /usr/lib64/libc.so \
-    && sed -i '/-DUSE_ROCM=ON/a\            "-DCMAKE_PREFIX_PATH=/opt/rocm;/opt/rocm/lib/rocm_sysdeps",' setup.py \
-    && sed -i '/find_package(hsakmt REQUIRED)/i \
-if(NOT TARGET numa::numa)\n\
-  find_library(NUMA_LIBRARY NAMES numa)\n\
-  find_path(NUMA_INCLUDE_DIR NAMES numa.h)\n\
-  if(NUMA_LIBRARY)\n\
-    add_library(numa::numa UNKNOWN IMPORTED)\n\
-    set_target_properties(numa::numa PROPERTIES IMPORTED_LOCATION ${NUMA_LIBRARY})\n\
-    if(NUMA_INCLUDE_DIR)\n\
-      set_target_properties(numa::numa PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${NUMA_INCLUDE_DIR})\n\
-    endif()\n\
-  endif()\n\
-endif()' src/application/CMakeLists.txt \
     && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
 RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
