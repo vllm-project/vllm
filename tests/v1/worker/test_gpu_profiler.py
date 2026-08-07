@@ -10,7 +10,12 @@ import pytest
 import torch
 from pydantic import ValidationError
 
-from vllm.config import CUDAGraphMode, ProfilerConfig
+from vllm.config import (
+    CompilationConfig,
+    CUDAGraphMode,
+    ProfilerConfig,
+    VllmConfig,
+)
 from vllm.config.profiler import _is_uri_path
 from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
 from vllm.v1.core.sched.output import CachedRequestData
@@ -349,14 +354,6 @@ def make_proton_wrapper(
     return wrapper, proton
 
 
-@pytest.fixture
-def nvidia_platform(monkeypatch):
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-
-
-@pytest.mark.usefixtures("nvidia_platform")
 class TestProtonConfig:
     def test_normalizes_local_output_directory(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -368,7 +365,6 @@ class TestProtonConfig:
         [
             ({"proton_profiler_dir": ""}, "must be set"),
             ({"proton_profiler_dir": "s3://bucket/profiles"}, "local directory"),
-            ({"delay_iterations": 1}, "delay_iterations"),
             (
                 {"proton_data": "tree", "proton_output_format": "chrome_trace"},
                 "requires proton_data",
@@ -409,15 +405,41 @@ class TestProtonConfig:
                 **{field: "invalid"},
             )
 
-    def test_rejects_non_cuda_platform(self, tmp_path, monkeypatch):
-        from vllm.platforms import current_platform
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("proton_profiler_dir", "profiles"),
+            ("proton_context", "python"),
+            ("proton_data", "trace"),
+            ("proton_backend", "cupti"),
+            ("proton_mode", "pcsampling"),
+            ("proton_hook", "triton"),
+            ("proton_output_format", "chrome_trace"),
+        ],
+    )
+    def test_rejects_proton_options_for_other_profilers(self, field, value):
+        with pytest.raises(ValueError, match=f"{field} only applicable"):
+            ProfilerConfig(**{field: value})
 
-        monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    def test_allows_proton_when_cuda_graphs_are_disabled(self, tmp_path):
+        config = VllmConfig(
+            profiler_config=ProfilerConfig(
+                profiler="proton", proton_profiler_dir=str(tmp_path)
+            ),
+            compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
+        )
 
-        with pytest.raises(ValueError, match="NVIDIA CUDA workers only"):
-            ProfilerConfig(
-                profiler="proton",
-                proton_profiler_dir=str(tmp_path),
+        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+    def test_rejects_proton_when_cuda_graphs_are_enabled(self, tmp_path):
+        with pytest.raises(ValueError, match="requires CUDA graphs to be disabled"):
+            VllmConfig(
+                profiler_config=ProfilerConfig(
+                    profiler="proton", proton_profiler_dir=str(tmp_path)
+                ),
+                compilation_config=CompilationConfig(
+                    cudagraph_mode=CUDAGraphMode.PIECEWISE
+                ),
             )
 
 
@@ -425,7 +447,6 @@ class TestProtonConfig:
     torch.version.hip is not None,
     reason="Proton profiling tests require an NVIDIA Triton runtime.",
 )
-@pytest.mark.usefixtures("nvidia_platform")
 class TestProtonProfilerWrapper:
     def test_passes_config_and_global_rank_name_to_proton(self, tmp_path):
         wrapper, proton = make_proton_wrapper(
@@ -473,20 +494,6 @@ class TestProtonProfilerWrapper:
         assert proton.deactivate.call_count == 2
         assert proton.finalize.call_args_list == [call(session=7), call(session=8)]
 
-    def test_uses_prefix_supplied_for_each_profile(self, tmp_path):
-        proton = make_proton()
-        proton.start.side_effect = [7, 8]
-        wrapper, proton = make_proton_wrapper(tmp_path, proton)
-
-        wrapper.start(worker_name="first_rank_3")
-        wrapper.stop()
-        wrapper.start(worker_name="second_rank_3")
-        wrapper.stop()
-
-        names = [c.kwargs["name"] for c in proton.start.call_args_list]
-        assert os.path.basename(names[0]).startswith("proton_first_rank_3_")
-        assert os.path.basename(names[1]).startswith("proton_second_rank_3_")
-
     def test_output_names_are_unique_across_worker_restarts(self, tmp_path):
         with patch(
             "vllm.profiler.wrapper.uuid4",
@@ -532,82 +539,6 @@ class TestProtonProfilerWrapper:
         with pytest.raises(RuntimeError, match="does not support selecting"):
             make_proton_wrapper(tmp_path, proton, proton_output_format="hatchet")
 
-    @pytest.mark.parametrize("fail_cleanup", [False, True])
-    def test_shutdown_finalizes_active_session(self, tmp_path, fail_cleanup):
-        proton = make_proton()
-        wrapper, proton = make_proton_wrapper(tmp_path, proton)
-        wrapper.start()
-        if fail_cleanup:
-            proton.deactivate.side_effect = RuntimeError("deactivate failed")
-            proton.finalize.side_effect = RuntimeError("finalize failed")
-
-        wrapper.shutdown()
-        wrapper.shutdown()
-
-        proton.deactivate.assert_called_once_with(session=7)
-        proton.finalize.assert_called_once_with(session=7)
-
-    @pytest.mark.parametrize(
-        ("first_result", "message"),
-        [
-            (None, "did not create"),
-            (RuntimeError("CUPTI unavailable"), "CUPTI unavailable"),
-        ],
-    )
-    def test_recovers_from_start_errors(self, tmp_path, first_result, message):
-        proton = make_proton()
-        proton.start.side_effect = [first_result, 8]
-        wrapper, _ = make_proton_wrapper(tmp_path, proton)
-
-        with pytest.raises(RuntimeError, match=message):
-            wrapper.start()
-
-        wrapper.start()
-        assert wrapper.is_running
-        wrapper.stop()
-        proton.finalize.assert_called_once_with(session=8)
-
-    @pytest.mark.parametrize(
-        ("failing_call", "message"),
-        [("finalize", "write failed"), ("deactivate", "deactivate failed")],
-    )
-    def test_recovers_from_stop_errors(self, tmp_path, failing_call, message):
-        proton = make_proton()
-        proton.start.side_effect = [7, 8]
-        getattr(proton, failing_call).side_effect = RuntimeError(message)
-        wrapper, _ = make_proton_wrapper(tmp_path, proton)
-        wrapper.start()
-
-        with pytest.raises(RuntimeError, match=message):
-            wrapper.stop()
-
-        getattr(proton, failing_call).side_effect = None
-        wrapper.start()
-        wrapper.stop()
-        assert proton.finalize.call_args_list == [call(session=7), call(session=8)]
-
-    def test_automatic_stop_errors_do_not_fail_inference(self, tmp_path):
-        proton = make_proton()
-        proton.finalize.side_effect = RuntimeError("write failed")
-        wrapper, _ = make_proton_wrapper(tmp_path, proton, max_iterations=1)
-        wrapper.start()
-
-        wrapper.step()
-        wrapper.step()
-        context = wrapper.annotate_context_manager("outside-profile")
-        wrapper.step()
-
-        assert isinstance(context, nullcontext)
-        proton.scope.assert_not_called()
-        proton.finalize.assert_called_once_with(session=7)
-
-    def test_rejects_amd(self, tmp_path):
-        with (
-            patch.object(torch.version, "hip", "6.0"),
-            pytest.raises(RuntimeError, match="supports NVIDIA GPUs only"),
-        ):
-            make_proton_wrapper(tmp_path)
-
     def test_missing_proton_has_actionable_error(self, tmp_path):
         config = ProfilerConfig(profiler="proton", proton_profiler_dir=str(tmp_path))
         with (
@@ -645,10 +576,10 @@ def test_gpu_worker_creates_proton_profiler():
         Worker.profile(worker)
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
-    worker.profiler.start.assert_called_once_with(worker_name="rank1")
+    worker.profiler.start.assert_called_once_with()
 
 
-def test_gpu_worker_updates_proton_prefix_each_run():
+def test_gpu_worker_recreates_proton_profiler_for_each_run():
     worker = MagicMock()
     worker.rank = 1
     worker.profiler = None
@@ -662,11 +593,11 @@ def test_gpu_worker_updates_proton_prefix_each_run():
         patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
     ):
         Worker.profile(worker, profile_prefix="first")
+        Worker.profile(worker, is_start=False)
         Worker.profile(worker, profile_prefix="second")
 
-    wrapper.return_value.start.assert_has_calls(
-        [
-            call(worker_name="first_rank1"),
-            call(worker_name="second_rank1"),
-        ]
-    )
+    assert wrapper.call_args_list == [
+        call(worker.profiler_config, worker_name="first_rank1"),
+        call(worker.profiler_config, worker_name="second_rank1"),
+    ]
+    assert wrapper.return_value.start.call_count == 2

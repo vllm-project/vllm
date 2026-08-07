@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import regex as re
@@ -175,11 +175,10 @@ class Worker(WorkerBase):
         # Only validate profiler config is valid, don't instantiate yet
         if self.profiler_config.profiler not in ("torch", "cuda", "proton", None):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
-        if (
-            self.profiler_config.profiler == "proton"
-            and not self.model_config.enforce_eager
-        ):
-            raise ValueError("The Proton profiler currently requires eager execution")
+        if self.profiler_config.profiler == "proton" and not current_platform.is_cuda():
+            raise ValueError(
+                "The Proton profiler currently supports NVIDIA CUDA workers only"
+            )
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # pending non-blocking PP send work from the previous iteration
@@ -1165,8 +1164,7 @@ class Worker(WorkerBase):
                     logger.debug("Starting CUDA profiler")
                 elif profiler_type == "proton":
                     self.profiler = ProtonProfilerWrapper(
-                        self.profiler_config,
-                        worker_name=trace_name,
+                        self.profiler_config, worker_name=trace_name
                     )
                     logger.debug(
                         "Starting Proton profiler with trace name: %s", trace_name
@@ -1177,16 +1175,18 @@ class Worker(WorkerBase):
                         f"Invalid profiler value of {self.profiler_config.profiler}"
                     )
 
-            if profiler_type == "proton":
-                proton_profiler = cast(ProtonProfilerWrapper, self.profiler)
-                proton_profiler.start(worker_name=trace_name)
-            else:
-                self.profiler.start()
+            self.profiler.start()
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
-            self.profiler.stop()
+            try:
+                self.profiler.stop()
+            finally:
+                if self.profiler_config.profiler == "proton":
+                    # Proton output names are fixed when the wrapper is constructed.
+                    # Recreate it so the next profile_prefix is honored.
+                    self.profiler = None
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)

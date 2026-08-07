@@ -123,9 +123,7 @@ The Proton-specific options are:
 - `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
 
 `hatchet` and `hatchet_msgpack` require `proton_data: "tree"`, while
-`chrome_trace` requires `proton_data: "trace"`. Proton does not support
-`delay_iterations`; starting the session synchronously ensures initialization
-errors are returned by `/start_profile`. CUDA graph profiling is not yet
+`chrome_trace` requires `proton_data: "trace"`. CUDA graph profiling is not yet
 supported, so `--enforce-eager` is required for every Proton mode.
 
 Automatic backend selection is recommended. vLLM currently supports Proton's

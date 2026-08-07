@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 import importlib
 import inspect
+import json
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -361,11 +361,6 @@ class ProtonProfilerWrapper(WorkerProfiler):
     ) -> None:
         super().__init__(profiler_config)
 
-        if torch.version.hip is not None:
-            raise RuntimeError(
-                "The Proton profiler currently supports NVIDIA GPUs only."
-            )
-
         try:
             self._proton = importlib.import_module("triton.profiler")
             triton = importlib.import_module("triton")
@@ -465,44 +460,6 @@ class ProtonProfilerWrapper(WorkerProfiler):
                     )
             finally:
                 self._session_id = None
-
-    @override
-    def _call_start(self) -> None:
-        self._start()
-        self._running = True
-
-    @override
-    def _call_stop(self) -> None:
-        try:
-            self._stop()
-            logger.info_once("Profiler stopped successfully.")
-        finally:
-            self._running = False
-
-    @override
-    def start(self, worker_name: str | None = None) -> None:
-        if worker_name is not None and not self._active:
-            self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
-        try:
-            super().start()
-        except Exception:
-            self._active = False
-            raise
-
-    @override
-    def step(self) -> None:
-        try:
-            super().step()
-        except Exception:
-            logger.exception("Failed to stop Proton after max iterations.")
-
-    @override
-    def shutdown(self) -> None:
-        if self._running:
-            try:
-                self.stop()
-            except Exception:
-                logger.exception("Failed to stop Proton during worker shutdown.")
 
     @override
     def annotate_context_manager(self, name: str):

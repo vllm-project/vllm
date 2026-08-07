@@ -189,22 +189,28 @@ class ProfilerConfig:
             )
 
         proton_profiler_dir = self.proton_profiler_dir
-        if proton_profiler_dir and self.profiler != "proton":
+        non_default_proton_options = [
+            name
+            for name, value, default in (
+                ("proton_profiler_dir", proton_profiler_dir, ""),
+                ("proton_context", self.proton_context, "shadow"),
+                ("proton_data", self.proton_data, "tree"),
+                ("proton_backend", self.proton_backend, None),
+                ("proton_mode", self.proton_mode, None),
+                ("proton_hook", self.proton_hook, None),
+                ("proton_output_format", self.proton_output_format, None),
+            )
+            if value != default
+        ]
+        if self.profiler != "proton" and non_default_proton_options:
+            options = ", ".join(non_default_proton_options)
             raise ValueError(
-                "proton_profiler_dir is only applicable when profiler is set "
-                "to 'proton'"
+                f"{options} only applicable when profiler is set to 'proton'"
             )
         if self.profiler == "proton" and not proton_profiler_dir:
             raise ValueError(
                 "proton_profiler_dir must be set when profiler is 'proton'"
             )
-        if self.profiler == "proton":
-            from vllm.platforms import current_platform
-
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "The Proton profiler currently supports NVIDIA CUDA workers only"
-                )
         if proton_profiler_dir:
             if _is_uri_path(proton_profiler_dir):
                 raise ValueError("proton_profiler_dir must be a local directory")
@@ -212,20 +218,15 @@ class ProfilerConfig:
                 os.path.expanduser(proton_profiler_dir)
             )
 
-        if self.profiler == "proton" and self.delay_iterations > 0:
-            raise ValueError(
-                "delay_iterations is not supported by the Proton profiler "
-                "because start errors must be returned by /start_profile"
-            )
-
-        output_format = self.proton_output_format
-        if output_format == "chrome_trace" and self.proton_data != "trace":
-            raise ValueError("chrome_trace output requires proton_data='trace'")
-        if (
-            output_format in ("hatchet", "hatchet_msgpack")
-            and self.proton_data != "tree"
-        ):
-            raise ValueError(f"{output_format} output requires proton_data='tree'")
+        if self.profiler == "proton":
+            output_format = self.proton_output_format
+            if output_format == "chrome_trace" and self.proton_data != "trace":
+                raise ValueError("chrome_trace output requires proton_data='trace'")
+            if (
+                output_format in ("hatchet", "hatchet_msgpack")
+                and self.proton_data != "tree"
+            ):
+                raise ValueError(f"{output_format} output requires proton_data='tree'")
 
         if self.capture_torch_profiler and self.profiler != "torch":
             raise ValueError(
