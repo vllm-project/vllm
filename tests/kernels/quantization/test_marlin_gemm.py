@@ -448,7 +448,6 @@ def marlin_generate_valid_test_cases():
                 if (
                     sub_case[0] == scalar_types.int8
                     and sub_case[1] == scalar_types.uint4b8
-                    and not act_order
                 ):
                     cases.append(pytest.param(*args, id="ldmatrix_s4"))
                 else:
