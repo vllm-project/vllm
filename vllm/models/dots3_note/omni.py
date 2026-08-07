@@ -32,6 +32,7 @@ from .processor import (
     IMAGE_END,
     IMAGE_PAD,
     IMAGE_START,
+    VIDEO_PLACEHOLDER,
     DotsNoteOmniDummyInputsBuilder,
     DotsNoteOmniMultiModalProcessor,
     DotsNoteOmniProcessingInfo,
@@ -66,6 +67,8 @@ class Dots3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return f"{IMAGE_START}{IMAGE_PAD}{IMAGE_END}"
         if modality.startswith("audio"):
             return f"{AUDIO_START}{AUDIO_PAD}{AUDIO_END}"
+        if modality.startswith("video"):
+            return VIDEO_PLACEHOLDER
         raise ValueError(f"Unsupported modality: {modality}")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -95,16 +98,18 @@ class Dots3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             model_config.revision,
             "audio_config",
         )
-        image_enabled = (
+        video_enabled = (
             vision_config_dict is not None
-            and self.multimodal_config.get_limit_per_prompt("image") > 0
+            and self.multimodal_config.get_limit_per_prompt("video") > 0
         )
-        audio_enabled = (
-            audio_config_dict is not None
-            and self.multimodal_config.get_limit_per_prompt("audio") > 0
+        image_enabled = vision_config_dict is not None and (
+            self.multimodal_config.get_limit_per_prompt("image") > 0 or video_enabled
+        )
+        audio_enabled = audio_config_dict is not None and (
+            self.multimodal_config.get_limit_per_prompt("audio") > 0 or video_enabled
         )
 
-        with self._mark_tower_model(vllm_config, {"image", "audio"}):
+        with self._mark_tower_model(vllm_config, {"image", "audio", "video"}):
             self.visual: DotsMoEVitModel | None
             if image_enabled:
                 assert vision_config_dict is not None
@@ -162,6 +167,59 @@ class Dots3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         audio_embeds, item_lengths = self.audio_tower(waveforms, audio_lengths)
         return audio_embeds.split(item_lengths)
 
+    def _process_video_input(
+        self,
+        pixel_values: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+        audio_values: torch.Tensor,
+        audio_lengths: torch.Tensor,
+        modalities: torch.Tensor,
+        frame_counts: torch.Tensor,
+        audio_counts: torch.Tensor,
+        emission_counts: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        image_embeds = self._process_image_input(pixel_values, image_grid_thw)
+        audio_embeds = (
+            self._process_audio_input(audio_values, audio_lengths)
+            if audio_lengths.numel()
+            else ()
+        )
+        orders = modalities.tolist()
+        frame_counts_list = frame_counts.tolist()
+        audio_counts_list = audio_counts.tolist()
+        emission_counts_list = emission_counts.tolist()
+        outputs: list[torch.Tensor] = []
+        image_idx = audio_idx = order_idx = 0
+        for num_frames, num_audios, num_emissions in zip(
+            frame_counts_list,
+            audio_counts_list,
+            emission_counts_list,
+        ):
+            video_order = orders[order_idx : order_idx + num_emissions]
+            video_parts: list[torch.Tensor] = []
+            video_image_start = image_idx
+            video_audio_start = audio_idx
+            for modality in video_order:
+                if modality == 0:
+                    video_parts.append(image_embeds[image_idx])
+                    image_idx += 1
+                elif modality == 1:
+                    if audio_idx >= len(audio_embeds):
+                        raise ValueError("NOTE video audio tower output is missing")
+                    video_parts.append(audio_embeds[audio_idx])
+                    audio_idx += 1
+                else:
+                    raise ValueError(f"Unknown NOTE video modality id: {modality}")
+            if image_idx - video_image_start != num_frames:
+                raise ValueError("NOTE video frame order/count mismatch")
+            if audio_idx - video_audio_start != num_audios:
+                raise ValueError("NOTE video audio order/count mismatch")
+            outputs.append(torch.cat(video_parts))
+            order_idx += num_emissions
+        if image_idx != len(image_embeds) or audio_idx != len(audio_embeds):
+            raise ValueError("NOTE video encoder outputs were not fully consumed")
+        return tuple(outputs)
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         multimodal_embeddings: list[torch.Tensor] = []
         handled: set[str] = set()
@@ -186,6 +244,22 @@ class Dots3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                         self._process_audio_input(audio_values, audio_lengths)
                     )
                 handled.add("audio")
+            elif input_key == "video_pixel_values" and "video" not in handled:
+                video_inputs = (
+                    kwargs.get("video_pixel_values"),
+                    kwargs.get("video_image_grid_thw"),
+                    kwargs.get("video_audio_values"),
+                    kwargs.get("video_audio_lengths"),
+                    kwargs.get("video_modalities"),
+                    kwargs.get("video_frame_counts"),
+                    kwargs.get("video_audio_counts"),
+                    kwargs.get("video_emission_counts"),
+                )
+                if all(isinstance(value, torch.Tensor) for value in video_inputs):
+                    multimodal_embeddings.extend(
+                        self._process_video_input(*video_inputs)  # type: ignore[arg-type]
+                    )
+                handled.add("video")
         return tuple(multimodal_embeddings)
 
     def forward(
