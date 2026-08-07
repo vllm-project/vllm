@@ -1082,6 +1082,83 @@ def test_merged_column_parallel_variable_slice(
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
 
 
+@torch.inference_mode()
+@pytest.mark.parametrize("repeats", [2, 3])
+@pytest.mark.parametrize("fully_shard", [True, False])
+@pytest.mark.parametrize("single_a", [True, False])
+@pytest.mark.parametrize("single_b", [True, False])
+@pytest.mark.parametrize("device", DEVICES)
+def test_column_parallel_packed_fused_lora_weights(
+    default_vllm_config, dist_init, repeats, fully_shard, single_a, single_b, device
+) -> None:
+    """set_lora must accept fused (single-tensor) lora_a and/or lora_b.
+
+    An ordinary PEFT checkpoint stores q/k/v separately and the loader
+    assembles per-slice lists. A *fused* source -- e.g. Megatron, which stores
+    QKV as one linear -- produces one lora_a of shape [rank, input_size] shared
+    by every slice, and one lora_b of shape [sum(output_sizes), rank] covering
+    all of them. Both are declared inputs; indexing them as if they were
+    per-slice lists yields a 1-D row and raises IndexError.
+    """
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    max_loras = 1
+    rank = 8
+    torch.set_default_device(device)
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=rank,
+        fully_sharded_loras=fully_shard,
+        lora_dtype=torch.float16,
+    )
+
+    if repeats == 2:
+        linear = MergedColumnParallelLinear(
+            4096, [4096] * repeats, bias=False, params_dtype=torch.float16
+        )
+        lora_linear = (
+            MergedColumnParallelLinearWithShardedLoRA(linear)
+            if fully_shard
+            else MergedColumnParallelLinearWithLoRA(linear)
+        )
+    else:
+        linear = QKVParallelLinear(4096, 64, 32, bias=False, params_dtype=torch.float16)
+        lora_linear = (
+            MergedQKVParallelLinearWithShardedLoRA(linear)
+            if fully_shard
+            else MergedQKVParallelLinearWithLoRA(linear)
+        )
+    lora_linear.create_lora_weights(max_loras, lora_config)
+
+    # slice_lora_a()/slice_lora_b() sit behind `if self.tp_size > 1`, so a
+    # single-process test would skip them. Force the branch: tp_rank stays 0
+    # and the buffers were sized for tp=1, so both select the full width and
+    # the expected values below are unchanged.
+    lora_linear.tp_size = 2
+
+    output_sizes = lora_linear.output_sizes
+    a = torch.rand(rank, 4096, dtype=torch.float16, device=device)
+    lora_a = a if single_a else [a.clone() for _ in range(lora_linear.n_slices)]
+
+    b_slices = [
+        torch.rand(size, rank, dtype=torch.float16, device=device)
+        for size in output_sizes
+    ]
+    lora_b = torch.cat(b_slices, dim=0) if single_b else b_slices
+
+    lora_linear.set_lora(0, lora_a, lora_b)
+
+    # The shared lora_a lands intact in every slice; lora_b is split per slice.
+    for i in range(lora_linear.n_slices):
+        torch.testing.assert_close(
+            lora_linear.lora_a_stacked[i][0, 0, :rank, :4096], a
+        )
+        torch.testing.assert_close(
+            lora_linear.lora_b_stacked[i][0, 0, : output_sizes[i], :rank], b_slices[i]
+        )
+
+
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 @pytest.mark.parametrize(
     "seed", list(range(VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS))
