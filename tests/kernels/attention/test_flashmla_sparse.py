@@ -592,7 +592,10 @@ def test_sparse_mla_offload_operator_path_schema_and_fake():
         "request_num_tokens",
         "request_active",
         "req_id_per_token",
-        "topk_logical_ids",
+        "live_topk_logical_ids",
+        "positions",
+        "saved_topk_logical_ids",
+        "tp_fence_token",
         "resident_main_kv",
         "resident_logical_ids",
         "resident_last_access",
@@ -622,27 +625,33 @@ def test_sparse_mla_offload_operator_path_schema_and_fake():
         "resident_main_kv",
         "resident_logical_ids",
         "resident_last_access",
+        "provisional_slots",
+        "positions",
+        "tp_fence_token",
         "is_host_writer",
         "block_size",
+        "finalize",
+        "finalize_phase",
     )
     assert tuple(signature(ops.sparse_mla_cache_plan).parameters) == plan_parameters
     assert tuple(signature(ops.sparse_mla_offload_transfer).parameters) == (
         transfer_parameters
     )
     with pytest.raises(
-        TypeError, match="takes 19 positional arguments but 22 were given"
+        TypeError, match="takes 22 positional arguments but 23 were given"
     ):
-        ops.sparse_mla_cache_plan(*(None,) * 22)
+        ops.sparse_mla_cache_plan(*(None,) * 23)
     with pytest.raises(
-        TypeError, match="takes 17 positional arguments but 19 were given"
+        TypeError, match="takes 22 positional arguments but 23 were given"
     ):
-        ops.sparse_mla_offload_transfer(*(None,) * 19)
+        ops.sparse_mla_offload_transfer(*(None,) * 23)
 
     for op_name, parameters, mutated_parameters in (
         (
             "sparse_mla_cache_plan",
             plan_parameters,
             {
+                "saved_topk_logical_ids",
                 "resident_main_kv",
                 "resident_logical_ids",
                 "resident_last_access",
@@ -661,9 +670,12 @@ def test_sparse_mla_offload_operator_path_schema_and_fake():
             transfer_parameters,
             {
                 "main_host_kv_uva",
+                "newest_logical_ids",
                 "resident_main_kv",
                 "resident_logical_ids",
                 "resident_last_access",
+                "provisional_slots",
+                "tp_fence_token",
             },
         ),
     ):
@@ -671,14 +683,32 @@ def test_sparse_mla_offload_operator_path_schema_and_fake():
             continue
         schema = torch._C._dispatch_find_schema_or_throw(f"_C::{op_name}", "").schema()
         assert tuple(argument.name for argument in schema.arguments) == parameters
-        schema_text = str(schema)
+        scalar_parameters = {
+            "num_host_blocks": "int",
+            "is_host_writer": "bool",
+            "block_size": "int",
+            "finalize": "bool",
+            "finalize_phase": "int",
+        }
         for parameter in parameters:
-            expected = (
-                f"Tensor! {parameter}"
-                if parameter in mutated_parameters
-                else f"Tensor {parameter}"
+            argument = next(
+                argument for argument in schema.arguments if argument.name == parameter
             )
-            assert expected in schema_text
+            expected_type = scalar_parameters.get(parameter, "Tensor")
+            assert str(argument.type) == expected_type
+            assert (argument.alias_info is not None) == (
+                parameter in mutated_parameters
+            )
+            if parameter in mutated_parameters:
+                assert argument.alias_info.is_write
+
+    public_attention_schema = torch._C._dispatch_find_schema_or_throw(
+        "vllm::sparse_mla_offload_attention", ""
+    ).schema()
+    output_argument = public_attention_schema.arguments[2]
+    assert output_argument.name == "output"
+    assert output_argument.alias_info is not None
+    assert output_argument.alias_info.is_write
 
     with FakeTensorMode():
         current = torch.empty(2, _OFFLOAD_QK_DIM, dtype=torch.bfloat16)
@@ -692,6 +722,10 @@ def test_sparse_mla_offload_operator_path_schema_and_fake():
         assert dependency.shape == (0,)
         assert dependency.dtype == current.dtype
         assert dependency.device == current.device
+        assert dependency.untyped_storage() != current.untyped_storage()
+        assert output.shape == (2, 64, _OFFLOAD_V_DIM)
+        assert output.dtype == current.dtype
+        assert output.device == current.device
 
     def offload_path(current, topk, query, output):
         dependency = torch.ops.vllm.sparse_mla_cache_plan(current, topk, _OFFLOAD_LAYER)

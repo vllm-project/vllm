@@ -5,7 +5,7 @@ import gc
 import math
 import multiprocessing
 import tempfile
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -2174,3 +2174,258 @@ def test_gpu_model_runner_v2_sparse_mla_broadcast_failure_stops_target(monkeypat
 
     assert events == [("publish",), ("pre_forward",)]
     assert runner.execute_model_state is None
+
+
+def test_gpu_model_runner_v2_sparse_mla_mtp_fence_order(monkeypatch):
+    import vllm.v1.worker.gpu.model_runner as model_runner_module
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.core.sched.output import CachedRequestData
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
+    from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
+
+    rejected_runner, scheduler_output, _, rejected_events, _, _ = (
+        _make_c6_full_decode_seed(monkeypatch)
+    )
+    mtp_output = replace(
+        scheduler_output,
+        num_scheduled_tokens={"decode": 3},
+        total_num_scheduled_tokens=3,
+        scheduled_spec_decode_tokens={"decode": [11, 12]},
+    )
+    rejected_runner.speculator = SimpleNamespace()
+    rejected_runner.vllm_config = SimpleNamespace(num_speculative_tokens=2)
+    malformed = (
+        mtp_output,
+        replace(mtp_output, scheduled_new_reqs=[SimpleNamespace(req_id="new")]),
+        replace(
+            mtp_output,
+            scheduled_cached_reqs=CachedRequestData(
+                req_ids=["decode", "context"],
+                resumed_req_ids=set(),
+                new_token_ids=[],
+                all_token_ids={},
+                new_block_ids=[],
+                num_computed_tokens=[],
+                num_output_tokens=[1, 0],
+            ),
+            num_scheduled_tokens={"decode": 3, "context": 1},
+            total_num_scheduled_tokens=4,
+        ),
+    )
+    for output in malformed:
+        with pytest.raises(ValueError, match="sparse MLA offload"):
+            rejected_runner.execute_model(output)
+        assert rejected_events == []
+
+    runner, _, tp_group, events, _, fence_token = _make_c6_full_decode_seed(monkeypatch)
+    manager = runner.sparse_mla_offload_manager
+    assert manager is not None
+    manager._finalize_mtp_batch = lambda idx, computed: events.append(
+        ("finalize", tuple(computed.tolist()))
+    )
+
+    def fence_mtp_step(step):
+        fence_token.copy_(step.to(dtype=torch.int32))
+        tp_group.broadcast(fence_token, src=0)
+
+    manager._fence_mtp_step = fence_mtp_step
+    input_batch = runner.prepare_inputs(None, None)
+    input_batch.num_reqs = 1
+    input_batch.num_tokens = input_batch.num_tokens_after_padding = 3
+    input_batch.input_ids = torch.zeros(3, dtype=torch.int64)
+    input_batch.positions = torch.arange(3, dtype=torch.int64)
+    input_batch.is_padding = torch.zeros(3, dtype=torch.bool)
+    input_batch.num_draft_tokens = 2
+    input_batch.num_scheduled_tokens = torch.tensor([3], dtype=torch.int32)
+    input_batch.seq_lens = torch.tensor([3], dtype=torch.int32)
+    input_batch.seq_lens_cpu_upper_bound = torch.tensor([3], dtype=torch.int32)
+    input_batch.query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+    runner.prepare_inputs = lambda output, desc: input_batch
+    runner.vllm_config = SimpleNamespace(num_speculative_tokens=2)
+    runner.num_speculative_steps = 3
+    runner.eplb.step = lambda **kwargs: None
+    runner.req_states.num_computed_tokens.gpu = torch.zeros(1, dtype=torch.int32)
+    runner.req_states.last_sampled_tokens = torch.zeros(1, dtype=torch.int64)
+    runner.req_states.next_prefill_tokens = torch.zeros(1, dtype=torch.int64)
+    runner.req_states.draft_tokens = torch.zeros((1, 3), dtype=torch.int64)
+    runner.req_states.all_token_ids = SimpleNamespace(
+        gpu=torch.zeros((1, 3), dtype=torch.int64)
+    )
+    runner.req_states.prompt_len = SimpleNamespace(np=torch.zeros(1, dtype=torch.int32))
+    runner.is_last_pp_rank = True
+    runner.pp_handler = None
+    runner.pcp_manager = None
+    runner.model = SimpleNamespace(compute_logits=lambda hidden: hidden)
+    runner.prompt_logprobs_worker = SimpleNamespace(
+        compute_prompt_logprobs=lambda *args: {}
+    )
+    runner.sampler = SimpleNamespace(
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(gpu=torch.ones(1)),
+            seeds=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
+        )
+    )
+    runner.main_stream = runner.output_copy_stream = runner.check_ep_fault = None
+    runner.draft_tokens_handler = SimpleNamespace(set_draft_tokens=lambda *args: None)
+    runner.kv_connector.post_forward = lambda finished: None
+
+    def sample(hidden, batch, grammar):
+        events.append(("sample",))
+        return (
+            SimpleNamespace(sampled_token_ids=torch.zeros((1, 1), dtype=torch.int64)),
+            torch.ones(1, dtype=torch.int32),
+            torch.zeros(1, dtype=torch.int32),
+        )
+
+    runner.sample = sample
+
+    def postprocess(idx, sampled, num_sampled, num_rejected, query_start_loc):
+        events.append(("postprocess",))
+        runner.req_states.num_computed_tokens.gpu.fill_(2)
+
+    runner.postprocess_sampled = postprocess
+    monkeypatch.setattr(
+        model_runner_module,
+        "AsyncOutput",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        model_runner_module.pcp,
+        "maybe_restore_pcp_for_sampling",
+        lambda manager, hidden, batch: (hidden, batch),
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "dispatch_cg_and_sync_dp",
+        lambda *args, **kwargs: (
+            BatchExecutionDescriptor(CUDAGraphMode.FULL, 3, 1),
+            None,
+        ),
+    )
+
+    speculator = object.__new__(MTPSpeculator)
+    speculator._sparse_mla_offload_manager = manager
+    speculator.supports_mm_inputs = False
+    speculator.num_speculative_steps = 3
+    speculator.max_model_len = 8
+    speculator.max_num_reqs = 1
+    speculator.dp_size = speculator.dp_rank = 1
+    speculator.prefill_cudagraph_manager = None
+    speculator.decode_cudagraph_manager = None
+    speculator.current_draft_step = torch.zeros((), dtype=torch.int64)
+    speculator.last_token_indices = torch.zeros(1, dtype=torch.int64)
+    speculator.input_buffers = SimpleNamespace(
+        input_ids=torch.zeros(3, dtype=torch.int64),
+        positions=torch.zeros(3, dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.ones(1, dtype=torch.int32),
+    )
+    speculator.idx_mapping = torch.zeros(1, dtype=torch.int64)
+    speculator.hidden_states = torch.zeros((3, 1))
+    speculator.draft_tokens = torch.zeros((1, 3), dtype=torch.int64)
+    speculator.temperature = torch.ones(1)
+    speculator.seeds = torch.zeros(1, dtype=torch.int64)
+    speculator.draft_logits = torch.zeros((1, 3, 1))
+    speculator.vllm_config = SimpleNamespace()
+    speculator.block_tables = SimpleNamespace(
+        compute_slot_mappings=lambda *args: torch.zeros(1, dtype=torch.int64)
+    )
+    speculator.kv_cache_config = SimpleNamespace()
+    speculator._copy_request_inputs = lambda *args: None
+    speculator._prepare_eplb_forward = lambda *args: None
+    speculator._build_draft_attn_metadata = lambda **kwargs: {}
+    speculator.sample_draft = lambda *args: torch.zeros(1, dtype=torch.int64)
+
+    class DraftModel:
+        def __call__(self, **kwargs):
+            events.append(("mtp_call", int(fence_token)))
+            return torch.zeros((3, 1))
+
+    speculator.model = DraftModel()
+    runner.speculator = speculator
+    monkeypatch.setattr(
+        spec_module,
+        "prepare_prefill_inputs",
+        lambda *args: speculator.current_draft_step.zero_(),
+    )
+    monkeypatch.setattr(
+        spec_module, "prepare_decode_inputs", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        spec_module, "update_draft_inputs", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        spec_module,
+        "dispatch_cg_and_sync_dp",
+        lambda *args, **kwargs: (
+            BatchExecutionDescriptor(CUDAGraphMode.NONE, 1, 1),
+            None,
+        ),
+    )
+    monkeypatch.setattr(spec_module, "build_slot_mappings_by_layer", lambda *args: {})
+    monkeypatch.setattr(
+        spec_module, "set_forward_context", lambda *args, **kwargs: nullcontext()
+    )
+
+    broadcast_tokens = []
+
+    def broadcast(token, src):
+        broadcast_tokens.append((token.data_ptr(), int(token), src))
+        events.append(("broadcast", int(token)))
+
+    tp_group.broadcast = broadcast
+    runner.cudagraph_manager.run_fullgraph = lambda desc: (
+        events.append(("target", int(fence_token))) or torch.zeros((3, 1))
+    )
+    runner.execute_model(mtp_output)
+    target_state = runner.execute_model_state
+    assert target_state is not None
+    runner.sample_tokens(None)
+
+    assert [event[0] for event in events] == [
+        "publish",
+        "pre_forward",
+        "broadcast",
+        "target",
+        "sample",
+        "postprocess",
+        "finalize",
+        "broadcast",
+        "mtp_call",
+        "broadcast",
+        "mtp_call",
+        "broadcast",
+        "mtp_call",
+    ]
+    assert [event[1] for event in events if event[0] == "broadcast"] == [-1, 0, 1, 2]
+    assert events[6] == ("finalize", (2,))
+    assert all(pointer == fence_token.data_ptr() for pointer, _, _ in broadcast_tokens)
+    assert all(src == 0 for _, _, src in broadcast_tokens)
+
+    def fail_second_mtp_broadcast(token, src):
+        events.append(("broadcast", int(token)))
+        if int(token) == 1:
+            raise RuntimeError("step-one fence failed")
+
+    events.clear()
+    tp_group.broadcast = fail_second_mtp_broadcast
+    with pytest.raises(RuntimeError, match="step-one fence failed"):
+        speculator.propose(
+            input_batch,
+            target_state.attn_metadata,
+            target_state.slot_mappings_by_layer,
+            target_state.hidden_states,
+            target_state.aux_hidden_states,
+            torch.ones(1, dtype=torch.int32),
+            torch.zeros(1, dtype=torch.int32),
+            runner.req_states.last_sampled_tokens,
+            runner.req_states.next_prefill_tokens,
+            runner.sampler.sampling_states.temperature.gpu,
+            runner.sampler.sampling_states.seeds.gpu,
+        )
+    assert events == [
+        ("broadcast", 0),
+        ("mtp_call", 0),
+        ("broadcast", 1),
+    ]

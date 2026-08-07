@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,9 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.sparse_mla_offload import SparseMLAOffloadManager
+
 logger = init_logger(__name__)
 
 
@@ -33,6 +36,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
         self.current_draft_step = torch.tensor(0, dtype=torch.int64, device=device)
+        self._sparse_mla_offload_manager: SparseMLAOffloadManager | None = None
         self.last_token_indices = torch.zeros(
             self.max_num_reqs, dtype=torch.int64, device=device
         )
@@ -41,6 +45,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+    def bind_sparse_mla_offload_manager(
+        self, manager: "SparseMLAOffloadManager"
+    ) -> None:
+        if self._sparse_mla_offload_manager not in (None, manager):
+            raise RuntimeError("sparse MLA offload Manager is already bound")
+        self._sparse_mla_offload_manager = manager
+
+    def unbind_sparse_mla_offload_manager(self) -> None:
+        self._sparse_mla_offload_manager = None
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -242,6 +256,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self._prepare_eplb_forward(num_tokens)
 
         self.on_prefill_begin(num_reqs)
+
+        manager = self._sparse_mla_offload_manager
+        if manager is not None:
+            manager._fence_mtp_step(self.current_draft_step)
+
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
@@ -437,6 +456,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
             # Update the current draft step.
             self.current_draft_step.fill_(step)
+
+            manager = self._sparse_mla_offload_manager
+            if manager is not None:
+                manager._fence_mtp_step(self.current_draft_step)
 
             # Generate draft tokens for the current step.
             if batch_desc.cg_mode == CUDAGraphMode.FULL:

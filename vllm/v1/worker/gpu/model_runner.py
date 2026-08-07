@@ -139,6 +139,7 @@ from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
+from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
@@ -582,13 +583,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         plan = self.kv_cache_config.sparse_mla_offload_plan
-        if plan is not None and getattr(
-            self.vllm_config, "num_speculative_tokens", None
-        ) not in (
-            None,
-            0,
+        if (
+            plan is not None
+            and getattr(self.vllm_config, "num_speculative_tokens", None)
+            not in (None, 0)
+            and type(self.speculator) is not MTPSpeculator
         ):
-            raise ValueError("sparse MLA offload does not support speculation")
+            raise ValueError("sparse MLA offload supports only standard MTP")
         physical_kv_cache_config = self.kv_cache_config
         physical_attn_groups = self.attn_groups
         if plan is not None:
@@ -645,6 +646,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 raise RuntimeError("invalid sparse MLA TP fence token")
             self._sparse_mla_tp_fence_token = fence_token
+            if type(self.speculator) is MTPSpeculator:
+                self.speculator.bind_sparse_mla_offload_manager(manager)
             missing_layers = []
             for name in plan.main_layer_names:
                 layer = self.compilation_config.static_forward_context.get(name)
@@ -1364,18 +1367,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and scheduler_output.total_num_scheduled_tokens > 0
             and isinstance(scheduler_output, SchedulerOutput)
         )
+        sparse_mla_mtp_step = (
+            sparse_mla_decode_step
+            and type(getattr(self, "speculator", None)) is MTPSpeculator
+        )
         if sparse_mla_decode_step:
             iteration = compute_iteration_details(scheduler_output)
-            if (
+            invalid_common = (
                 iteration.num_ctx_requests != 0
                 or iteration.num_generation_requests <= 0
                 or scheduler_output.scheduled_new_reqs
-                or scheduler_output.scheduled_spec_decode_tokens
-                or any(
-                    count != 1
+            )
+            if sparse_mla_mtp_step:
+                max_width = 1 + self.vllm_config.num_speculative_tokens
+                invalid_batch = invalid_common or any(
+                    not 1 <= count <= max_width
                     for count in scheduler_output.num_scheduled_tokens.values()
                 )
-            ):
+            else:
+                invalid_batch = (
+                    invalid_common
+                    or bool(scheduler_output.scheduled_spec_decode_tokens)
+                    or any(
+                        count != 1
+                        for count in scheduler_output.num_scheduled_tokens.values()
+                    )
+                )
+            if invalid_batch:
+                if sparse_mla_mtp_step:
+                    raise ValueError(
+                        "sparse MLA offload supports only real standard-MTP pure Decode"
+                    )
                 raise ValueError(
                     "sparse MLA offload supports only real non-MTP pure Decode"
                 )
@@ -1603,7 +1625,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 fence_token = self._sparse_mla_tp_fence_token
                 if fence_token is None:
                     raise RuntimeError("missing sparse MLA TP fence token")
-                get_tp_group().broadcast(fence_token, src=0)
+                manager = self.sparse_mla_offload_manager
+                if sparse_mla_mtp_step and isinstance(manager, SparseMLAOffloadManager):
+                    manager._fence_mtp_target()
+                else:
+                    if sparse_mla_mtp_step:
+                        fence_token.fill_(-1)
+                    get_tp_group().broadcast(fence_token, src=0)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
@@ -1629,7 +1657,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     fence_token = self._sparse_mla_tp_fence_token
                     if fence_token is None:
                         raise RuntimeError("missing sparse MLA TP fence token")
-                    get_tp_group().broadcast(fence_token, src=0)
+                    manager = self.sparse_mla_offload_manager
+                    if sparse_mla_mtp_step and isinstance(
+                        manager, SparseMLAOffloadManager
+                    ):
+                        manager._fence_mtp_target()
+                    else:
+                        if sparse_mla_mtp_step:
+                            fence_token.fill_(-1)
+                        get_tp_group().broadcast(fence_token, src=0)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
                     # cudagraph, chosen inside run_pw_graph). cg_mode is only
@@ -1787,6 +1823,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+        if (
+            self.sparse_mla_offload_manager is not None
+            and type(getattr(self, "speculator", None)) is MTPSpeculator
+        ):
+            manager = self.sparse_mla_offload_manager
+            assert manager is not None
+            manager._finalize_mtp_batch(
+                input_batch.idx_mapping,
+                self.req_states.num_computed_tokens.gpu,
+            )
+
         if self.speculator is not None:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
@@ -1919,6 +1966,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._sparse_mla_kv_caches_dict = None
             self._sparse_mla_borrower_step = step = 2
         if step == 2:
+            if type(self.speculator) is MTPSpeculator:
+                self.speculator.unbind_sparse_mla_offload_manager()
             self.speculator = None
             self._sparse_mla_borrower_step = step = 3
         for index, name in enumerate(self._sparse_mla_indexer_layer_names, start=3):

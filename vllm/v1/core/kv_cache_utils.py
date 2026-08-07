@@ -2178,7 +2178,7 @@ def _sparse_mla_manifest(
         entry("miss_victim_slots", (r, w, topk), torch.int32),
         entry("miss_counts", (r, w), torch.int32),
         entry("provisional_slots", (lm, r, w, topk), torch.int32),
-        entry("accepted_counts", (r,), torch.int32),
+        entry("accepted_counts", (r, w), torch.int32),
         entry("hit_output", (r, w, local_query_heads, value_head_dim), main_dtype),
         entry("hit_lse", (r, w, local_query_heads), torch.float32),
         entry("miss_output", (r, w, local_query_heads, value_head_dim), main_dtype),

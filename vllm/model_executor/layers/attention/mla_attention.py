@@ -982,9 +982,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     if "request_active" in buffers
                     else topk_buffer.shape[0]
                 )
-                if topk_buffer.shape[0] < row_capacity:
+                topk_rows = max(row_capacity, num_actual_toks)
+                if topk_buffer.shape[0] < topk_rows:
                     raise RuntimeError("sparse MLA offload Top-K capacity is too small")
-                topk_indices = topk_buffer[:row_capacity]
+                topk_indices = topk_buffer[:topk_rows]
                 if topk_indices.ndim == 2:
                     topk_indices = topk_indices.unsqueeze(1)
                 if (
@@ -1002,7 +1003,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
                 cache_plan_dep = sparse_mla_cache_plan(
-                    current_main_kv, topk_indices, self.layer_name
+                    current_main_kv,
+                    topk_indices,
+                    self.layer_name,
                 )
                 sparse_query = (
                     torch.cat(mqa_q, dim=-1) if isinstance(mqa_q, tuple) else mqa_q
