@@ -62,6 +62,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
+from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -289,6 +290,7 @@ class KimiMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
+            runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
         )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
