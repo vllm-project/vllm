@@ -141,6 +141,17 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
     fn try_from(raw: WireStructuredOutputsParams) -> Result<Self> {
         use StructuredOutputConstraint::*;
 
+        if matches!(&raw.json, Some(Value::String(value)) if value.trim().is_empty()) {
+            return Err(Error::InvalidStructuredOutputsParams {
+                message: "structured_outputs.json cannot be an empty string".to_string(),
+            });
+        }
+        if matches!(&raw.grammar, Some(value) if value.trim().is_empty()) {
+            return Err(Error::InvalidStructuredOutputsParams {
+                message: "structured_outputs.grammar cannot be an empty string".to_string(),
+            });
+        }
+
         let mut constraint = None;
 
         macro_rules! insert_constraint {
@@ -287,6 +298,26 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("json_object must be true"));
+    }
+
+    #[test]
+    fn structured_outputs_rejects_empty_json_string() {
+        let error = serde_json::from_value::<StructuredOutputsParams>(serde_json::json!({
+            "json": "  ",
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("json cannot be an empty string"));
+    }
+
+    #[test]
+    fn structured_outputs_rejects_empty_grammar_string() {
+        let error = serde_json::from_value::<StructuredOutputsParams>(serde_json::json!({
+            "grammar": "\n\t",
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("grammar cannot be an empty string"));
     }
 
     #[test]
