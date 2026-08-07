@@ -450,6 +450,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
             fut.add_done_callback(_on_handshake)
             return
+        # Keep the engine alive while it is actively receiving pushes, mirroring
+        # how pull-mode transfers touch _engine_last_active in start_load_kv.
+        self._engine_last_active[decode_engine_id] = time.perf_counter()
 
         # Both sides stay logical here; ``_xfer_blocks_for_req`` converts each
         # to physical with its own physical-blocks-per-logical ratio -- P uses
