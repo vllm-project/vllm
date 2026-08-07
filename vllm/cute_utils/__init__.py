@@ -19,6 +19,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 _TORCH_TO_CUTE_DTYPE = {
     torch.bfloat16: BFloat16,
     torch.float8_e4m3fn: Float8E4M3FN,
+    torch.float32: Float32,
 }
 
 _CUTE_TO_PTX_DTYPE = {
@@ -32,11 +33,6 @@ _CUTE_TO_PTX_DTYPE = {
 EVICT_NORMAL = Int64(0x1000000000000000)
 EVICT_FIRST = Int64(0x12F0000000000000)
 EVICT_LAST = Int64(0x14F0000000000000)
-
-TORCH_TO_CUTE_DTYPE = {
-    torch.bfloat16: BFloat16,
-    torch.float32: Float32,
-}
 
 
 @dsl_user_op

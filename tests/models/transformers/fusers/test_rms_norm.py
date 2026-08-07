@@ -146,24 +146,39 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm as VLLMGemmaRMSNorm
     from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
-    # `default_vllm_config` supplies the config context the CustomOp needs; the
-    # weightless path reads hidden size from the model config, so stub it.
-    model_config = SimpleNamespace(get_hidden_size=lambda: 16)
     with torch.device("meta"):
         module = cls()
         fuser = get_fuser(module)
-        built = fuser.fuse(module, "norm", model_config, None)
+        built = fuser.fuse(module, "norm", default_vllm_config)
     from vllm.model_executor.models.transformers.fusers.rms_norm import (
         TPAwareNormMixin,
     )
 
     types_by_name = {"RMSNorm": VLLMRMSNorm, "GemmaRMSNorm": VLLMGemmaRMSNorm}
     assert isinstance(built, types_by_name[expected])
-    assert isinstance(built, TPAwareNormMixin)  # fused norms self-correct under TP
+    assert isinstance(built, TPAwareNormMixin)
     assert built.variance_epsilon == module.variance_epsilon
-    assert isinstance(built.weight, nn.Parameter) == (
-        getattr(module, "weight", None) is not None
-    )
+    # The weight states the hidden size (and is what the TP check reads); a norm
+    # without one has none to state.
+    weight = getattr(module, "weight", None)
+    assert isinstance(built.weight, nn.Parameter) == (weight is not None)
+    assert built.weight.shape[0] == (weight.size(0) if weight is not None else 0)
+
+
+def test_weightless_norm_has_no_hidden_size(default_vllm_config):
+    """A weightless norm states no hidden size, and the model's (LM) hidden size
+    would be wrong for one on a sub-dimension: Llama 4's `qk_norm` normalizes
+    head_dim, so sizing it at hidden_size made the TP gather reject its input.
+    It fuses with none, and so normalizes the width it is given at any TP size,
+    matching the unfused norm and vLLM's native `RMSNorm(hidden_size=head_dim)`.
+    """
+    module = WeightlessRMSNorm(72)
+    built = get_fuser(module).fuse(module, "norm", default_vllm_config)
+    assert built.hidden_size == 0
+
+    built.tp_size = 2  # emulate TP=2 without a real process group
+    x = torch.randn(4, 72)
+    torch.testing.assert_close(built(x), module(x))
 
 
 def test_fused_rms_norm_op_default_eps(default_vllm_config):
@@ -176,8 +191,8 @@ def test_fused_rms_norm_op_default_eps(default_vllm_config):
         fuser = get_fuser(module)
         assert isinstance(fuser, RMSNormFuser)
         assert not fuser.zero_centered
-        model_config = SimpleNamespace(get_hidden_size=lambda: 16, dtype=torch.float32)
-        built = fuser.fuse(module, "norm", model_config, None)
+        vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.float32))
+        built = fuser.fuse(module, "norm", vllm_config)
     assert isinstance(built, VLLMRMSNorm)
     assert built.variance_epsilon == torch.finfo(torch.float32).eps
 
@@ -185,16 +200,15 @@ def test_fused_rms_norm_op_default_eps(default_vllm_config):
 def test_eps_is_derived_per_instance(default_vllm_config):
     """Two instances of the same norm class with different eps must fuse to their
     own eps: the type-cached fuser holds only structure, not this value."""
-    model_config = SimpleNamespace(get_hidden_size=lambda: 16)
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = RMSNorm(16, eps=eps)
-            built = get_fuser(module).fuse(module, "norm", model_config, None)
+            built = get_fuser(module).fuse(module, "norm", default_vllm_config)
             assert built.variance_epsilon == eps
 
 
 def test_fused_norm_is_gather_capable(default_vllm_config):
-    """Every fused norm is emitted gather-capable, so a norm on a head-sharded
+    """Every weighted fused norm is emitted gather-capable, so a norm on a head-sharded
     projection (OLMoE-style) self-corrects at runtime with no QKV-specific
     plumbing. A full-width input skips the gather and equals a plain norm."""
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm

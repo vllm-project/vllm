@@ -517,15 +517,19 @@ class ServerSettings(BaseSettings):
             "server process(es)."
         ),
     )
+    use_rust_bench: bool = Field(
+        default=False,
+        json_schema_extra={"compile_factor": False},
+        description=("If set, use the packaged Rust client for `vllm bench serve`."),
+    )
     rust_frontend_path: str | None = Field(
         default=None,
         json_schema_extra={"compile_factor": False},
         description=(
-            "Path to the Rust frontend binary. Defaults to None unless "
-            "VLLM_USE_RUST_FRONTEND=1, in which case the value is resolved "
-            'from the env var (default "auto", which discovers the binary '
-            "installed with the vllm package). Only used when "
-            "VLLM_USE_RUST_FRONTEND=1."
+            "Path to the vllm-rs binary. Defaults to None unless "
+            "VLLM_USE_RUST_FRONTEND=1 or VLLM_USE_RUST_BENCH=1, in which case "
+            'the value is resolved from the env var (default "auto", which '
+            "discovers the binary installed with the vllm package)."
         ),
     )
     allow_long_max_model_len: bool = Field(
@@ -548,6 +552,13 @@ class ServerSettings(BaseSettings):
             "to disk) and will be lost when the vLLM server shuts down. "
             "2. Enabling this option will cause a memory leak, as stored "
             "messages are never removed from memory until the server terminates."
+        ),
+    )
+    enable_cohere_api: bool = Field(
+        default=False,
+        description=(
+            "If set to 1, expose the Cohere Chat v2 API at "
+            "``POST /cohere/v2/chat``. Default off."
         ),
     )
     allow_chunked_local_attn_with_hybrid_kv_cache: bool = Field(
@@ -658,24 +669,24 @@ class ServerSettings(BaseSettings):
     )
 
     @model_validator(mode="after")
-    def _resolve_rust_frontend_path(self) -> "ServerSettings":
-        # Mirrors the legacy `_resolve_rust_frontend_path` behavior: the
-        # path is only meaningful when the Rust frontend is enabled. When
-        # disabled, ignore (and warn about) any explicitly-set path. When
-        # enabled, an unset path or one of "auto"/"1"/"true" resolves to
-        # the bundled `vllm-rs` binary.
+    def _resolve_rust_cli_path(self) -> "ServerSettings":
+        # Mirrors the legacy `_resolve_rust_cli_path` behavior: the path is
+        # only meaningful when the Rust frontend or the Rust bench client is
+        # enabled. When neither is, ignore (and warn about) any
+        # explicitly-set path. When enabled, an unset path or one of
+        # "auto"/"1"/"true" resolves to the bundled `vllm-rs` binary.
         raw = self.rust_frontend_path
-        if not self.use_rust_frontend:
+        if not (self.use_rust_frontend or self.use_rust_bench):
             if _env_set("VLLM_RUST_FRONTEND_PATH"):
                 logger.warning(
-                    "VLLM_RUST_FRONTEND_PATH is set but VLLM_USE_RUST_FRONTEND "
-                    "is not enabled. The Rust frontend will not be used. "
-                    "Set VLLM_USE_RUST_FRONTEND=1 to enable it."
+                    "VLLM_RUST_FRONTEND_PATH is set without enabling "
+                    "VLLM_USE_RUST_FRONTEND or VLLM_USE_RUST_BENCH. "
+                    "Set one of them to 1 to use the vllm-rs binary."
                 )
             self.rust_frontend_path = None
             return self
 
-        # Rust frontend enabled: if path env var is unset, default to "auto".
+        # Rust CLI enabled: if path env var is unset, default to "auto".
         if raw is None:
             raw = "auto"
 
@@ -1338,8 +1349,7 @@ class MediaSettings(BaseSettings):
             "Backend for Video IO -- selects the frame-sampling algorithm. "
             '"opencv": uniform sampling. '
             '"opencv_dynamic": duration-aware dynamic sampling. '
-            '"identity": returns raw video bytes for model processor to '
-            "handle. Custom backend implementations can be registered via "
+            "Custom backend implementations can be registered via "
             '`@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and '
             "imported at runtime. If a non-existing backend is used, an "
             "AssertionError will be thrown."
@@ -1433,12 +1443,6 @@ class CpuSettings(BaseSettings):
             "cores will not be used by OMP threads of a rank."
         ),
     )
-    cpu_sgl_kernel: bool = Field(
-        default=False,
-        description=(
-            "(CPU backend only) Whether to use SGL kernels, optimized for small batch."
-        ),
-    )
     cpu_attn_split_kv: bool = Field(
         default=True,
         description="(CPU backend only) Whether to enable attention split KV.",
@@ -1513,6 +1517,16 @@ class RocmSettings(BaseSettings):
     rocm_use_aiter_moe: bool = Field(
         default=True,
         description="Whether to use aiter moe ops. By default is enabled.",
+    )
+    rocm_use_aiter_moe_situv2_a8w4: bool = Field(
+        default=False,
+        description=(
+            "Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) "
+            "gate/up-interleaved flydsl kernels instead of the default a16w4 "
+            "separated path. This is the only flag users need: vLLM picks the "
+            "kernels by passing gate_mode to AITER and sets the AITER-side "
+            "workaround env at init."
+        ),
     )
     rocm_aiter_moe_dispatch_policy: int = Field(
         default=0,
@@ -1850,6 +1864,21 @@ class QuantSettings(BaseSettings):
             "sentinel."
         ),
     )
+    kimi_k3_shard_sp_shared_expert: bool = Field(
+        default=False,
+        description=(
+            "Kimi-K3 only. Under sequence-parallel MoE the dense and "
+            "shared-expert MLPs are replicated on every rank, so each rank "
+            "streams the whole weight to serve its own token shard. Shard "
+            "them across TP instead: the MLP then all-gathers the full token "
+            "set, computes this rank's partial, and reduce-scatters (which "
+            "both sums across TP and restores the sequence sharding). Trades "
+            "weight bandwidth and resident memory for two collectives per "
+            "layer, so it only wins at low token counts: intended for decode "
+            "instances in a P/D disaggregated deployment, not for prefill or "
+            "unified serving."
+        ),
+    )
     deepep_buffer_size_mb: int = Field(
         default=1024,
         description="The size in MB of the buffers (NVL and RDMA) used by DeepEP.",
@@ -1930,27 +1959,6 @@ class QuantSettings(BaseSettings):
             "may not produce correct model outputs."
         ),
     )
-    q_scale_constant: int = Field(
-        default=200,
-        alias="Q_SCALE_CONSTANT",
-        description=(
-            "Divisor for dynamic query scale factor calculation for FP8 KV Cache."
-        ),
-    )
-    k_scale_constant: int = Field(
-        default=200,
-        alias="K_SCALE_CONSTANT",
-        description=(
-            "Divisor for dynamic key scale factor calculation for FP8 KV Cache."
-        ),
-    )
-    v_scale_constant: int = Field(
-        default=100,
-        alias="V_SCALE_CONSTANT",
-        description=(
-            "Divisor for dynamic value scale factor calculation for FP8 KV Cache."
-        ),
-    )
     kv_cache_layout: Literal["NHD", "HND"] | None = Field(
         default=None,
         description=(
@@ -2002,7 +2010,15 @@ class QuantSettings(BaseSettings):
         description=(
             "Enable checking whether the generated logits contain NaNs, "
             "indicating corrupted output. Useful for debugging low level "
-            "bugs or bad hardware but it may add compute overhead."
+            "bugs or bad hardware but it may add compute overhead. Implied "
+            "by VLLM_RAISE_ON_LOGIT_NANS."
+        ),
+    )
+    raise_on_logit_nans: bool = Field(
+        default=False,
+        description=(
+            "Raise an exception when generated logits contain NaNs. Enabling "
+            "this also enables the NaN computation required to detect them."
         ),
     )
     use_oink_ops: bool = Field(
@@ -2052,6 +2068,14 @@ class QuantSettings(BaseSettings):
             "performance."
         ),
     )
+
+    @model_validator(mode="after")
+    def _raise_on_nans_implies_compute(self) -> "QuantSettings":
+        # Detecting NaNs requires computing them, so the raise flag turns the
+        # compute flag on regardless of how the latter was set.
+        if self.raise_on_logit_nans:
+            self.compute_nans_in_logits = True
+        return self
 
     @field_validator("float32_matmul_precision", mode="before")
     @classmethod

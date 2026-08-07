@@ -6,7 +6,6 @@ from itertools import islice
 
 import torch
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -39,11 +38,11 @@ from vllm.model_executor.models.utils import (
     make_layers,
     sequence_parallel_chunk,
 )
+from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.mla.sparse_utils import register_phys_shadow
 
-from .attention import DeepseekV32Attention
-from .fused_ops import fused_allreduce_rms_norm
+from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
 
 
 def _all_gather_sp_states(
@@ -179,7 +178,6 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
 class DeepseekV32Model(torch.nn.Module):
     fall_back_to_pt_during_load = False
 
@@ -203,7 +201,6 @@ class DeepseekV32Model(torch.nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
-        register_phys_shadow(topk_indices_buffer)
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -409,6 +406,11 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     """
 
     model_cls = DeepseekV32Model
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if self.config.model_type == "glm_moe_dsa":
+            enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
 
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the

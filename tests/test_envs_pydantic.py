@@ -238,7 +238,6 @@ def test_dir_exposes_known_vars():
         "MAX_JOBS",
         "CUDA_HOME",
         "VLLM_DO_NOT_TRACK",
-        "Q_SCALE_CONSTANT",
     ]:
         assert expected in names, f"{expected} missing from dir(envs)"
 

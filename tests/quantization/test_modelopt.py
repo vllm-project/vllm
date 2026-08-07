@@ -13,7 +13,12 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.model import ModelConfig
+from vllm.model_executor.kernels.linear import (
+    HummingNvFp4LinearKernel,
+    MarlinNvFp4LinearKernel,
+)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
@@ -21,6 +26,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
+    ModelOptNvFp4W4A16LinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -42,12 +48,12 @@ def _skip(msg: str) -> NoReturn:
 
 def _snapshot_download_or_skip(model_id: str) -> str:
     try:
-        from huggingface_hub import snapshot_download
+        from vllm.transformers_utils.repo_utils import hf_api
     except Exception as e:  # pragma: no cover
         _skip(f"huggingface_hub is required to download {model_id}: {e}")
 
     try:
-        return snapshot_download(
+        return hf_api().snapshot_download(
             repo_id=model_id,
             repo_type="model",
             # These checkpoints are already small; download full repo for simplicity.
@@ -468,15 +474,13 @@ def test_modelopt_nvfp4_config_dispatches_w4a4_method():
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a16_method():
-    """``quant_method="W4A16_NVFP4"`` routes to the new
+    """``quant_method="W4A16_NVFP4"`` routes to
     ``ModelOptNvFp4W4A16LinearMethod`` instead of the W4A4 sibling.
 
     Mirrors the FP8 dispatch precedent (``ModelOptFp8Config`` selects
     one of three FP8 LinearMethods on ``quant_method``); a regression
     here would mean a W4A16 NVFP4 checkpoint silently loaded under the
-    W4A4 method, which would try to register an ``input_scale`` runtime
-    parameter and (more importantly) call the cutlass W4A4 NVFP4 GEMM
-    instead of FP4 Marlin.
+    W4A4 activation-quantization path.
     """
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4Config,
@@ -493,6 +497,21 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
     assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
     assert config.LinearMethodCls is not ModelOptNvFp4LinearMethod
     assert config.quant_method == "W4A16_NVFP4"
+
+
+@pytest.mark.parametrize(
+    ("linear_backend", "kernel_cls"),
+    [("auto", MarlinNvFp4LinearKernel), ("humming", HummingNvFp4LinearKernel)],
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
+    vllm_config = VllmConfig()
+    vllm_config.kernel_config.linear_backend = linear_backend
+    with set_current_vllm_config(vllm_config):
+        method = ModelOptNvFp4W4A16LinearMethod(
+            ModelOptNvFp4Config(quant_method="W4A16_NVFP4")
+        )
+    assert isinstance(method.kernel, kernel_cls)
 
 
 @pytest.mark.parametrize(
