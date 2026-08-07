@@ -182,6 +182,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             (kMxfp4Static, kMxfp4Dynamic),
             (kMxfp4Static, kMxfp8Dynamic),
             (kMxfp4Static, kFp8DynamicTokenSym),
+            # MXFP4 weight (group-32 e8m0) with block-FP8 activation
+            # (group-128 float32). Runs via WGMMA software dequant, so it
+            # works on Hopper (SM90/H200) as well as Blackwell.
+            (kMxfp4Static, kFp8Dynamic128Sym),
             (kNvfp4Static, None),
             (kNvfp4Static, kFp8DynamicTokenSym),
             (kMxfp8Static, None),

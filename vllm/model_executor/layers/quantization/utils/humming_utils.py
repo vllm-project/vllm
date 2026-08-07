@@ -295,7 +295,18 @@ def _humming_input_schema_to_quant_key(
     gs = schema.input_scale_group_size
     group_shape = GroupShape(row=1, col=gs) if gs > 0 else GroupShape.PER_TOKEN
 
-    scale_dtype = MXFP_SCALE_DTYPE if gs > 0 else torch.float32
+    # Pick the scale dtype the Humming kernel actually consumes. An explicit
+    # input_scale_dtype always wins. Otherwise infer from the grouping: MX
+    # microscale activations (group size 32, e.g. MXFP8) carry an e8m0 (uint8)
+    # scale, while block-FP8 (group size 128) and per-token FP8/int8 carry a
+    # float32 scale. Getting this right lets a grouped FP8 activation match
+    # kFp8Dynamic128Sym instead of an unmatchable uint8-scaled key.
+    if schema.input_scale_dtype is not None:
+        scale_dtype = _HUMMING_TO_SCALE_DTYPE[schema.input_scale_dtype]
+    elif gs == 32:
+        scale_dtype = MXFP_SCALE_DTYPE
+    else:
+        scale_dtype = torch.float32
 
     scale = ScaleDesc(dtype=scale_dtype, static=False, group_shape=group_shape)
 
