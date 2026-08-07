@@ -2499,7 +2499,9 @@ def test_dcp_put_step_decouples_factor_from_namespace():
     mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=None)
     gqa = FullAttentionSpec(block_size=16, num_kv_heads=4, head_size=64, dtype=None)
     mamba = MambaSpec(
-        block_size=16, shapes=((1, 1),), dtypes=(torch.float32,),
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
     worker._kv_cache_groups = [
@@ -2551,6 +2553,36 @@ def test_pressure_codes_include_transfer_fail():
     assert worker.MOONCAKE_TRANSFER_FAIL == -800
     assert worker.MOONCAKE_TRANSFER_FAIL in worker._PRESSURE_CODES
     assert worker.MOONCAKE_NO_AVAILABLE_HANDLE in worker._PRESSURE_CODES
+
+
+def test_dcp_gqa_put_step_rank_wraps_within_put_step():
+    """GQA (factor < tp_size) under DCP: put_step_rank must wrap with
+    % put_step so every namespace gets full chunk coverage."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 2  # factor = 8 // 2 = 4
+    worker.dcp_size = 2  # put_step = 4 // 2 = 2
+    gqa = FullAttentionSpec(block_size=16, num_kv_heads=2, head_size=64, dtype=None)
+    worker._kv_cache_groups = [KVCacheGroupSpec(["gqa"], gqa)]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+        )
+    ]
+    _refresh_group_tp_replication_factors(worker)
+
+    assert worker._group_tp_replication_factors == (4,)
+    assert worker._group_put_steps == (2,)
+    # tp4 and tp6 have tp_rank//dcp_size = 2 and 3, which exceed put_step=2.
+    # Without % put_step they would skip all chunks.
+    for tp in (0, 2, 4, 6):
+        expected_psr = (tp // 2) % 2
+        assert expected_psr < 2, f"tp{tp} put_step_rank overflow"
 
 
 def test_lookup_partial_prefix_returns_first_hit_length():
