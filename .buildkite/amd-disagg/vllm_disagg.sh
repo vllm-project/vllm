@@ -530,7 +530,6 @@ run_node() {
 
     # Shared-FS completion sentinel (LOG_PATH is shared & per-run/per-job).
     local sentinel="${LOG_PATH}/.disagg_done"
-    (( NODE_RANK == 0 )) && { rm -f "${sentinel}" 2>/dev/null || true; }
 
     log "node mode: rank=${NODE_RANK}/${total} role=${ROLE} master=${IS_MASTER} wide_ep=${WIDE_EP_MODE}(${PARALLEL_MODE})"
     log "topology: xP=${xP} yD=${yD} gpus/node=${GPUS_PER_NODE} IPADDRS=${IPADDRS}"

@@ -316,14 +316,14 @@ if [[ -z "${STATE}" ]]; then
     STATE="deadline"; RC=1; REASON="poll deadline"
 fi
 
-# Preflight to see if the nodes are actually free and fail if not free.
+# Pre-flight logic.
 PF_LINES=()
 if compgen -G "${LOG_DIR}/preflight_NODE*.log" >/dev/null 2>&1; then
     cat -- "${LOG_DIR}"/preflight_NODE*.log >&2 || true
     mapfile -t PF_LINES < <(grep -h '^PREFLIGHT-REJECTED: ' "${LOG_DIR}"/preflight_NODE*.log 2>/dev/null || true)
 fi
-if (( ${#PF_LINES[@]} > 0 )); then
-    STATE="preflight-rejected"; RC=1
+if (( ${#PF_LINES[@]} > 0 )) && (( RC != 0 )); then
+    STATE="preflight-rejected"
     REASON="${PF_LINES[0]#PREFLIGHT-REJECTED: }"
     if (( ${#PF_LINES[@]} > 1 )); then
         REASON="${REASON} [+$(( ${#PF_LINES[@]} - 1 )) more node(s), see ${LOG_DIR}/]"
