@@ -8,7 +8,6 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -450,7 +449,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -519,6 +518,8 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
                 layer.weight, layer.weight_scale, layer.logical_widths
             )
         layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight.input_dim = 0
+        layer.weight.output_dim = 1
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
@@ -543,7 +544,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -640,7 +641,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
             static=True, group_shape=GroupShape(block_n, block_k)
         )
 
-        self.out_dtype = torch.get_default_dtype()
+        self.out_dtype = get_current_vllm_config().model_config.dtype
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
@@ -767,15 +768,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             config=self.moe,
             weight_key=kFp8StaticTensorSym,
             activation_key=kFp8StaticTensorSym,
-        )
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
         )
 
     def create_weights(
@@ -1407,15 +1399,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.nvfp4_backend
         )
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
     def uses_weight_scale_2_pattern(self) -> bool:
         """
         FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales.
@@ -1608,6 +1591,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            swiglu_alpha=getattr(layer, "swiglu_alpha", None),
+            swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
         )
 
@@ -2084,15 +2069,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             and envs.VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD
         ):
             self._dequant_mxfp8_weights_to_bf16(layer)
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
