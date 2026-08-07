@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from typing import Any
 
 import pytest
 import torch
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import single_gpu_only
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
@@ -71,12 +71,6 @@ def test_mtp_correctness(
             method, model_name, tp_size = model_setup
             draft_model = None
         _skip_if_insufficient_gpus_for_tp(tp_size)
-
-        if "Qwen3.5" in model_name and os.environ.get("VLLM_USE_V2_MODEL_RUNNER"):
-            pytest.skip(
-                "Model Runner V2 does not yet support hybrid models "
-                "(Qwen3.5 mixes Mamba-style GDN with attention layers)."
-            )
 
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
 
@@ -151,5 +145,79 @@ def test_mtp_correctness(
         # Upon failure, inspect the outputs to check for inaccuracy.
         assert matches > int(0.8 * len(ref_outputs))
         del spec_llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
+@single_gpu_only
+def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Successor hashes avoid an extra MTP page drop without changing output."""
+    aligned_page_size = 544
+    prompt_len = 2 * aligned_page_size + 1
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=32,
+        logprobs=5,
+    )
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_MLA_DISABLE", "1")
+        llm = LLM(
+            model="Qwen/Qwen3.5-0.8B-Base",
+            trust_remote_code=True,
+            enable_prefix_caching=True,
+            max_model_len=2048,
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": 1,
+                "max_model_len": 2048,
+            },
+            limit_mm_per_prompt={"image": 0, "video": 0},
+        )
+        assert llm.llm_engine.vllm_config.cache_config.prefix_match_unit is None
+
+        tokenizer = llm.get_tokenizer()
+        source = (
+            "The following context is intentionally repeated to exercise prefix "
+            "caching. " * 300
+        ) + "Explain why deterministic inference should be reproducible."
+        prompt_token_ids = tokenizer.encode(source)[-prompt_len:]
+        assert len(prompt_token_ids) == prompt_len
+        prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+        cold_output = llm.generate([prompt], sampling_params)[0]
+        warm_output = llm.generate([prompt], sampling_params)[0]
+
+        assert cold_output.num_cached_tokens == 0
+        max_safe_hit = 2 * aligned_page_size
+        # An unconditional one-page EAGLE drop would report only 544 tokens.
+        assert warm_output.num_cached_tokens == max_safe_hit
+
+        cold_completion = cold_output.outputs[0]
+        warm_completion = warm_output.outputs[0]
+        assert cold_completion.token_ids == warm_completion.token_ids
+        check_logprobs_close(
+            outputs_0_lst=[
+                (
+                    list(cold_completion.token_ids),
+                    cold_completion.text,
+                    cold_completion.logprobs,
+                )
+            ],
+            outputs_1_lst=[
+                (
+                    list(warm_completion.token_ids),
+                    warm_completion.text,
+                    warm_completion.logprobs,
+                )
+            ],
+            name_0="cold_mtp",
+            name_1="warm_mtp",
+            always_check_logprobs=True,
+        )
+
+        del llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
