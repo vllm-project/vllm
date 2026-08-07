@@ -166,16 +166,17 @@ class ServingDerender(BaseServing):
             total_tokens=prompt_tokens + completion_tokens,
         )
 
+        model_name = request.model or self.models.model_name()
         logger.debug(
             "derender_chat request_id=%s model=%s choices=%d completion_tokens=%d",
             gen.request_id,
-            request.model,
+            model_name,
             len(choices),
             completion_tokens,
         )
         return ChatCompletionResponse(
             id=gen.request_id,
-            model=request.model,
+            model=model_name,
             created=int(time.time()),
             choices=choices,
             usage=usage,

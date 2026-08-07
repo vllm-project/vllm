@@ -267,8 +267,8 @@ class DerenderChatRequest(BaseModel):
     # --8<-- [start:derender-chat-request]
     stream: Literal[False] = False
 
-    model: str
-    """Served model name."""
+    model: str | None = None
+    """Served model name. Defaults to the server's served model name."""
 
     generate_response: GenerateResponse
     """The complete token-in / token-out engine response to derender."""
