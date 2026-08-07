@@ -134,7 +134,7 @@ pydantic==2.13.4
     #   pydantic-settings
 pydantic-core==2.46.4
     # via pydantic
-pydantic-settings==2.14.1
+pydantic-settings==2.15.0
     # via -r requirements/docs.in
 pygments==2.20.0
     # via mkdocs-material

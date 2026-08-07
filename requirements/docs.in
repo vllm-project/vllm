@@ -11,7 +11,8 @@ mkdocs-redirects
 regex
 ruff
 pydantic
-pydantic-settings  # required by docs/mkdocs/plugins/gen_env_vars.py
+# >=2.14.2 fixes CVE-2026-58203 (secrets_dir symlink escape).
+pydantic-settings>=2.14.2  # required by docs/mkdocs/plugins/gen_env_vars.py
 
 # For generating argparse docs.
 # Adding requirements here should only be used as a last resort.

@@ -436,6 +436,7 @@ class ServerSettings(BaseSettings):
     )
     api_key: str | None = Field(
         default=None,
+        json_schema_extra={"compile_factor": False},
         description="API key for vLLM API server.",
     )
     debug_log_api_server_response: bool = Field(

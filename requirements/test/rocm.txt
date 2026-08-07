@@ -864,7 +864,7 @@ pydantic-extra-types==2.11.1
     # via
     #   fastapi
     #   mistral-common
-pydantic-settings==2.13.1
+pydantic-settings==2.15.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
