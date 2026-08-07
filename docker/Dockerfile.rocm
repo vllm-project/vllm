@@ -6,15 +6,8 @@ ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
-# KV connector selection. INSTALL_KV_CONNECTORS is the umbrella, mirroring the
-# arg of the same name in docker/Dockerfile that the CUDA release builds set
-# true; it turns on every connector below. Each connector also has its own arg,
-# defaulting to the umbrella, so a build can opt into a subset:
-#   --build-arg INSTALL_KV_CONNECTORS=true                       # all
-#   --build-arg INSTALL_LMCACHE=true                             # just LMCache
-#   --build-arg INSTALL_KV_CONNECTORS=true --build-arg INSTALL_LMCACHE=false
-# Booleans rather than a list because the per-connector build stages are
-# selected via `FROM <stage>_${ARG}`, which needs the value in the stage name.
+# Umbrella for all KV connectors; each also has its own arg for opting into a
+# subset. Booleans, not a list, because stages select via FROM <stage>_${ARG}.
 ARG INSTALL_KV_CONNECTORS=false
 ARG INSTALL_LMCACHE=${INSTALL_KV_CONNECTORS}
 # NIC backend for MoRI RDMA support.
@@ -482,13 +475,11 @@ RUN cd /opt/nixl && \
         /tmp/nixl_wheels/repaired/*.whl && \
     cp /tmp/nixl_wheels/repaired/*.whl /app/install
 
-# LMCache build stage. LMCache publishes no ROCm wheel to PyPI, so build the
-# HIP extension from source. BUILD_WITH_HIP selects the ROCm build profile,
-# which hipifies csrc and compiles it as a torch CppExtension via hipcc.
+# LMCache ships no ROCm wheel on PyPI, so build the HIP extension from source.
 FROM base AS build_lmcache
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="v0.5.3rc4"
-# Defaults to the arch set this image already targets.
+# Defaults to this image's arch set.
 ARG LMCACHE_ROCM_ARCH=""
 ARG COMMON_WORKDIR
 RUN git clone ${LMCACHE_REPO} ${COMMON_WORKDIR}/lmcache \
@@ -509,8 +500,7 @@ names = zipfile.ZipFile(glob.glob('/app/install/*.whl')[0]).namelist(); \
 so = [n for n in names if n.endswith('.so')]; \
 sys.exit('no compiled extension in wheel' if not so else 0)"
 
-# Gate the build behind INSTALL_LMCACHE so the hipcc compile is skipped
-# entirely when the connector is not requested.
+# Gated so the hipcc build is skipped entirely when not requested.
 FROM scratch AS export_lmcache_true
 COPY --from=build_lmcache /app/install/*.whl /
 FROM scratch AS export_lmcache_false
@@ -907,19 +897,20 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
 
-# Install the LMCache KV connector, built from source for HIP.
 # --no-deps: lmcache's metadata is shared with its CUDA build and pins
-# numpy<=2.2.6, which would downgrade vLLM's numpy. These three are the only
-# runtime deps requirements/rocm.txt does not already provide; optional S3 /
-# Bigtable / Prometheus backends need awscrt, google-cloud-bigtable and
-# opentelemetry-exporter-prometheus respectively.
+# numpy<=2.2.6, which would downgrade vLLM's. These four are the only runtime
+# deps requirements/rocm.txt lacks; the otel exporter is needed because
+# `lmcache server` initialises observability unconditionally.
 ARG INSTALL_LMCACHE
 RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
     --mount=type=cache,target=/root/.cache/uv \
     if [ "$INSTALL_LMCACHE" = "true" ]; then \
         uv pip install --system --no-deps /lmcache_install/*.whl \
         && uv pip install --system sortedcontainers cupy-rocm-7-0 aiofile \
-        && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"; \
+           opentelemetry-exporter-prometheus \
+        && python3 -c "import lmcache, lmcache.c_ops, importlib.metadata as m; \
+[m.version(d) for d in ('sortedcontainers','aiofile','cupy-rocm-7-0','opentelemetry-exporter-prometheus')]; \
+print('lmcache', lmcache.__version__)"; \
     fi
 
 ARG COMMON_WORKDIR
