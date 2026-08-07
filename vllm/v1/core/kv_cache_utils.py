@@ -427,26 +427,6 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
 
 
-def need_extra_keys(request: Request) -> bool:
-    """Check whether the blocks allocated to this request need extra hash keys.
-
-    Args:
-        request (Request): The request.
-
-    Returns:
-        bool: Whether blocks allocated to this request need extra hash keys.
-    """
-
-    # Multimodal requests need to include the MM hash.
-    # LoRA requests need to include the LoRA name.
-    # Request with provided cache salt need to include the salt.
-    return (
-        bool(request.mm_features)
-        or (request.lora_request is not None)
-        or (request.cache_salt is not None)
-    )
-
-
 def _gen_mm_extra_hash_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
 ) -> tuple[list[Any], int]:
@@ -665,12 +645,12 @@ def resolve_kv_cache_block_sizes(
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size, scheduler_block_size
 
-    # Mamba groups with block_size != cache_config.block_size
-    # (mamba_cache_mode != "align") break divisibility; back off to the
-    # scheduler block size.
+    # Mamba groups outside align mode break divisibility; back off to the
+    # scheduler block size. Read the mode from the resolved group spec because
+    # its block size may have been updated independently of cache_config.
     if any(
         isinstance(g.kv_cache_spec, MambaSpec)
-        and g.kv_cache_spec.block_size != cache_config.block_size
+        and g.kv_cache_spec.mamba_cache_mode != "align"
         for g in groups
     ):
         return scheduler_block_size, scheduler_block_size
@@ -1186,20 +1166,6 @@ def _get_kv_cache_groups_uniform_type(
     """
 
     return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
-
-
-def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
-    """
-    Whether all layers in the given KVCacheSpec have the same page size.
-    Args:
-        kv_cache_spec: The KVCacheSpec of each attention layer in the model
-
-    Returns:
-        True if all layers have the same page size, False otherwise.
-    """
-
-    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
-    return len(page_sizes) == 1
 
 
 def unify_kv_cache_spec_page_size(
@@ -1913,6 +1879,13 @@ def _annotate_eagle_groups_deepseek_v4(
             break
 
 
+def _largest_divisor_at_most(value: int, limit: int) -> int:
+    for candidate in range(min(value, limit), 0, -1):
+        if value % candidate == 0:
+            return candidate
+    return 1
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec]:
@@ -1978,9 +1951,20 @@ def get_kv_cache_groups(
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
         common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+        group_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in groups))
         for name, spec in hidden_specs.items():
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
-            new_bs = max(common_page // per_token, 1)
+            max_block_size = max(common_page // per_token, 1)
+            new_bs = _largest_divisor_at_most(group_block_size, max_block_size)
+            wasted_bytes = common_page - new_bs * per_token
+            logger.info(
+                "Using block size %d for hidden-state cache layer %s; "
+                "page alignment wastes %d bytes (%.2f%%) per block",
+                new_bs,
+                name,
+                wasted_bytes,
+                wasted_bytes / common_page * 100,
+            )
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
@@ -2020,6 +2004,23 @@ def get_kv_cache_capacity(
         vllm_config, kv_cache_config
     )
     return int(max_concurrency * max_model_len), max_concurrency
+
+
+def update_kv_cache_capacity(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> None:
+    """Store and log the resolved KV cache capacity."""
+    num_tokens, max_concurrency = get_kv_cache_capacity(vllm_config, kv_cache_config)
+    vllm_config.cache_config.kv_cache_size_tokens = num_tokens
+    vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
+    max_model_len = vllm_config.model_config.max_model_len
+    logger.info_once(
+        "GPU KV cache size: %s tokens, "
+        "Maximum concurrency for %s tokens per request: %.2fx",
+        f"{num_tokens:,}",
+        f"{max_model_len:,}",
+        max_concurrency,
+    )
 
 
 def _max_memory_usage_bytes_from_groups(
@@ -2356,23 +2357,6 @@ def get_kv_cache_configs(
         for tensor in kv_cache_config.kv_cache_tensors:
             assert tensor.size % num_blocks_old == 0
             tensor.size = tensor.size // num_blocks_old * min_num_blocks
-
-        if len(kv_cache_config.kv_cache_groups) > 0:
-            max_model_len = vllm_config.model_config.max_model_len
-            # GPU KV cache size in tokens = max_concurrency * max_model_len:
-            # the total tokens of context the pool can hold at peak
-            # utilization. Sourcing this from the concurrency calculation
-            # handles hybrid layouts correctly.
-            num_tokens, max_concurrency = get_kv_cache_capacity(
-                vllm_config, kv_cache_config
-            )
-
-            logger.info_once("GPU KV cache size: %s tokens", f"{num_tokens:,}")
-            logger.info_once(
-                "Maximum concurrency for %s tokens per request: %.2fx",
-                f"{max_model_len:,}",
-                max_concurrency,
-            )
 
     return kv_cache_configs
 
