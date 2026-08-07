@@ -242,9 +242,7 @@ def test_fa4_fp8_per_head_descales() -> None:
     k_descale = torch.tensor([[0.25, 1.5]], dtype=torch.float32)
     v_descale = torch.tensor([[0.5, 2.0]], dtype=torch.float32)
 
-    query_scale = torch.repeat_interleave(
-        q_descale[0], num_query_heads // num_kv_heads
-    )
+    query_scale = torch.repeat_interleave(q_descale[0], num_query_heads // num_kv_heads)
     query_fp8 = (query / query_scale[None, :, None]).to(torch.float8_e4m3fn)
     key_fp8 = (key / k_descale[0, :, None]).to(torch.float8_e4m3fn)
     value_fp8 = (value / v_descale[0, :, None]).to(torch.float8_e4m3fn)
