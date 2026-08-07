@@ -14,7 +14,15 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.platforms import current_platform
 
-if current_platform.get_device_capability() < (7, 0):
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip(
+        "INT8 Triton kernels require a CUDA-alike or XPU device",
+        allow_module_level=True,
+    )
+
+if current_platform.is_cuda_alike() and not current_platform.has_device_capability(
+    (7, 0)
+):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
