@@ -290,7 +290,6 @@ torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
   int64_t const target_tile_k_size = marlin::tile_k_size * (is_a_8bit ? 2 : 1);
   STD_TORCH_CHECK(size_k % target_tile_k_size == 0, "size_k = ", size_k,
                   " is not divisible by tile_k_size = ", target_tile_k_size);
-  // Keep the stricter N alignment required by Marlin GEMM.
   STD_TORCH_CHECK(size_n % marlin::tile_n_size == 0, "size_n = ", size_n,
                   " is not divisible by tile_n_size = ", marlin::tile_n_size);
 
