@@ -29,6 +29,7 @@ import requests
 
 
 MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
+MOE_MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-30B-A3B")
 
 
 _BASE_ARGS = [
@@ -68,6 +69,14 @@ _DUMMY_ARGS = [
 # ---------------------------------------------------------------------------
 
 
+def _is_expert_parallel(extra_args):
+    return any(
+        arg == "--enable-expert-parallel"
+        or arg.startswith("--enable-expert-parallel=")
+        for arg in (extra_args or [])
+    )
+
+
 @contextmanager
 def server(
     extra_args=None,
@@ -85,12 +94,13 @@ def server(
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
+    model = MOE_MODEL_NAME if _is_expert_parallel(extra_args) else MODEL_NAME
     cmd = [
         sys.executable,
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
-        MODEL_NAME,
+        model,
         "--port",
         str(port),
         "--served-model-name",
@@ -353,6 +363,26 @@ def health(url) -> int:
         return requests.get(f"{url}/health", timeout=5).status_code
     except Exception:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers — weight checker
+# ---------------------------------------------------------------------------
+
+
+def weight_checker(url: str, action: str) -> requests.Response:
+    return requests.post(
+        f"{url}/weight_checker", json={"action": action}, timeout=180
+    )
+
+
+def collective_rpc(url: str, method: str) -> requests.Response:
+    """Invoke an existing worker method through the development RPC API."""
+    return requests.post(
+        f"{url}/collective_rpc",
+        json={"method": method, "timeout": 900},
+        timeout=900,
+    )
 
 
 # ---------------------------------------------------------------------------
