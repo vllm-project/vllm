@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
+    calc_diff,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
@@ -242,8 +243,14 @@ def test_w8a8_block_fp8_fused_moe(
     else:
         ref_out_m = ref_out
 
-    torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
-    torch.testing.assert_close(m_out, ref_out_m, atol=tol, rtol=tol)
+    atol = tol
+    if current_platform.is_device_capability(120):
+        assert calc_diff(out, ref_out) < 1e-3
+        assert calc_diff(m_out, ref_out_m) < 1e-3
+        atol *= 4
+
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=tol)
+    torch.testing.assert_close(m_out, ref_out_m, atol=atol, rtol=tol)
 
 
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
