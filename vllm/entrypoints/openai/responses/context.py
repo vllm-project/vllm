@@ -607,12 +607,14 @@ class HarmonyContext(ConversationContext):
         available_tools: list[str],
         function_tool_names: frozenset[str],
         response_parser: Parser | None = None,
+        request: ResponsesRequest | None = None,
     ):
         from vllm.parser.harmony import HarmonyParser, Segment
 
         assert isinstance(response_parser, HarmonyParser)
 
         self._messages = messages
+        self.request = request
         self.response_parser: HarmonyParser = response_parser
         self.finish_reason: str | None = None
         self.available_tools = available_tools

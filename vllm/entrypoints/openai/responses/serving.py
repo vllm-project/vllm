@@ -466,6 +466,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     available_tools,
                     function_tool_names,
                     response_parser=response_parser,
+                    request=request,
                 )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
@@ -720,7 +721,14 @@ class OpenAIServingResponses(GenerateBaseServing):
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, HarmonyContext):
                 token_ids = context.render_for_completion()
-                engine_input = tokens_input(token_ids)
+                engine_input = tokens_input(
+                    token_ids,
+                    cache_salt=(
+                        context.request.cache_salt
+                        if context.request is not None
+                        else None
+                    ),
+                )
 
                 sampling_params.max_tokens = max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
