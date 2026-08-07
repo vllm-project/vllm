@@ -66,6 +66,12 @@ class ProfilerConfig:
     """If `True`, enables memory profiling in the torch profiler.
     Disabled by default."""
 
+    torch_profiler_execution_trace: bool = False
+    """If `True`, also captures a PyTorch execution trace (ET) alongside the
+    Kineto trace. The ET is collected via an `ExecutionTraceObserver` and saved
+    as `execution_trace_<worker_name>.json` under `torch_profiler_dir`, one file
+    per worker. Disabled by default."""
+
     capture_torch_profiler: bool = False
     """If `True`, enables a torch profiler during CUDA graph capture on rank 0.
     Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.
@@ -140,6 +146,12 @@ class ProfilerConfig:
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."
+            )
+
+        if self.torch_profiler_execution_trace and self.profiler != "torch":
+            raise ValueError(
+                "torch_profiler_execution_trace is only applicable when profiler "
+                "is set to 'torch'"
             )
 
         profiler_dir = self.torch_profiler_dir
