@@ -183,7 +183,9 @@ def _init_kv_cache_quant(
     layer._o_scale_float = None
 
     quant_method = (
-        quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
+        quant_config.get_effective_quant_method(layer, prefix=prefix)
+        if quant_config
+        else None
     )
 
     # See [Note: Register q/k/v/prob scales in state dict]
@@ -581,7 +583,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
         # for more details.
         quant_method = (
-            self.quant_config.get_quant_method(self, prefix=self.layer_name)
+            self.quant_config.get_effective_quant_method(self, prefix=self.layer_name)
             if self.quant_config
             else None
         )

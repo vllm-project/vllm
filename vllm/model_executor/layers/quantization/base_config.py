@@ -12,6 +12,9 @@ from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
     from vllm.model_executor.models.utils import WeightsMapper
 else:
     QuantizationMethods = str
@@ -103,6 +106,7 @@ class QuantizationConfig(ABC):
         super().__init__()
         # mapping is updated by models as they initialize
         self.packed_modules_mapping: dict[str, list[str]] = dict()
+        self.online_quant_config: OnlineQuantizationConfig | None = None
 
     @abstractmethod
     def get_name(self) -> QuantizationMethods:
@@ -180,7 +184,8 @@ class QuantizationConfig(ABC):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
-        """Get the quantize method to use for the quantized layer.
+        """Get the quantize method to use for the quantized layer, from the
+        pre-quantized checkpoint quant_method.
 
         Args:
             layer: The layer for the quant method.
@@ -190,6 +195,51 @@ class QuantizationConfig(ABC):
             method.
         """
         raise NotImplementedError
+
+    def set_online_quantization(self, online_args: Any) -> None:
+        """Enable online quantization for checkpoint-unquantized layers."""
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        self.online_quant_config = OnlineQuantizationConfig(online_args)
+
+    def get_effective_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> QuantizeMethodBase | None:
+        """Return the checkpoint method with configured online quantization."""
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+        from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+            UnquantizedFusedMoEMethod,
+        )
+        from vllm.model_executor.layers.linear import (
+            LinearBase,
+            UnquantizedLinearMethod,
+        )
+
+        base_quant_method = self.get_quant_method(layer, prefix)
+        if self.online_quant_config is None:
+            return base_quant_method
+        if not isinstance(layer, (LinearBase, RoutedExperts)):
+            return base_quant_method
+
+        self.online_quant_config.packed_modules_mapping = self.packed_modules_mapping
+        online_method = self.online_quant_config.get_quant_method(layer, prefix)
+        checkpoint_is_quantized = base_quant_method is not None and not isinstance(
+            base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
+        )
+        online_is_quantized = online_method is not None and not isinstance(
+            online_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
+        )
+        if checkpoint_is_quantized and online_is_quantized:
+            raise ValueError(
+                f"Cannot apply requested online quantization {online_method} to "
+                f"pre-quantized layer {prefix}: {base_quant_method} was selected "
+                "by the checkpoint quantization config."
+            )
+        if not online_is_quantized:
+            return base_quant_method
+        return online_method
 
     @staticmethod
     def get_cache_scale_mapper() -> "WeightsMapper":

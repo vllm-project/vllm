@@ -380,7 +380,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
 
         quant_method = (
-            self.quant_config.get_quant_method(self, prefix=self.layer_name)
+            self.quant_config.get_effective_quant_method(self, prefix=self.layer_name)
             if self.quant_config
             else None
         )

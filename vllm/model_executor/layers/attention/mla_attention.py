@@ -1117,7 +1117,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
         # for more details.
         quant_method = (
-            self.quant_config.get_quant_method(self, prefix=self.layer_name)
+            self.quant_config.get_effective_quant_method(self, prefix=self.layer_name)
             if self.quant_config
             else None
         )

@@ -275,7 +275,9 @@ class LinearBase(PluggableLayer):
         self.quant_method: QuantizeMethodBase
         if quant_config is None:
             self.quant_method = UnquantizedLinearMethod()
-        elif quant_method := quant_config.get_quant_method(self, prefix=prefix):
+        elif quant_method := quant_config.get_effective_quant_method(
+            self, prefix=prefix
+        ):
             self.quant_method = quant_method
         else:
             raise ValueError("All linear layers should support quant method.")
