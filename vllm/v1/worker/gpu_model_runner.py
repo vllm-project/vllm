@@ -3977,6 +3977,36 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
+    def _allow_microbatching(
+        self, num_reqs: int, num_scheduled_tokens_np: np.ndarray
+    ) -> bool:
+        """Refuse to microbatch a prefill batch of mixed cache state.
+
+        Splitting a step that mixes extends, which read a cached prefix, with
+        prefills that start from nothing corrupts the generations of every
+        request in the first microbatch, which is what fails
+        test_dbo_dp_ep_gsm8k[deepep_high_throughput] with prefix caching on.
+        The defect itself is not found yet, so run such a step whole; they are
+        rare enough that this costs nothing measurable.
+
+        Vetoing on one rank is safe, since microbatching is agreed collectively
+        across data-parallel ranks and any rank refusing settles it for all.
+        """
+        if self.parallel_config.all2all_backend != "deepep_high_throughput":
+            return True
+        # Extends and prefills in the sense `split_decodes_and_prefills` gives
+        # them: both are longer than a decode, and an extend is the one whose
+        # sequence outruns its query, which here means it has computed tokens.
+        query_lens = num_scheduled_tokens_np[:num_reqs]
+        is_extend_or_prefill = query_lens > (self.reorder_batch_threshold or 1)
+        if not is_extend_or_prefill.any():
+            return True
+        computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        return not (
+            (is_extend_or_prefill & (computed > 0)).any()
+            and (is_extend_or_prefill & (computed == 0)).any()
+        )
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -4320,6 +4350,9 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                allow_microbatching=self._allow_microbatching(
+                    num_reqs, num_scheduled_tokens_np
+                ),
             )
 
             logger.debug(
