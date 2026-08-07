@@ -186,12 +186,16 @@ frame does not have.)
 
 ## 3. Configuration
 
-| Env var | Default | Meaning |
+A single CLI flag toggles the arena; the slot count/size and divert threshold
+are internal constants (no env vars).
+
+| Flag (`ParallelConfig` field) | Default | Meaning |
 |---|---|---|
-| `VLLM_SHM_TENSOR_ARENA` | `1` | Enable the arena (`0` disables; behavior reverts to the out-of-band path). |
-| `VLLM_SHM_TENSOR_ARENA_SLOTS` | `8` | Number of slots. |
-| `VLLM_SHM_TENSOR_ARENA_SLOT_MB` | `256` | Slot size; tensors larger than this fall back to `_reduce_tensor`. |
-| `VLLM_SHM_TENSOR_ARENA_MIN_MB` | `8` | Minimum tensor size to divert; smaller tensors take the out-of-band path. |
+| `--enable-shm-tensor-arena` / `--no-enable-shm-tensor-arena` (`enable_shm_tensor_arena`) | on | Route large CPU tensors through the arena; disable to avoid the `/dev/shm` reservation and take the out-of-band path only. |
+
+Internal constants in `shm_broadcast.py`: **8 slots × 256 MB**; tensors larger
+than a slot, or smaller than the **8 MB** divert threshold, take the out-of-band
+`_reduce_tensor` path.
 
 ## 4. Validation
 
@@ -223,7 +227,7 @@ frame does not have.)
    (arena + pinning); vision-encoder compute for the same image is ~80 ms.
 4. **Outstanding — arena vs. out-of-band on `main`.** Re-run the same seeded A/B
    with the baseline set to current `main` (i.e. `_reduce_tensor` on, arena off
-   via `VLLM_SHM_TENSOR_ARENA=0`) vs. arena on, to quantify the incremental N→1
+   via `--no-enable-shm-tensor-arena`) vs. arena on, to quantify the incremental N→1
    copy + pinning gain at TP=4 (and ideally TP=2/8 to show the copy-count scaling).
 
 ## 5. Limitations and future work
