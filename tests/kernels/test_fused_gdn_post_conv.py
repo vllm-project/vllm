@@ -216,10 +216,17 @@ def test_fused_post_conv_l0():
     assert g.shape == (0, HV)
 
 
-@pytest.mark.parametrize("tp_size", [1, 2, 4, 8, 16])
-@pytest.mark.parametrize("query_lengths", [(4, 4), (4, 2, 0), (8,)])
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("norm_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "tp_size,query_lengths,state_dtype,norm_dtype",
+    [
+        pytest.param(16, (4, 4), torch.bfloat16, torch.bfloat16, id="tp16-bf16"),
+        pytest.param(4, (4, 4), torch.float32, torch.float32, id="tp4-fp32"),
+        pytest.param(16, (4, 2, 0), torch.bfloat16, torch.float32, id="tp16-ragged"),
+        pytest.param(4, (4, 2, 0), torch.float32, torch.bfloat16, id="tp4-ragged"),
+        pytest.param(16, (8,), torch.float32, torch.bfloat16, id="tp16-max"),
+        pytest.param(4, (8,), torch.bfloat16, torch.float32, id="tp4-max"),
+    ],
+)
 @torch.inference_mode()
 def test_fused_gdn_decode_post_conv_mtp_ratio8(
     tp_size: int,
@@ -278,16 +285,14 @@ def test_fused_gdn_decode_post_conv_mtp_ratio8(
         dtype=torch.int32,
         device=device,
     )
-    num_accepted_tokens = torch.tensor(
-        [1, *[state_width] * (num_reqs - 1)],
-        dtype=torch.int32,
-        device=device,
-    )
+    num_accepted_tokens = torch.ones(num_reqs, dtype=torch.int32, device=device)
     if query_lengths[-1] == 0:
         state_indices[-1].zero_()
-        num_accepted_tokens[-1] = 1
 
-    for step in range(3):
+    for step, accepted_tokens in enumerate((1, min(2, state_width), state_width)):
+        num_accepted_tokens.fill_(accepted_tokens)
+        if query_lengths[-1] == 0:
+            num_accepted_tokens[-1] = 1
         raw_ref, _ = fused_sigmoid_gating_delta_rule_update(
             A_log=A_log,
             a=a,

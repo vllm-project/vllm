@@ -127,7 +127,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
-    VLLM_QWEN3_5_GDN_DECODE_KERNEL: Literal["triton", "phase_a"] = "triton"
+    VLLM_QWEN3_5_GDN_DECODE_KERNEL: Literal["triton", "fused"] = "triton"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1209,11 +1209,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
     ),
-    # Select the Qwen3.5 one-token, non-speculative GDN decode implementation.
+    # Select the Qwen3.5 GDN decode implementation.
     "VLLM_QWEN3_5_GDN_DECODE_KERNEL": env_with_choices(
         "VLLM_QWEN3_5_GDN_DECODE_KERNEL",
         "triton",
-        ["triton", "phase_a"],
+        ["triton", "fused"],
         case_sensitive=False,
     ),
     # Disable pynccl (using torch.distributed instead)

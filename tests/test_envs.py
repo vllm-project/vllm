@@ -256,11 +256,12 @@ def test_qwen3_5_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_QWEN3_5_GDN_DECODE_KERNEL", raising=False)
     assert env_func() == "triton"
 
-    for value in ("triton", "phase_a"):
+    for value in ("triton", "fused"):
         monkeypatch.setenv("VLLM_QWEN3_5_GDN_DECODE_KERNEL", value)
         assert env_func() == value
 
     for value in (
+        "phase_a",
         "phase_a_packed",
         "phase_b_grouped",
         "phase_b_cluster",

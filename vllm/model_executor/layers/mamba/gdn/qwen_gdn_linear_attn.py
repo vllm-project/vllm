@@ -1879,7 +1879,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
-            and self.gdn_decode_kernel == "phase_a"
+            and self.gdn_decode_kernel == "fused"
             and self.num_v_heads == 8 * self.num_k_heads
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
