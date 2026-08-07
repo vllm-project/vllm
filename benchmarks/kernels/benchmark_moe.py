@@ -876,12 +876,30 @@ def get_quantization_group_size(config) -> int | None:
     return None
 
 
+def resolve_config_with_prefix(config, model_prefix: str):
+    """Descend into a nested sub-config, keeping the top-level
+    quantization_config.
+
+    HF checkpoints store ``quantization_config`` at the top level, so plain
+    ``getattr(config, model_prefix)`` would drop it and silently tune the
+    unquantized/per-tensor variant (and save the config under a filename
+    without the block shape, which serving would then never load).
+    """
+    quantization_config = getattr(config, "quantization_config", None)
+    sub_config = getattr(config, model_prefix)
+    if quantization_config is not None and not hasattr(
+        sub_config, "quantization_config"
+    ):
+        sub_config.quantization_config = quantization_config
+    return sub_config
+
+
 def main(args: argparse.Namespace):
     print(args)
 
     config = get_config(model=args.model, trust_remote_code=args.trust_remote_code)
     if args.model_prefix:
-        config = getattr(config, args.model_prefix)
+        config = resolve_config_with_prefix(config, args.model_prefix)
     E, topk, intermediate_size, hidden_size = get_model_params(config)
     enable_ep = bool(args.enable_expert_parallel)
     if enable_ep:
