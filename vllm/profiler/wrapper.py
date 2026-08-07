@@ -11,7 +11,6 @@ import torch
 from typing_extensions import override
 
 import vllm.version
-
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.logger import init_logger
