@@ -180,6 +180,95 @@ def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
 )
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+def test_online_mxfp4_tp_weight_quant_matches_unsharded(tp_size: int):
+    """TP-aligned MXFP4 shards match slices of unsharded quantization."""
+    torch.manual_seed(3)
+
+    device = current_platform.device_type
+    hidden_size = 1024
+    intermediate_size = 512
+
+    dense_weight = torch.randn(
+        hidden_size, intermediate_size, dtype=torch.bfloat16, device=device
+    )
+    w13_weight = torch.randn(
+        2,
+        2 * intermediate_size,
+        hidden_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    w2_weight = torch.randn(
+        2,
+        hidden_size,
+        intermediate_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+
+    dense_quantized, dense_scales = mxfp4_quantize(dense_weight)
+    w13_quantized, w13_scales = mxfp4_quantize(w13_weight)
+    w2_quantized, w2_scales = mxfp4_quantize(w2_weight)
+
+    for tp_rank in range(tp_size):
+        output_per_partition = hidden_size // tp_size
+        input_per_partition = intermediate_size // tp_size
+        output_start = tp_rank * output_per_partition
+        input_start = tp_rank * input_per_partition
+
+        column_quantized, column_scales = mxfp4_quantize(
+            dense_weight.narrow(0, output_start, output_per_partition)
+        )
+        assert torch.equal(
+            column_quantized,
+            dense_quantized.narrow(0, output_start, output_per_partition),
+        )
+        assert torch.equal(
+            column_scales,
+            dense_scales.narrow(0, output_start, output_per_partition),
+        )
+
+        row_quantized, row_scales = mxfp4_quantize(
+            dense_weight.narrow(1, input_start, input_per_partition)
+        )
+        assert torch.equal(
+            row_quantized,
+            dense_quantized.narrow(1, input_start // 2, input_per_partition // 2),
+        )
+        assert torch.equal(
+            row_scales,
+            dense_scales.narrow(1, input_start // 32, input_per_partition // 32),
+        )
+
+        w13_quantized_shard, w13_scales_shard = mxfp4_quantize(
+            w13_weight.narrow(1, 2 * input_start, 2 * input_per_partition)
+        )
+        assert torch.equal(
+            w13_quantized_shard,
+            w13_quantized.narrow(1, 2 * input_start, 2 * input_per_partition),
+        )
+        assert torch.equal(
+            w13_scales_shard,
+            w13_scales.narrow(1, 2 * input_start, 2 * input_per_partition),
+        )
+
+        w2_quantized_shard, w2_scales_shard = mxfp4_quantize(
+            w2_weight.narrow(2, input_start, input_per_partition)
+        )
+        assert torch.equal(
+            w2_quantized_shard,
+            w2_quantized.narrow(2, input_start // 2, input_per_partition // 2),
+        )
+        assert torch.equal(
+            w2_scales_shard,
+            w2_scales.narrow(2, input_start // 32, input_per_partition // 32),
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
+)
 @pytest.mark.parametrize("moe_backend", ["aiter", "emulation"])
 @pytest.mark.parametrize(
     "unpadded_hidden_size,unpadded_intermediate_size",
