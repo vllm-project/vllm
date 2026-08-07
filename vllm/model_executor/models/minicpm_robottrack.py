@@ -14,7 +14,8 @@ advertises the ``"embed"`` task and returns a flat 24-dim vector per request
 import hashlib
 import math
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -30,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.pooler import DispatchPooler
@@ -71,6 +73,196 @@ def _frame_content_key(frame: Any) -> int:
     arr = np.ascontiguousarray(np.asarray(frame))
     digest = hashlib.blake2b(arr.tobytes(), digest_size=8).digest()
     return int.from_bytes(digest, "big", signed=True)
+
+
+def _stream_id_key(stream_id: object) -> int:
+    """Stable integer key for a client-supplied stream identifier.
+
+    String ids are hashed so the batched ``stream_id`` mm field stays an int
+    (the vLLM IPC serializer only supports tensors / int / float values).
+    """
+    if isinstance(stream_id, int):
+        return stream_id
+    if isinstance(stream_id, str):
+        digest = hashlib.blake2b(stream_id.encode(), digest_size=8).digest()
+        return int.from_bytes(digest, "big", signed=True)
+    raise TypeError(f"stream_id must be an int or str, got {type(stream_id).__name__}")
+
+
+def _pixel_window_cached(
+    frames: Sequence[Any],
+    keys: Sequence[int],
+    cache: "OrderedDict[int, tuple[torch.Tensor, torch.Tensor]]",
+    cache_size: int,
+    process_misses: Callable[[list[Any]], tuple[torch.Tensor, torch.Tensor]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Assemble a window's normalized pixels, reusing per-frame cache entries.
+
+    ``process_misses`` resizes+normalizes a list of frames (all cache misses)
+    and returns ``(dino, siglip)`` batches in the same order. Frames already in
+    ``cache`` (content-addressed by ``keys``) are served without reprocessing.
+    Returns the full window's ``(dino, siglip)`` tensors in window order.
+
+    ``cache_size == 0`` disables reuse: every frame goes through
+    ``process_misses``, matching the uncached path exactly.
+    """
+    by_frame: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    miss_idx: list[int] = []
+    for i, key in enumerate(keys):
+        cached = cache.get(key) if cache_size > 0 else None
+        if cached is not None:
+            by_frame[i] = cached
+            cache.move_to_end(key)
+        else:
+            miss_idx.append(i)
+
+    if miss_idx:
+        miss_dino, miss_siglip = process_misses([frames[i] for i in miss_idx])
+        for j, i in enumerate(miss_idx):
+            dino_pixel = miss_dino[j : j + 1]
+            siglip_pixel = miss_siglip[j : j + 1]
+            by_frame[i] = (dino_pixel, siglip_pixel)
+            if cache_size > 0:
+                cache[keys[i]] = (dino_pixel, siglip_pixel)
+                cache.move_to_end(keys[i])
+        while cache_size > 0 and len(cache) > cache_size:
+            cache.popitem(last=False)
+
+    dino = torch.cat([by_frame[i][0] for i in range(len(frames))], dim=0)
+    siglip = torch.cat([by_frame[i][1] for i in range(len(frames))], dim=0)
+    return dino, siglip
+
+
+@dataclass
+class RobotTrackStreamState:
+    """Server-side rolling window for one explicitly named client stream.
+
+    ``coarse_history`` holds the pooled coarse tokens (``[coarse_per, C]`` each)
+    of the trailing history frames, newest last, excluding the current frame;
+    ``current_coarse`` is the latest frame's coarse pool, promoted into history
+    when the next frame arrives. ``fine`` is the latest frame's fine pool and
+    ``frame_index`` the latest committed camera frame index.
+    """
+
+    coarse_history: tuple[torch.Tensor, ...] = ()
+    current_coarse: torch.Tensor | None = None
+    fine: torch.Tensor | None = None
+    frame_index: int | None = None
+
+
+def _classify_stream_request(
+    frame_count: int,
+    history_frames: int,
+    state: RobotTrackStreamState | None,
+    frame_index: int | None,
+) -> str:
+    """Classify a request against the stream's committed state.
+
+    A ``history_frames + 1``-frame request replaces the stream's window
+    (establish or re-sync); a single-frame request appends to an established
+    stream when ``frame_index`` is consecutive, or reuses the committed result
+    when it repeats the last index (idempotent retry). Returns
+    ``"replace"`` / ``"append"`` / ``"reuse"``.
+    """
+    if frame_count == history_frames + 1:
+        if frame_index is not None and frame_index < 0:
+            raise ValueError("frame_index must be non-negative.")
+        return "replace"
+    if frame_count != 1:
+        raise ValueError(
+            f"frames must contain 1 incremental frame or {history_frames + 1} "
+            f"complete-window frames, got {frame_count}."
+        )
+    if state is None:
+        raise ValueError(
+            "A single-frame request requires an existing stream. Send a complete "
+            f"{history_frames + 1}-frame window first."
+        )
+    if frame_index is None or state.frame_index is None:
+        raise ValueError(
+            "Single-frame requests require frame_index, and the preceding "
+            "complete window must also specify its final frame_index."
+        )
+    if frame_index == state.frame_index:
+        return "reuse"
+    if frame_index != state.frame_index + 1:
+        raise ValueError(
+            f"Out-of-order frame_index={frame_index}; expected "
+            f"{state.frame_index + 1} for this stream."
+        )
+    return "append"
+
+
+def _advance_stream_state(
+    state: RobotTrackStreamState | None,
+    mode: str,
+    coarse_by_frame: list[torch.Tensor],
+    fine: torch.Tensor,
+    frame_index: int,
+    history_frames: int,
+) -> RobotTrackStreamState:
+    """Roll the stream window forward after encoding the received frame(s)."""
+    if mode == "replace":
+        history = tuple(coarse_by_frame[:-1])[-history_frames:]
+        current_coarse = coarse_by_frame[-1]
+    else:  # "append"
+        # Promote the previous current frame into history, drop the oldest, and
+        # make the new frame current — otherwise the window would skip a frame.
+        history = (*state.coarse_history[1:], state.current_coarse)[-history_frames:]
+        current_coarse = coarse_by_frame[0]
+    return RobotTrackStreamState(
+        coarse_history=history,
+        current_coarse=current_coarse,
+        fine=fine,
+        frame_index=frame_index,
+    )
+
+
+def _assemble_window_tensors(
+    coarse_history: torch.Tensor,
+    fine: torch.Tensor,
+    history_frames: int,
+    coarse_tokens_per_frame: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Assemble ``(coarse, coarse_time, fine, fine_time)`` for the visual bundle.
+
+    ``coarse_history`` is the stacked ``[n, coarse_per, C]`` coarse pools of the
+    trailing history frames (newest last); ``fine`` is the current frame's fine
+    pool. The stateless ``_encode_window`` and the stateful stream path both
+    build exactly this bundle for the same window, so the construction lives
+    here once instead of being kept in sync across two copies.
+    """
+    history = _pad_history_frames(coarse_history, history_frames)
+    coarse = history.reshape(-1, history.size(-1))
+    device = fine.device
+    coarse_time = torch.arange(history_frames, device=device).repeat_interleave(
+        coarse_tokens_per_frame
+    )
+    fine_time = torch.full(
+        (fine.size(0),), history_frames, dtype=torch.long, device=device
+    )
+    return coarse, coarse_time, fine, fine_time
+
+
+def _assemble_stream_window(
+    state: RobotTrackStreamState,
+    history_frames: int,
+    coarse_tokens_per_frame: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Assemble ``(coarse, coarse_time, fine, fine_time)`` from stream history.
+
+    Re-stacks the committed coarse history through the shared
+    ``_assemble_window_tensors``, so the stateful path produces exactly the
+    policy input the stateless ``_encode_window`` would for the same window.
+    """
+    if not state.coarse_history:
+        raise RuntimeError("empty stream history")
+    return _assemble_window_tensors(
+        torch.stack(state.coarse_history),
+        state.fine,
+        history_frames,
+        coarse_tokens_per_frame,
+    )
 
 
 def _square_side(token_count: int) -> int:
@@ -280,11 +472,30 @@ class DINOv3ViTRopePositionEmbedding(nn.Module):
         return cos.to(pixel_values.dtype), sin.to(pixel_values.dtype)
 
 
+def _create_fake_bias_for_k_proj(
+    weights: Iterable[tuple[str, torch.Tensor]], fake_bias_key_name: str
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Inject a zeros bias for a bias-less projection into a weight stream.
+
+    Same trick as ``whisper._create_fake_bias_for_k_proj``: a fused
+    ``QKVParallelLinear`` has a single bias over q/k/v, but DINOv3's k_proj has
+    no bias. The fused bias starts uninitialized, so a zeros k-bias is fed to
+    the loader to make the assembled bias ``[q_bias, 0, v_bias]``.
+    """
+    for name, weight in weights:
+        yield name, weight
+        if name.endswith(fake_bias_key_name):
+            bias = torch.zeros(weight.size(0))
+            bias_name = name.replace("weight", "bias")
+            yield bias_name, bias
+
+
 class DINOv3ViTAttention(nn.Module):
     """DINOv3 attention with RoPE on patch tokens only.
 
-    q/k/v stay as separate ``ColumnParallelLinear`` layers (rather than a fused
-    ``QKVParallelLinear``) because DINOv3's k_proj has no bias.
+    q/k/v are a fused ``QKVParallelLinear`` with one bias; DINOv3's k_proj has
+    no bias, so a zeros bias is faked for it at load time (see
+    ``_create_fake_bias_for_k_proj``) and the fused bias holds ``[q, 0, v]``.
     """
 
     def __init__(
@@ -302,26 +513,18 @@ class DINOv3ViTAttention(nn.Module):
             self.num_heads, get_tensor_model_parallel_world_size()
         )
 
-        self.q_proj = ColumnParallelLinear(
+        # A fused qkv has one bias; DINOv3's published configs use
+        # query_bias=True / key_bias=False / value_bias=True, with the missing
+        # k bias faked to zero at load time.
+        assert config.query_bias and config.value_bias and not config.key_bias
+        self.qkv_proj = QKVParallelLinear(
             self.embed_dim,
-            self.embed_dim,
-            bias=config.query_bias,
+            head_size=self.head_dim,
+            total_num_heads=self.num_heads,
+            total_num_kv_heads=self.num_heads,
+            bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}.q_proj",
-        )
-        self.k_proj = ColumnParallelLinear(
-            self.embed_dim,
-            self.embed_dim,
-            bias=config.key_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.k_proj",
-        )
-        self.v_proj = ColumnParallelLinear(
-            self.embed_dim,
-            self.embed_dim,
-            bias=config.value_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.v_proj",
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.embed_dim,
@@ -344,9 +547,10 @@ class DINOv3ViTAttention(nn.Module):
         sin: torch.Tensor,
         num_prefix_tokens: int,
     ) -> torch.Tensor:
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split(
+            (self.num_heads_per_partition * self.head_dim,) * 3, dim=-1
+        )
         batch, seq = q.shape[:2]
         q = q.view(batch, seq, self.num_heads_per_partition, self.head_dim)
         k = k.view(batch, seq, self.num_heads_per_partition, self.head_dim)
@@ -464,8 +668,18 @@ class DINOv3VisionModel(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # mask_token is inference-irrelevant; inv_freq is computed, not stored.
+        # DINOv3's k_proj has no bias: fake a zeros bias so the fused qkv_proj
+        # bias loads as [q, 0, v] (same trick as whisper).
+        weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
+        mapper = WeightsMapper(
+            orig_to_new_stacked={
+                ".attention.q_proj": (".attention.qkv_proj", "q"),
+                ".attention.k_proj": (".attention.qkv_proj", "k"),
+                ".attention.v_proj": (".attention.qkv_proj", "v"),
+            }
+        )
         loader = AutoWeightsLoader(self, skip_substrs=["mask_token"])
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 class DualVisionTower(nn.Module):
@@ -691,22 +905,45 @@ class MiniCPMRobotTrackPixelItems(ModalityDataItems[list[Any], list[Any]]):
 
     The window (oldest first, current last) is a single multimodal item; the
     frames are routed to the HF processor, which resizes/normalizes them for
-    DINOv3 and SigLIP. The rolling deque itself stays on the client.
+    DINOv3 and SigLIP. When the client names a ``stream_id`` (plus a monotonic
+    ``frame_index``), the server keeps the window state and the client only
+    sends the newly-arrived frame each step.
     """
 
-    def __init__(self, frames: list[Any]) -> None:
+    def __init__(
+        self,
+        frames: list[Any],
+        stream_id: str | None = None,
+        frame_index: int | None = None,
+    ) -> None:
         super().__init__(frames, "image")
+        self.stream_id = stream_id
+        self.frame_index = frame_index
 
     def get_count(self) -> int:
         return 1
 
-    def get(self, index: int) -> list[Any]:
+    def get(self, index: int) -> Any:
         if index != 0:
             raise IndexError(index)
-        return self.data
+        # Return the metadata-carrying dict so the framework's cache-miss
+        # re-parse (`parse_mm_data` on this item's data) does not drop the
+        # stream_id/frame_index that distinguish a stateful request.
+        if self.stream_id is None:
+            return self.data
+        return {
+            "frames": self.data,
+            "stream_id": self.stream_id,
+            "frame_index": self.frame_index,
+        }
 
     def get_processor_data(self) -> Mapping[str, object]:
-        return {"frames": self.data}
+        data: dict[str, object] = {"frames": self.data}
+        if self.stream_id is not None:
+            data["stream_id"] = self.stream_id
+        if self.frame_index is not None:
+            data["frame_index"] = self.frame_index
+        return data
 
     def get_passthrough_data(self) -> Mapping[str, object]:
         return {}
@@ -718,10 +955,35 @@ class MiniCPMRobotTrackDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[Any],
     ) -> ModalityDataItems[Any, Any] | None:
         # pixels-in: a rolling window of raw frames (list, or {"frames": [...]}).
+        # A dict may also carry stream_id/frame_index for the stateful window.
+        # The framework's cache-miss re-parse wraps one item's data in a list;
+        # unwrap a single frames-dict so its stream metadata is preserved.
+        if (
+            isinstance(data, (list, tuple))
+            and len(data) == 1
+            and isinstance(data[0], dict)
+            and "frames" in data[0]
+        ):
+            item = data[0]
+            stream_id = item.get("stream_id")
+            if stream_id is not None:
+                stream_id = _stream_id_key(stream_id)
+            return MiniCPMRobotTrackPixelItems(
+                list(item["frames"]),
+                stream_id=stream_id,
+                frame_index=item.get("frame_index"),
+            )
         if isinstance(data, (list, tuple)):
             return MiniCPMRobotTrackPixelItems(list(data))
         if isinstance(data, dict) and "frames" in data:
-            return MiniCPMRobotTrackPixelItems(list(data["frames"]))
+            stream_id = data.get("stream_id")
+            if stream_id is not None:
+                stream_id = _stream_id_key(stream_id)
+            return MiniCPMRobotTrackPixelItems(
+                list(data["frames"]),
+                stream_id=stream_id,
+                frame_index=data.get("frame_index"),
+            )
         # features-in: precomputed DINOv3+SigLIP tokens (backward compatible).
         if not isinstance(data, dict):
             raise ValueError(
@@ -769,6 +1031,20 @@ def _count_marker_runs(time_indices: torch.Tensor) -> int:
 
 
 class MiniCPMRobotTrackProcessingInfo(BaseProcessingInfo):
+    def __init__(self, ctx: Any) -> None:
+        super().__init__(ctx)
+        # Per-frame normalized-pixel cache (pixels-in path, CPU side). Keyed by
+        # the same content hash as the tower feature cache: a rolling window
+        # resize/normalizes only frames it has not seen before, so steady-state
+        # steps re-process just the new frame. Bound by ``pixel_cache_size``
+        # (0 disables reuse, matching the original full-window processing).
+        self._pixel_cache: OrderedDict[int, tuple[torch.Tensor, torch.Tensor]] = (
+            OrderedDict()
+        )
+        self._pixel_cache_size = int(
+            getattr(self.get_hf_config(), "pixel_cache_size", 0)
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
@@ -800,20 +1076,11 @@ class MiniCPMRobotTrackProcessingInfo(BaseProcessingInfo):
             "_siglip_processor", SiglipImageProcessor, self.get_hf_config().siglip_model
         )
 
-    def prepare_pixels(
-        self, frames: Sequence[Any]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Resize + normalize a window of raw frames for DINOv3 and SigLIP.
-
-        Faithful to upstream ``DualVisionEncoder._prepare``: each frame is
-        RGB-converted and BICUBIC-resized to ``image_size`` before the
-        encoder-specific processor normalization.
-        """
+    @staticmethod
+    def _resize_frame(frame: Any, size: int, resample: Any) -> Any:
         from PIL import Image
 
-        size = self.get_hf_config().image_size
-        resample = Image.Resampling.BICUBIC
-        images = [
+        return (
             (
                 frame
                 if isinstance(frame, Image.Image)
@@ -821,16 +1088,55 @@ class MiniCPMRobotTrackProcessingInfo(BaseProcessingInfo):
             )
             .convert("RGB")
             .resize((size, size), resample)
-            for frame in frames
-        ]
-        size_arg = {"height": size, "width": size}
-        dino = self.get_dino_processor()(
-            images=images, return_tensors="pt", size=size_arg
-        )["pixel_values"]
-        siglip = self.get_siglip_processor()(
-            images=images, return_tensors="pt", size=size_arg
-        )["pixel_values"]
-        return dino, siglip
+        )
+
+    def prepare_pixels(
+        self, frames: Sequence[Any]
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+        """Resize + normalize a window of raw frames for DINOv3 and SigLIP.
+
+        Faithful to upstream ``DualVisionEncoder._prepare``: each frame is
+        RGB-converted and BICUBIC-resized to ``image_size`` before the
+        encoder-specific processor normalization.
+
+        Per-frame normalized pixels are memoized by content hash (same key as
+        the tower feature cache), so a rolling window only resize/normalizes
+        frames it has not seen before; unchanged history frames are served from
+        the cache. Returns ``(dino, siglip, keys)``; ``keys`` are the per-frame
+        content hashes, reused by the caller so frames are hashed exactly once.
+        """
+        from PIL import Image
+
+        size = self.get_hf_config().image_size
+        resample = Image.Resampling.BICUBIC
+        keys = [_frame_content_key(frame) for frame in frames]
+
+        def process_misses(
+            miss_frames: list[Any],
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            images = [
+                self._resize_frame(frame, size, resample) for frame in miss_frames
+            ]
+            size_arg = {"height": size, "width": size}
+            miss_dino = self.get_dino_processor()(
+                images=images, return_tensors="pt", size=size_arg
+            )["pixel_values"]
+            miss_siglip = self.get_siglip_processor()(
+                images=images, return_tensors="pt", size=size_arg
+            )["pixel_values"]
+            return miss_dino, miss_siglip
+
+        if self._pixel_cache_size <= 0:
+            dino, siglip = process_misses(list(frames))
+        else:
+            dino, siglip = _pixel_window_cached(
+                frames,
+                keys,
+                self._pixel_cache,
+                self._pixel_cache_size,
+                process_misses,
+            )
+        return dino, siglip, keys
 
     def get_num_image_tokens(
         self,
@@ -929,15 +1235,23 @@ class MiniCPMRobotTrackMultiModalProcessor(
             dino_list, siglip_list, lengths = [], [], []
             keys: list[int] = []
             for window in windows:
-                dino_pixels, siglip_pixels = self.info.prepare_pixels(window)
+                dino_pixels, siglip_pixels, window_keys = self.info.prepare_pixels(
+                    window
+                )
                 dino_list.append(dino_pixels)
                 siglip_list.append(siglip_pixels)
                 lengths.append(len(window))
-                keys.extend(_frame_content_key(frame) for frame in window)
+                keys.extend(window_keys)
             outputs["dino_pixels"] = torch.cat(dino_list)
             outputs["siglip_pixels"] = torch.cat(siglip_list)
             outputs["frame_lengths"] = torch.tensor(lengths, dtype=torch.long)
             outputs["frame_keys"] = torch.tensor(keys, dtype=torch.long)
+            # Stateful stream metadata: one value per window, routed to the model
+            # as batched fields (not split by the per-frame flat config).
+            if "stream_id" in mm_data:
+                outputs["stream_id"] = [mm_data["stream_id"]]
+            if "frame_index" in mm_data:
+                outputs["frame_index"] = [mm_data["frame_index"]]
 
         return BatchFeature(outputs, tensor_type="pt")
 
@@ -961,7 +1275,7 @@ class MiniCPMRobotTrackMultiModalProcessor(
             frame_lengths = hf_inputs.get(
                 "frame_lengths", torch.empty(0, dtype=torch.long)
             )
-            return dict(
+            fields = dict(
                 dino_pixels=MultiModalFieldConfig.flat_from_sizes(
                     "image", frame_lengths
                 ),
@@ -973,6 +1287,11 @@ class MiniCPMRobotTrackMultiModalProcessor(
                 ),
                 frame_lengths=MultiModalFieldConfig.batched("image"),
             )
+            # Stateful stream metadata is a batched (per-window) non-tensor value.
+            if "stream_id" in hf_inputs:
+                fields["stream_id"] = MultiModalFieldConfig.batched("image")
+                fields["frame_index"] = MultiModalFieldConfig.batched("image")
+            return fields
         return _robottrack_field_config(hf_inputs)
 
     def _get_prompt_updates(
@@ -1057,6 +1376,12 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
         # step. The current frame's fine pool is never cached.
         self._frame_cache: OrderedDict[int, torch.Tensor] = OrderedDict()
         self._frame_cache_size = int(getattr(config, "frame_cache_size", 0))
+
+        # Stateful stream windows (pixels-in path): each stream holds its rolling
+        # 31-frame coarse history server-side, so a client only sends the new
+        # frame per step (with ``stream_id`` / ``frame_index``). Bounded LRU.
+        self._stream_states: OrderedDict[str, RobotTrackStreamState] = OrderedDict()
+        self._max_cached_streams = int(getattr(config, "max_cached_streams", 8))
 
         self.vision_projector = VisionProjector(config.vision_feature_dim, hidden_dim)
         self.temporal_markers = TemporalMarkerEncoder(hidden_dim, config.max_time_steps)
@@ -1184,21 +1509,74 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
             self._frame_cache_size,
         )
 
-        device = fine.device
         if len(coarse_by_frame) > 1:
             history = torch.stack(coarse_by_frame[:-1], dim=0)
         else:
             history = coarse_by_frame[-1].unsqueeze(0)
-        history = _pad_history_frames(history, cfg.history_frames)
-        coarse = history.reshape(-1, history.size(-1))
+        return _assemble_window_tensors(
+            history,
+            fine,
+            cfg.history_frames,
+            cfg.coarse_tokens_per_frame,
+        )
 
-        coarse_time = torch.arange(cfg.history_frames, device=device).repeat_interleave(
-            cfg.coarse_tokens_per_frame
+    def _commit_stream(self, stream_id: str, state: RobotTrackStreamState) -> None:
+        self._stream_states[stream_id] = state
+        self._stream_states.move_to_end(stream_id)
+        while len(self._stream_states) > self._max_cached_streams:
+            self._stream_states.popitem(last=False)
+
+    def _encode_stream_window(
+        self,
+        dino_pixels: torch.Tensor,
+        siglip_pixels: torch.Tensor,
+        frame_keys: Sequence[int],
+        stream_id: str,
+        frame_index: int | None,
+    ) -> torch.Tensor:
+        """Encode one stream update and roll the server-side window forward.
+
+        ``"replace"`` (a full window) establishes/re-syncs the stream; ``"append"``
+        (one consecutive frame) encodes it and rolls the history; ``"reuse"``
+        (the same ``frame_index``) is an idempotent retry served from the
+        committed state without re-encoding. Returns the visual bundle for the
+        assembled window.
+        """
+        cfg = self.config
+        state = self._stream_states.get(stream_id)
+        mode = _classify_stream_request(
+            dino_pixels.shape[0], cfg.history_frames, state, frame_index
         )
-        fine_time = torch.full(
-            (fine.size(0),), cfg.history_frames, dtype=torch.long, device=device
+
+        if mode == "reuse":
+            next_state = state
+        else:
+            coarse_by_frame, fine, _ = _encode_frames_cached(
+                self.vision_tower,
+                self._frame_cache,
+                self._frame_cache_size,
+                dino_pixels,
+                siglip_pixels,
+                list(frame_keys),
+                cfg.coarse_tokens_per_frame,
+                cfg.fine_tokens_current_frame,
+            )
+            next_state = _advance_stream_state(
+                state,
+                mode,
+                coarse_by_frame,
+                fine,
+                frame_index,
+                cfg.history_frames,
+            )
+            self._commit_stream(stream_id, next_state)
+
+        coarse, coarse_time, fine, fine_time = _assemble_stream_window(
+            next_state,
+            cfg.history_frames,
+            cfg.coarse_tokens_per_frame,
         )
-        return coarse, coarse_time, fine, fine_time
+        return self._embed_visual_bundle(coarse, coarse_time, fine, fine_time)
 
     def _embed_pixel_windows(
         self,
@@ -1206,7 +1584,16 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
         siglip_pixels: object,
         frame_lengths: object,
         frame_keys: object,
+        stream_ids: object | None = None,
+        frame_indices: object | None = None,
     ) -> MultiModalEmbeddings:
+        """Embed raw-frame windows, optionally advancing server-side streams.
+
+        With ``stream_ids`` (plus per-window ``frame_indices``) each window is a
+        stateful stream update (one new frame per step); otherwise windows are
+        encoded statelessly. Both paths share the same split pipeline and only
+        differ in the per-window encode call.
+        """
         dino_pixels = _as_4d(dino_pixels)
         siglip_pixels = _as_4d(siglip_pixels)
         lengths = _as_length_list(frame_lengths)
@@ -1214,13 +1601,30 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
         dino_split = torch.split(dino_pixels, lengths)
         siglip_split = torch.split(siglip_pixels, lengths)
         key_split = _split_by_lengths(keys, lengths)
+
+        if stream_ids is None:
+            return [
+                self._embed_visual_bundle(*self._encode_window(dp, sp, wk))
+                for dp, sp, wk in zip(dino_split, siglip_split, key_split)
+            ]
+
+        ids = [_scalar(s) for s in stream_ids]
+        indices = (
+            [_scalar(i) for i in frame_indices]
+            if frame_indices is not None
+            else [None] * len(ids)
+        )
         return [
-            self._embed_visual_bundle(*self._encode_window(dp, sp, wk))
-            for dp, sp, wk in zip(dino_split, siglip_split, key_split)
+            self._encode_stream_window(dp, sp, wk, sid, fidx)
+            for dp, sp, wk, sid, fidx in zip(
+                dino_split, siglip_split, key_split, ids, indices
+            )
         ]
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        # pixels-in: raw-frame windows are encoded by the in-tree tower.
+        # pixels-in: raw-frame windows are encoded by the in-tree tower. With a
+        # ``stream_id`` the request advances a server-side window (one frame per
+        # step); otherwise it is a stateless full-window request.
         dino_pixels = kwargs.get("dino_pixels")
         if dino_pixels is not None:
             return self._embed_pixel_windows(
@@ -1228,6 +1632,8 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
                 kwargs["siglip_pixels"],
                 kwargs["frame_lengths"],
                 kwargs["frame_keys"],
+                kwargs.get("stream_id"),
+                kwargs.get("frame_index"),
             )
 
         # features-in: precomputed DINOv3+SigLIP tokens (backward compatible).
@@ -1285,6 +1691,15 @@ class MiniCPMRobotTrackModel(nn.Module, SupportsMultiModal):
             for name, _ in self.vision_tower.named_parameters(prefix="vision_tower")
         }
         return loaded
+
+
+def _scalar(value: object) -> object:
+    # Batched stream fields arrive as 0-dim CUDA tensors after the H2D
+    # transfer; dict-key matching needs a plain int (tensor hashing is by
+    # identity, so a fresh tensor never equals the stored key).
+    if isinstance(value, torch.Tensor):
+        return int(value.item())
+    return value
 
 
 def _as_4d(tensor: object) -> torch.Tensor:

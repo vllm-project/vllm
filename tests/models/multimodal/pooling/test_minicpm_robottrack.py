@@ -23,12 +23,17 @@ import torch
 from vllm.model_executor.models.minicpm_robottrack import (
     DINOv3ViTRopePositionEmbedding,
     FunnelTrajectoryHead,
+    RobotTrackStreamState,
     VisionProjector,
+    _advance_stream_state,
     _apply_dinov3_rotary_pos_emb,
+    _assemble_stream_window,
+    _classify_stream_request,
     _count_marker_runs,
     _encode_frames_cached,
     _grid_pool,
     _pad_history_frames,
+    _pixel_window_cached,
     _rotate_half,
     _square_side,
     _square_side_or_none,
@@ -277,6 +282,200 @@ def test_frame_cache_reencodes_repeated_current_frame():
     assert encoded == 1
     assert tower.frames_encoded == 3
     assert fine.shape == (64, 4)
+
+
+class _CountingPixelProcessor:
+    """Fake resize+normalize: per-frame normalized pixels derived from the id."""
+
+    def __init__(self) -> None:
+        self.frames_processed = 0
+
+    def __call__(self, miss_frames):
+        self.frames_processed += len(miss_frames)
+        values = torch.tensor([[float(f)] for f in miss_frames]).unsqueeze(-1)
+        return values, values.clone()
+
+
+def _make_pixel_window(frame_ids):
+    # Frame ids double as content-hash keys (like `_make_window` for the tower).
+    return list(frame_ids), list(frame_ids)
+
+
+def test_pixel_cache_normalizes_each_frame_once():
+    processor = _CountingPixelProcessor()
+    cache: OrderedDict = OrderedDict()
+    num_frames, window = 12, 4
+    per_step = []
+    for frame_ids in _rolling_windows(num_frames, window):
+        frames, keys = _make_pixel_window(frame_ids)
+        before = processor.frames_processed
+        _pixel_window_cached(frames, keys, cache, 64, processor)
+        per_step.append(processor.frames_processed - before)
+
+    # Warmup and steady state alike: only the newly arrived frame is normalized.
+    assert per_step == [1] * num_frames
+    # Each distinct frame is normalized exactly once over the whole run.
+    assert processor.frames_processed == num_frames
+
+
+def test_pixel_cache_disabled_reprocesses_full_window():
+    processor = _CountingPixelProcessor()
+    cache: OrderedDict = OrderedDict()
+    num_frames, window = 8, 4
+    per_step = []
+    for frame_ids in _rolling_windows(num_frames, window):
+        frames, keys = _make_pixel_window(frame_ids)
+        before = processor.frames_processed
+        _pixel_window_cached(frames, keys, cache, 0, processor)
+        per_step.append(processor.frames_processed - before)
+
+    expected = [min(step + 1, window) for step in range(num_frames)]
+    assert per_step == expected
+    assert processor.frames_processed == sum(expected)
+
+
+def test_pixel_cache_evicts_oldest_beyond_capacity():
+    processor = _CountingPixelProcessor()
+    cache: OrderedDict = OrderedDict()
+    frames, keys = _make_pixel_window([0, 1, 2])
+    _pixel_window_cached(frames, keys, cache, 2, processor)
+    assert len(cache) == 2
+
+
+def test_pixel_cache_matches_uncached_pixels():
+    num_frames, window = 10, 4
+    cached_processor = _CountingPixelProcessor()
+    plain_processor = _CountingPixelProcessor()
+    cache_on, cache_off = OrderedDict(), OrderedDict()
+    for frame_ids in _rolling_windows(num_frames, window):
+        frames, keys = _make_pixel_window(frame_ids)
+        dino_on, siglip_on = _pixel_window_cached(
+            frames, keys, cache_on, 64, cached_processor
+        )
+        dino_off, siglip_off = _pixel_window_cached(
+            frames, keys, cache_off, 0, plain_processor
+        )
+        assert torch.equal(dino_on, dino_off)
+        assert torch.equal(siglip_on, siglip_off)
+
+
+def test_pixel_cache_preserves_window_order():
+    processor = _CountingPixelProcessor()
+    cache: OrderedDict = OrderedDict()
+    frames, keys = _make_pixel_window([5, 5, 3])
+    dino, siglip = _pixel_window_cached(frames, keys, cache, 64, processor)
+    # Window order preserved, including a repeated frame.
+    assert dino.shape == (3, 1, 1)
+    assert dino[:, 0, 0].tolist() == [5.0, 5.0, 3.0]
+    assert torch.equal(siglip, dino)
+
+
+# ---------------------------------------------------------------------------
+# Stateful stream protocol (establish / append / reuse).
+# ---------------------------------------------------------------------------
+
+
+def _fake_coarse(frame_id: int) -> torch.Tensor:
+    return torch.full((4, 8), float(frame_id))
+
+
+def _fake_fine(frame_id: int) -> torch.Tensor:
+    return torch.full((64, 8), float(frame_id))
+
+
+def test_classify_stream_request_state_machine():
+    hist = 31
+    # A full window replaces (establish), even with a prior state (re-sync).
+    assert _classify_stream_request(32, hist, None, 31) == "replace"
+    state = RobotTrackStreamState(frame_index=31)
+    assert _classify_stream_request(32, hist, state, 50) == "replace"
+    # Invalid frame counts are rejected.
+    with pytest.raises(ValueError):
+        _classify_stream_request(5, hist, None, 0)
+    # Single frame without a stream must establish first.
+    with pytest.raises(ValueError):
+        _classify_stream_request(1, hist, None, 32)
+    # Consecutive frame_index appends; the same index is an idempotent reuse.
+    assert _classify_stream_request(1, hist, state, 32) == "append"
+    assert _classify_stream_request(1, hist, state, 31) == "reuse"
+    # Out-of-order or missing indices are rejected.
+    with pytest.raises(ValueError):
+        _classify_stream_request(1, hist, state, 33)
+    with pytest.raises(ValueError):
+        _classify_stream_request(1, hist, state, None)
+
+
+def test_stream_replace_keeps_last_31_history():
+    coarse_by_frame = [_fake_coarse(i) for i in range(32)]
+    state = _advance_stream_state(
+        None, "replace", coarse_by_frame, _fake_fine(31), 31, history_frames=31
+    )
+    assert len(state.coarse_history) == 31
+    # Frames 0..30 are history (the 32nd frame is current), oldest first.
+    assert torch.equal(state.coarse_history[0], _fake_coarse(0))
+    assert torch.equal(state.coarse_history[-1], _fake_coarse(30))
+    assert torch.equal(state.current_coarse, _fake_coarse(31))
+    assert torch.equal(state.fine, _fake_fine(31))
+    assert state.frame_index == 31
+
+
+def test_stream_append_rolls_window():
+    coarse_by_frame = [_fake_coarse(i) for i in range(32)]
+    state = _advance_stream_state(
+        None, "replace", coarse_by_frame, _fake_fine(31), 31, history_frames=31
+    )
+    next_state = _advance_stream_state(
+        state,
+        "append",
+        [_fake_coarse(32)],
+        _fake_fine(32),
+        32,
+        history_frames=31,
+    )
+    assert len(next_state.coarse_history) == 31
+    # Oldest (frame 0) rolled off; the previous current (frame 31) is promoted
+    # into history, and frame 32 becomes the new current.
+    assert torch.equal(next_state.coarse_history[0], _fake_coarse(1))
+    assert torch.equal(next_state.coarse_history[-1], _fake_coarse(31))
+    assert torch.equal(next_state.current_coarse, _fake_coarse(32))
+    assert torch.equal(next_state.fine, _fake_fine(32))
+    assert next_state.frame_index == 32
+
+
+def test_stream_assemble_matches_stateless_window():
+    # Establish with frames 0..31, then append frames 32..39. The assembled
+    # window must always be the last 31 coarse frames + the current fine, in the
+    # same order the stateless `_encode_window` would produce.
+    coarse_per, fine_count, hist, channels = 4, 64, 31, 8
+    state = _advance_stream_state(
+        None,
+        "replace",
+        [_fake_coarse(i) for i in range(32)],
+        _fake_fine(31),
+        31,
+        hist,
+    )
+    for frame_index in range(32, 40):
+        state = _advance_stream_state(
+            state,
+            "append",
+            [_fake_coarse(frame_index)],
+            _fake_fine(frame_index),
+            frame_index,
+            hist,
+        )
+        coarse, coarse_time, fine_out, fine_time = _assemble_stream_window(
+            state, hist, coarse_per
+        )
+        assert coarse.shape == (hist * coarse_per, channels)
+        assert coarse_time.shape == (hist * coarse_per,)
+        assert fine_out.shape == (fine_count, channels)
+        assert fine_time.shape == (fine_count,)
+        assert torch.equal(fine_out, _fake_fine(frame_index))
+        assert torch.equal(fine_time, torch.full((fine_count,), hist, dtype=torch.long))
+        # Oldest history frame is frame_index - 31; newest is frame_index - 1.
+        assert float(coarse[0, 0]) == frame_index - hist
+        assert float(coarse[-1, 0]) == frame_index - 1
 
 
 def test_submodule_shapes():
