@@ -16,6 +16,46 @@ Events are additive (like `SchedulerStats`): everything queued gets delivered
 in order, nothing dropped. So an event can be a full snapshot (consumer
 replaces its state) or a delta (consumer applies each one). Producers throttle
 themselves.
+
+Worker-side producers publish into a process-local buffer, which the engine
+core drains from every rank. A weight-loader plugin reporting per-rank
+transfer throughput, for example:
+
+    from vllm.v1.notifications import (
+        CustomNotification,
+        publish_worker_notification,
+    )
+
+    def on_weights_loaded(rank, elapsed_s, num_bytes):
+        publish_worker_notification(
+            CustomNotification(
+                key="my_loader",
+                payload={
+                    "rank": rank,
+                    "gbps": num_bytes * 8 / elapsed_s / 1e9,
+                },
+            )
+        )
+
+Rank identity belongs in the payload: the gather flattens every rank's events
+into one list, so an event that does not say where it came from cannot be told
+apart from its peers.
+
+The frontend side is a stat logger, which sees the events from every rank:
+
+    class MyLoaderStatLogger(StatLoggerBase):
+        def record(self, *, engine_notifications=None, **kwargs):
+            for event in engine_notifications or ():
+                if isinstance(event, CustomNotification) and event.key == "my_loader":
+                    self.gbps.labels(rank=event.payload["rank"]).set(
+                        event.payload["gbps"]
+                    )
+
+Delivery: producers that publish during model load are gathered once before
+the engine serves, and in-tree producers gather on their own state changes.
+A producer that publishes at arbitrary later times needs
+`VLLM_WORKER_NOTIFICATION_POLL_INTERVAL` set, since nothing else prompts a
+gather on its behalf.
 """
 
 from typing import Any
