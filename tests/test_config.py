@@ -1678,6 +1678,91 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
+def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
+    """Stand-in for the draft ModelConfig fields method resolution reads."""
+    return SimpleNamespace(
+        hf_config=SimpleNamespace(model_type=model_type, **hf_attrs),
+        model=model,
+        architectures=list(architectures),
+    )
+
+
+@pytest.mark.parametrize(
+    "method, draft_model_config, expected",
+    [
+        # A speculators checkpoint is resolved from its own declaration even
+        # when stored at a path with no algorithm hint (a trainer's output).
+        pytest.param(
+            "draft_model",
+            _draft_config("/train/checkpoints/6", speculators_model_type="dflash"),
+            ("dflash", False),
+            id="declared-dflash-at-neutral-path",
+        ),
+        pytest.param(
+            "draft_model",
+            _draft_config("/train/checkpoints/6", speculators_model_type="peagle"),
+            ("eagle3", True),
+            id="declared-peagle-implies-parallel-drafting",
+        ),
+        # A checkpoint that declares itself outranks an unrelated algorithm
+        # name in whatever directory it happens to be stored under.
+        pytest.param(
+            "draft_model",
+            _draft_config("/bench/eagle3_vs_mtp/ckpt", model_type="deepseek_mtp"),
+            ("mtp", False),
+            id="declared-mtp-beats-eagle3-in-path",
+        ),
+        pytest.param(
+            "draft_model",
+            _draft_config("/bench/eagle3_vs_medusa/ckpt", model_type="medusa"),
+            ("medusa", False),
+            id="declared-medusa-beats-eagle3-in-path",
+        ),
+        pytest.param(
+            "draft_model",
+            _draft_config(
+                "/bench/dflash_vs_dspark/ckpt", architectures=["Qwen3DSparkModel"]
+            ),
+            ("dspark", False),
+            id="declared-dspark-arch-beats-dflash-in-path",
+        ),
+        # Checkpoints that declare nothing still fall back to the path name.
+        pytest.param(
+            "draft_model",
+            _draft_config("yuhuili/EAGLE-LLaMA3-Instruct-8B"),
+            ("eagle", False),
+            id="undeclared-falls-back-to-path-eagle",
+        ),
+        pytest.param(
+            "draft_model",
+            _draft_config("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
+            ("eagle3", False),
+            id="undeclared-falls-back-to-path-eagle3",
+        ),
+        # An explicit method is never second-guessed.
+        pytest.param(
+            "eagle3",
+            _draft_config("/train/checkpoints/6", speculators_model_type="dflash"),
+            ("eagle3", False),
+            id="explicit-method-wins",
+        ),
+    ],
+)
+def test_speculative_method_resolution(method, draft_model_config, expected):
+    """Method resolution trusts declarations over checkpoint path names.
+
+    Exercised below the public API on purpose: reaching it through
+    SpeculativeConfig would mean downloading a checkpoint per case.
+    """
+    resolved = SpeculativeConfig._resolve_method(method, draft_model_config, 5)
+    assert resolved == expected
+
+
+def test_unresolvable_speculative_method_raises():
+    with pytest.raises(NotImplementedError, match="Unsupported speculative method"):
+        SpeculativeConfig._resolve_method("medusa", _draft_config("/some/ckpt"), 5)
+
+
 def test_draft_sample_method_probabilistic_is_accepted():
     speculative_config = SpeculativeConfig(
         method="ngram",

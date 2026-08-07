@@ -702,6 +702,84 @@ class SpeculativeConfig:
         parts = model.split(".")
         return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
+    @staticmethod
+    def _resolve_method(
+        method: SpeculativeMethod | None,
+        draft_model_config: ModelConfig,
+        num_speculative_tokens: int,
+    ) -> tuple[SpeculativeMethod, bool]:
+        """Resolve the speculative method to use for a draft checkpoint.
+
+        Evidence is consulted in decreasing order of reliability: a method the
+        user set explicitly, then the algorithm the checkpoint declares about
+        itself, then legacy name heuristics on the checkpoint path for
+        checkpoints that declare nothing. A declaration must outrank the path,
+        otherwise a checkpoint saved under a directory whose name mentions an
+        unrelated algorithm is read as that algorithm.
+
+        Args:
+            method: Method resolved so far, either explicit or defaulted.
+            draft_model_config: Config of the draft checkpoint.
+            num_speculative_tokens: Draft length, only used to warn about MTP.
+
+        Returns:
+            The resolved method, and whether it implies parallel drafting.
+
+        Raises:
+            NotImplementedError: If the method cannot be resolved.
+        """
+        if method in ("eagle", "eagle3", "dflash", "dspark"):
+            return method, False
+
+        hf_config = draft_model_config.hf_config
+
+        # Speculators-format checkpoints declare their algorithm in config.json.
+        speculators_model_type = getattr(hf_config, "speculators_model_type", None)
+        if speculators_model_type is not None:
+            if speculators_model_type == "peagle":
+                # Mirrors SpeculatorsConfig.build_vllm_speculative_config.
+                return "eagle3", True
+            return speculators_model_type, False
+        if (
+            "Qwen3DSparkModel" in draft_model_config.architectures
+            or "Gemma4DSparkModel" in draft_model_config.architectures
+        ):
+            return "dspark", False
+        if hf_config.model_type == "medusa":
+            return "medusa", False
+        if hf_config.model_type == "mlp_speculator":
+            return "mlp_speculator", False
+        if hf_config.model_type in get_args(MTPModelTypes):
+            if num_speculative_tokens > 1 and hf_config.model_type not in (
+                "step3p5_mtp",
+                "inkling_mtp",
+            ):
+                logger.warning(
+                    "Enabling num_speculative_tokens > 1 will run "
+                    "multiple times of forward on same MTP layer"
+                    ",which may result in lower acceptance rate"
+                )
+            return "mtp", False
+
+        # Checkpoints that declare nothing, recognized by name. examples:
+        # yuhuili/EAGLE-LLaMA3-Instruct-8B
+        # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
+        # AngelSlim/Qwen3-8B_eagle3
+        # deepseek-ai/dspark_qwen3_8b_block7
+        model = draft_model_config.model.lower()
+        if "eagle-" in model:
+            return "eagle", False
+        if "eagle3" in model:
+            return "eagle3", False
+        if "dflash" in model:
+            return "dflash", False
+        if "dspark" in model:
+            return "dspark", False
+
+        if method == "draft_model":
+            return method, False
+        raise NotImplementedError(f"Unsupported speculative method: '{method}'")
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -904,66 +982,13 @@ class SpeculativeConfig:
                         draft_hf.vocab_size = target_vocab
                         draft_hf.truncated_vocab_size = target_vocab
 
-                # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
-                    pass
-                # Speculators-format checkpoints declare their algorithm in
-                # config.json; trust it before the name heuristics below, which
-                # miss checkpoints saved under paths with no algorithm hint.
-                elif (
-                    speculators_model_type := getattr(
-                        self.draft_model_config.hf_config,
-                        "speculators_model_type",
-                        None,
-                    )
-                ) is not None:
-                    if speculators_model_type == "peagle":
-                        # Mirrors SpeculatorsConfig.build_vllm_speculative_config.
-                        self.method = "eagle3"
-                        self.parallel_drafting = True
-                    else:
-                        self.method = speculators_model_type
-                # examples:
-                # yuhuili/EAGLE-LLaMA3-Instruct-8B
-                # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
-                # AngelSlim/Qwen3-8B_eagle3
-                # deepseek-ai/dspark_qwen3_8b_block7
-                elif "eagle-" in self.draft_model_config.model.lower():
-                    self.method = "eagle"
-                elif "eagle3" in self.draft_model_config.model.lower():
-                    self.method = "eagle3"
-                elif "dflash" in self.draft_model_config.model.lower():
-                    self.method = "dflash"
-                elif (
-                    "dspark" in self.draft_model_config.model.lower()
-                    or "Qwen3DSparkModel" in self.draft_model_config.architectures
-                    or "Gemma4DSparkModel" in self.draft_model_config.architectures
-                ):
-                    self.method = "dspark"
-                elif self.draft_model_config.hf_config.model_type == "medusa":
-                    self.method = "medusa"
-                elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
-                    self.method = "mlp_speculator"
-                elif self.draft_model_config.hf_config.model_type in get_args(
-                    MTPModelTypes
-                ):
-                    self.method = "mtp"
-                    if (
-                        self.num_speculative_tokens > 1
-                        and self.draft_model_config.hf_config.model_type
-                        not in ("step3p5_mtp", "inkling_mtp")
-                    ):
-                        logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run "
-                            "multiple times of forward on same MTP layer"
-                            ",which may result in lower acceptance rate"
-                        )
-                elif self.method == "draft_model":
-                    pass
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported speculative method: '{self.method}'"
-                    )
+                self.method, parallel_drafting = SpeculativeConfig._resolve_method(
+                    self.method,
+                    self.draft_model_config,
+                    self.num_speculative_tokens,
+                )
+                if parallel_drafting:
+                    self.parallel_drafting = True
 
                 if self.method in ("eagle", "eagle3"):
                     # EAGLE drafts share the target's positional space; a
