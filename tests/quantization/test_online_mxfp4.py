@@ -94,12 +94,11 @@ def assert_quantized_weights_equal(
         assert checkpoint_tensor.dtype == online_tensor.dtype
         num_mismatched = (checkpoint_tensor != online_tensor).sum().item()
         total = checkpoint_tensor.numel()
-        print(
+
+        assert torch.equal(checkpoint_tensor, online_tensor), (
             f"{key}: {num_mismatched}/{total} "
             f"({100 * num_mismatched / total:.4f}%) mismatched bytes"
         )
-
-        assert torch.equal(checkpoint_tensor, online_tensor)
 
 
 def _skip_reason_if_unavailable(backend: str, dtype: torch.dtype) -> str | None:
@@ -304,6 +303,7 @@ def test_online_mxfp4_moe_matches_quark(
 
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
         rocm_aiter_ops.refresh_env_variables()
 
         if current_platform.is_cuda():
