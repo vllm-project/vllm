@@ -17,7 +17,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
+from vllm.utils.torch_utils import async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -917,18 +917,21 @@ def compute_causal_conv1d_metadata(
     token_chunk_offset_ptr = None
     for BLOCK_M in [8]:  # cover all BLOCK_M values
         nums = -(-seqlens // BLOCK_M)
+        nums_np = nums.numpy()
         nums_dict[BLOCK_M] = {}
         nums_dict[BLOCK_M]["nums"] = nums
-        nums_dict[BLOCK_M]["tot"] = nums.sum().item()
-        mlist = np_to_pinned_tensor(np.repeat(np.arange(len(nums)), nums))
+        nums_dict[BLOCK_M]["tot"] = int(nums_np.sum())
+        mlist = np_to_pinned_tensor(np.repeat(np.arange(len(nums_np)), nums_np))
         nums_dict[BLOCK_M]["mlist"] = mlist
         mlist_len = len(nums_dict[BLOCK_M]["mlist"])
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
         MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
-        offsetlist = []  # type: ignore
-        for idx, num in enumerate(nums):
-            offsetlist.extend(range(num))
-        offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
+        starts = np.cumsum(nums_np) - nums_np
+        offsetlist = np_to_pinned_tensor(
+            (np.arange(mlist_len, dtype=np.int64) - np.repeat(starts, nums_np)).astype(
+                np.int32
+            )
+        )
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
 
         if batch_ptr is None:
