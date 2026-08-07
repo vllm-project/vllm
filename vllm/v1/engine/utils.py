@@ -1125,7 +1125,6 @@ def launch_core_engines(
         and not offline_mode
         and dp_rank == 0
         and local_engine_count > 0
-        and vllm_config.model_config.is_moe
         and not parallel_config.enable_elastic_ep
         and not parallel_config._coord_store_port
     ):
