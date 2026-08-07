@@ -1332,6 +1332,7 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
         hash_block_size=hash_block_size,
         use_eagle=True,
     )
+    assert manager.coordinator.eagle_group_ids == {0}
 
     # The owner prefills in scheduler-split style: stop at the block boundary
     # (4), then at the prompt's last hash boundary (6, partial entries).

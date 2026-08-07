@@ -102,6 +102,9 @@ class MooncakeStoreCoordinator:
         """Mirrors KVCacheCoordinator.verify_and_split_kv_cache_groups but
         dispatches via spec_manager_map (we don't allocate managers).
         """
+        eagle_group_ids = KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+            self.kv_cache_groups, self.use_eagle
+        )
         attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
@@ -113,18 +116,15 @@ class MooncakeStoreCoordinator:
                 if group.spec == spec:
                     assert manager_cls is group.manager_cls
                     group.group_ids.append(i)
-                    if g.is_eagle_group and not group.use_eagle:
+                    if i in eagle_group_ids and not group.use_eagle:
                         attention_groups[idx] = group._replace(use_eagle=True)
                     break
             else:
                 attention_groups.append(
-                    SpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    SpecGroup(spec, [i], manager_cls, i in eagle_group_ids)
                 )
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))
-        # Conservatively flag all groups when use_eagle is set but none is flagged.
-        if self.use_eagle and not any(g.use_eagle for g in attention_groups):
-            attention_groups = [g._replace(use_eagle=True) for g in attention_groups]
         self.attention_groups = attention_groups
         # Per-group eagle bits. SpecGroup carries use_eagle for the whole
         # merged spec group, so the per-group store/lookup masks agree with
@@ -337,10 +337,9 @@ class MooncakeStoreCoordinator:
                     apply_eagle and group_eagle and idx not in eagle_verified
                 )
                 _max_length = curr_hit_length
-                # No eagle peek margin for a recurrent (Mamba) group: its finder
-                # never drops a block, so a widened bound would match past the
-                # attention-verified hit and resume from speculative state (#43559).
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                # Only widen managers that can drop back to the verified
+                # candidate boundary.
+                if drop_eagle_block and manager_cls.supports_eagle_cache_peek:
                     eagle_margin = (
                         self.hash_block_size
                         if self.enable_partial_hash_hits

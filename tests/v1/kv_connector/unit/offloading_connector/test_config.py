@@ -326,6 +326,21 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
     ] == [1, 3]
 
 
+def test_eagle_fallback_excludes_mamba_offload_group():
+    config = _make_vllm_config()
+    config.speculative_config = MagicMock()
+    config.speculative_config.use_eagle.return_value = True
+    kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    scheduler_config = SchedulerOffloadConfig.from_spec(
+        MockOffloadingSpec(offloading_config), config, kv_cache_config
+    )
+
+    assert scheduler_config.kv_group_configs[0].is_eagle_group
+    assert not scheduler_config.kv_group_configs[1].is_eagle_group
+
+
 def test_preserves_data_parallel_index():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2

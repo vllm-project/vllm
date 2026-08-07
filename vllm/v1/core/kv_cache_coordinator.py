@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
 
@@ -96,12 +97,9 @@ class KVCacheCoordinator(ABC):
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
-        self.eagle_group_ids: set[int] = {
-            i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
-        }
-        # Conservatively fall back to flag all groups when no group is flagged.
-        if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+        self.eagle_group_ids = KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+            kv_cache_config.kv_cache_groups, use_eagle
+        )
 
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
@@ -749,10 +747,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 _max_length = curr_hit_length
                 # Eagle matches one extra drop unit (one hash unit for
                 # fine-grained managers, else one cache block) and then drops
-                # it, landing back at the candidate length. No margin for
-                # mamba: its finder never drops (draft models have no mamba
-                # layers), so the hit would grow past the candidate.
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                # it, landing back at the candidate length. Managers that
+                # cannot rewind recurrent state must not receive that margin.
+                if drop_eagle_block and manager_cls.supports_eagle_cache_peek:
                     eagle_margin = (
                         self.hash_block_size
                         if self.enable_partial_hash_hits
