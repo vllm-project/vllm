@@ -31,10 +31,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MultiModalKwargsItems
-from vllm.multimodal.inputs import (
-    MultiModalFeatureSpec,
-    MultiModalFieldConfig,
-)
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalFieldConfig
 from vllm.multimodal.parse import (
     ImageProcessorItems,
     MultiModalDataItems,
@@ -63,7 +60,7 @@ _MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
-    def _get_audio_processor(self) -> Any:
+    def _get_audio_processor(self) -> Any | None:
         # TODO: drop feature_extractor branch once huggingface/transformers#44394 lands.
         return getattr_iter(
             self.get_hf_processor(), ("audio_processor", "feature_extractor")
@@ -79,10 +76,16 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return hasattr(self.get_hf_processor(), "video_processor")
 
     def _get_audio_sampling_rate(self) -> float:
-        sub = self._get_audio_processor()
-        if sub is not None and hasattr(sub, "sampling_rate"):
-            return sub.sampling_rate
+        audio_processor = self._get_audio_processor()
+        if audio_processor is not None and hasattr(audio_processor, "sampling_rate"):
+            return audio_processor.sampling_rate
         return 16000.0
+
+    def _get_audio_chunk_length(self) -> float:
+        audio_processor = self._get_audio_processor()
+        if audio_processor is not None and hasattr(audio_processor, "chunk_length"):
+            return audio_processor.chunk_length
+        return 30
 
     def get_data_parser(self) -> MultiModalDataParser:
         if self._is_audio_model():
@@ -173,10 +176,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         data: MultiModalDataDict = {}
         if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
             sampling_rate = self.info._get_audio_sampling_rate()
-            sub = self.info._get_audio_processor()
-            chunk_length = getattr(sub, "chunk_length", None) if sub else None
-            if chunk_length is None:
-                chunk_length = 30
+            chunk_length = self.info._get_audio_chunk_length()
             audio_len = int(chunk_length * sampling_rate)
             data["audio"] = self._get_dummy_audios(
                 length=audio_len,
@@ -221,7 +221,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         def get_replacement(item_idx: int, modality: str):
             out_item = out_mm_kwargs[modality][item_idx]
-            repl_ids = out_item[f"{modality}_placeholder_ids"].data
+            repl_ids = out_item[f"{modality}_replacement_ids"].data
             embed_id = repl_ids.mode().values.item()
             return PromptUpdateDetails.select_token_id(repl_ids.tolist(), embed_id)
 
@@ -241,7 +241,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: "BatchFeature",
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         # HF Processors always return a mask but vLLM doesn't need it
@@ -262,7 +262,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     }
                 )
                 mm_fields["num_audio_tokens"] = MultiModalFieldConfig.batched("audio")
-            self._add_placeholder_fields("audio", hf_inputs, mm_fields)
+            self._add_prompt_update_fields("audio", hf_inputs, mm_fields)
         if self.info._is_image_model():
             num_image_patches = hf_inputs.get("num_image_patches")
             if num_image_patches is not None:
@@ -284,20 +284,20 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             # Keep these as batched, as they always have batch size as first dim
             mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
             mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
-            self._add_placeholder_fields("image", hf_inputs, mm_fields)
+            self._add_prompt_update_fields("image", hf_inputs, mm_fields)
         return mm_fields
 
-    def _add_placeholder_fields(
+    def _add_prompt_update_fields(
         self,
         modality: str,
-        hf_inputs: "BatchFeature",
+        hf_inputs: BatchFeature,
         mm_fields: dict[str, MultiModalFieldConfig],
     ) -> None:
         # Drop the placeholder counts so they aren't an mm field
-        sizes = hf_inputs.pop(f"num_{modality}_placeholders", None)
+        sizes = hf_inputs.pop(f"num_{modality}_replacement_ids", None)
         if sizes is None:
             return
-        mm_fields[f"{modality}_placeholder_ids"] = (
+        mm_fields[f"{modality}_replacement_ids"] = (
             MultiModalFieldConfig.flat_from_sizes(modality, sizes, keep_on_cpu=True)
         )
         mm_fields[f"{modality}_target_ids"] = MultiModalFieldConfig.batched(
@@ -325,7 +325,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ) -> "BatchFeature":
+    ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not any(mm_data.get(key) for key in ("images", "audio")):
             prompt_ids = self.info.get_tokenizer().encode(prompt, **tok_kwargs)
@@ -338,7 +338,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
-        self._add_placeholder_ids(processed_data)
+        self._tokenize_replacement_offsets(processed_data)
         images = mm_data.get("images")
         if images is not None and self.info._is_image_model():
             hf_processor = self.info.get_hf_processor(**mm_kwargs)
@@ -356,7 +356,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
         return processed_data
 
-    def _add_placeholder_ids(self, processed_data: "BatchFeature") -> None:
+    def _tokenize_replacement_offsets(self, processed_data: BatchFeature) -> None:
         offsets = processed_data.pop("text_replacement_offsets", None)
         if not offsets:
             raise RuntimeError(
@@ -376,10 +376,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             target = tokenizer.encode(offset["text"], add_special_tokens=False)
             target_ids.setdefault(offset["type"], []).append(target)
         for modality, per_item in repl_ids.items():
-            processed_data[f"{modality}_placeholder_ids"] = torch.tensor(
+            processed_data[f"{modality}_replacement_ids"] = torch.tensor(
                 [i for ids in per_item for i in ids]
             )
-            processed_data[f"num_{modality}_placeholders"] = torch.tensor(
+            processed_data[f"num_{modality}_replacement_ids"] = torch.tensor(
                 [len(ids) for ids in per_item]
             )
             processed_data[f"{modality}_target_ids"] = torch.tensor(
@@ -618,7 +618,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
     def embed_multimodal(self, **kwargs):
         for modality in ("image", "audio"):
-            kwargs.pop(f"{modality}_placeholder_ids", None)
+            kwargs.pop(f"{modality}_replacement_ids", None)
             kwargs.pop(f"{modality}_target_ids", None)
 
         embeddings: tuple[torch.Tensor, ...] = ()
