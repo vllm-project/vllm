@@ -54,6 +54,7 @@ def _count_expert_num_tokens(
     num_experts,
     topk_numel,
     expert_map,
+    num_global_experts,
     HAS_EXPERT_MAP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -67,9 +68,14 @@ def _count_expert_num_tokens(
         mask = offsets < (topk_numel - x * BLOCK_SIZE)
         expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
         if HAS_EXPERT_MAP:
-            expert_map_ptrs = expert_map + expert_ids
-            expert_map_mask = expert_ids >= 0
-            expert_ids = tl.load(expert_map_ptrs, mask=expert_map_mask, other=-1)
+            # topk_ids can carry arbitrary positive garbage on the padded rows
+            # of a CUDA-graph batch (torch.empty allocation, routers do not
+            # overwrite every slot), so bound by the length of the map being
+            # indexed -- the GLOBAL expert count. The rank-local count is NOT
+            # a safe bound for expert_map under EP.
+            expert_map_mask = (expert_ids >= 0) & (expert_ids < num_global_experts)
+            safe_ids = tl.where(expert_map_mask, expert_ids, 0)
+            expert_ids = tl.load(expert_map + safe_ids, mask=expert_map_mask, other=-1)
 
         has_curr_expert = tl.where(expert_ids == curr_expert, 1, 0)
         acc = acc + has_curr_expert
@@ -112,6 +118,7 @@ def count_expert_num_tokens(
         num_local_experts,
         topk_ids.numel(),
         expert_map,
+        expert_map.numel() if expert_map is not None else 0,
         HAS_EXPERT_MAP=expert_map is not None,
         BLOCK_SIZE=BLOCK_SIZE,
     )
