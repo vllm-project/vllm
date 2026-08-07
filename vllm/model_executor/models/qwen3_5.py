@@ -292,7 +292,6 @@ class Qwen3_5ForCausalLMBase(
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
-    IsHybrid,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -428,42 +427,13 @@ class Qwen3_5ForCausalLMBase(
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-    @classmethod
-    def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
-            vllm_config.cache_config.mamba_ssm_cache_dtype,
-        )
-
-    @classmethod
-    def get_mamba_state_shape_from_config(
-        cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
-        parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_text_config
-        tp_size = parallel_config.tensor_parallel_size
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            tp_size,
-            hf_config.linear_num_key_heads,
-            hf_config.linear_num_value_heads,
-            hf_config.linear_key_head_dim,
-            hf_config.linear_value_head_dim,
-            hf_config.linear_conv_kernel_dim,
-            num_spec,
-        )
-
-    @classmethod
-    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
-        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[object],
+    ) -> tuple[torch.Tensor, int]:
+        positions = torch.arange(len(input_tokens), dtype=torch.long)
+        return positions.unsqueeze(0).expand(3, -1), 0
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
