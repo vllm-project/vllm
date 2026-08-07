@@ -27,6 +27,7 @@ from typing import Protocol
 from vllm_cli.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
+    SocketIdentity,
     validate_artifact_root,
     validate_identity,
     write_manifest_atomic,
@@ -47,6 +48,74 @@ class ProcessInventory:
     root_pid: int
     process_tree: tuple[int, ...]
     cuda_holders: tuple[int, ...]
+    sockets: tuple[SocketIdentity, ...]
+
+
+@dataclass(frozen=True)
+class _TcpSocketRecord:
+    family: str
+    local_raw: str
+    remote_raw: str
+    inode: int
+
+
+def _format_tcp_endpoint(family: str, raw: str) -> str:
+    address_hex, port_hex = raw.rsplit(":", 1)
+    packed = bytes.fromhex(address_hex)
+    if family == "AF_INET":
+        address = socket.inet_ntop(socket.AF_INET, packed[::-1])
+        return f"{address}:{int(port_hex, 16)}"
+    if family == "AF_INET6":
+        packed = b"".join(
+            packed[offset : offset + 4][::-1] for offset in range(0, 16, 4)
+        )
+        address = socket.inet_ntop(socket.AF_INET6, packed)
+        return f"[{address}]:{int(port_hex, 16)}"
+    raise SnapshotCreateError(f"unsupported TCP address family: {family}")
+
+
+def _validate_tcp_connections(
+    records: tuple[_TcpSocketRecord, ...], owned_inodes: set[int]
+) -> tuple[SocketIdentity, ...]:
+    owned = tuple(record for record in records if record.inode in owned_inodes)
+    endpoints = {
+        (record.family, record.local_raw, record.remote_raw) for record in owned
+    }
+    external = tuple(
+        record
+        for record in owned
+        if (record.family, record.remote_raw, record.local_raw) not in endpoints
+    )
+    if external:
+        details = ", ".join(
+            f"{_format_tcp_endpoint(record.family, record.local_raw)} to "
+            f"{_format_tcp_endpoint(record.family, record.remote_raw)}"
+            for record in external
+        )
+        raise SnapshotCreateError(
+            f"snapshot tree has an external established TCP connection: {details}"
+        )
+    return tuple(
+        sorted(
+            (
+                SocketIdentity(
+                    family=record.family,
+                    socket_type="SOCK_STREAM",
+                    local_address=_format_tcp_endpoint(record.family, record.local_raw),
+                    remote_address=_format_tcp_endpoint(
+                        record.family, record.remote_raw
+                    ),
+                    state="ESTABLISHED",
+                )
+                for record in owned
+            ),
+            key=lambda identity: (
+                identity.family,
+                identity.local_address,
+                identity.remote_address or "",
+            ),
+        )
+    )
 
 
 class SnapshotTools(Protocol):
@@ -316,15 +385,58 @@ class LocalSnapshotTools:
             sorted({int(line.strip()) for line in output.splitlines() if line.strip()})
         )
 
+    def _socket_inodes(self, process_tree: tuple[int, ...]) -> set[int]:
+        inodes: set[int] = set()
+        for pid in process_tree:
+            descriptor_dir = Path("/proc") / str(pid) / "fd"
+            try:
+                descriptors = tuple(descriptor_dir.iterdir())
+            except FileNotFoundError as error:
+                raise SnapshotCreateError(
+                    f"snapshot process exited during socket inventory: {pid}"
+                ) from error
+            for descriptor in descriptors:
+                try:
+                    target = os.readlink(descriptor)
+                except FileNotFoundError:
+                    continue
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inodes.add(int(target[len("socket:[") : -1]))
+        return inodes
+
+    def _tcp_records(self) -> tuple[_TcpSocketRecord, ...]:
+        records: list[_TcpSocketRecord] = []
+        for family, table in (
+            ("AF_INET", Path("/proc/net/tcp")),
+            ("AF_INET6", Path("/proc/net/tcp6")),
+        ):
+            for row in table.read_text().splitlines()[1:]:
+                fields = row.split()
+                if fields[3] != "01":
+                    continue
+                records.append(
+                    _TcpSocketRecord(
+                        family=family,
+                        local_raw=fields[1],
+                        remote_raw=fields[2],
+                        inode=int(fields[9]),
+                    )
+                )
+        return tuple(records)
+
     def inventory(self, root_pid: int) -> ProcessInventory:
         process_tree = self._tree_pids(root_pid)
         cuda_holders = tuple(pid for pid in self._cuda_pids() if pid in process_tree)
         if not cuda_holders:
             raise SnapshotCreateError("snapshot tree has no CUDA-holding process")
+        sockets = _validate_tcp_connections(
+            self._tcp_records(), self._socket_inodes(process_tree)
+        )
         return ProcessInventory(
             root_pid=root_pid,
             process_tree=process_tree,
             cuda_holders=cuda_holders,
+            sockets=sockets,
         )
 
     def _criu(
@@ -477,6 +589,7 @@ class LocalSnapshotTools:
                     "dump.log",
                     "--shell-job",
                     "--ext-unix-sk",
+                    "--tcp-established",
                     "--link-remap",
                 ],
             )
@@ -643,6 +756,7 @@ class LocalSnapshotTools:
             environment=self._environment_identity(),
             process_tree=inventory.process_tree,
             cuda_holders=inventory.cuda_holders,
+            socket_inventory=inventory.sockets,
             oracle_token_ids=oracle.token_ids,
             oracle_text=oracle.text,
         )
@@ -696,6 +810,7 @@ class LocalSnapshotTools:
                 "restore.log",
                 "--shell-job",
                 "--ext-unix-sk",
+                "--tcp-established",
                 "--link-remap",
                 "--restore-detached",
                 "--pidfile",

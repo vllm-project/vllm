@@ -17,8 +17,8 @@ Snapshots currently require all of the following:
 - Tensor, pipeline, and data parallel size 1.
 - One plaintext TCP HTTP API server without built-in API authentication,
   custom middleware, TLS, or a Unix domain socket.
-- No established TCP connections in the captured process tree. Snapshot
-  creation fails instead of asking CRIU to preserve external TCP sessions.
+- No established TCP connections to a peer outside the captured process tree.
+  Snapshot creation records tree-owned connections and rejects external peers.
 - [CRIU](https://github.com/checkpoint-restore/criu),
   [cuda-checkpoint](https://github.com/NVIDIA/cuda-checkpoint), and NVIDIA's
   CRIU CUDA plugin installed on the host.
@@ -105,8 +105,7 @@ tree has stopped. Concurrent restores of one artifact are not supported.
   process. Build it before serving user traffic and protect it like model
   weights and process memory.
 - The tested configuration disables usage reporting during snapshot creation.
-  Any feature that opens an external connection must close it before the
-  capture boundary.
+  Any feature that opens an external connection must close it before capture.
 
 For a lower-complexity option that retains a live process, see
 [Sleep mode](sleep_mode.md). Sleep mode and initialized snapshots retain

@@ -33,12 +33,15 @@ from vllm_cli.snapshot.controller import (
     ProcessInventory,
     SnapshotCreateError,
     SnapshotRestoreError,
+    _TcpSocketRecord,
+    _validate_tcp_connections,
     create_snapshot,
     restore_snapshot,
 )
 from vllm_cli.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
+    SocketIdentity,
     read_manifest,
     write_manifest_atomic,
 )
@@ -285,6 +288,7 @@ class FakeSnapshotTools:
             root_pid=root_pid,
             process_tree=(root_pid, 101),
             cuda_holders=(101,),
+            sockets=(),
         )
 
     def dump(self, workdir: Path, _inventory: ProcessInventory) -> None:
@@ -367,6 +371,7 @@ def _controller_manifest(**changes: object) -> SnapshotManifest:
         environment=(("VLLM_USE_V1", "1"),),
         process_tree=(100, 101),
         cuda_holders=(101,),
+        socket_inventory=(),
         oracle_token_ids=(12095,),
         oracle_text=" Paris",
     )
@@ -449,6 +454,54 @@ def test_failed_child_is_reaped_and_reported(tmp_path: Path):
     assert 100 not in tools._children
 
 
+def test_tcp_inventory_accepts_connections_owned_by_the_snapshot_tree():
+    records = (
+        _TcpSocketRecord(
+            family="AF_INET6",
+            local_raw="0000000000000000FFFF00003C00000A:C262",
+            remote_raw="0000000000000000FFFF00003C00000A:D6F6",
+            inode=41,
+        ),
+        _TcpSocketRecord(
+            family="AF_INET6",
+            local_raw="0000000000000000FFFF00003C00000A:D6F6",
+            remote_raw="0000000000000000FFFF00003C00000A:C262",
+            inode=42,
+        ),
+    )
+
+    assert _validate_tcp_connections(records, {41, 42}) == (
+        SocketIdentity(
+            family="AF_INET6",
+            socket_type="SOCK_STREAM",
+            local_address="[::ffff:10.0.0.60]:49762",
+            remote_address="[::ffff:10.0.0.60]:55030",
+            state="ESTABLISHED",
+        ),
+        SocketIdentity(
+            family="AF_INET6",
+            socket_type="SOCK_STREAM",
+            local_address="[::ffff:10.0.0.60]:55030",
+            remote_address="[::ffff:10.0.0.60]:49762",
+            state="ESTABLISHED",
+        ),
+    )
+
+
+def test_tcp_inventory_rejects_an_external_established_connection():
+    records = (
+        _TcpSocketRecord(
+            family="AF_INET",
+            local_raw="3C00000A:D6F6",
+            remote_raw="01010101:01BB",
+            inode=41,
+        ),
+    )
+
+    with pytest.raises(SnapshotCreateError, match="external established TCP"):
+        _validate_tcp_connections(records, {41})
+
+
 def test_manifest_records_installed_binary_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -485,6 +538,7 @@ def test_manifest_records_installed_binary_revision(
             root_pid=100,
             process_tree=(100, 101),
             cuda_holders=(101,),
+            sockets=(),
         ),
         Oracle(token_ids=(12095,), text=" Paris"),
         tmp_path,
@@ -590,7 +644,7 @@ def test_restore_resets_child_log_to_captured_size(
 
     def fake_dump(action: str, _artifact: Path, arguments: list[str]) -> None:
         assert action == "dump"
-        assert "--tcp-established" not in arguments
+        assert "--tcp-established" in arguments
         (shm_dir / "link_remap.270").write_bytes(b"semaphore state")
 
     monkeypatch.setattr(tools, "_criu", fake_dump)
@@ -600,6 +654,7 @@ def test_restore_resets_child_log_to_captured_size(
             root_pid=100,
             process_tree=(100, 101),
             cuda_holders=(101,),
+            sockets=(),
         ),
     )
     assert (artifact / "link-remaps/link_remap.270").read_bytes() == (
@@ -610,7 +665,7 @@ def test_restore_resets_child_log_to_captured_size(
 
     def fake_restore(action: str, artifact: Path, arguments: list[str]) -> None:
         assert action == "restore"
-        assert "--tcp-established" not in arguments
+        assert "--tcp-established" in arguments
         assert child_log.read_bytes() == b"startup log"
         assert (shm_dir / "link_remap.270").read_bytes() == b"semaphore state"
         (artifact / "restored.pid").write_text("100")

@@ -7,7 +7,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import Any, TypeAlias, cast
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 
@@ -22,6 +22,15 @@ class SnapshotCompatibilityError(SnapshotError):
 
 class SnapshotSecurityError(SnapshotError):
     """The snapshot artifact does not meet the private-path contract."""
+
+
+@dataclass(frozen=True)
+class SocketIdentity:
+    family: str
+    socket_type: str
+    local_address: str
+    remote_address: str | None
+    state: str
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,7 @@ class SnapshotManifest:
     environment: tuple[tuple[str, str], ...]
     process_tree: tuple[int, ...]
     cuda_holders: tuple[int, ...]
+    socket_inventory: tuple[SocketIdentity, ...]
     oracle_token_ids: tuple[int, ...]
     oracle_text: str
 
@@ -61,6 +71,7 @@ _NON_IDENTITY_FIELDS = frozenset(
         "artifact_bytes",
         "process_tree",
         "cuda_holders",
+        "socket_inventory",
         "oracle_token_ids",
         "oracle_text",
     }
@@ -142,10 +153,14 @@ def _manifest_from_dict(value: dict[str, object]) -> SnapshotManifest:
     value = dict(value)
     engine_args = cast(list[list[JsonScalar]], value["engine_args"])
     environment = cast(list[list[str]], value["environment"])
+    socket_inventory = cast(list[dict[str, Any]], value["socket_inventory"])
     value["engine_args"] = tuple((str(key), item) for key, item in engine_args)
     value["environment"] = tuple((str(key), str(item)) for key, item in environment)
     value["process_tree"] = tuple(cast(list[int], value["process_tree"]))
     value["cuda_holders"] = tuple(cast(list[int], value["cuda_holders"]))
+    value["socket_inventory"] = tuple(
+        SocketIdentity(**item) for item in socket_inventory
+    )
     value["oracle_token_ids"] = tuple(cast(list[int], value["oracle_token_ids"]))
     return SnapshotManifest(**value)  # type: ignore[arg-type]
 
