@@ -1858,7 +1858,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
-        model_runner_output.worker_notifications = take_worker_notifications() or None
+        model_runner_output.worker_notifications = take_worker_notifications()
 
         return async_output
 
@@ -1897,7 +1897,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
-            worker_notifications=take_worker_notifications() or None,
+            worker_notifications=take_worker_notifications(),
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
