@@ -435,12 +435,6 @@ class HiSparseRuntime:
         self.lru_slots: torch.Tensor | None = lru_init.repeat(
             max_num_reqs, 1
         ).contiguous()
-        # In-kernel hit/miss counters (telemetry). stats_row_bytes converts
-        # misses to gathered bytes; plan-once wiring adds each follower's
-        # row bytes to its leader (the followers re-gather the
-        # leader's misses), so the leader's counter covers the whole group.
-        self._swap_stats = torch.zeros(2, dtype=torch.uint64, device=self.device)
-        self.stats_row_bytes = row_bytes
         self._plan = _get_group_plan(
             self.device, max_swap_rows or max_num_reqs, config.top_k
         )
@@ -458,7 +452,6 @@ class HiSparseRuntime:
         self.leader = leader
         self._plan = leader._plan
         leader.followers.append(self)
-        leader.stats_row_bytes += self.stats_row_bytes
         self.device_global_indices = None
         self.lru_slots = None
         self._lru_init = None
@@ -676,7 +669,6 @@ class HiSparseRuntime:
             request_state_indices,
             self.region_stride,
             None,
-            self._swap_stats,
             attention_indices,
             self.hot.attention_block_stride,
             req_id_per_token[:num_tokens].contiguous(),

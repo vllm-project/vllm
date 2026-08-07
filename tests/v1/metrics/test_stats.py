@@ -3,7 +3,6 @@
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
-    HiSparseStats,
     IterationStats,
     PrefillStats,
     PromptTokenStats,
@@ -35,7 +34,6 @@ def test_scheduler_iteration_details_serialization():
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
             iteration_details=iteration_details,
-            hisparse_stats=HiSparseStats(7, 3, 48),
         )
     )
 
@@ -45,7 +43,6 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
-    assert decoded.scheduler_stats.hisparse_stats == HiSparseStats(7, 3, 48)
 
 
 def test_compute_iteration_details_includes_encoder_stats():

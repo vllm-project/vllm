@@ -18,7 +18,6 @@ from vllm.v1.kv_offload.sparse.hisparse_worker import (
     HiSparseWorker,
     _expand_source_block_ids,
 )
-from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 
@@ -302,17 +301,6 @@ def test_hisparse_worker_finish_forward_enqueues_deferred_spills(monkeypatch):
     assert calls == [[transfer]]
     assert worker._post_forward_transfers == []
     assert recorded_streams == [current_stream]
-
-
-def test_hisparse_worker_finish_step_counts_each_index_group_once():
-    worker = object.__new__(HiSparseWorker)
-    worker._metrics_calls = hisparse_worker_module._METRICS_INTERVAL - 1
-    worker._metrics_last = HiSparseStats()
-    worker.leader_runtimes = [
-        SimpleNamespace(_swap_stats=torch.tensor([7, 3]), stats_row_bytes=16)
-    ]
-
-    assert worker.finish_step() == HiSparseStats(7, 3, 48)
 
 
 def test_hisparse_worker_reports_each_completed_transfer_once():
