@@ -397,6 +397,10 @@ pub struct ChatOptions {
     /// Effort level exposed to chat templates for reasoning models.
     pub reasoning_effort: Option<ReasoningEffort>,
 
+    /// Standard response format available to model-specific renderers.
+    #[serde(default)]
+    pub response_format: Option<Value>,
+
     /// Additional keyword arguments exposed to the chat template.
     pub template_kwargs: HashMap<String, Value>,
 }
@@ -407,6 +411,7 @@ impl Default for ChatOptions {
             generation_prompt_mode: GenerationPromptMode::StartNewAssistant,
             chat_template: None,
             reasoning_effort: None,
+            response_format: None,
             template_kwargs: HashMap::new(),
         }
     }
@@ -486,6 +491,9 @@ pub struct ChatRequest {
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -509,6 +517,7 @@ impl ChatRequest {
             cache_salt: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            session_id: None,
             lora_request: None,
         }
     }

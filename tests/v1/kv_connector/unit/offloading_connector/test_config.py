@@ -8,9 +8,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
 from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    SchedulerOffloadConfig,
+    is_store_reachable_swa_chunk,
 )
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
@@ -179,6 +184,25 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
+def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_layer"], _full_attention_spec()),
+            KVCacheGroupSpec(
+                ["mamba_layer"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+
 def _parallelism_agnostic(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     config = _make_vllm_config()
     kv_cache_config = KVCacheConfig(
@@ -265,6 +289,38 @@ def test_prefill_context_parallelism_does_not_scale_group_blocks():
     assert tuple(group.tokens_per_block for group in offloading_config.groups) == (16,)
     assert offloading_config.cache.tokens_per_hash == 16
     assert offloading_config.cache.blocks_per_chunk == 4
+
+
+def test_dcp_scales_attention_but_not_mamba_group_blocks():
+    config = _make_vllm_config(tensor_parallel_size=2, decode_context_parallel_size=2)
+    config.speculative_config = None
+
+    offloading_config = build_offloading_config(
+        config, _make_mamba_hybrid_kv_cache_config()
+    )
+
+    assert tuple(group.tokens_per_block for group in offloading_config.groups) == (
+        32,
+        16,
+    )
+    scheduler_config = SchedulerOffloadConfig.from_spec(
+        MockOffloadingSpec(offloading_config),
+        config,
+        _make_mamba_hybrid_kv_cache_config(),
+    )
+    mamba_group = scheduler_config.kv_group_configs[1]
+    assert mamba_group.alignment_chunk_count == 2
+    assert [
+        chunk_idx
+        for chunk_idx in range(4)
+        if is_store_reachable_swa_chunk(
+            chunk_idx,
+            4,
+            mamba_group.alignment_chunk_count,
+            mamba_group.sliding_window_size_in_chunks,
+            mamba_group.is_eagle_group,
+        )
+    ] == [1, 3]
 
 
 def test_preserves_data_parallel_index():

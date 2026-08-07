@@ -7,7 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -608,9 +608,12 @@ class MPClient(EngineCoreClient):
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
-                ) as (engine_manager, coordinator, addresses, tensor_queue):
-                    self.resources.coordinator = coordinator
-                    self.resources.engine_manager = engine_manager
+                ) as engine_launch:
+                    self.resources.coordinator = engine_launch.coordinator
+                    self.resources.engine_manager = engine_launch.engine_manager
+                    coordinator = engine_launch.coordinator
+                    addresses = engine_launch.addresses
+                    tensor_queue = engine_launch.tensor_queue
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
                 if coordinator is not None:
@@ -671,11 +674,6 @@ class MPClient(EngineCoreClient):
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
 
-            # Request objects which may contain pytorch-allocated tensors
-            # that we need to keep references to until zmq is done with the
-            # underlying data.
-            self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
-
             # Start monitoring engine core processes for unexpected failures
             self.start_engine_core_monitor()
 
@@ -706,14 +704,6 @@ class MPClient(EngineCoreClient):
     def ensure_alive(self):
         if self.resources.engine_dead:
             raise EngineDeadError()
-
-    def add_pending_message(self, tracker: zmq.MessageTracker, msg: Any):
-        if not tracker.done:
-            self.pending_messages.appendleft((tracker, msg))
-
-    def free_pending_messages(self):
-        while self.pending_messages and self.pending_messages[-1][0].done:
-            self.pending_messages.pop()
 
     def dp_engines_running(self) -> bool:
         return self.engines_running
@@ -896,17 +886,12 @@ class SyncMPClient(MPClient):
 
     def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         self.ensure_alive()
-        self.free_pending_messages()
         # (Identity, RequestType, SerializedRequest)
         msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
-
-        if len(msg) <= 3:
-            # No auxiliary buffers => no tensor backing buffers in request.
-            self.input_socket.send_multipart(msg, copy=False)
-            return
-
-        tracker = self.input_socket.send_multipart(msg, copy=False, track=True)
-        self.add_pending_message(tracker, request)
+        # Any zero-copy tensor/ndarray frames are kept alive by zmq itself
+        # until it's finished sending them (there is a ref chain from the underlying
+        # memoryview back to the original owning tensor/ndarray).
+        self.input_socket.send_multipart(msg, copy=False)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -1129,32 +1114,16 @@ class AsyncMPClient(MPClient):
             engine = self.core_engine
 
         message = (request_type.value, *self.encoder.encode(request))
-        return self._send_input_message(message, engine, request)
+        return self._send_input_message(message, engine)
 
     def _send_input_message(
-        self, message: tuple[bytestr, ...], engine: EngineIdentity, objects: Any
+        self, message: tuple[bytestr, ...], engine: EngineIdentity
     ) -> Awaitable[Any]:
-        """
-        objects is a reference to retain until zmq is finished with the
-        buffers, in case they were extracted from tensors in the request.
-        """
         self.ensure_alive()
-        self.free_pending_messages()
-
-        msg = (engine,) + message
-        if not objects or len(msg) <= 3:
-            # No auxiliary buffers => no tensor backing buffers in request.
-            return self.input_socket.send_multipart(msg, copy=False)
-
-        future: asyncio.Future[zmq.MessageTracker]
-        future = self.input_socket.send_multipart(msg, copy=False, track=True)
-
-        def add_pending(f: asyncio.Future[zmq.MessageTracker]):
-            with contextlib.suppress(BaseException):
-                self.add_pending_message(f.result(), objects)
-
-        future.add_done_callback(add_pending)
-        return future
+        # Any zero-copy tensor/ndarray frames are kept alive by zmq itself
+        # until it's finished sending them (there is a ref chain from the underlying
+        # memoryview back to the original owning tensor/ndarray).
+        return self.input_socket.send_multipart((engine,) + message, copy=False)
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
@@ -1169,7 +1138,7 @@ class AsyncMPClient(MPClient):
             EngineCoreRequestType.UTILITY.value,
             *self.encoder.encode((self.client_index, call_id, method, args)),
         )
-        await self._send_input_message(message, engine, args)
+        await self._send_input_message(message, engine)
         self._ensure_output_queue_task()
         return await future
 
