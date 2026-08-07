@@ -4,10 +4,24 @@ from unittest import TestCase
 
 import torch
 
+from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
     LogprobsLists,
     LogprobsTensors,
+    ModelRunnerOutput,
 )
+
+
+def test_model_runner_output_carries_hisparse_stats_without_connector():
+    stats = HiSparseStats(7, 3, 48)
+
+    output = ModelRunnerOutput.with_worker_output_only(None, stats)
+
+    assert output is not EMPTY_MODEL_RUNNER_OUTPUT
+    assert output.kv_connector_output is None
+    assert output.hisparse_stats is stats
+    assert EMPTY_MODEL_RUNNER_OUTPUT.hisparse_stats is None
 
 
 def test_logprobs_tensors_cat():

@@ -34,10 +34,14 @@ from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     register_indexer_source,
     release_pinned_state,
 )
+from vllm.v1.metrics.stats import HiSparseStats
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu.block_table import BlockTables
+
+
+_METRICS_INTERVAL = 2000
 
 
 def _expand_source_block_ids(
@@ -96,6 +100,8 @@ class HiSparseWorker:
         self._block_staging_event: torch.Event | None = None
         self._post_forward_transfers: list[SparseKVPageTransfer] = []
         self._completed_transfer_ids: list[int] = []
+        self._metrics_calls = 0
+        self._metrics_last = HiSparseStats()
         self._init_backup_plan(device, max_model_len, max_concurrent_batches)
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
@@ -327,6 +333,30 @@ class HiSparseWorker:
         self._post_forward_transfers = []
         self._enqueue_transfers(transfers)
         self.host_write_event.record(current_stream)
+
+    def finish_step(self) -> HiSparseStats | None:
+        self._metrics_calls += 1
+        if self._metrics_calls % _METRICS_INTERVAL != 0:
+            return None
+
+        current = HiSparseStats()
+        for runtime in self.leader_runtimes:
+            hits, misses = runtime._swap_stats.cpu().tolist()
+            current.cache_hits += hits
+            current.cache_misses += misses
+            current.host_to_device_bytes += misses * runtime.stats_row_bytes
+
+        delta = HiSparseStats(
+            cache_hits=current.cache_hits - self._metrics_last.cache_hits,
+            cache_misses=current.cache_misses - self._metrics_last.cache_misses,
+            host_to_device_bytes=(
+                current.host_to_device_bytes - self._metrics_last.host_to_device_bytes
+            ),
+        )
+        self._metrics_last = current
+        if delta.cache_hits == 0 and delta.cache_misses == 0:
+            return None
+        return delta
 
     def take_completed_transfer_ids(self) -> list[int] | None:
         completed = self._completed_transfer_ids

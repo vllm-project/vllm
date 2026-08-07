@@ -64,8 +64,10 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, MambaSpec
 from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseWorker
+from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.outputs import (
     DraftTokenIds,
+    KVConnectorOutput,
     ModelRunnerOutput,
     RoutedExpertsTensors,
     make_empty_encoder_model_runner_output,
@@ -1616,8 +1618,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # in the immediate next step (rather than in pp_size steps).
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
 
-            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
+            return ModelRunnerOutput.with_worker_output_only(
+                kv_connector_output, hisparse_stats
+            )
 
         # Last rank: sample tokens
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
@@ -1726,8 +1730,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.draft_tokens[input_batch.idx_mapping],
             )
 
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
+        model_runner_output.hisparse_stats = hisparse_stats
 
         return async_output
 
@@ -1746,11 +1751,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         self.execute_model_state = None
 
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            return ModelRunnerOutput.with_worker_output_only(
+                kv_connector_output, hisparse_stats
+            )
 
         assert self.pooling_runner is not None
         pooler_output, finished_mask = self.pooling_runner.pool(
@@ -1762,6 +1769,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
+            hisparse_stats=hisparse_stats,
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
@@ -1781,6 +1789,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             input_batch.query_start_loc,
         )
+
+    def _finish_step(
+        self, finished_req_ids: set[str]
+    ) -> tuple[KVConnectorOutput | None, HiSparseStats | None]:
+        hisparse_stats = (
+            self.hisparse_worker.finish_step()
+            if self.hisparse_worker is not None
+            else None
+        )
+        return self.kv_connector.post_forward(finished_req_ids), hisparse_stats
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that

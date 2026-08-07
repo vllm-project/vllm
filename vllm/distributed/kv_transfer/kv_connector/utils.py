@@ -90,11 +90,17 @@ class KVOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
+        aggregated_hisparse_stats = None
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
             assert model_runner_output is not None
+            if aggregated_hisparse_stats is None:
+                aggregated_hisparse_stats = model_runner_output.hisparse_stats
+            elif hisparse_stats := model_runner_output.hisparse_stats:
+                aggregated_hisparse_stats.aggregate(hisparse_stats)
+
             kv_output = model_runner_output.kv_connector_output
             if not kv_output:
                 continue
@@ -160,6 +166,7 @@ class KVOutputAggregator:
         output = outputs[output_rank]
 
         assert output is not None
+        output.hisparse_stats = aggregated_hisparse_stats
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
