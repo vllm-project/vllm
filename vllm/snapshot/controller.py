@@ -4,15 +4,16 @@
 import argparse
 import dataclasses
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from contextlib import suppress
@@ -125,29 +126,29 @@ def create_snapshot(
         raise SnapshotCreateError(f"snapshot target already exists: {target}")
     validate_artifact_root(target, creating=True)
     target.parent.mkdir(parents=False, exist_ok=True)
-    workdir = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
-    workdir.chmod(0o700)
+    target.mkdir(mode=0o700)
+    published = False
     root_pid: int | None = None
     inventory: ProcessInventory | None = None
     try:
         child_argv = engine_argv or _current_engine_argv(args)
-        root_pid = toolset.launch_child(workdir, child_argv)
-        oracle = toolset.wait_ready(workdir, root_pid)
+        root_pid = toolset.launch_child(target, child_argv)
+        oracle = toolset.wait_ready(target, root_pid)
         inventory = toolset.inventory(root_pid)
-        toolset.dump(workdir, inventory)
+        toolset.dump(target, inventory)
         toolset.verify_dead(inventory)
-        manifest = toolset.make_manifest(args, child_argv, inventory, oracle, workdir)
+        manifest = toolset.make_manifest(args, child_argv, inventory, oracle, target)
         if not manifest.complete:
             raise SnapshotCreateError("snapshot manifest is incomplete")
-        toolset.publish(workdir, target, manifest)
-        workdir = Path()
+        toolset.publish(target, target, manifest)
+        published = True
     except BaseException:
         if root_pid is not None and hasattr(toolset, "abort_create"):
             toolset.abort_create(root_pid, inventory)  # type: ignore[attr-defined]
         raise
     finally:
-        if workdir != Path() and workdir.exists():
-            shutil.rmtree(workdir)
+        if not published and target.exists():
+            shutil.rmtree(target)
 
 
 def restore_snapshot(
@@ -193,8 +194,9 @@ class LocalSnapshotTools:
         self.criu = shutil.which("criu") or "criu"
         self.cuda_checkpoint = shutil.which("cuda-checkpoint") or "cuda-checkpoint"
         self.nvidia_smi = shutil.which("nvidia-smi") or "nvidia-smi"
-        plugin_dir = os.environ.get("VLLM_SNAPSHOT_CRIU_PLUGIN_DIR", "")
-        self.plugin_dir = Path(plugin_dir) if plugin_dir else Path()
+        plugin_dir = os.environ.get("CRIU_CUDA_PLUGIN_DIR", "")
+        self.plugin_dir = Path(plugin_dir) if plugin_dir else None
+        self.shm_dir = Path("/dev/shm")
         self.timeout_s = float(os.environ.get("VLLM_SNAPSHOT_TIMEOUT_S", "900"))
         self._children: dict[int, subprocess.Popen[bytes]] = {}
 
@@ -223,8 +225,8 @@ class LocalSnapshotTools:
         for command in (self.criu, self.cuda_checkpoint, self.nvidia_smi):
             if shutil.which(command) is None:
                 raise RuntimeError(f"snapshot dependency not found: {command}")
-        if not self.plugin_dir:
-            raise RuntimeError("VLLM_SNAPSHOT_CRIU_PLUGIN_DIR is required")
+        if self.plugin_dir is None:
+            raise RuntimeError("CRIU_CUDA_PLUGIN_DIR is required")
         if not (self.plugin_dir / "cuda_plugin.so").is_file():
             raise RuntimeError(f"CRIU CUDA plugin not found in {self.plugin_dir}")
         if os.geteuid() != 0:
@@ -252,6 +254,7 @@ class LocalSnapshotTools:
         process = subprocess.Popen(
             command,
             cwd=workdir,
+            stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -331,6 +334,8 @@ class LocalSnapshotTools:
         artifact: Path,
         arguments: list[str],
     ) -> None:
+        if self.plugin_dir is None:
+            raise RuntimeError("CRIU_CUDA_PLUGIN_DIR is required")
         env = os.environ.copy()
         env["PATH"] = f"{Path(self.cuda_checkpoint).parent}:{env['PATH']}"
         env["VLLM_SNAPSHOT_IGNORED_FD_MAP"] = str(artifact / "ignored-nvidia-fds.tsv")
@@ -349,27 +354,143 @@ class LocalSnapshotTools:
         ]
         self._run(command)
 
+    def _record_child_log_size(self, artifact: Path) -> None:
+        child_log = artifact / "child.log"
+        size_path = artifact / "child.log.snapshot-size"
+        payload = f"{child_log.stat().st_size}\n".encode()
+        descriptor = os.open(
+            size_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+
+    def _link_remap_names(self) -> set[str]:
+        return {
+            path.name
+            for path in self.shm_dir.glob("link_remap.*")
+            if path.name.removeprefix("link_remap.").isdigit()
+        }
+
+    def _capture_link_remaps(self, artifact: Path, names: set[str]) -> None:
+        if not names:
+            return
+        destination_dir = artifact / "link-remaps"
+        destination_dir.mkdir(mode=0o700)
+        for name in sorted(names):
+            source = self.shm_dir / name
+            source_fd = os.open(
+                source,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                metadata = os.fstat(source_fd)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                    raise SnapshotCreateError(f"invalid CRIU link remap: {source}")
+                destination_fd = os.open(
+                    destination_dir / name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                with os.fdopen(destination_fd, "wb") as destination:
+                    with os.fdopen(os.dup(source_fd), "rb") as contents:
+                        shutil.copyfileobj(contents, destination)
+                    destination.flush()
+                    os.fsync(destination.fileno())
+            finally:
+                os.close(source_fd)
+            source.unlink()
+
+    def _restore_link_remaps(self, artifact: Path) -> None:
+        source_dir = artifact / "link-remaps"
+        if not source_dir.exists():
+            return
+        for source in sorted(source_dir.iterdir()):
+            if (
+                not source.name.removeprefix("link_remap.").isdigit()
+                or source.is_symlink()
+                or not source.is_file()
+            ):
+                raise SnapshotRestoreError(f"invalid saved link remap: {source}")
+            payload = source.read_bytes()
+            target = self.shm_dir / source.name
+            try:
+                descriptor = os.open(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+            except FileExistsError as error:
+                if target.is_symlink() or target.read_bytes() != payload:
+                    raise SnapshotRestoreError(
+                        f"conflicting CRIU link remap exists: {target}"
+                    ) from error
+                continue
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+
+    def _reset_child_log(self, artifact: Path) -> None:
+        size_path = artifact / "child.log.snapshot-size"
+        descriptor = os.open(
+            size_path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        with os.fdopen(descriptor, "r") as source:
+            size = int(source.read().strip())
+        if size < 0:
+            raise SnapshotRestoreError("captured child log size is invalid")
+
+        child_log = artifact / "child.log"
+        descriptor = os.open(
+            child_log,
+            os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < size:
+                raise SnapshotRestoreError("captured child log is invalid")
+            os.ftruncate(descriptor, size)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     def dump(self, workdir: Path, inventory: ProcessInventory) -> None:
         images = workdir / "images"
         images.mkdir(mode=0o700)
         fd_map = workdir / "ignored-nvidia-fds.tsv"
         fd_map.touch(mode=0o600)
-        self._criu(
-            "dump",
+        remaps_before = self._link_remap_names()
+        try:
+            self._criu(
+                "dump",
+                workdir,
+                [
+                    "--tree",
+                    str(inventory.root_pid),
+                    "--images-dir",
+                    str(images),
+                    "--log-file",
+                    "dump.log",
+                    "--shell-job",
+                    "--ext-unix-sk",
+                    "--tcp-established",
+                    "--link-remap",
+                ],
+            )
+        except BaseException:
+            for name in self._link_remap_names() - remaps_before:
+                (self.shm_dir / name).unlink(missing_ok=True)
+            raise
+        self._capture_link_remaps(
             workdir,
-            [
-                "--tree",
-                str(inventory.root_pid),
-                "--images-dir",
-                str(images),
-                "--log-file",
-                "dump.log",
-                "--shell-job",
-                "--ext-unix-sk",
-                "--tcp-established",
-                "--link-remap",
-            ],
+            self._link_remap_names() - remaps_before,
         )
+        self._record_child_log_size(workdir)
 
     def verify_dead(self, inventory: ProcessInventory) -> None:
         process = self._children.pop(inventory.root_pid, None)
@@ -397,6 +518,8 @@ class LocalSnapshotTools:
         return digest.hexdigest()
 
     def _plugin_identity(self) -> tuple[tuple[str, str], ...]:
+        if self.plugin_dir is None:
+            return ()
         return tuple(
             (f"snapshot_plugin_sha256:{path.name}", self._sha256(path))
             for path in sorted(self.plugin_dir.glob("*.so"))
@@ -412,6 +535,9 @@ class LocalSnapshotTools:
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             return vllm.__version__
+
+    def _binary_revision(self) -> str:
+        return importlib.metadata.version("vllm")
 
     def _gpu_identity(self) -> tuple[str, str, str]:
         output = self._run(
@@ -462,7 +588,7 @@ class LocalSnapshotTools:
             created_at=datetime.now(timezone.utc).isoformat(),
             artifact_bytes=self._artifact_bytes(workdir),
             source_revision=source_revision,
-            binary_revision=source_revision,
+            binary_revision=self._binary_revision(),
             python_version=platform.python_version(),
             torch_version=torch.__version__,
             cuda_runtime=str(torch.version.cuda or ""),
@@ -486,8 +612,9 @@ class LocalSnapshotTools:
         )
 
     def publish(self, workdir: Path, target: Path, manifest: SnapshotManifest) -> None:
+        if workdir != target:
+            raise SnapshotCreateError("snapshot work directory changed before publish")
         write_manifest_atomic(workdir, manifest)
-        workdir.rename(target)
         parent_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(parent_fd)
@@ -503,7 +630,7 @@ class LocalSnapshotTools:
         return dataclasses.replace(
             manifest,
             source_revision=source_revision,
-            binary_revision=source_revision,
+            binary_revision=self._binary_revision(),
             python_version=platform.python_version(),
             torch_version=torch.__version__,
             cuda_runtime=str(torch.version.cuda or ""),
@@ -522,6 +649,8 @@ class LocalSnapshotTools:
         release.unlink(missing_ok=True)
         pidfile = artifact / "restored.pid"
         pidfile.unlink(missing_ok=True)
+        self._reset_child_log(artifact)
+        self._restore_link_remaps(artifact)
         self._criu(
             "restore",
             artifact,

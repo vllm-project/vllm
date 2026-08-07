@@ -17,6 +17,8 @@ else:
 
 
 def validate_create_args(args: argparse.Namespace) -> None:
+    if not args.revision:
+        raise ValueError("snapshot create requires an explicit --revision")
     if args.tensor_parallel_size != 1:
         raise ValueError("snapshot create currently requires tensor parallel size 1")
     if args.pipeline_parallel_size != 1:

@@ -64,9 +64,20 @@ def test_create_rejects_tp2():
         "Qwen/Qwen3-0.6B",
         "--snapshot-dir",
         "/tmp/qwen-snapshot",
+        "--revision",
+        "model-sha",
         "--tensor-parallel-size",
         "2",
     )
 
     with pytest.raises(ValueError, match="tensor parallel size 1"):
+        snapshot_cli.validate_create_args(args)
+
+
+def test_create_requires_pinned_model_revision():
+    args = parse_snapshot(
+        "create", "Qwen/Qwen3-0.6B", "--snapshot-dir", "/tmp/qwen-snapshot"
+    )
+
+    with pytest.raises(ValueError, match="--revision"):
         snapshot_cli.validate_create_args(args)

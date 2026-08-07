@@ -3,6 +3,7 @@
 
 import argparse
 import dataclasses
+import importlib.metadata
 import json
 import stat
 from contextlib import asynccontextmanager
@@ -228,12 +229,15 @@ class FakeSnapshotTools:
         self.events: list[str] = []
         self.fail_at: str | None = None
         self.identity_change: dict[str, object] = {}
+        self.launch_workdir: Path | None = None
 
     def preflight(self, _action: str, _artifact: Path) -> None:
         self.events.append("preflight")
 
     def launch_child(self, workdir: Path, _engine_argv: tuple[str, ...]):
         self.events.append("launch-child")
+        self.launch_workdir = workdir
+        assert not (workdir / "manifest.json").exists()
         (workdir / "child.log").touch()
         return 100
 
@@ -276,8 +280,8 @@ class FakeSnapshotTools:
 
     def publish(self, workdir: Path, target: Path, manifest: SnapshotManifest) -> None:
         self.events.append("publish")
+        assert workdir == target
         write_manifest_atomic(workdir, manifest)
-        workdir.rename(target)
 
     def current_identity(self, manifest: SnapshotManifest) -> SnapshotManifest:
         return dataclasses.replace(manifest, **self.identity_change)
@@ -356,6 +360,7 @@ def test_create_publishes_only_after_complete_dump(tmp_path: Path):
     )
 
     assert read_manifest(target).complete
+    assert tools.launch_workdir == target
     assert tools.events == [
         "preflight",
         "launch-child",
@@ -418,3 +423,97 @@ def test_failed_child_is_reaped_and_reported(tmp_path: Path):
         tools.wait_ready(tmp_path, 100)
 
     assert 100 not in tools._children
+
+
+def test_manifest_records_installed_binary_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    tools = LocalSnapshotTools()
+    original_read_text = Path.read_text
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "binary-build")
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda path, *args, **kwargs: (
+            "host-a"
+            if path == Path("/etc/machine-id")
+            else original_read_text(path, *args, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(tools, "_source_revision", lambda: "source-sha")
+    monkeypatch.setattr(
+        tools,
+        "_gpu_identity",
+        lambda: ("NVIDIA A10", "GPU-abc", "575.57.08"),
+    )
+    monkeypatch.setattr(tools, "_version", lambda _command: "4.1")
+    monkeypatch.setattr(tools, "_sha256", lambda _path: "checkpoint-sha")
+    monkeypatch.setattr(tools, "_environment_identity", lambda: ())
+
+    manifest = tools.make_manifest(
+        argparse.Namespace(
+            model_tag="Qwen/Qwen3-0.6B",
+            revision="model-sha",
+            tokenizer_revision="tokenizer-sha",
+        ),
+        ("Qwen/Qwen3-0.6B",),
+        ProcessInventory(
+            root_pid=100,
+            process_tree=(100, 101),
+            cuda_holders=(101,),
+            sockets=(),
+        ),
+        Oracle(token_ids=(12095,), text=" Paris"),
+        tmp_path,
+    )
+
+    assert manifest.source_revision == "source-sha"
+    assert manifest.binary_revision == "binary-build"
+
+
+def test_restore_resets_child_log_to_captured_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir()
+    child_log = artifact / "child.log"
+    child_log.write_bytes(b"startup log")
+    shm_dir = tmp_path / "shm"
+    shm_dir.mkdir()
+    tools = LocalSnapshotTools()
+    tools.shm_dir = shm_dir
+
+    def fake_dump(action: str, _artifact: Path, _arguments: list[str]) -> None:
+        assert action == "dump"
+        (shm_dir / "link_remap.270").write_bytes(b"semaphore state")
+
+    monkeypatch.setattr(tools, "_criu", fake_dump)
+    tools.dump(
+        artifact,
+        ProcessInventory(
+            root_pid=100,
+            process_tree=(100, 101),
+            cuda_holders=(101,),
+            sockets=(),
+        ),
+    )
+    assert (artifact / "link-remaps/link_remap.270").read_bytes() == (
+        b"semaphore state"
+    )
+    assert not (shm_dir / "link_remap.270").exists()
+    child_log.write_bytes(b"startup log\nrestored output")
+
+    def fake_restore(action: str, artifact: Path, _arguments: list[str]) -> None:
+        assert action == "restore"
+        assert child_log.read_bytes() == b"startup log"
+        assert (shm_dir / "link_remap.270").read_bytes() == b"semaphore state"
+        (artifact / "restored.pid").write_text("100")
+
+    monkeypatch.setattr(tools, "_criu", fake_restore)
+    monkeypatch.setattr(
+        tools,
+        "_run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="100"),
+    )
+
+    assert tools.restore(artifact) == 100
