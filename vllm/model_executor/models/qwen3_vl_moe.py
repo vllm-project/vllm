@@ -87,11 +87,17 @@ class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layer_type: type[torch.nn.Module] = Qwen3VLMoeDecoderLayer,
+    ):
         super().__init__(
             vllm_config=vllm_config,
             prefix=prefix,
-            decoder_layer_type=Qwen3VLMoeDecoderLayer,
+            decoder_layer_type=decoder_layer_type,
         )
 
     def forward(
