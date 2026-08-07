@@ -65,3 +65,22 @@ def test_gate_reports_false_when_the_runner_is_absent(monkeypatch):
         assert fi_utils.has_flashinfer_trtllm_sparse_mla_dsv4() is False
     finally:
         fi_utils.has_flashinfer_trtllm_sparse_mla_dsv4.cache_clear()
+
+
+def test_unavailable_reason_covers_the_version_half(monkeypatch):
+    """flashinfer-python 0.6.13 exposes nearby sparse-MLA APIs without the
+    SM120 module, and a cubin mismatched against python fails at first kernel
+    call — symbols alone fail open in both cases (alexbi29,
+    vllm-project/vllm#41834)."""
+    import importlib.metadata as md
+
+    from vllm.utils import flashinfer as fi
+
+    versions = {"flashinfer-python": "0.6.13", "flashinfer-cubin": "0.6.13"}
+    monkeypatch.setattr(md, "version", lambda name: versions[name])
+    reason = fi.flashinfer_sm120_sparse_mla_unavailable_reason()
+    assert reason is not None and "0.6.14" in reason
+
+    versions = {"flashinfer-python": "0.6.16", "flashinfer-cubin": "0.6.15"}
+    reason = fi.flashinfer_sm120_sparse_mla_unavailable_reason()
+    assert reason is not None and "does not match" in reason

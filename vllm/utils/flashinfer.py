@@ -239,6 +239,49 @@ def has_flashinfer_moe() -> bool:
     )
 
 
+def flashinfer_sm120_sparse_mla_unavailable_reason() -> str | None:
+    """Return why the SM120 packed sparse-MLA decode path cannot run, or None.
+
+    Two halves, both load-bearing (reported by alexbi29 on
+    vllm-project/vllm#41834):
+
+    - the symbol half (``has_flashinfer_trtllm_sparse_mla_dsv4``) — probes the
+      exact imports the consumer makes;
+    - the version half — flashinfer-python 0.6.13 exposes nearby sparse-MLA
+      APIs WITHOUT the SM120 module, and a flashinfer-cubin whose version
+      differs from flashinfer-python can still fail open on symbols alone
+      (the python side JIT-compiles against mismatched cubins at first call).
+    """
+    import importlib.metadata as _md
+
+    try:
+        py_ver = _md.version("flashinfer-python")
+    except _md.PackageNotFoundError:
+        return "flashinfer-python is not installed"
+    base = py_ver.split("+")[0]
+    parts = tuple(int(x) for x in base.split(".")[:3] if x.isdigit())
+    if parts < (0, 6, 14):
+        return (
+            f"flashinfer-python {py_ver} < 0.6.14 (SM120 packed sparse-MLA "
+            "ships from 0.6.14; 0.6.13 exposes nearby APIs without it)"
+        )
+    try:
+        cubin_ver = _md.version("flashinfer-cubin")
+    except _md.PackageNotFoundError:
+        cubin_ver = None
+    if cubin_ver is not None and cubin_ver.split("+")[0] != base:
+        return (
+            f"flashinfer-cubin {cubin_ver} does not match flashinfer-python "
+            f"{py_ver}; mismatched cubins fail at first kernel call"
+        )
+    if not has_flashinfer_trtllm_sparse_mla_dsv4():
+        return (
+            "flashinfer is installed but the SM120 packed sparse-MLA symbols "
+            "are missing (see has_flashinfer_trtllm_sparse_mla_dsv4)"
+        )
+    return None
+
+
 @functools.cache
 def has_flashinfer_trtllm_sparse_mla_dsv4() -> bool:
     """Return ``True`` if FlashInfer's official SM120 packed sparse-MLA decode
