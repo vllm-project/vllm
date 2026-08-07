@@ -163,13 +163,15 @@ def resolve_quantization_config(
     take precedence over the shorthand.
     """
     if quantization is not None and quantization not in ONLINE_QUANT_SHORTHAND_NAMES:
-        if quantization_config is not None:
-            raise ValueError(
-                f"quantization_config is only supported when quantization is "
-                f"one of {sorted(ONLINE_QUANT_SHORTHAND_NAMES)}, "
-                f"got quantization={quantization!r}"
-            )
-        return None
+        # Pre-quantized checkpoints can be composed with online weight quantization
+        # for layers that the base quant_method leaves unquantized. The
+        # checkpoint quant_method remains the primary quantization method; composition
+        # is performed after its config has been loaded.
+        if quantization_config is None:
+            return None
+        if isinstance(quantization_config, dict):
+            return QuantizationConfigArgs(**quantization_config)
+        return quantization_config
 
     base = _ONLINE_SHORTHANDS.get(quantization) if quantization else None
 

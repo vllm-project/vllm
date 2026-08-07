@@ -84,6 +84,24 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 
 Combine with `--moe-backend` to pin a specific kernel family.
 
+### Online quantization on unquantized layers from partially-quantized checkpoints
+
+Online quantization can be used on already quantized checkpoints independently of their original `quant_method` (`modelopt`, `compressed-tensors`, `quark`, etc.), for layers that are left unquantized in the original checkpoint.
+
+The checkpoint `quant_method` remains responsible for its quantized layers, while the selected unquantized layers use the requested online method.
+
+For example:
+
+```bash
+vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
+  --quantization-config.linear mxfp8
+```
+
+adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where only MOE experts are quantized.
+
+!!! info
+    `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.
+
 ### Separate Schemes for Dense and MoE Layers
 
 You can apply different quantization schemes to dense linear layers and MoE expert layers via the `linear` and `moe` fields. Each accepts either a full spec dict, or a bare string naming an online shorthand (e.g. `"fp8_per_block"`) or weight format (e.g. `"fp8_per_block_static"`); fields not set fall back to the shorthand defaults.
