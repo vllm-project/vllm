@@ -9,7 +9,10 @@ pub(crate) mod token_ids;
 
 use logprobs::validate_logprobs;
 use sampling::validate_resolved_sampling_params;
-use token_ids::{validate_prompt_token_ids, validate_vocab_range};
+use token_ids::{
+    validate_bad_words_tokenized_shape, validate_prompt_token_ids,
+    validate_resolved_stop_token_ids, validate_sampler_control_sizes, validate_vocab_range,
+};
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
 };
@@ -90,6 +93,8 @@ pub fn lower_sampling_params(
     prompt_len: u32,
     tokenizer: &dyn Tokenizer,
 ) -> Result<EngineCoreSamplingParams> {
+    validate_sampler_control_sizes(&sampling_params)?;
+
     let SamplingParams {
         temperature,
         top_p,
@@ -157,6 +162,9 @@ pub fn lower_sampling_params(
         all_stop_token_ids.insert(primary_eos_token_id);
     }
     all_stop_token_ids.extend(extra_eos_token_ids.iter().copied());
+    if min_tokens > 0 {
+        validate_resolved_stop_token_ids(&all_stop_token_ids)?;
+    }
 
     if !ignore_eos {
         merge_unique_token_ids(&mut stop_token_ids, extra_eos_token_ids.iter().copied());
@@ -263,6 +271,7 @@ fn tokenize_bad_words(
 
         if !without_space.is_empty() {
             all_token_ids.push(without_space);
+            validate_bad_words_tokenized_shape(&all_token_ids)?;
         }
         if !with_space.is_empty()
             && all_token_ids.last().is_some_and(|prev: &Vec<u32>| {
@@ -270,6 +279,7 @@ fn tokenize_bad_words(
             })
         {
             all_token_ids.push(with_space);
+            validate_bad_words_tokenized_shape(&all_token_ids)?;
         }
     }
 
@@ -316,10 +326,12 @@ fn merge_unique_token_ids(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use serial_test::file_serial;
     use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, PlaceholderRange};
     use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_tokenizer::{Result as TokenizerResult, Tokenizer};
 
     use super::*;
     use crate::backend::hf::HfTextBackend;
@@ -329,6 +341,51 @@ mod tests {
 
     fn stub_tokenizer() -> TestTokenizer {
         TestTokenizer::new()
+    }
+
+    struct CountingTokenizer {
+        inner: TestTokenizer,
+        encode_calls: AtomicUsize,
+    }
+
+    impl CountingTokenizer {
+        fn new() -> Self {
+            Self {
+                inner: TestTokenizer::new(),
+                encode_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn encode_calls(&self) -> usize {
+            self.encode_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Tokenizer for CountingTokenizer {
+        fn encode(&self, text: &str, add_special_tokens: bool) -> TokenizerResult<Vec<u32>> {
+            self.encode_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.encode(text, add_special_tokens)
+        }
+
+        fn encode_ordinary(&self, text: &str) -> TokenizerResult<Vec<u32>> {
+            self.inner.encode_ordinary(text)
+        }
+
+        fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> TokenizerResult<String> {
+            self.inner.decode(token_ids, skip_special_tokens)
+        }
+
+        fn token_to_id(&self, token: &str) -> Option<u32> {
+            self.inner.token_to_id(token)
+        }
+
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            self.inner.id_to_token(id)
+        }
+
+        fn vocab_size(&self) -> usize {
+            self.inner.vocab_size()
+        }
     }
 
     fn sample_request() -> TextRequest {
@@ -358,6 +415,14 @@ mod tests {
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
             model_vocab_size: 1000,
             tokenizer_vocab_size: 2000,
+        }
+    }
+
+    fn sample_sampler_width_limits() -> SamplingLimits {
+        SamplingLimits {
+            model_vocab_size: 4096,
+            tokenizer_vocab_size: 4096,
+            ..sample_sampling_limits()
         }
     }
 
@@ -1193,6 +1258,191 @@ mod tests {
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_fixed_width_sampler_controls_above_engine_limits() {
+        let cases = [
+            (
+                SamplingParams {
+                    allowed_token_ids: Some(vec![1; 1025]),
+                    ..SamplingParams::default()
+                },
+                "allowed_token_ids",
+                SamplingLimits::MAX_ALLOWED_TOKEN_IDS,
+            ),
+            (
+                SamplingParams {
+                    logit_bias: Some((0..1025).map(|token_id| (token_id, 1.0)).collect()),
+                    ..SamplingParams::default()
+                },
+                "logit_bias",
+                SamplingLimits::MAX_LOGIT_BIAS_TOKENS,
+            ),
+        ];
+
+        for (sampling_params, expected_parameter, expected_max_allowed) in cases {
+            let error =
+                lower_sampling_params_with_limits(sampling_params, sample_sampler_width_limits())
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::TokenIds(TokenIdsError::TooManyEntries {
+                    parameter,
+                    requested: 1025,
+                    max_allowed,
+                }) if parameter == expected_parameter && max_allowed == expected_max_allowed
+            ));
+        }
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_stop_token_ids_after_eos_expansion() {
+        let error = lower_sampling_params(
+            SamplingParams {
+                min_tokens: Some(1),
+                stop_token_ids: Some((0..128).collect()),
+                ..SamplingParams::default()
+            },
+            SamplingHints {
+                primary_eos_token_id: Some(4095),
+                ..SamplingHints::default()
+            },
+            sample_sampler_width_limits(),
+            3,
+            &stub_tokenizer(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::TooManyEntries {
+                parameter: "stop_token_ids after EOS expansion",
+                requested: 129,
+                max_allowed,
+            }) if max_allowed == SamplingLimits::MAX_STOP_TOKEN_IDS
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_accepts_over_width_stop_token_ids_when_min_tokens_is_zero() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                min_tokens: Some(0),
+                stop_token_ids: Some((0..129).collect()),
+                ..SamplingParams::default()
+            },
+            sample_sampler_width_limits(),
+        )
+        .expect("stop_token_ids wider than the staged row are unused when min_tokens is zero");
+
+        assert_eq!(params.min_tokens, 0);
+        assert_eq!(params.stop_token_ids.len(), 129);
+        assert_eq!(params.all_stop_token_ids.len(), 129);
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_bad_words_before_tokenization_limits() {
+        let tokenizer = CountingTokenizer::new();
+        let error = lower_sampling_params(
+            SamplingParams {
+                bad_words: Some(vec!["blocked".to_string(); 1001]),
+                ..SamplingParams::default()
+            },
+            SamplingHints::default(),
+            sample_sampler_width_limits(),
+            3,
+            &tokenizer,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::TooManyEntries {
+                parameter: "bad_words",
+                requested: 1001,
+                max_allowed,
+            }) if max_allowed == SamplingLimits::MAX_BAD_WORDS_INPUT_COUNT
+        ));
+        assert_eq!(tokenizer.encode_calls(), 0);
+
+        let error = lower_sampling_params(
+            SamplingParams {
+                bad_words: Some(vec!["a".repeat(1001)]),
+                ..SamplingParams::default()
+            },
+            SamplingHints::default(),
+            sample_sampler_width_limits(),
+            3,
+            &tokenizer,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::EntryTooLong {
+                parameter: "bad_words",
+                requested: 1001,
+                max_allowed,
+            }) if max_allowed == SamplingLimits::MAX_BAD_WORD_INPUT_LENGTH
+        ));
+        assert_eq!(tokenizer.encode_calls(), 0);
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_bad_words_tokenized_shape_above_engine_limits() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                bad_words: Some(vec!["a".to_string(); 129]),
+                ..SamplingParams::default()
+            },
+            sample_sampler_width_limits(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::TooManyTokenizedEntries {
+                parameter: "bad_words",
+                requested: 129,
+                max_allowed,
+            }) if max_allowed == SamplingLimits::MAX_BAD_WORD_TOKEN_SEQUENCES
+        ));
+
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                bad_words: Some(vec!["\u{1f600}".repeat(1000)]),
+                ..SamplingParams::default()
+            },
+            sample_sampler_width_limits(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::TooManyTokenizedTokens {
+                parameter: "bad_words",
+                requested: 4000,
+                max_allowed,
+            }) if max_allowed == SamplingLimits::MAX_BAD_WORD_TOTAL_TOKENS
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_accepts_sampler_controls_at_engine_limits() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                min_tokens: Some(1),
+                stop_token_ids: Some((0..128).collect()),
+                allowed_token_ids: Some(vec![1; 1024]),
+                logit_bias: Some((0..1024).map(|token_id| (token_id, 1.0)).collect()),
+                bad_words: Some(vec!["a".to_string(); 128]),
+                ..SamplingParams::default()
+            },
+            sample_sampler_width_limits(),
+        )
+        .expect("fixed-width sampler controls at the engine limit should pass");
+
+        assert_eq!(params.stop_token_ids.len(), 128);
+        assert_eq!(params.allowed_token_ids.as_ref().map(Vec::len), Some(1024));
+        assert_eq!(params.logit_bias.as_ref().map(HashMap::len), Some(1024));
+        assert_eq!(params.bad_words_token_ids.as_ref().map(Vec::len), Some(128));
     }
 
     #[test]

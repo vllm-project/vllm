@@ -48,6 +48,20 @@ impl SamplingLimits {
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
     pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;
+    /// Fixed-width V2 GPU sampler budget for `allowed_token_ids`.
+    pub const MAX_ALLOWED_TOKEN_IDS: usize = 1024;
+    /// Fixed-width V2 GPU sampler budget for `logit_bias`.
+    pub const MAX_LOGIT_BIAS_TOKENS: usize = 1024;
+    /// Fixed-width V2 GPU sampler budget for resolved stop token IDs.
+    pub const MAX_STOP_TOKEN_IDS: usize = 128;
+    /// Pre-tokenization cap for user-supplied `bad_words` entries.
+    pub const MAX_BAD_WORDS_INPUT_COUNT: usize = 1000;
+    /// Pre-tokenization cap for one user-supplied `bad_words` entry.
+    pub const MAX_BAD_WORD_INPUT_LENGTH: usize = 1000;
+    /// Fixed-width V2 GPU sampler budget for tokenized bad-word sequences.
+    pub const MAX_BAD_WORD_TOKEN_SEQUENCES: usize = 128;
+    /// Fixed-width V2 GPU sampler budget for flattened bad-word tokens.
+    pub const MAX_BAD_WORD_TOTAL_TOKENS: usize = 1024;
 
     /// Return the union bound used to validate token-ID prompts.
     pub fn prompt_token_vocab_size(&self) -> usize {
