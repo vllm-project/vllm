@@ -163,6 +163,42 @@ class TestGlm47ExtractToolCalls:
         assert r.tools_called
         assert json.loads(r.tool_calls[0].function.arguments) == {"city": "  Beijing  "}
 
+    def test_missing_opening_arg_value_tag(self, glm47_tool_parser, mock_request):
+        # GLM-4.7 sometimes drops the opening <arg_value> tag under load while
+        # the value and closing tag stay intact; the call is still recoverable
+        # and must not collapse to "{}" (issue #49248).
+        out = "<tool_call>get_weather<arg_key>city</arg_key>Beijing</arg_value></tool_call>"
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+    def test_missing_opening_arg_value_tag_with_newline(
+        self, glm47_tool_parser, mock_request
+    ):
+        # The structural newline that would precede <arg_value> is not part of
+        # the value, so it is stripped; the closing tag still delimits the value.
+        out = "<tool_call>get_weather\n<arg_key>city</arg_key>\nBeijing</arg_value>\n</tool_call>"
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+    def test_missing_opening_arg_value_tag_multiple_args(
+        self, glm47_tool_parser, mock_request
+    ):
+        # A malformed arg followed by a well-formed one both parse correctly.
+        out = (
+            "<tool_call>get_weather"
+            "<arg_key>city</arg_key>Beijing</arg_value>"
+            "<arg_key>date</arg_key><arg_value>2026-01-01</arg_value>"
+            "</tool_call>"
+        )
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {
+            "city": "Beijing",
+            "date": "2026-01-01",
+        }
+
     def test_content_before(self, glm47_tool_parser, mock_request):
         out = "Checking.<tool_call>get_current_date</tool_call>"
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
@@ -239,6 +275,43 @@ class TestGlm47Streaming:
             "get_weather\n",
             "<arg_key>city</arg_key>",
             "<arg_value>",
+            "Beijing",
+            "</arg_value>",
+            "</tool_call>",
+        ]
+        current_text = ""
+        deltas = []
+        for chunk in chunks:
+            current_text += chunk
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=mock_request,
+            )
+            if delta:
+                deltas.append(delta)
+        arguments = [
+            tool_call.function.arguments
+            for delta in deltas
+            for tool_call in (delta.tool_calls or [])
+            if tool_call.function and tool_call.function.arguments
+        ]
+        args = json.loads("".join(arguments))
+        assert args["city"] == "Beijing"
+
+    def test_missing_opening_arg_value_tag(self, glm47_tool_parser, mock_request):
+        # Streaming counterpart of the malformed-tag recovery: the opening
+        # <arg_value> chunk never arrives, but the value still streams and the
+        # assembled arguments are valid JSON (issue #49248).
+        _reset(glm47_tool_parser)
+        chunks = [
+            "<tool_call>",
+            "get_weather\n",
+            "<arg_key>city</arg_key>",
             "Beijing",
             "</arg_value>",
             "</tool_call>",
