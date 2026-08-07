@@ -16,6 +16,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
     GPULoadStoreSpec,
+    TransferResult,
 )
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
@@ -498,7 +499,7 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
                 ),
             )
             deadline = time.time() + 10
-            finished = []
+            finished: list[TransferResult] = []
             while time.time() < deadline and not finished:
                 finished = worker.get_finished()
                 if not finished:
