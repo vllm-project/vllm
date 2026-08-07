@@ -3,6 +3,14 @@
 
 import pytest
 
+from vllm import LLM
+from vllm.model_executor.offloader import (
+    NoopOffloader,
+    UVAOffloader,
+    get_offloader,
+    set_offloader,
+)
+
 from ..utils import compare_two_settings
 
 
@@ -27,3 +35,29 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
         env1=None,
         env2=env_vars,
     )
+
+
+@pytest.mark.parametrize("use_v2_model_runner", ["0", "1"])
+def test_cpu_offload_is_applied(monkeypatch, use_v2_model_runner):
+    """--cpu-offload-gb must actually offload weights on both model runners.
+
+    The output comparison above cannot catch an offloader that is never
+    installed, since not offloading produces identical outputs.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", use_v2_model_runner)
+
+    # The offloader is a process-global, so reset it to the default first.
+    set_offloader(NoopOffloader())
+
+    LLM(
+        model="hmellor/tiny-random-LlamaForCausalLM",
+        cpu_offload_gb=1,
+        max_model_len=128,
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+    )
+
+    offloader = get_offloader()
+    assert isinstance(offloader, UVAOffloader)
+    assert offloader.cpu_offload_bytes > 0
