@@ -576,8 +576,8 @@ class Dot3NoteModel(DeepseekV32Model):
         """Swap NOTE [NoPE, RoPE] rows to the reused [RoPE, NoPE] layout."""
         head_dim = 128
         half_dim = head_dim // 2
-        rows = weight.view(-1, head_dim, weight.shape[-1])
-        return torch.cat([rows[:, half_dim:], rows[:, :half_dim]], dim=1).view_as(
+        rows = weight.reshape(-1, head_dim, *weight.shape[1:])
+        return torch.cat([rows[:, half_dim:], rows[:, :half_dim]], dim=1).reshape_as(
             weight
         )
 
@@ -598,7 +598,13 @@ class Dot3NoteModel(DeepseekV32Model):
                     ):
                         continue
 
-                if name.endswith(".indexer.wq_b.weight"):
+                if name.endswith(
+                    (
+                        ".indexer.wq_b.weight",
+                        ".indexer.k_norm.weight",
+                        ".indexer.k_norm.bias",
+                    )
+                ):
                     weight = self._to_deepseek_indexer_layout(weight)
 
                 projection = next(
