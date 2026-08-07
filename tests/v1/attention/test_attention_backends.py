@@ -3,6 +3,7 @@
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -30,6 +31,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.b12x_attn import B12XPagedAttentionBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     set_kv_cache_layout,
@@ -153,7 +155,12 @@ def create_and_prepopulate_kv_cache(
     # For an fp8 kv cache, store the cache in the fp8 dtype so that assigning
     # the higher-precision context tensors quantizes them, mirroring runtime.
     fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
-    storage_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype] if fp8_kv_cache else dtype
+    if fp8_kv_cache:
+        storage_dtype = FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+    elif kv_cache_dtype == "auto":
+        storage_dtype = dtype
+    else:
+        storage_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
     kv_cache = torch.zeros(
         num_blocks,
@@ -250,6 +257,8 @@ def run_attention_backend(
     attn_type: AttentionType = AttentionType.DECODER,
     sliding_window: int | None = None,
     kv_cache_dtype: str = "auto",
+    sinks: torch.Tensor | None = None,
+    use_cuda_graph: bool = False,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -292,13 +301,14 @@ def run_attention_backend(
             )
     else:
         # Build metadata
-        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        if actual_backend == AttentionBackendEnum.FLEX_ATTENTION:
-            builder.direct_build = use_direct_block_mask
-        attn_metadata = builder.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-        )
+        with set_current_vllm_config(vllm_config):
+            builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+            if actual_backend == AttentionBackendEnum.FLEX_ATTENTION:
+                builder.direct_build = use_direct_block_mask
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
 
     # Instantiate implementation
     num_heads = vllm_config.model_config.get_num_attention_heads(
@@ -309,16 +319,19 @@ def run_attention_backend(
     )
     head_size = vllm_config.model_config.get_head_size()
     scale = 1.0 / (head_size**0.5)
-    impl = impl_cls(
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=scale,
-        num_kv_heads=num_kv_heads,
-        alibi_slopes=None,
-        sliding_window=sliding_window,
-        attn_type=attn_type,
-        kv_cache_dtype=kv_cache_dtype,
-    )
+    extra_impl_kwargs = {"sinks": sinks} if sinks is not None else {}
+    with set_current_vllm_config(vllm_config):
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            attn_type=attn_type,
+            kv_cache_dtype=kv_cache_dtype,
+            **extra_impl_kwargs,
+        )
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
@@ -334,9 +347,28 @@ def run_attention_backend(
         impl.do_kv_cache_update(
             mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
         )
-    output = impl.forward(
-        mock_layer, query, key, value, kv_cache, attn_metadata, output=output
-    )
+    if use_cuda_graph:
+        impl.forward(
+            mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+        )
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            impl.forward(
+                mock_layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output=output,
+            )
+        graph.replay()
+        torch.accelerator.synchronize()
+    else:
+        output = impl.forward(
+            mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+        )
 
     return output
 
@@ -354,6 +386,11 @@ def _test_backend_correctness(
     rtol: float = 1e-2,
     tensor_parallel_size: int = 1,
     kv_cache_dtype: str = "auto",
+    sliding_window_override: int | None = None,
+    use_attention_sinks: bool = False,
+    use_cuda_graph: bool = False,
+    num_speculative_tokens: int = 0,
+    model_dtype: torch.dtype | None = None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -398,10 +435,20 @@ def _test_backend_correctness(
         model_name=model,
         tensor_parallel_size=1,  # Always use TP=1 to avoid multi-GPU requirements
         max_model_len=max(batch_spec.seq_lens),
+        dtype=model_dtype or "auto",
         block_size=block_size,
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
+    if AttentionBackendEnum.B12X_ATTN in backend_to_test:
+        vllm_config.scheduler_config.max_num_seqs = batch_spec.batch_size
+        vllm_config.scheduler_config.max_num_batched_tokens = max(
+            sum(batch_spec.query_lens), 64
+        )
+        if num_speculative_tokens > 0:
+            vllm_config.speculative_config = SimpleNamespace(
+                num_speculative_tokens=num_speculative_tokens
+            )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
     device = torch.device(f"{DEVICE_TYPE}:0")
 
@@ -418,10 +465,19 @@ def _test_backend_correctness(
         vllm_config.parallel_config
     )
     head_size = vllm_config.model_config.get_head_size()
-    sliding_window = vllm_config.model_config.get_sliding_window()
+    sliding_window = (
+        sliding_window_override
+        if sliding_window_override is not None
+        else vllm_config.model_config.get_sliding_window()
+    )
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     block_size = vllm_config.cache_config.block_size
     scale = 1.0 / (head_size**0.5)
+    sinks = (
+        torch.linspace(-0.3, 0.3, num_q_heads, dtype=dtype, device=device)
+        if use_attention_sinks
+        else None
+    )
 
     fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
     if fp8_kv_cache:
@@ -474,14 +530,45 @@ def _test_backend_correctness(
         block_mask = create_block_mask(
             final_mask_mod, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device=device
         )
-        sdpa_out_i = flex_attention(
-            q_sdpa_in,
-            k_sdpa_in,
-            v_sdpa_in,
-            block_mask=block_mask,
-            scale=scale,
-            enable_gqa=True,
-        )
+        if sinks is None:
+            sdpa_out_i = flex_attention(
+                q_sdpa_in,
+                k_sdpa_in,
+                v_sdpa_in,
+                block_mask=block_mask,
+                scale=scale,
+                enable_gqa=True,
+            )
+        else:
+            q_idx = torch.arange(q_len, device=device).unsqueeze(1)
+            kv_idx = torch.arange(kv_len, device=device).unsqueeze(0)
+            mask = final_mask_mod(
+                torch.zeros((), device=device),
+                torch.zeros((), device=device),
+                q_idx,
+                kv_idx,
+            )
+            scores = (
+                torch.einsum(
+                    "hqd,hkd->hqk",
+                    q_sdpa_in.squeeze(0).float(),
+                    k_sdpa_in.squeeze(0).float(),
+                )
+                * scale
+            )
+            scores = scores.masked_fill(~mask.unsqueeze(0), float("-inf"))
+            sink_logits = sinks.float().view(num_q_heads, 1, 1)
+            probabilities = torch.softmax(
+                torch.cat([scores, sink_logits.expand(num_q_heads, q_len, 1)], dim=-1),
+                dim=-1,
+            )[..., :kv_len]
+            sdpa_out_i = (
+                torch.einsum(
+                    "hqk,hkd->hqd", probabilities, v_sdpa_in.squeeze(0).float()
+                )
+                .unsqueeze(0)
+                .to(dtype)
+            )
 
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
 
@@ -543,9 +630,24 @@ def _test_backend_correctness(
         if backend_name == AttentionBackendEnum.FLASHINFER:
             set_kv_cache_layout("HND")
             reset_kv_cache_layout = True
+        elif backend_name == AttentionBackendEnum.B12X_ATTN:
+            set_kv_cache_layout("NHD")
+            reset_kv_cache_layout = True
 
         kv_cache_for_backend = kv_cache
-        if backend_cls is not None:
+        if backend_name == AttentionBackendEnum.B12X_ATTN:
+            cache_dtype = (
+                FP8_KV_CACHE_DTYPES[kv_cache_dtype]
+                if is_quantized_kv_cache(kv_cache_dtype)
+                else kv_cache.dtype
+            )
+            typed_cache = kv_cache.view(cache_dtype)
+            key_cache = typed_cache[..., :head_size].permute(0, 2, 1, 3)
+            value_cache = typed_cache[..., head_size:].permute(0, 2, 1, 3)
+            kv_cache_for_backend = torch.stack((key_cache, value_cache), dim=1)
+            if is_quantized_kv_cache(kv_cache_dtype):
+                kv_cache_for_backend = kv_cache_for_backend.view(torch.uint8)
+        elif backend_cls is not None:
             try:
                 stride_order = backend_cls.get_kv_cache_stride_order()
             except (AttributeError, NotImplementedError):
@@ -574,6 +676,8 @@ def _test_backend_correctness(
                 sliding_window=sliding_window,
                 attn_type=attn_type,
                 kv_cache_dtype=kv_cache_dtype,
+                sinks=sinks,
+                use_cuda_graph=use_cuda_graph,
             )
         finally:
             if reset_kv_cache_layout:
@@ -604,6 +708,151 @@ def _test_backend_correctness(
             atol=atol,
             msg=partial(error_msg, backend_name=backend_name),
         )
+
+
+def _require_b12x_paged_attention() -> None:
+    capability = current_platform.get_device_capability()
+    if (
+        not current_platform.is_cuda()
+        or capability is None
+        or not B12XPagedAttentionBackend.supports_compute_capability(capability)
+    ):
+        pytest.skip("B12X paged attention requires SM120 or SM121.")
+
+    from b12x.attention import paged
+
+    if not paged.is_supported():
+        pytest.skip("B12X paged attention is not available.")
+
+
+def _b12x_causal_mask(
+    b: torch.Tensor,
+    h: torch.Tensor,
+    q_idx: torch.Tensor,
+    kv_idx: torch.Tensor,
+    *,
+    context_len: int,
+):
+    return q_idx + context_len >= kv_idx
+
+
+def _b12x_causal_sliding_window_mask(
+    b: torch.Tensor,
+    h: torch.Tensor,
+    q_idx: torch.Tensor,
+    kv_idx: torch.Tensor,
+    *,
+    context_len: int,
+    sliding_window: int,
+):
+    causal_mask = q_idx + context_len >= kv_idx
+    window_mask = q_idx + context_len - kv_idx < sliding_window
+    return causal_mask & window_mask
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    ["small_decode", "small_prefill", "mixed_small", "medium_decode"],
+)
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "model_dtype"),
+    [
+        ("auto", None),
+        ("bfloat16", torch.bfloat16),
+        ("fp8_e4m3", torch.bfloat16),
+    ],
+)
+@pytest.mark.parametrize("block_size", [64, 128])
+def test_b12x_causal_backend_correctness(
+    default_vllm_config,
+    workspace_init,
+    batch_spec_name: str,
+    kv_cache_dtype: str,
+    model_dtype: torch.dtype | None,
+    block_size: int,
+):
+    """B12X causal paged attention matches the shared SDPA reference."""
+    _require_b12x_paged_attention()
+
+    _test_backend_correctness(
+        BATCH_SPECS[batch_spec_name],
+        "Qwen/Qwen3-0.6B",
+        [AttentionBackendEnum.B12X_ATTN],
+        _b12x_causal_mask,
+        block_size=block_size,
+        kv_cache_dtype=kv_cache_dtype,
+        model_dtype=model_dtype,
+    )
+
+
+@pytest.mark.parametrize("batch_spec_name", ["small_decode", "small_prefill"])
+def test_b12x_causal_sliding_window_and_sinks(
+    default_vllm_config,
+    workspace_init,
+    batch_spec_name: str,
+):
+    """B12X preserves causal SWA and attention-sink semantics."""
+    _require_b12x_paged_attention()
+
+    sliding_window = 16
+    mask = partial(_b12x_causal_sliding_window_mask, sliding_window=sliding_window)
+
+    _test_backend_correctness(
+        BATCH_SPECS[batch_spec_name],
+        "Qwen/Qwen3-0.6B",
+        [AttentionBackendEnum.B12X_ATTN],
+        mask,
+        block_size=64,
+        atol=3e-2,
+        rtol=3e-2,
+        sliding_window_override=sliding_window,
+        use_attention_sinks=True,
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+def test_b12x_decode_cuda_graph_replay_with_sliding_window_and_sinks(
+    default_vllm_config,
+    workspace_init,
+    kv_cache_dtype: str,
+):
+    """B12X causal metadata and sinks remain capture-safe during replay."""
+    _require_b12x_paged_attention()
+
+    sliding_window = 16
+    mask = partial(_b12x_causal_sliding_window_mask, sliding_window=sliding_window)
+
+    _test_backend_correctness(
+        BATCH_SPECS["small_decode"],
+        "Qwen/Qwen3-0.6B",
+        [AttentionBackendEnum.B12X_ATTN],
+        mask,
+        block_size=64,
+        atol=3e-2,
+        rtol=3e-2,
+        sliding_window_override=sliding_window,
+        use_attention_sinks=True,
+        use_cuda_graph=True,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+
+def test_b12x_speculative_verifier_cuda_graph_replay(
+    default_vllm_config,
+    workspace_init,
+):
+    """B12X replays uniform speculative verification through its graph plan."""
+    _require_b12x_paged_attention()
+
+    _test_backend_correctness(
+        BatchSpec(seq_lens=[32, 40], query_lens=[4, 4]),
+        "Qwen/Qwen3-0.6B",
+        [AttentionBackendEnum.B12X_ATTN],
+        _b12x_causal_mask,
+        block_size=128,
+        num_speculative_tokens=3,
+        use_cuda_graph=True,
+    )
 
 
 @pytest.mark.parametrize(
