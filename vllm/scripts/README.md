@@ -93,10 +93,11 @@ Start prefill service
 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
 UCX_NET_DEVICES=all \
 CUDA_VISIBLE_DEVICES=0 \
+VLLM_NIXL_SIDE_CHANNEL_HOST=[IP_ADDRESS] \
 vllm serve "$MODEL" \
 --port 8100 \
 --enforce-eager \
---gpu-memory-utilization 0.6 \
+--gpu-memory-utilization 0.9 \
 --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
 ```
 
@@ -105,11 +106,12 @@ Start decode service
 CUDA_VISIBLE_DEVICES=0 \
 UCX_NET_DEVICES=all \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
+VLLM_NIXL_SIDE_CHANNEL_HOST=[IP_ADDRESS] \
 vllm serve "$MODEL" \
 --port 8200 \
 --enforce-eager \
---gpu-memory-utilization 0.35 \
---kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+--gpu-memory-utilization 0.9 \
+--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
 ```
 
 Start the proxy
