@@ -104,8 +104,13 @@ def test_worker_publish_take_roundtrip():
     publish_worker_notification(event)
 
     assert take_worker_notifications() == [event]
-    # Second take is empty, it drained.
-    assert take_worker_notifications() == []
+    # Second take drained; None rather than [] keeps the empty step allocation-free.
+    assert take_worker_notifications() is None
+
+
+def test_empty_drain_allocates_nothing():
+    """The per-step common case: no producer installed, no list built."""
+    assert take_worker_notifications() is None
 
 
 def test_worker_notifications_survive_until_the_first_drain():
