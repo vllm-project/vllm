@@ -1690,107 +1690,103 @@ def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
 @pytest.mark.parametrize(
     "method, draft_model_config, expected",
     [
-        # A speculators checkpoint is resolved from its own declaration even
-        # when stored at a path with no algorithm hint (a trainer's output).
+        # Config parsing normalizes self-describing checkpoints to a registry
+        # drafter architecture, which resolves the method even at a path with
+        # no algorithm hint (e.g. a trainer's `checkpoints/6`).
         pytest.param(
-            "draft_model",
-            _draft_config("/train/checkpoints/6", speculators_model_type="dflash"),
-            "dflash",
-            id="declared-dflash-at-neutral-path",
+            None,
+            _draft_config(
+                "/train/checkpoints/6", architectures=["Eagle3Qwen3ForCausalLM"]
+            ),
+            ("eagle3", False),
+            id="arch-at-neutral-path",
         ),
+        # peagle architectures run as the eagle3 method, drafting in parallel.
         pytest.param(
-            "draft_model",
-            _draft_config("/train/checkpoints/6", speculators_model_type="peagle"),
-            "eagle3",
-            id="declared-peagle-maps-to-eagle3",
+            None,
+            _draft_config(
+                "/train/checkpoints/6", architectures=["PeagleQwen3ForCausalLM"]
+            ),
+            ("eagle3", True),
+            id="arch-peagle-parallel-eagle3",
         ),
-        # A checkpoint that declares itself outranks an unrelated algorithm
-        # name in whatever directory it happens to be stored under.
+        # Declarations outrank an unrelated algorithm name in the path.
         pytest.param(
-            "draft_model",
-            _draft_config("/bench/eagle3_vs_mtp/ckpt", model_type="deepseek_mtp"),
-            "mtp",
-            id="declared-mtp-beats-eagle3-in-path",
-        ),
-        pytest.param(
-            "draft_model",
-            _draft_config("/bench/eagle3_vs_medusa/ckpt", model_type="medusa"),
-            "medusa",
-            id="declared-medusa-beats-eagle3-in-path",
-        ),
-        pytest.param(
-            "draft_model",
+            None,
             _draft_config(
                 "/bench/dflash_vs_dspark/ckpt", architectures=["Qwen3DSparkModel"]
             ),
-            "dspark",
-            id="declared-dspark-arch-beats-dflash-in-path",
+            ("dspark", True),
+            id="arch-beats-path-name",
         ),
-        # Native DFlash drafters (e.g. z-lab/*) ship outside speculators format
-        # and declare themselves only through `architectures`.
         pytest.param(
-            "draft_model",
-            _draft_config("z-lab/Qwen3.6-35B-A3B", architectures=["DFlashDraftModel"]),
-            "dflash",
-            id="declared-dflash-arch-without-name-hint",
+            None,
+            _draft_config("/bench/eagle3_vs_mtp/ckpt", model_type="deepseek_mtp"),
+            ("mtp", False),
+            id="model-type-beats-path-name",
         ),
-        # Checkpoints that declare nothing still fall back to the path name.
+        # yuhuili-style eagle3 checkpoints keep a plain llama config but
+        # declare a draft vocabulary, which only the eagle3 family has.
         pytest.param(
-            "draft_model",
+            None,
+            _draft_config("/train/checkpoints/6", draft_vocab_size=32000),
+            ("eagle3", False),
+            id="draft-vocab-fingerprint",
+        ),
+        # EAGLE research checkpoints declare nothing; the deprecated
+        # path-name fallback keeps them working.
+        pytest.param(
+            None,
             _draft_config("yuhuili/EAGLE-LLaMA3-Instruct-8B"),
-            "eagle",
-            id="undeclared-falls-back-to-path-eagle",
+            ("eagle", False),
+            id="undeclared-path-name-fallback",
         ),
+        pytest.param(
+            None,
+            _draft_config("/train/checkpoints/6"),
+            ("draft_model", False),
+            id="undeclared-draft-model",
+        ),
+        # An explicit method is never overridden, but parallel drafting still
+        # follows the architecture when it implements that method.
         pytest.param(
             "draft_model",
-            _draft_config("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
-            "eagle3",
-            id="undeclared-falls-back-to-path-eagle3",
+            _draft_config("/ckpt", architectures=["Eagle3Qwen3ForCausalLM"]),
+            ("draft_model", False),
+            id="explicit-never-overridden",
         ),
-        # An explicit method is never second-guessed.
         pytest.param(
             "eagle3",
-            _draft_config("/train/checkpoints/6", speculators_model_type="dflash"),
-            "eagle3",
-            id="explicit-method-wins",
+            _draft_config("/ckpt", architectures=["PeagleQwen3ForCausalLM"]),
+            ("eagle3", True),
+            id="explicit-keeps-arch-parallelism",
         ),
     ],
 )
 def test_speculative_method_resolution(method, draft_model_config, expected):
-    """Method resolution trusts declarations over checkpoint path names.
+    """Method resolution reads the checkpoint's declaration, not its path.
 
-    Exercised below the public API on purpose: reaching it through
-    SpeculativeConfig would mean downloading a checkpoint per case.
+    Exercised below the public API: reaching it through SpeculativeConfig
+    would download a checkpoint per case.
     """
-    resolved = SpeculativeConfig._resolve_method(method, draft_model_config, 5)
-    assert resolved == expected
+    assert (
+        SpeculativeConfig._resolve_method_and_parallel(method, draft_model_config)
+        == expected
+    )
 
 
-def test_unresolvable_speculative_method_raises():
-    with pytest.raises(NotImplementedError, match="Unsupported speculative method"):
-        SpeculativeConfig._resolve_method("medusa", _draft_config("/some/ckpt"), 5)
+def test_drafter_method_table_matches_registry():
+    from typing import get_args
 
+    from vllm.config.speculative import SpeculativeMethod
+    from vllm.model_executor.models.registry import (
+        _SPECULATIVE_DECODING_MODELS,
+        SPEC_METHOD_BY_DRAFTER_ARCH,
+    )
 
-@pytest.mark.parametrize(
-    "hf_attrs, method, expected",
-    [
-        # peagle runs as eagle3 but drafts in parallel, so the declared
-        # algorithm has to be consulted rather than the resolved method.
-        pytest.param({"speculators_model_type": "peagle"}, "eagle3", True, id="peagle"),
-        pytest.param(
-            {"speculators_model_type": "eagle3"}, "eagle3", False, id="eagle3"
-        ),
-        pytest.param({"speculators_model_type": "dflash"}, "dflash", True, id="dflash"),
-        # Checkpoints that declare nothing fall back to the resolved method.
-        pytest.param({}, "dflash", True, id="undeclared-dflash"),
-        pytest.param({}, "dspark", True, id="undeclared-dspark"),
-        pytest.param({}, "eagle3", False, id="undeclared-eagle3"),
-        pytest.param({}, "draft_model", False, id="undeclared-draft-model"),
-    ],
-)
-def test_parallel_drafting_follows_declared_algorithm(hf_attrs, method, expected):
-    hf_config = SimpleNamespace(model_type="llama", **hf_attrs)
-    assert SpeculativeConfig._uses_parallel_drafting(hf_config, method) is expected
+    assert _SPECULATIVE_DECODING_MODELS.keys() <= SPEC_METHOD_BY_DRAFTER_ARCH.keys()
+    valid = set(get_args(SpeculativeMethod))
+    assert {m for m, _ in SPEC_METHOD_BY_DRAFTER_ARCH.values()} <= valid
 
 
 def test_draft_sample_method_probabilistic_is_accepted():
