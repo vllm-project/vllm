@@ -8,6 +8,7 @@ steps:
   device: h200_18gb
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/language
   commands:
     # Test standard language models, excluding a subset of slow tests
@@ -60,6 +61,7 @@ steps:
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
@@ -88,6 +90,7 @@ steps:
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation
   commands:
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
@@ -101,6 +104,7 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
@@ -126,6 +130,7 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation_ppl_test
   commands:
     - pytest -v -s models/language/generation_ppl_test
@@ -163,6 +168,7 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/language/pooling
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
@@ -181,6 +187,7 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/language/pooling_mteb_test
   commands:
     - pytest -v -s models/language/pooling_mteb_test

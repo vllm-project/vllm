@@ -1590,15 +1590,16 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
-        if not torch.allclose(
+        # Match existing NVFP4 MoE paths: fused w13 uses the w1 global scale.
+        if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
-            raise ValueError("Different global scales for w1 and w3 is not supported.")
+            logger.warning_once(
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected."
+            )
 
-        # Use a single gscale for w13
-        w13_weight_scale_2 = torch.maximum(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ).contiguous()
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
         w2_weight_scale_2 = layer.w2_weight_scale_2
 
@@ -1659,6 +1660,9 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale_2,
             a2_scale=layer.w2_input_scale_2,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
+            swiglu_alpha=getattr(layer, "swiglu_alpha", None),
+            swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
         )
 
