@@ -44,6 +44,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
 )
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -52,6 +53,16 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
+
+# ROCm fused all-reduce + RMSNorm op, resolved once at import. Used to collapse
+# the latent-MoE all-reduce and its subsequent RMSNorm (the routed output
+# transform) into a single aiter kernel. None when aiter is unavailable.
+try:
+    from vllm._aiter_ops import rocm_aiter_ops as _aiter_ops
+
+    _aiter_fused_ar_rmsnorm = _aiter_ops.get_fused_allreduce_rmsnorm_op()
+except Exception:
+    _aiter_fused_ar_rmsnorm = None
 
 
 def register_layer_for_moe_forward_op(
@@ -435,6 +446,56 @@ class MoERunner(MoERunnerInterface):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
+    def _get_zero_residual(self, x: torch.Tensor) -> torch.Tensor:
+        """Read-only zero residual buffer for the fused AR+RMSNorm kernel.
+
+        The aiter op takes a residual even when there is nothing to add; a
+        zero residual makes it compute plain ``rmsnorm(all_reduce(x))``. The
+        buffer is cached and reused across calls, regrown only when the current
+        input needs more space or a different dtype/device.
+        """
+        buf = getattr(self, "_zero_residual", None)
+        if (
+            buf is None
+            or buf.numel() < x.numel()
+            or buf.dtype != x.dtype
+            or buf.device != x.device
+        ):
+            buf = torch.zeros(x.numel(), dtype=x.dtype, device=x.device)
+            self._zero_residual = buf
+        return buf[: x.numel()].view_as(x)
+
+    def _can_fuse_ar_rmsnorm(
+        self,
+        fused_output: torch.Tensor,
+        fused_output_is_reduced: bool,
+    ) -> bool:
+        """Whether the AR + routed-output RMSNorm pair can use the aiter fused op.
+
+        Only fuses transforms whose post-norm structure is known exactly: an
+        RMSNorm ``.norm`` followed by a callable ``.up_proj`` (the
+        ``KimiRoutedOutputTransform`` shape). Any other transform falls back to
+        the unfused all-reduce + transform path so no post-norm op is dropped.
+        """
+        transform = self.routed_output_transform
+        norm = getattr(transform, "norm", None)
+        up_proj = getattr(transform, "up_proj", None)
+        return (
+            _aiter_fused_ar_rmsnorm is not None
+            and current_platform.is_rocm()
+            and transform is not None
+            and isinstance(norm, RMSNorm)
+            and callable(up_proj)
+            and self.routed_scaling_factor == 1.0
+            and not self.moe_config.is_sequence_parallel
+            and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
+            and not fused_output_is_reduced
+            and fused_output.is_cuda
+            and fused_output.dim() == 2
+            and fused_output.is_contiguous()
+            and fused_output.dtype in (torch.bfloat16, torch.float16)
+        )
+
     def _maybe_reduce_routed_output_before_transform(
         self,
         fused_output: torch.Tensor,
@@ -744,13 +805,31 @@ class MoERunner(MoERunnerInterface):
         fused_output_is_reduced = self._fused_output_is_reduced
 
         # Latent routed output has to be reduced before output transform,
-        # because the transform may include non-linear normalization.
-        fused_output, fused_output_is_reduced = (
-            self._maybe_reduce_routed_output_before_transform(
-                fused_output,
-                fused_output_is_reduced,
+        # because the transform may include non-linear normalization. On ROCm,
+        # when the transform is a plain RMSNorm + up_proj, the all-reduce and
+        # the RMSNorm collapse into a single aiter fused kernel; the up_proj
+        # then runs on the fused result. Guarded on routed_scaling_factor == 1.0
+        # so the routed-scale step below stays a no-op and ordering is preserved.
+        fused_via_aiter = False
+        fused_transform = self.routed_output_transform
+        if self._can_fuse_ar_rmsnorm(fused_output, fused_output_is_reduced):
+            assert fused_transform is not None
+            transform = fused_transform
+            normed, _ = _aiter_fused_ar_rmsnorm(
+                input_=fused_output,
+                residual=self._get_zero_residual(fused_output),
+                weight=transform.norm.weight.to(fused_output.dtype),
+                epsilon=transform.norm.variance_epsilon,
             )
-        )
+            fused_output_is_reduced = True
+            fused_via_aiter = True
+        else:
+            fused_output, fused_output_is_reduced = (
+                self._maybe_reduce_routed_output_before_transform(
+                    fused_output,
+                    fused_output_is_reduced,
+                )
+            )
 
         # If routed output is already reduced, reduce shared to match.
         # See note above re: the two all-reduce points.
@@ -763,7 +842,11 @@ class MoERunner(MoERunnerInterface):
         )
 
         # Apply output transform (e.g. latent -> full dim)
-        fused_output = self.apply_routed_output_transform(fused_output)
+        if fused_via_aiter:
+            assert fused_transform is not None
+            fused_output, _ = fused_transform.up_proj(normed)
+        else:
+            fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
             result = shared_output + fused_output
