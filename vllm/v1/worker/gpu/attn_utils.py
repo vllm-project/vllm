@@ -7,6 +7,8 @@ from typing import Any, cast
 
 import torch
 
+from vllm.v1.worker.gpu.kv_cache_fabric import maybe_fabric_kv_tensor
+
 from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
@@ -189,12 +191,12 @@ def _allocate_kv_cache(
         if kv_cache_tensor.block_stride > 0:
             # Allocate once; all packed tensors alias the same backing.
             if packed_backing is None:
-                packed_backing = torch.zeros(
-                    kv_cache_tensor.size, dtype=torch.int8, device=device
+                packed_backing = maybe_fabric_kv_tensor(
+                    kv_cache_tensor.size, device
                 )
             tensor = packed_backing
         else:
-            tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
+            tensor = maybe_fabric_kv_tensor(kv_cache_tensor.size, device)
         for layer_name in kv_cache_tensor.shared_by:
             kv_cache_raw_tensors[layer_name] = tensor
 
