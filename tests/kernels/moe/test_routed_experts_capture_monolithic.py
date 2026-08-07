@@ -385,11 +385,9 @@ def test_routed_experts_capturer_e2e_via_monolithic_experts() -> None:
     on the monolithic experts and verify the captured rows land in the
     capturer's device buffer at the correct layer slot.
 
-    Mirrors the wiring done in ``GPUModelRunner._bind_routed_experts_capturer``
-    for the monolithic path: a single closure is installed on the monolithic
-    ``fused_experts`` (in addition to ``router.set_capture_fn`` on the
-    non-monolithic path) and the capturer routes per-layer based on the
-    closed-over ``layer_id``.
+    Mirrors the monolithic path in ``bind_routed_experts_capturer``: a single
+    closure is installed on ``fused_experts`` and routes per-layer based on
+    the closed-over ``layer_id``.
     """
     from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
         RoutedExpertsCapturer,
