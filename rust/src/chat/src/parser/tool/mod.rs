@@ -33,6 +33,7 @@ pub mod names {
     // also routes to `Internlm2ToolParser` despite the version-agnostic name.
     pub const INTERNLM: &str = "internlm";
     pub const KIMI_K2: &str = "kimi_k2";
+    pub const KIMI_K3: &str = "kimi_k3";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
     pub const MINIMAX_M2: &str = "minimax_m2";
@@ -78,6 +79,7 @@ impl ToolParserFactory {
             .register_parser::<HyV3ToolParser>(names::HY_V3)
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
+            .register_unified_dummy(names::KIMI_K3)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
