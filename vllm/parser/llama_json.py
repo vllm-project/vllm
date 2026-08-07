@@ -1121,8 +1121,16 @@ class LlamaJsonParser(ParserEngine):
                     # is the entire response, and dropping it returns an empty
                     # message to a client that asked for a specific tool.
                     if accumulated and not self._drop_content:
-                        self._flush_held_ws(out)
-                        out.append(SemanticEvent(EventType.TEXT_CHUNK, accumulated))
+                        if self._forced_tool_choice:
+                            # Hold rather than emit.  Text under a forced
+                            # choice is already held, so emitting here would
+                            # put this ahead of everything generated before
+                            # it, and would leak the required-mode "[" if a
+                            # real call is promoted later.
+                            self._held_forced.append(accumulated)
+                        else:
+                            self._flush_held_ws(out)
+                            out.append(SemanticEvent(EventType.TEXT_CHUNK, accumulated))
                     continue
                 self._drop_content = True
                 self._held_ws.clear()

@@ -2688,3 +2688,69 @@ class TestForcedChoiceKeepsUnpromotedText:
 
         assert [c.name for c in calls or []] == ["run_cmd"]
         assert not content
+
+    @pytest.mark.parametrize(
+        "text",
+        ['[ Let me think {"x": 1}', 'prose {"x": 1} more', '{"x": 1} tail'],
+        ids=["array-scaffold-then-phantom", "prose-around-phantom", "phantom-first"],
+    )
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            pytest.param("required", id="required"),
+            pytest.param(
+                {"type": "function", "function": {"name": "run_cmd"}}, id="named"
+            ),
+            pytest.param("auto", id="auto"),
+        ],
+    )
+    def test_retracted_phantom_keeps_generation_order(
+        self, parser_cls, mock_tokenizer, tool_choice, text
+    ):
+        """Restoring prose JSON must not reorder the response.
+
+        Text under a forced choice is held until finish, but the phantom
+        restore used to append straight to the output, so the retracted
+        object overtook everything generated before it -- ``[ Let me think
+        {"x": 1}`` came back as ``{"x": 1}[ Let me think``.  Content-order
+        corruption that streaming and non-streaming agree on, so the parity
+        assertions elsewhere cannot see it.
+        """
+        parser = parser_cls(mock_tokenizer)
+        request = self._adjusted(parser, tool_choice)
+
+        calls, content = parser._extract_tool_calls(
+            text, request, enable_auto_tools=True
+        )
+
+        assert not calls
+        # Non-streaming strips surrounding whitespace; order is the claim.
+        assert content == text.strip()
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            pytest.param("required", id="required"),
+            pytest.param(
+                {"type": "function", "function": {"name": "run_cmd"}}, id="named"
+            ),
+        ],
+    )
+    def test_promoted_call_still_discards_a_retracted_phantom(
+        self, parser_cls, mock_tokenizer, tool_choice
+    ):
+        """The other half: holding must not turn into leaking.
+
+        Once a call is promoted the held text is dropped, so the
+        required-mode ``[`` and any retracted phantom before the call stay
+        off the wire.
+        """
+        parser = parser_cls(mock_tokenizer)
+        request = self._adjusted(parser, tool_choice)
+
+        calls, content = parser._extract_tool_calls(
+            '[{"x": 1}' + self.COMPLETE, request, enable_auto_tools=True
+        )
+
+        assert [c.name for c in calls or []] == ["run_cmd"]
+        assert not content
