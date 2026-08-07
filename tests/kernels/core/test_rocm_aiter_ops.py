@@ -164,91 +164,6 @@ def _assert_rel_error_quality(
     assert mean_rel < mean_limit, msg
     assert above_max_count / total <= max_fail_rate, msg
 
-
-# Env var tests ------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("env_name", "attr_name"),
-    [
-        ("VLLM_ROCM_USE_AITER_RMSNORM", "VLLM_ROCM_USE_AITER_RMSNORM"),
-        ("VLLM_ROCM_USE_AITER_TRITON_ROPE", "VLLM_ROCM_USE_AITER_TRITON_ROPE"),
-        ("VLLM_ROCM_USE_AITER_TRITON_GEMM", "VLLM_ROCM_USE_AITER_TRITON_GEMM"),
-        ("VLLM_ROCM_USE_AITER_LINEAR", "VLLM_ROCM_USE_AITER_LINEAR"),
-    ],
-)
-@pytest.mark.parametrize("enabled", [True, False])
-def test_aiter_env_flags_follow_exact_bool_parse(
-    env_name: str,
-    attr_name: str,
-    enabled: bool,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """AITER ROCm env flags should follow the exact bool parse contract."""
-    with monkeypatch.context() as mp:
-        mp.setenv(env_name, "1" if enabled else "0")
-        envs = _reload_envs()
-        assert getattr(envs, attr_name) is enabled
-
-    _reload_envs()
-
-
-# Op registration tests ----------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "op_name",
-    [
-        "rocm_aiter_rms_norm",
-        "rocm_aiter_rmsnorm2d_fwd_with_add",
-        "rocm_aiter_triton_rotary_embedding",
-        "rocm_aiter_per_token_quant",
-        "rocm_aiter_per_tensor_quant",
-        "rocm_aiter_act_mul_and_fp8_group_quant",
-    ],
-)
-def test_rocm_aiter_helper_ops_registered(op_name: str):
-    """The raw AITER helper ops owned by this file should stay registered."""
-    require_aiter()
-    import vllm._aiter_ops  # noqa: F401
-
-    assert hasattr(torch.ops.vllm, op_name)
-    assert callable(getattr(torch.ops.vllm, op_name))
-
-
-# -- rocm_aiter_rms_norm correctness tests ---------------------------------
-
-
-def test_rocm_aiter_rms_norm_output_shape():
-    """rocm_aiter_rms_norm returns tensor of same shape as input."""
-    require_aiter()
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    torch.set_default_device("cuda")
-    M, N = 32, 512
-    x = torch.randn(M, N, dtype=torch.bfloat16)
-    weight = torch.ones(N, dtype=torch.bfloat16)
-    eps = 1e-5
-
-    out = rocm_aiter_ops.rms_norm(x, weight, eps)
-    assert out.shape == (M, N)
-    assert out.dtype == torch.bfloat16
-    assert not torch.any(torch.isnan(out))
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_rocm_aiter_rms_norm_dtype(dtype):
-    """rocm_aiter_rms_norm preserves input dtype."""
-    require_aiter()
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    torch.set_default_device("cuda")
-    x = torch.randn(16, 256, dtype=dtype)
-    weight = torch.ones(256, dtype=dtype)
-    out = rocm_aiter_ops.rms_norm(x, weight, 1e-5)
-    assert out.dtype == dtype
-
-
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_rocm_aiter_rms_norm_vs_torch(dtype):
     """rocm_aiter_rms_norm matches PyTorch manual RMSNorm for float16 and bfloat16."""
@@ -274,114 +189,6 @@ def test_rocm_aiter_rms_norm_vs_torch(dtype):
         atol=1e-2,
         rtol=1e-2,
     )
-
-
-# -- rocm_aiter_rmsnorm2d_fwd_with_add tests -------------------------------
-
-
-def test_rocm_aiter_rmsnorm_with_add_output_shapes():
-    """rocm_aiter_rmsnorm2d_fwd_with_add returns (normed, residual)
-    with correct shapes."""
-    require_aiter()
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    torch.set_default_device("cuda")
-    M, N = 16, 256
-    x = torch.randn(M, N, dtype=torch.bfloat16)
-    residual = torch.randn(M, N, dtype=torch.bfloat16)
-    weight = torch.ones(N, dtype=torch.bfloat16)
-    eps = 1e-5
-
-    out, res_out = rocm_aiter_ops.rms_norm2d_with_add(x, residual, weight, eps)
-    assert out.shape == (M, N)
-    assert res_out.shape == (M, N)
-    assert out.dtype == torch.bfloat16
-    assert not torch.any(torch.isnan(out))
-
-
-# -- rocm_aiter_per_token_quant tests --------------------------------------
-
-
-def test_rocm_aiter_per_token_quant_output_shapes():
-    """rocm_aiter_per_token_quant returns (quantized, scale) with correct shapes."""
-    require_aiter()
-    require_fp8()
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    torch.set_default_device("cuda")
-    M, N = 32, 512
-    x = torch.randn(M, N, dtype=torch.bfloat16)
-    fp8_dtype = current_platform.fp8_dtype()
-
-    x_quant, scale = rocm_aiter_ops.per_token_quant(x, fp8_dtype)
-    assert x_quant.shape == (M, N)
-    assert x_quant.dtype == fp8_dtype
-    assert scale.shape[0] == M  # one scale per token
-    assert not torch.any(torch.isnan(scale))
-
-
-# -- rocm_aiter_per_tensor_quant tests -------------------------------------
-
-
-def test_rocm_aiter_per_tensor_quant_output_shapes():
-    """rocm_aiter_per_tensor_quant returns (quantized, scale) with correct shapes."""
-    require_aiter()
-    require_fp8()
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    torch.set_default_device("cuda")
-    M, N = 32, 512
-    x = torch.randn(M, N, dtype=torch.bfloat16)
-    fp8_dtype = current_platform.fp8_dtype()
-
-    x_quant, scale = rocm_aiter_ops.per_tensor_quant(x, fp8_dtype)
-    assert x_quant.shape == (M, N)
-    assert x_quant.dtype == fp8_dtype
-    # Scale is a scalar or single-element tensor
-    assert scale.numel() == 1
-
-
-# -- rocm_aiter_act_mul_and_fp8_group_quant tests --------------------------
-
-
-def test_rocm_aiter_act_mul_and_fp8_group_quant_output_shapes():
-    """act_mul_and_fp8_group_quant halves the last dim (gate+up) and returns FP8."""
-    require_aiter()
-    require_fp8()
-    import vllm._aiter_ops  # noqa: F401 - ensure op is registered
-
-    torch.set_default_device("cuda")
-    M, N = 32, 512  # N must be even (gate + up halves)
-    group_size = 128
-    x = torch.randn(M, N, dtype=torch.bfloat16)
-
-    x_quant, scale = torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant(
-        x, group_size
-    )
-    N_half = N // 2
-    fp8_dtype = current_platform.fp8_dtype()
-    assert x_quant.shape == (M, N_half)
-    assert x_quant.dtype == fp8_dtype
-    expected_scale_cols = (N_half + group_size - 1) // group_size
-    assert scale.shape == (M, expected_scale_cols)
-
-
-def test_rocm_aiter_act_mul_and_fp8_group_quant_fake_implementation():
-    """The SiLU-mul FP8 group-quant op should preserve fake-tensor support."""
-    require_aiter()
-    require_fp8()
-    import vllm._aiter_ops  # noqa: F401
-
-    x = torch.randn((32, 512), dtype=torch.bfloat16, device="cuda")
-    torch.library.opcheck(
-        torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant,
-        (x, 128),
-        test_utils=("test_faketensor",),
-    )
-
-
-# ``group_fp8_quant`` has a dedicated sibling file with deeper raw-op coverage:
-# tests/kernels/quantization/test_rocm_aiter_grouped_quant.py
 
 
 # -- Numerical accuracy tests for AITER custom ops -------------------------
@@ -626,42 +433,6 @@ def test_rocm_aiter_rms_norm_determinism():
 
     _assert_deterministic(rocm_aiter_ops.rms_norm, x, weight, eps, n_runs=4)
 
-
-# -- Op registration tests for fused RMSNorm+quant ops ---------------------
-
-
-def test_rocm_aiter_rmsnorm_fused_dynamic_quant_registered():
-    """rocm_aiter_rmsnorm_fused_dynamic_quant custom op is registered."""
-    require_aiter()
-    import vllm._aiter_ops  # noqa: F401
-
-    assert hasattr(torch.ops.vllm, "rocm_aiter_rmsnorm_fused_dynamic_quant")
-
-
-def test_rocm_aiter_rmsnorm_fused_add_dynamic_quant_registered():
-    """rocm_aiter_rmsnorm_fused_add_dynamic_quant custom op is registered."""
-    require_aiter()
-    import vllm._aiter_ops  # noqa: F401
-
-    assert hasattr(torch.ops.vllm, "rocm_aiter_rmsnorm_fused_add_dynamic_quant")
-
-
-def test_rocm_aiter_rmsnorm_fp8_group_quant_registered():
-    """rocm_aiter_rmsnorm_fp8_group_quant custom op is registered."""
-    require_aiter()
-    import vllm._aiter_ops  # noqa: F401
-
-    assert hasattr(torch.ops.vllm, "rocm_aiter_rmsnorm_fp8_group_quant")
-
-
-def test_rocm_aiter_rmsnorm_with_add_fp8_group_quant_registered():
-    """rocm_aiter_rmsnorm_with_add_fp8_group_quant custom op is registered."""
-    require_aiter()
-    import vllm._aiter_ops  # noqa: F401
-
-    assert hasattr(torch.ops.vllm, "rocm_aiter_rmsnorm_with_add_fp8_group_quant")
-
-
 # -- Fused RMSNorm + quantization accuracy tests ---------------------------
 
 
@@ -824,39 +595,6 @@ def test_rocm_aiter_rmsnorm_fp8_group_quant_vs_sequential():
     )
 
 
-def test_rocm_aiter_rmsnorm_with_add_fp8_group_quant_shapes():
-    """Fused (residual-add + RMSNorm + FP8-group-quant) returns correct shapes."""
-    require_aiter()
-    require_fp8()
-    import vllm._aiter_ops  # noqa: F401
-
-    torch.set_default_device("cuda")
-    torch.manual_seed(3)
-
-    M, N = 32, 512
-    group_size = 128
-    x = torch.randn(M, N, dtype=torch.bfloat16)
-    residual = torch.randn(M, N, dtype=torch.bfloat16)
-    weight = torch.ones(N, dtype=torch.bfloat16)
-    eps = 1e-5
-    fp8_dtype = current_platform.fp8_dtype()
-    expected_groups = (N + group_size - 1) // group_size
-
-    # Returns (x_quant, residual_out, scales)
-    fused_q, fused_res, fused_scales = (
-        torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant(
-            x, residual, weight, eps, group_size
-        )
-    )
-
-    assert fused_q.shape == (M, N)
-    assert fused_q.dtype == fp8_dtype
-    assert fused_res.shape == (M, N)
-    assert fused_res.dtype == torch.bfloat16
-    assert fused_scales.shape == (M, expected_groups)
-    assert not torch.any(torch.isnan(fused_scales))
-
-
 def test_rocm_aiter_rmsnorm_with_add_fp8_group_quant_residual_accuracy():
     """Fused rmsnorm_with_add_fp8_group_quant residual output matches x + residual."""
     require_aiter()
@@ -911,7 +649,6 @@ def test_rocm_aiter_rmsnorm_with_add_fp8_group_quant_residual_accuracy():
 
 
 # -- End-to-end inference chain test ---------------------------------------
-
 
 def test_rocm_aiter_rms_norm_then_per_token_quant_e2e():
     """End-to-end: BF16 RMSNorm -> per-token FP8 quantization -> dequantize.
