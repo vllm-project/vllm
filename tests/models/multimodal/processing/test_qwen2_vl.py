@@ -27,7 +27,7 @@ def test_fused_input_norm_initialization_on_device(
     rescale_factor: float,
     is_identity: bool,
 ):
-    """Identity detection must not synchronize the accelerator."""
+    """Identity detection must not synchronize the default device."""
     original_allclose = torch.allclose
 
     def cpu_allclose(input: torch.Tensor, other: torch.Tensor, *args, **kwargs):
@@ -36,7 +36,11 @@ def test_fused_input_norm_initialization_on_device(
         return original_allclose(input, other, *args, **kwargs)
 
     monkeypatch.setattr(torch, "allclose", cpu_allclose)
-    with torch.device("cuda"):
+    # Exercise the real accelerator when available. The meta device gives the
+    # CPU-only test shard the same non-CPU default-device semantics without
+    # requiring a CUDA-enabled PyTorch build.
+    default_device = "cuda" if torch.cuda.is_available() else "meta"
+    with torch.device(default_device):
         input_norm = FusedInputNorm(image_mean, image_std, rescale_factor)
 
     assert input_norm.is_identity is is_identity
@@ -44,8 +48,8 @@ def test_fused_input_norm_initialization_on_device(
         assert input_norm.weight is None
         assert input_norm.bias is None
     else:
-        assert input_norm.weight.device.type == "cuda"
-        assert input_norm.bias.device.type == "cuda"
+        assert input_norm.weight.device.type == default_device
+        assert input_norm.bias.device.type == default_device
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
