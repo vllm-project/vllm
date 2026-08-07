@@ -2585,6 +2585,42 @@ def test_dcp_gqa_put_step_rank_wraps_within_put_step():
         assert expected_psr < 2, f"tp{tp} put_step_rank overflow"
 
 
+def test_dcp_mamba_no_phantom_namespaces():
+    """Mamba (factor=1) under DCP: rank_namespaces must produce exactly
+    tp_size entries (one per rank), not tp_size * dcp_size.  Phantom
+    namespaces would break the all()-based lookup."""
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 8
+    worker.num_kv_head = 1
+    worker.dcp_size = 2
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    worker._kv_cache_groups = [KVCacheGroupSpec(["mamba"], mamba)]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=16,
+        )
+    ]
+    _refresh_group_tp_replication_factors(worker)
+
+    prefixes = worker._lookup_key_prefixes[0]
+    assert len(prefixes) == 8, f"Expected 8 Mamba namespaces, got {len(prefixes)}"
+    dcp_ranks = [p.split("@dcp")[1].split("@")[0] for p in prefixes]
+    assert sorted(dcp_ranks) == ["0", "0", "0", "0", "1", "1", "1", "1"], (
+        f"dcp_ranks should be 4×dcp0 + 4×dcp1, got {sorted(dcp_ranks)}"
+    )
+
+
 def test_lookup_partial_prefix_returns_first_hit_length():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1, 0]

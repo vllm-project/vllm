@@ -1466,12 +1466,19 @@ class MooncakeStoreWorker:
 
     def _init_lookup_key_prefixes(self) -> None:
         def rank_namespaces(factor: int) -> tuple[tuple[int, int, int, int], ...]:
-            if self.dcp_size > 1:
+            if self.dcp_size > 1 and factor > 1:
                 return tuple(
                     (shard_rank, pcp_rank, dcp_rank, pp_rank)
                     for pcp_rank in range(self.pcp_size)
                     for shard_rank in range(self.tp_size // factor)
                     for dcp_rank in range(self.dcp_size)
+                    for pp_rank in range(self.pp_size)
+                )
+            if self.dcp_size > 1:
+                return tuple(
+                    (shard_rank, pcp_rank, shard_rank % self.dcp_size, pp_rank)
+                    for pcp_rank in range(self.pcp_size)
+                    for shard_rank in range(self.tp_size // factor)
                     for pp_rank in range(self.pp_size)
                 )
             return tuple(
