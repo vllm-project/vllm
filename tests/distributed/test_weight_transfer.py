@@ -2223,6 +2223,97 @@ class TestRdtRouter:
             RdtRouter(2, 2, [[0, 5]]).validate()
 
 
+class TestRdtRouterLiveConsumers:
+    """``free_target(..., live_consumer_ids=...)`` — syncing to a fleet that has
+    lost a consumer.
+
+    What makes degradation safe is that ``producer_for`` is pure in the consumer
+    id: dropping consumers cannot change a SURVIVING consumer's binding, so a live
+    target is always a subset-count of the provisioned one and a producer never
+    has to serve a name it did not register at init.
+    """
+
+    ROUTERS = {
+        # (num_producers, num_consumers, group_owners, num_groups)
+        "identity_8x8": (8, 8, None, 6),
+        "gather_to_all_16x8": (16, 8, None, 95),
+        "fan_in_2x8": (2, 8, None, 5),
+        "pipeline_2stage": (16, 8, [[*range(8)]] * 3 + [[*range(8, 16)]] * 3, 6),
+        "owners_exceed_consumers": (8, 2, [[*range(8)]] * 4, 4),
+    }
+
+    @staticmethod
+    def _router(spec):
+        p, c, owners, ngroups = spec
+        return RdtRouter(p, c, owners, num_groups=ngroups), ngroups
+
+    @pytest.mark.parametrize("name", list(ROUTERS))
+    def test_full_live_set_matches_no_live_set(self, name):
+        """A fleet that has lost nothing must behave exactly as before."""
+        r, ngroups = self._router(self.ROUTERS[name])
+        everyone = list(range(r.num_consumers))
+        for g in range(ngroups):
+            for p in r.owners(g):
+                assert r.free_target(p, g, everyone) == r.free_target(p, g)
+
+    @pytest.mark.parametrize("name", list(ROUTERS))
+    def test_live_targets_match_a_direct_count(self, name):
+        """Cross-checked against the definition over hole-y live sets — a live set
+        is not required to be a prefix or contiguous."""
+        r, ngroups = self._router(self.ROUTERS[name])
+        c = r.num_consumers
+        for live in ({0}, set(range(c)) - {0}, set(range(0, c, 2)), {c - 1}):
+            for g in range(ngroups):
+                for p in r.owners(g):
+                    expected = sum(1 for x in sorted(live) if r.producer_for(x, g) == p)
+                    assert r.free_target(p, g, live) == expected
+
+    @pytest.mark.parametrize("name", list(ROUTERS))
+    def test_live_targets_conserve_over_the_live_set(self, name):
+        """The termination law restated for a degraded sync: each live consumer
+        frees a group exactly once, so the targets sum to the live count. Short is
+        a hang; long is a double free."""
+        r, ngroups = self._router(self.ROUTERS[name])
+        live = sorted(set(range(r.num_consumers)) - {0})
+        for g in range(ngroups):
+            assert sum(r.free_target(p, g, live) for p in r.owners(g)) == len(live)
+
+    @pytest.mark.parametrize("name", list(ROUTERS))
+    def test_live_targets_never_exceed_provisioned(self, name):
+        r, ngroups = self._router(self.ROUTERS[name])
+        live = set(range(r.num_consumers)) - {0}
+        for g in range(ngroups):
+            for p in r.owners(g):
+                assert r.free_target(p, g, live) <= r.free_target(p, g)
+
+    def test_surviving_consumers_keep_their_bindings(self):
+        r, ngroups = self._router(self.ROUTERS["gather_to_all_16x8"])
+        before = {
+            (c, g): r.producer_for(c, g)
+            for c in range(r.num_consumers)
+            for g in range(ngroups)
+        }
+        live = sorted(set(range(r.num_consumers)) - {3})
+        assert all(
+            r.producer_for(c, g) == before[(c, g)] for c in live for g in range(ngroups)
+        )
+
+    def test_a_dead_consumer_block_zeroes_its_producer(self):
+        """2 producers, 8 consumers: 0-3 pull from producer 0. Kill all four and it
+        has nothing to publish — its groups become gather-and-drop, which the
+        publish loop already handles."""
+        r, ngroups = self._router(self.ROUTERS["fan_in_2x8"])
+        for g in range(ngroups):
+            assert r.free_target(0, g, [4, 5, 6, 7]) == 0
+            assert r.free_target(1, g, [4, 5, 6, 7]) == 4
+
+    def test_empty_live_set_zeroes_everything(self):
+        r, ngroups = self._router(self.ROUTERS["identity_8x8"])
+        assert all(
+            r.free_target(p, g, []) == 0 for g in range(ngroups) for p in r.owners(g)
+        )
+
+
 class _OwnedSource(_ListSource):
     """A source that gathers only some groups, like a pipeline-parallel rank."""
 
@@ -2320,6 +2411,73 @@ def test_sharded_rdt_publish_carries_the_group_free_target(monkeypatch):
     )
     engine.send_weights()
     assert server.free_targets == [1, 1, 1, 1]
+
+
+class TestLiveConsumersScope:
+    """``_live_consumers`` — the per-sync recompute of this rank's free targets.
+
+    The provisioned geometry is frozen for the run; only the expected free count
+    per group moves, and it must move back afterwards so one degraded sync cannot
+    leak into the next.
+    """
+
+    @staticmethod
+    def _engine(num_consumers, world, rank, group_owners=None, num_groups=4):
+        engine = ShardedRDTTrainerWeightTransferEngine.__new__(
+            ShardedRDTTrainerWeightTransferEngine
+        )
+        engine._init_info = ShardedRDTTrainerInitInfo(
+            rank=rank, num_consumers=num_consumers
+        )
+        router = RdtRouter(world, num_consumers, group_owners, num_groups=num_groups)
+        engine._router = router
+        engine._owned_idx = (
+            router.owned_groups(rank) if group_owners else list(range(num_groups))
+        )
+        engine._free_targets = {
+            gi: router.free_target(rank, gi) for gi in engine._owned_idx
+        }
+        engine._world_and_rank = lambda: (world, rank)
+        return engine
+
+    def test_none_leaves_the_targets_untouched(self):
+        engine = self._engine(num_consumers=4, world=4, rank=0)
+        before = dict(engine._free_targets)
+        with engine._live_consumers(None):
+            assert engine._free_targets == before
+        assert engine._free_targets == before
+
+    def test_targets_shrink_inside_the_scope(self):
+        engine = self._engine(num_consumers=8, world=2, rank=0)
+        assert set(engine._free_targets.values()) == {4}
+        with engine._live_consumers([0, 1, 4, 5, 6, 7]):
+            assert set(engine._free_targets.values()) == {2}
+
+    def test_provisioned_targets_are_restored(self):
+        engine = self._engine(num_consumers=8, world=2, rank=0)
+        before = dict(engine._free_targets)
+        with engine._live_consumers([4, 5, 6, 7]):
+            assert set(engine._free_targets.values()) == {0}
+        assert engine._free_targets == before
+
+    def test_targets_are_restored_when_the_sync_raises(self):
+        engine = self._engine(num_consumers=8, world=2, rank=0)
+        before = dict(engine._free_targets)
+        with pytest.raises(RuntimeError), engine._live_consumers([4, 5, 6, 7]):
+            raise RuntimeError("gather failed")
+        assert engine._free_targets == before
+
+    def test_owned_groups_never_move(self):
+        """Degrading changes the TARGETS, never the gather schedule: the group
+        collectives span every owner and must run identically on all of them."""
+        owners = [[*range(8)]] * 3 + [[*range(8, 16)]] * 3
+        engine = self._engine(
+            num_consumers=8, world=16, rank=8, group_owners=owners, num_groups=6
+        )
+        assert engine._owned_idx == [3, 4, 5]
+        with engine._live_consumers([0, 1, 2, 3]):
+            assert sorted(engine._free_targets) == [3, 4, 5]
+        assert sorted(engine._free_targets) == [3, 4, 5]
 
 
 def test_sharded_rdt_worker_init_info_carries_group_owners(monkeypatch):

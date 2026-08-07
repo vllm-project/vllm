@@ -29,6 +29,7 @@ import contextlib
 import threading
 import time
 import uuid
+from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar
@@ -58,6 +59,24 @@ logger = init_logger(__name__)
 # How many gathered groups may be resident (and served) at once before the
 # gather loop blocks. Bounds resident gathered groups on the trainer.
 DEFAULT_GATHER_LOOKAHEAD = 2
+
+# [RDT-STALL-WATCHDOG] Seconds of no progress at all — no publish, no produce, no
+# free — before the producer declares the sync dead.
+#
+# A consumer that dies mid-sync never sends its ``free_gather``, so the group is
+# never released and the three waits below block forever. That stops this rank
+# iterating its WeightSource, which is a collective, which wedges every other
+# trainer rank — with no exception surfacing anywhere until an unrelated NCCL
+# watchdog kills training. The bound converts that into one real error.
+#
+# Liveness backstop, not a latency target: nominal inter-progress gaps are
+# sub-second (the bake runs at init), so this is a ~100x margin even at 235B. It
+# arrives on the init info rather than from the environment because the producer
+# is a Ray actor and does not inherit the trainer process's environment.
+DEFAULT_STALL_TIMEOUT_S = 300.0
+# How often a blocked waiter wakes to re-check the progress stamp. Short enough
+# that the reported stall time is accurate, long enough to be free.
+_STALL_POLL_S = 5.0
 
 # The actor method name the worker engine dials for the NIXL pull. Fixed by
 # contract (ShardedRDTWeightTransferInitInfo.produce_method_name default).
@@ -100,6 +119,9 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Emit per-blob checksums to /tmp/rdt_profile for offline diffing."""
     gather_lookahead: int = DEFAULT_GATHER_LOOKAHEAD
     """Resident gathered groups before the gather loop blocks."""
+    stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S
+    """Seconds of no publish/serve/free progress before the producer fails the
+    sync (see ``DEFAULT_STALL_TIMEOUT_S``)."""
 
 
 class _RDTProducerServer:
@@ -125,6 +147,7 @@ class _RDTProducerServer:
         pack_check: bool,
         gather_lookahead: int,
         served_names: list[str] | None = None,
+        stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S,
     ) -> None:
         import gc
 
@@ -133,6 +156,14 @@ class _RDTProducerServer:
         self._cache: dict[str, torch.Tensor] = {}
         self._cache_cond = threading.Condition()
         self._gather_error: BaseException | None = None
+
+        # [RDT-STALL-WATCHDOG] Monotonic stamp of the last forward step of the
+        # publish -> serve -> free credit loop, bumped under ``_cache_cond`` by
+        # begin_sync / publish / produce completion / free. The three waits below
+        # poll it instead of blocking forever, so a consumer that dies mid-sync
+        # fails the sync with a real error rather than wedging every trainer rank.
+        self._stall_timeout = float(stall_timeout_s)
+        self._last_progress = time.monotonic()
 
         # Names this producer publishes, so a misrouted pull fails loudly
         # instead of blocking forever in the cache wait. None = serve anything.
@@ -196,6 +227,48 @@ class _RDTProducerServer:
     def ping(self) -> int:
         return self._device_index
 
+    # ---------------- stall watchdog ----------------
+
+    def _note_progress_locked(self) -> None:
+        """Record that the credit loop moved. Caller holds ``_cache_cond``."""
+        self._last_progress = time.monotonic()
+
+    def _wait_for(self, blocked: Callable[[], bool], what: str) -> None:
+        """``_cache_cond.wait()`` with a liveness bound.
+
+        Waits while ``blocked()`` holds, returning early on a gather error exactly
+        as the unbounded waits it replaces did. If nothing anywhere on this
+        producer makes progress for ``_stall_timeout``, self-fires the existing
+        ``set_gather_error`` channel — which wakes every other waiter here and is
+        already checked by all three loops — so the whole rank unwinds through one
+        path and the driver gets a real exception.
+
+        The stamp is global to the producer rather than per-waiter on purpose: a
+        consumer that dies is not the only thing that stops, and a waiter that is
+        merely slow is kept alive by its peers' progress. Caller holds
+        ``_cache_cond``.
+        """
+        while blocked():
+            if self._gather_error is not None:
+                return
+            self._cache_cond.wait(_STALL_POLL_S)
+            if not blocked() or self._gather_error is not None:
+                return
+            stalled = time.monotonic() - self._last_progress
+            if stalled >= self._stall_timeout:
+                msg = (
+                    f"RDT stall: no progress for {stalled:.0f}s while waiting for "
+                    f"{what} (timeout {self._stall_timeout:.0f}s). A consumer most "
+                    f"likely died mid-sync: {len(self._inflight_keys)} group(s) "
+                    f"published and unfreed."
+                )
+                logger.error("[rdt-stall] %s", msg)
+                # Same channel a gather failure uses: wakes every waiter here, and
+                # each raises rather than returning a half-served result.
+                self._gather_error = RuntimeError(msg)
+                self._cache_cond.notify_all()
+                return
+
     def warmup_nixl(self) -> None:
         """Create this server's NIXL agent NOW, while the rank's GPU is quiet.
 
@@ -228,6 +301,7 @@ class _RDTProducerServer:
             self._freed_pending.clear()
             self._free_counts.clear()
             self._free_targets.clear()
+            self._note_progress_locked()
 
     def _release_group_locked(self, key: tuple) -> None:
         """Drop a freed group's cache entries and release its backpressure slot.
@@ -271,10 +345,10 @@ class _RDTProducerServer:
         for one that will never come.
         """
         with self._cache_cond:
-            while len(self._inflight_keys) >= self._lookahead:
-                if self._gather_error is not None:
-                    break
-                self._cache_cond.wait()
+            self._wait_for(
+                lambda: len(self._inflight_keys) >= self._lookahead,
+                "a lookahead credit",
+            )
 
         storages, views = entries
         bases: dict[int, torch.Tensor] = {}
@@ -305,6 +379,7 @@ class _RDTProducerServer:
                 self._release_group_locked(group_key)
             freed = self._freed_pending
             self._freed_pending = []
+            self._note_progress_locked()
             self._cache_cond.notify_all()
         return freed
 
@@ -312,10 +387,10 @@ class _RDTProducerServer:
         """Block until every published group has been freed by its consumers;
         return the remaining freed keys so the engine drops its last refs."""
         with self._cache_cond:
-            while self._inflight_keys:
-                if self._gather_error is not None:
-                    break
-                self._cache_cond.wait()
+            self._wait_for(
+                lambda: bool(self._inflight_keys),
+                "every published group to be freed",
+            )
             freed = self._freed_pending
             self._freed_pending = []
             return freed
@@ -344,6 +419,7 @@ class _RDTProducerServer:
             target = self._free_targets.get(key)
             if target is not None and count >= target:
                 self._release_group_locked(key)
+            self._note_progress_locked()
             self._cache_cond.notify_all()
 
     def reserve_serve_arena(self, consumer_id: int, nbytes: int) -> None:
@@ -388,12 +464,16 @@ class _RDTProducerServer:
                 )
         t_w0 = time.perf_counter()
         with self._cache_cond:
-            while not all(n in self._cache for n in needed):
-                if self._gather_error is not None:
-                    raise RuntimeError(
-                        f"gather errored before {needed}: {self._gather_error!r}"
-                    )
-                self._cache_cond.wait()
+            self._wait_for(
+                lambda: not all(n in self._cache for n in needed),
+                f"{len(needed)} name(s) to be published",
+            )
+            if not all(n in self._cache for n in needed):
+                # _wait_for only gives up on a gather error (its own stall
+                # included), so the names are never coming.
+                raise RuntimeError(
+                    f"gather errored before {needed}: {self._gather_error!r}"
+                )
         wait_s = time.perf_counter() - t_w0
 
         t_s0 = time.perf_counter()
@@ -477,6 +557,11 @@ class _RDTProducerServer:
 
     def _bump_timing(self, t_m0, wait_s, t_s0, nspecs, nbytes) -> None:
         slice_s = time.perf_counter() - t_s0
+        # A served pull is the third of the four progress signals the stall
+        # watchdog reads (publish / produce / free / begin_sync): a long sync whose
+        # consumers pull steadily but slowly must never trip it.
+        with self._cache_cond:
+            self._note_progress_locked()
         with self._timing_lock:
             self._produce_calls += 1
             self._produce_specs += nspecs
@@ -832,6 +917,7 @@ class ShardedRDTTrainerWeightTransferEngine(
             nosync=ii.nosync,
             pack_check=ii.pack_check,
             gather_lookahead=ii.gather_lookahead,
+            stall_timeout_s=ii.stall_timeout_s,
         )
         ray.get(self._server.ping.remote())
         # Pre-barrier NIXL warmup: must complete before the server-name
@@ -865,8 +951,67 @@ class ShardedRDTTrainerWeightTransferEngine(
 
     # ---------------- per-round ----------------
 
-    def send_weights(self) -> None:
+    @contextlib.contextmanager
+    def _live_consumers(self, live_consumer_ids: Collection[int] | None):
+        """Scope this sync's free targets to the consumers still alive.
+
+        The provisioned geometry — ``num_consumers``, the router, the ownership
+        table, ``_owned_idx``, the ``served_names`` the producer registered — is
+        FROZEN for the run and is untouched here. All that changes is how many
+        consumers each owned group expects a ``free_gather`` from, which
+        ``publish_group`` already takes as an argument on every call. So syncing
+        to a degraded fleet is a per-sync recompute, not a protocol change.
+
+        Groups whose live target falls to zero are gathered and dropped by the
+        existing publish loop: the gather is a collective across the group's
+        owners and must run on every rank regardless, but publishing a group
+        nobody will free would park a backpressure slot until ``end_sync`` waited
+        forever.
+
+        Every rank must be given the SAME live set — they are all inside the same
+        gather collectives — so the caller has to compute it once and dispatch it
+        to all of them.
+        """
+        if live_consumer_ids is None:
+            yield
+            return
+        assert self._router is not None  # set by trainer_init
+        rank = self._world_and_rank()[1]
+        provisioned = self._free_targets
+        live = sorted(set(live_consumer_ids))
+        self._free_targets = {
+            gi: self._router.free_target(rank, gi, live) for gi in self._owned_idx
+        }
+        dropped = sum(
+            1
+            for gi in self._owned_idx
+            if self._free_targets[gi] <= 0 < provisioned.get(gi, 0)
+        )
+        logger.warning(
+            "[rdt-degraded] serving %d/%d live consumers; %d of this rank's %d "
+            "owned groups become gather-and-drop",
+            len(live),
+            self._init_info.num_consumers,
+            dropped,
+            len(self._owned_idx),
+        )
+        try:
+            yield
+        finally:
+            self._free_targets = provisioned
+
+    def send_weights(self, live_consumer_ids: Collection[int] | None = None) -> None:
+        """Gather this rank's weights and publish them for the consumers to pull.
+
+        ``live_consumer_ids`` restricts the sync to the consumers still alive;
+        ``None`` (the default) serves the whole provisioned set. See
+        ``_live_consumers``.
+        """
         assert self.source is not None
+        with self._live_consumers(live_consumer_ids):
+            self._send_weights_inner()
+
+    def _send_weights_inner(self) -> None:
         if not self.is_sender:
             self._run_gather_loop(update_future=None)
             return

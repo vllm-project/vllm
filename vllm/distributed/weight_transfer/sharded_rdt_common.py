@@ -15,7 +15,7 @@ defines what a group index means for ``WeightSource``, not just for this
 transport.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 
 import torch
 
@@ -133,16 +133,35 @@ class RdtRouter:
             {self.producer_for(consumer_id, g) for g in range(self.num_groups)}
         )
 
-    def free_target(self, producer_rank: int, group_idx: int) -> int:
+    def free_target(
+        self,
+        producer_rank: int,
+        group_idx: int,
+        live_consumer_ids: Collection[int] | None = None,
+    ) -> int:
         """How many consumers pull ``group_idx`` from ``producer_rank``.
 
         Zero is normal: an owner with more peers than consumers still has to run
         the group's collective, but must not publish it — nothing would free it.
+
+        ``live_consumer_ids`` restricts the scan to the consumers still alive for
+        THIS sync; ``None`` means the whole provisioned set (the behaviour of
+        every deployment that does not tolerate consumer death). This is the
+        entire producer-side mechanism for syncing to a fleet that has lost a
+        consumer: ``producer_for`` is pure in the consumer id, so removing
+        consumers cannot change any surviving consumer's binding — it can only
+        lower some free targets, and a target that falls to zero turns that group
+        into gather-and-drop, which the publish loop already handles. Liveness is
+        a FILTER over the provisioned geometry, never a re-derivation of it:
+        rebuilding the router from a shrunken consumer count would silently
+        re-map every survivor.
         """
+        live = None if live_consumer_ids is None else set(live_consumer_ids)
         return sum(
             1
             for c in range(self.num_consumers)
-            if self.producer_for(c, group_idx) == producer_rank
+            if (live is None or c in live)
+            and self.producer_for(c, group_idx) == producer_rank
         )
 
     def owned_groups(self, producer_rank: int) -> list[int]:
