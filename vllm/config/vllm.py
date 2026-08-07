@@ -658,14 +658,10 @@ class VllmConfig:
             return False
 
         if model_config.runner_type == "pooling":
-            # Only encoder-only pooling is task-complete on V2. Which task a
-            # model resolves to is unknown until its pooler is built, so
-            # token-wise models (rerankers, reward models) would fail at engine
-            # start. Keep all decoder pooling on V1 until it is supported.
-            if model_config.attn_type != "encoder_only":
+            if model_config.is_multimodal_model:
                 return False
             # The Transformers backend registers attention layers under names
-            # V2's encoder-only path does not build metadata for. This also
+            # V2's pooling path does not build metadata for. This also
             # covers models with no in-tree implementation, which fall back to
             # that backend even though model_impl is left as "auto".
             if model_config.using_transformers_backend():
