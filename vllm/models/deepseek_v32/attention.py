@@ -32,6 +32,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 
 
@@ -259,6 +260,15 @@ class DeepseekV32Attention(MLAAttention):
         self.topk_indices_buffer = topk_indices_buffer
 
         self.skip_topk = False
+        enable_short_prefill_scoring_skip = (
+            not is_mtp_layer
+            and not skip_topk
+            and not self.use_pcp
+            and current_platform.is_cuda()
+        )
+        self._dense_mha_metadata_layer_name = (
+            self.layer_name if enable_short_prefill_scoring_skip else ""
+        )
 
         if self.require_fp8_kv_cache:
             assert is_quantized_kv_cache(self.kv_cache_dtype), (
@@ -470,7 +480,7 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=True,
                 use_pcp=False,
-                dense_mha_metadata_layer_name="",
+                dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
                 use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
