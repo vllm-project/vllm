@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 import numpy as np
 import torch
@@ -181,11 +181,22 @@ class RejectionSampler:
     ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
+        num_reqs = input_batch.num_reqs
+
+        if logits.shape[0] <= max_chunk_logits:
+            # One chunk covers the batch. Adaptive verification compacts the logits
+            # without updating cu_num_logits_np (it keeps the pre-compacted layout),
+            # so the stale sums must not pick chunk boundaries; its budget cap
+            # guarantees the compacted batch always lands here.
+            request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
+        else:
+            request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
+
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
         logprobs_chunks: list[LogprobsTensors] = []
 
-        for start, end in _iter_request_chunks(cu_num_logits_np, max_chunk_logits):
+        for start, end in request_chunks:
             lo = int(cu_num_logits_np[start])
             hi = int(cu_num_logits_np[end])
             chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo

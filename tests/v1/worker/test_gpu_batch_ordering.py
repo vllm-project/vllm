@@ -40,14 +40,14 @@ def _make_common_attn_metadata(query_lens: list[int]) -> CommonAttentionMetadata
 def test_sort_batch_req_ids_no_spec():
     # decode_query_len == 1: plain ascending order (decodes first).
     num_tokens_per_req = {"p1": 100, "d1": 1, "p2": 7, "d2": 1}
-    assert sort_batch_req_ids(num_tokens_per_req, 1) == ["d1", "d2", "p2", "p1"]
+    assert sort_batch_req_ids(num_tokens_per_req, {}, 1) == ["d1", "d2", "p2", "p1"]
 
 
 def test_sort_batch_req_ids_spec_decode():
     # decode_query_len == 2 (MTP k=1): uniform decodes lead, then the 1-token
     # chunked-prefill tail, then longer prefills.
     num_tokens_per_req = {"tail": 1, "d1": 2, "p1": 100, "d2": 2}
-    assert sort_batch_req_ids(num_tokens_per_req, 2) == ["d1", "d2", "tail", "p1"]
+    assert sort_batch_req_ids(num_tokens_per_req, {}, 2) == ["d1", "d2", "tail", "p1"]
 
 
 def test_spec_decodes_lead_short_prefill_tail():
@@ -55,7 +55,7 @@ def test_spec_decodes_lead_short_prefill_tail():
     # uniform 2-token decodes as decodes even when a 1-token prefill tail is
     # in the batch (indexer-style: require_uniform, threshold=1+k).
     num_tokens_per_req = {"tail": 1, **{f"d{i}": 2 for i in range(8)}}
-    req_ids = sort_batch_req_ids(num_tokens_per_req, 2)
+    req_ids = sort_batch_req_ids(num_tokens_per_req, {}, 2)
     query_lens = [num_tokens_per_req[r] for r in req_ids]
     assert query_lens == [2] * 8 + [1]
 

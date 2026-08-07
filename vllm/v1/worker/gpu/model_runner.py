@@ -102,6 +102,7 @@ from vllm.v1.worker.gpu.input_batch import (
     post_update_num_computed_tokens,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
+    set_dummy_context,
 )
 from vllm.v1.worker.gpu.kv_connector import (
     NO_OP_KV_CONNECTOR,
@@ -1422,25 +1423,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
-            if context_len and self.kernel_block_sizes:
-                query_len = batch_desc.max_query_len or cdiv(
-                    batch_desc.num_tokens, dummy_num_reqs
-                )
-                context_len = self.block_tables.set_dummy_context(
-                    dummy_num_reqs,
-                    query_len,
-                    min(context_len, self.max_model_len - query_len),
-                    self.kv_cache_config.num_blocks,
-                )
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
                 batch_desc.num_tokens,
                 self.input_buffers,
-                context_len=context_len,
                 max_query_len=batch_desc.max_query_len,
             )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
+                if context_len:
+                    set_dummy_context(
+                        input_batch,
+                        self.block_tables,
+                        context_len,
+                        self.kv_cache_config.num_blocks,
+                        self.max_model_len,
+                    )
             else:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "

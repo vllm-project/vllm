@@ -5,7 +5,6 @@ from collections.abc import Iterable
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import (
     FusedStagedWriter,
@@ -175,27 +174,6 @@ class BlockTables:
         return tuple(
             block_table[:num_reqs].zero_() for block_table in self.input_block_tables
         )
-
-    def set_dummy_context(
-        self, num_reqs: int, query_len: int, context_len: int, num_kv_blocks: int
-    ) -> int:
-        """
-        Give each dummy request its own span of KV blocks.
-        Used when profiling step cost.
-        """
-        for block_table, block_size, bpk in zip(
-            self.input_block_tables, self.kernel_block_sizes, self.blocks_per_kv_block
-        ):
-            num_blocks = min(
-                cdiv(context_len + query_len, block_size), block_table.shape[1]
-            )
-            # Spans are disjoint until the pool runs out, then they wrap and share
-            # blocks: profiling only needs the reads to be realistic, not distinct.
-            block_ids = torch.arange(
-                num_reqs * num_blocks, dtype=block_table.dtype, device=self.device
-            ) % (num_kv_blocks * bpk)
-            block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
-        return context_len
 
     def compute_slot_mappings(
         self,
