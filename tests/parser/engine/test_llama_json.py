@@ -2136,3 +2136,142 @@ class TestBareArgumentsRepair:
 
         for streamed in args.values():
             json.loads(streamed)
+
+
+class TestBareArgsArmingRespectsTheSchema:
+    """Bare-arguments mode may only arm when the schema forbids an envelope.
+
+    A named tool choice installs the selected function's ``parameters`` as
+    the guided-decoding schema.  When that schema declares no properties --
+    ``{"type": "object"}`` or ``{}`` -- it does not forbid
+    ``{"name": ..., "parameters": ...}``, so an effectively unconstrained
+    model writes the envelope the chat template asks for.  Reading the whole
+    object as the arguments then hands the tool executor the envelope, which
+    is what upstream does today for these schemas.
+    """
+
+    NAMED = {"type": "function", "function": {"name": "run_python"}}
+    ENVELOPE = '{"name": "run_python", "parameters": {"code": "print(1)"}}'
+    BARE = '{"code": "print(1)"}'
+
+    @pytest.fixture
+    def parser_cls(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+        cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        assert cls is not None
+        return cls
+
+    def _request(self, parameters):
+        function = {"name": "run_python", "description": "run python"}
+        if parameters is not None:
+            function["parameters"] = parameters
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "run python that prints 1"}],
+            tools=[{"type": "function", "function": function}],
+            tool_choice=self.NAMED,
+        )
+
+    # Schemas that do NOT constrain the object's keys. Guided decoding
+    # permits the envelope, so the model writes one.
+    UNCONSTRAINED = [
+        pytest.param({"type": "object"}, id="free-form-object"),
+        pytest.param({}, id="empty-schema"),
+    ]
+
+    @pytest.mark.parametrize("parameters", UNCONSTRAINED)
+    def test_envelope_is_carved_when_the_schema_permits_one(
+        self, parser_cls, mock_tokenizer, parameters
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = parser.adjust_request(self._request(parameters))
+
+        calls, _ = parser._extract_tool_calls(
+            self.ENVELOPE, request, enable_auto_tools=True
+        )
+
+        assert [c.name for c in calls or []] == ["run_python"]
+        # The load-bearing assertion: the arguments are the parameters,
+        # not the whole envelope.
+        assert json.loads(calls[0].arguments) == {"code": "print(1)"}
+
+    @pytest.mark.parametrize("parameters", UNCONSTRAINED)
+    @pytest.mark.parametrize("chunk_size", [1, 4, 10_000])
+    def test_envelope_streams_the_parameters(
+        self, parser_cls, mock_tokenizer, parameters, chunk_size
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = parser.adjust_request(self._request(parameters))
+
+        names: list[str] = []
+        args: dict[int, str] = {}
+        for start in range(0, len(self.ENVELOPE), chunk_size):
+            delta_text = self.ENVELOPE[start : start + chunk_size]
+            delta = parser.parse_delta(
+                delta_text,
+                [ord(c) for c in delta_text],
+                request,
+                prompt_token_ids=[1] if start == 0 else None,
+                finished=start + chunk_size >= len(self.ENVELOPE),
+            )
+            for tool_call in (delta.tool_calls if delta else None) or []:
+                if tool_call.function and tool_call.function.name:
+                    names.append(tool_call.function.name)
+                if tool_call.function and tool_call.function.arguments:
+                    args[tool_call.index] = (
+                        args.get(tool_call.index, "") + tool_call.function.arguments
+                    )
+
+        assert names == ["run_python"]
+        assert [json.loads(a) for a in args.values()] == [{"code": "print(1)"}]
+
+    # A schema that names its keys DOES forbid the envelope, so the model
+    # writes bare parameters and the whole object is the arguments.
+    @pytest.mark.parametrize(
+        "parameters",
+        [
+            pytest.param(
+                {
+                    "type": "object",
+                    "properties": {"code": {"type": "string"}},
+                    "required": ["code"],
+                },
+                id="typed-properties",
+            ),
+            pytest.param(None, id="no-parameters-key"),
+        ],
+    )
+    def test_bare_parameters_still_work_when_the_schema_constrains_keys(
+        self, parser_cls, mock_tokenizer, parameters
+    ):
+        parser = parser_cls(mock_tokenizer)
+        request = parser.adjust_request(self._request(parameters))
+
+        calls, _ = parser._extract_tool_calls(
+            self.BARE, request, enable_auto_tools=True
+        )
+
+        assert [c.name for c in calls or []] == ["run_python"]
+        assert json.loads(calls[0].arguments) == {"code": "print(1)"}
+
+    def test_arming_is_decided_by_the_schema_not_its_mere_presence(
+        self, parser_cls, mock_tokenizer
+    ):
+        """Guard the guard: the two schema families must arm differently."""
+        wrapper = parser_cls(mock_tokenizer)
+
+        def armed_name(parameters):
+            engine = LlamaJsonParser(mock_tokenizer)
+            request = wrapper.adjust_request(self._request(parameters))
+            engine._check_skip_tool_parsing(request)
+            return engine._named_bare_args_name
+
+        assert armed_name({"type": "object"}) is None
+        assert (
+            armed_name({"type": "object", "properties": {"code": {"type": "string"}}})
+            == "run_python"
+        )
