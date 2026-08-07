@@ -515,7 +515,6 @@ class MultiprocExecutor(Executor):
         with suppress(OSError):
             if init_file := getattr(self, "_init_file", None):
                 os.remove(init_file)
-                self._init_file = None
 
         logger.debug_once("[shutdown] Executor: complete")
 
