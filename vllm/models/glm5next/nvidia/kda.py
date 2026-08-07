@@ -37,6 +37,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
+from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -195,12 +199,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.in_proj_qkvbfg_a = _Glm5NextMergedColumnParallelLinear(
             self.hidden_size,
             [
-                projection_size,   # q (shard 0)
-                projection_size,   # k (shard 1)
-                projection_size,   # v (shard 2)
-                self.num_heads,    # b (shard 3)
-                self.head_dim,     # f_a (shard 4, replicated)
-                self.head_dim,     # g_a (shard 5, replicated)
+                projection_size,  # q (shard 0)
+                projection_size,  # k (shard 1)
+                projection_size,  # v (shard 2)
+                self.num_heads,  # b (shard 3)
+                self.head_dim,  # f_a (shard 4, replicated)
+                self.head_dim,  # g_a (shard 5, replicated)
             ],
             replicated_shard_ids=(4, 5),
             tp_size=self.tp_size,
@@ -460,9 +464,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 query_start_loc=spec_query_start_loc,
                 max_query_len=conv_mql,
             )
-            q_spec, k_spec, v_spec = qkv_spec.split(
-                self.local_projection_size, dim=-1
-            )
+            q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
         # --- causal conv1d: non-spec path (prefill or plain decode) ---
         q_ns = k_ns = v_ns = None
@@ -479,9 +481,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata_narrowed,
             ).transpose(0, 1)
-            q_ns, k_ns, v_ns = qkv_ns.split(
-                self.local_projection_size, dim=-1
-            )
+            q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_state_indices_tensor is not None
             decode_conv_indices = non_spec_state_indices_tensor[
@@ -496,9 +496,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_state_indices=decode_conv_indices,
                 validate_data=True,
             )
-            q_ns, k_ns, v_ns = qkv_ns.split(
-                self.local_projection_size, dim=-1
-            )
+            q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
 
         def _rearr(x):
             return rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
@@ -536,9 +534,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             assert q_ns is not None
             assert non_spec_state_indices_tensor is not None
             assert has_initial_state is not None
-            zero_idx = non_spec_state_indices_tensor[~has_initial_state]
-            recurrent_state[zero_idx] = 0
-            initial_state = recurrent_state[non_spec_state_indices_tensor].contiguous()
+            initial_state = gather_initial_states(
+                recurrent_state, non_spec_state_indices_tensor, has_initial_state
+            )
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -558,7 +556,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 lower_bound=lower_bound,
             )
             # Init cache
-            recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+            scatter_states(
+                recurrent_state,
+                last_recurrent_state,
+                non_spec_state_indices_tensor,
+            )
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_query_start_loc is not None
             assert non_spec_state_indices_tensor is not None
