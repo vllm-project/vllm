@@ -33,10 +33,10 @@ steps:
   num_devices: 2
   device: h100
   source_file_dependencies:
-  - csrc/minimax_reduce_rms_kernel.cu
-  - csrc/minimax_reduce_rms_kernel.h
-  - vllm/model_executor/layers/mamba/linear_attn.py
-  - vllm/model_executor/layers/mamba/lamport_workspace.py
+  - csrc/libtorch_stable/minimax_reduce_rms_kernel.cu
+  - csrc/libtorch_stable/minimax_reduce_rms_kernel.h
+  - vllm/model_executor/layers/minimax_rms_norm/rms_norm_tp.py
+  - vllm/model_executor/layers/minimax_rms_norm/lamport_workspace.py
   - tests/kernels/core/test_minimax_reduce_rms.py
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
@@ -46,7 +46,7 @@ steps:
   timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
-  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
@@ -59,7 +59,7 @@ steps:
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
-  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
@@ -151,8 +151,6 @@ steps:
   source_file_dependencies:
   - cmake/external_projects/flashmla.cmake
   - vllm/v1/attention/ops/flashmla.py
-  - vllm/v1/attention/backends/mla/flashmla.py
-  - vllm/v1/attention/backends/mla/flashmla_sparse.py
   - tests/kernels/attention/test_flashmla.py
   - tests/kernels/attention/test_flashmla_sparse.py
   - tests/kernels/attention/test_mla_cross_layer_kernel_equivalence.py
@@ -226,7 +224,7 @@ steps:
   key: kernels-mamba-test
   timeout_in_minutes: 40
   source_file_dependencies:
-  - csrc/mamba/
+  - csrc/libtorch_stable/mamba/
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/ops
   commands:
