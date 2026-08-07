@@ -44,6 +44,9 @@ from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
     should_load_quant_weights,
 )
+from vllm.model_executor.layers.attention.mla_attention import (
+    backend_supports_prefill_query_quantization,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -91,6 +94,20 @@ logger = init_logger(__name__)
 # attention front-end (the GEMM is small and launch-bound, so the overlap
 # hides it); at or above it, run the gate on the main stream.
 _GATE_MULTI_STREAM_TOKEN_THRESHOLD = 512
+
+
+def _validate_plain_fp8_prefill_support(cache_dtype: str) -> None:
+    if (
+        cache_dtype in ("fp8", "fp8_e4m3")
+        and not backend_supports_prefill_query_quantization()
+    ):
+        raise ValueError(
+            "Kimi-K3 plain FP8 KV cache requires FP8 prefill query "
+            "quantization, which is only supported on device capability 100 "
+            "with a compatible MLA prefill backend. Use "
+            "--kv-cache-dtype fp8_ds_mla on Hopper or with other unsupported "
+            "prefill backends."
+        )
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
@@ -262,6 +279,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype = cache_config.cache_dtype
         else:
             self.kv_cache_dtype = "auto"
+        _validate_plain_fp8_prefill_support(self.kv_cache_dtype)
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
