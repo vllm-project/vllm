@@ -924,6 +924,14 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
+    def compute_weight_checksums(self) -> dict:
+        """Return SHA-256 digests for all named parameters in the model."""
+        return self.model_executor.compute_weight_checksums()
+
+    def reset_weights(self) -> None:
+        """Overwrite all model weight-bearing tensors with random values."""
+        self.model_executor.reset_weights()
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
 

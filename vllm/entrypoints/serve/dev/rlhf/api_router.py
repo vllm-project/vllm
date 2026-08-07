@@ -226,6 +226,131 @@ async def weight_info(raw_request: Request):
     return JSONResponse(content={"weight_version": weight_version})
 
 
+# ───────────────────────────────────────────────────────────────────────
+# Weight checksum (snapshot / compare / checksum / reset)
+# ───────────────────────────────────────────────────────────────────────
+
+
+class _WeightCheckerState:
+    """Stores the last SHA-256 weight snapshot for compare operations.
+
+    Thread-safe because all HTTP handlers run in the same asyncio event loop
+    (single-threaded from the checker's perspective).
+    """
+
+    def __init__(self):
+        self.snapshot: list[dict[str, str]] | None = None
+
+    def store(self, per_engine: list[dict[str, str]]) -> None:
+        self.snapshot = list(per_engine)
+
+    def compare(self, current: list[dict[str, str]]) -> tuple[bool, list[str]]:
+        """Return (all_match, list_of_mismatched_or_missing_names).
+
+        ``mismatches`` covers two cases:
+        - digest changed (weight was overwritten with different values)
+        - tensor present in snapshot but absent from current (partial transfer)
+        Either case is a mismatch.
+        """
+        if self.snapshot is None:
+            raise RuntimeError("No snapshot taken yet; call action='snapshot' first")
+        all_bad: list[str] = []
+        for idx in range(max(len(self.snapshot), len(current))):
+            cur = current[idx] if idx < len(current) else {}
+            base = self.snapshot[idx] if idx < len(self.snapshot) else {}
+            changed = [
+                f"dp{idx}:{name}"
+                for name, digest in cur.items()
+                if base.get(name) != digest
+            ]
+            missing = [f"dp{idx}:{n}" for n in base if n not in cur]
+            all_bad += changed + missing
+        # compare is one-shot: clear the snapshot so a second compare
+        # (without a fresh snapshot) is rejected with 400.
+        self.snapshot = None
+        return len(all_bad) == 0, all_bad
+
+
+@router.post("/weight_checker")
+async def weight_checker(raw_request: Request) -> JSONResponse:
+    """Snapshot, compare, or checksum model weights via SHA-256.
+
+    Request body::
+
+        {"action": "snapshot"}   -> take a fresh weight digest and store it
+        {"action": "compare"}    -> compare current weights against stored snapshot
+        {"action": "checksum"}   -> return per-tensor SHA-256 without storing
+        {"action": "reset"}      -> overwrite GPU weights with random values
+
+    Responses (all 200 on success):
+
+    * **snapshot**: ``{"status": "snapshotted", "n_tensors": int}``
+    * **compare**:  ``{"match": bool, "mismatches": [str]}``
+    * **checksum**: ``{"checksums": {name: hex_str}}``
+    * **reset**:    ``{"status": "reset"}``
+
+    Use case in RL: call ``snapshot`` right before a weight update, then ``reset`` weight,
+    ``compare`` after ``finish_weight_update`` to verify the engine's weights
+    actually changed (non-zero NCCL transfer).
+    """
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+    action = body.get("action")
+    if action not in ("snapshot", "compare", "checksum", "reset"):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=f"action must be one of snapshot|compare|checksum|reset, got {action!r}",
+        )
+
+    client = engine_client(raw_request)
+    checker: _WeightCheckerState = raw_request.app.state.weight_checker
+
+    if action == "reset":
+        # Overwrite every weight-bearing tensor with random values on the GPU
+        await client.reset_weights()
+        return JSONResponse(content={"status": "reset"})
+
+    per_engine: list[dict[str, str]] = (
+        await client.compute_weight_checksums_all()
+    )
+    if not per_engine:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            detail="No engine returned weight checksums",
+        )
+
+    if action == "snapshot":
+        checker.store(per_engine)
+
+        return JSONResponse(content={
+            "status": "snapshotted",
+            "n_tensors": len(per_engine[0]),
+            "engines": [len(c) for c in per_engine]
+        })
+
+    if action == "checksum":
+        checksums = {
+            f"dp{idx}:{name}": digest
+            for idx, engine_checksums in enumerate(per_engine)
+            for name, digest in engine_checksums.items()
+        }
+        return JSONResponse(content={
+            "checksums": checksums,
+            "engines": per_engine,
+        })
+
+    # action == "compare"
+    try:
+        match, mismatches = checker.compare(per_engine)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value, detail=str(exc)) from exc
+
+    return JSONResponse(content={"match": match, "mismatches": mismatches})
+
+
 @router.get("/get_world_size")
 async def get_world_size(
     raw_request: Request,
@@ -247,4 +372,8 @@ async def get_world_size(
 
 
 def attach_router(app: FastAPI):
+    # Initialize per-request state objects on the app.
+    if not hasattr(app.state, "weight_checker"):
+        app.state.weight_checker = _WeightCheckerState()
+
     app.include_router(router)

@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
@@ -51,6 +52,43 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
         if num_nans > 0
     }
     raise RuntimeError(f"NaNs detected in logits: {corrupted_requests}")
+
+
+def _iter_checksum_targets(model: nn.Module):
+    """
+    Both named_parameters() and named_buffers() are included because some
+        quantization schemes (e.g. custom quantizers, LoRA) register
+        weight-bearing tensors as buffers, not as parameters.
+    Non-persistent buffers
+        (RoPE sin/cos caches recomputed from config) are skipped because they
+        vary across restarts even when weights are unchanged.
+    """
+    # Skip patterns for buffers that are recomputed from configuration,
+    # not from checkpoint data.
+    _SKIP_PATTERNS = (
+        "rotary_emb.cos_cached",
+        "rotary_emb.sin_cached",
+        "rotary_emb.cos_sin_cache",
+    )
+
+    for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
+        if any(pat in name for pat in _SKIP_PATTERNS):
+            continue
+        supported_dtypes = {
+            torch.bool,
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        }
+        if not tensor.is_floating_point() and tensor.dtype not in supported_dtypes:
+            continue
+        try:
+            raw = tensor.data.contiguous().cpu().view(torch.uint8).numpy().tobytes()
+        except Exception:  # pragma: no cover — exotic dtype
+            continue
+        yield name, tensor
 
 
 @triton.jit(do_not_specialize=["n_blocks"])
