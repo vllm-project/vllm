@@ -448,6 +448,23 @@ class BaseRenderer(ABC, Generic[_T]):
             and not prompt.get("multi_modal_uuids")
         )
 
+    def _defers_tokenization(
+        self,
+        prompt: "TextPrompt",
+        params: "TokenizeParams",
+    ) -> bool:
+        """Whether to skip renderer tokenization and let the multi-modal
+        processor tokenize the prompt text itself, so that the prompt is
+        tokenized exactly once."""
+        mm_processor = self.mm_processor
+        return (
+            mm_processor is not None
+            and mm_processor.prefers_prompt_text
+            and bool(prompt.get("multi_modal_data"))
+            and params.truncate_prompt_tokens is None
+            and params.pad_prompt_tokens is None
+        )
+
     @staticmethod
     def _build_tokens_prompt(
         token_ids: Sequence[int],
@@ -525,6 +542,11 @@ class BaseRenderer(ABC, Generic[_T]):
                     "use 'prompt_token_ids' for token ID inputs"
                 )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+            if self._defers_tokenization(prompt, params):  # type: ignore[arg-type]
+                prompt["tokenization_kwargs"] = {  # type: ignore[typeddict-unknown-key]
+                    "add_special_tokens": params.add_special_tokens
+                }
+                return prompt  # type: ignore[return-value]
             prompt = self._tokenize_prompt(prompt, params)
 
         if params.needs_detokenization and "prompt" not in prompt:
@@ -561,6 +583,11 @@ class BaseRenderer(ABC, Generic[_T]):
                     "use 'prompt_token_ids' for token ID inputs"
                 )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+            if self._defers_tokenization(prompt, params):  # type: ignore[arg-type]
+                prompt["tokenization_kwargs"] = {  # type: ignore[typeddict-unknown-key]
+                    "add_special_tokens": params.add_special_tokens
+                }
+                return prompt  # type: ignore[return-value]
             prompt = await self._tokenize_prompt_async(prompt, params)
 
         if params.needs_detokenization and "prompt" not in prompt:
@@ -725,7 +752,19 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
-    # TODO: Remove str and tokenization_kwargs after deprecating InputPreprocessor
+    @staticmethod
+    def _extract_mm_prompt(
+        prompt: TokensPrompt,
+    ) -> tuple[list[int] | str, dict[str, Any] | None]:
+        """Return the prompt to pass to the multi-modal processor along with
+        its tokenization kwargs: token ids when Step 2 tokenized the prompt,
+        otherwise the prompt text whose tokenization was deferred."""
+        if "prompt_token_ids" in prompt:
+            # Tokenization already done in Step 2
+            return prompt["prompt_token_ids"], None
+
+        return prompt["prompt"], prompt.get("tokenization_kwargs")  # type: ignore[typeddict-item]
+
     def _process_multimodal(
         self,
         prompt: list[int] | str,
@@ -775,20 +814,19 @@ class BaseRenderer(ABC, Generic[_T]):
         """Process token inputs, with multimodal preprocessing offloaded
         to the shared thread pool in the async variant.
         """
-        prompt_token_ids = prompt["prompt_token_ids"]
-
         engine_input: TokensInput | MultiModalInput
         if multi_modal_data := prompt.get("multi_modal_data"):
+            mm_prompt, tokenization_kwargs = self._extract_mm_prompt(prompt)
             engine_input = self._process_multimodal(
-                prompt_token_ids,
+                mm_prompt,
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
-                tokenization_kwargs=None,  # Tokenization already done in Step 2
+                tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 skip_mm_cache=skip_mm_cache,
             )
         else:
-            engine_input = tokens_input(prompt_token_ids)
+            engine_input = tokens_input(prompt["prompt_token_ids"])
 
         if prompt_text := prompt.get("prompt"):
             engine_input["prompt"] = prompt_text
@@ -838,20 +876,19 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
     ) -> TokensInput | MultiModalInput:
-        prompt_token_ids = prompt["prompt_token_ids"]
-
         engine_input: TokensInput | MultiModalInput
         if multi_modal_data := prompt.get("multi_modal_data"):
+            mm_prompt, tokenization_kwargs = self._extract_mm_prompt(prompt)
             engine_input = await self._process_multimodal_async(
-                prompt_token_ids,
+                mm_prompt,
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
-                tokenization_kwargs=None,
+                tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 skip_mm_cache=skip_mm_cache,
             )
         else:
-            engine_input = tokens_input(prompt_token_ids)
+            engine_input = tokens_input(prompt["prompt_token_ids"])
 
         if prompt_text := prompt.get("prompt"):
             engine_input["prompt"] = prompt_text

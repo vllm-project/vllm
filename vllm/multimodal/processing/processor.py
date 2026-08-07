@@ -1052,6 +1052,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
+    prefers_prompt_text: bool = False
+    """
+    Whether `apply` should be given the prompt text instead of token ids
+    whenever possible.
+
+    Set by processors that tokenize the prompt themselves (e.g. the
+    Transformers backend), so that the renderer defers tokenization to them
+    instead of tokenizing first and forcing a lossy decode/re-encode
+    round trip.
+    """
+
     def __init__(
         self,
         info: _I,

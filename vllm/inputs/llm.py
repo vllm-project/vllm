@@ -95,6 +95,12 @@ class _PromptOptions(TypedDict):
     Optional cache salt to be used for prefix caching.
     """
 
+    tokenization_kwargs: NotRequired[dict[str, Any]]
+    """
+    Overrides for the tokenization performed by the multi-modal processor.
+    Set by the renderer when tokenization is deferred to the processor.
+    """
+
 
 class TextPrompt(_PromptOptions):
     """Schema for a text prompt."""
