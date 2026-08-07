@@ -251,8 +251,9 @@ def validate_structural_tag_response_format(
 
 
 def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
-    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+    from vllm.v1.structured_output.backend_xgrammar import (
+        validate_xgrammar_structural_tag_syntax,
+    )
 
     if isinstance(payload, str) and not payload:
         raise VLLMValidationError(
@@ -261,12 +262,11 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
         )
 
     try:
-        validate_xgrammar_grammar(
-            SamplingParams(
-                structured_outputs=StructuredOutputsParams(structural_tag=payload)
-            )
-        )
-    except (TypeError, ValueError, VLLMValidationError) as exc:
+        # Request parsing has no model/tokenizer context, so keep this step to
+        # xgrammar's parse-only validation. Token bounds are enforced later,
+        # before tokenizer-bound compilation.
+        validate_xgrammar_structural_tag_syntax(payload)
+    except (TypeError, ValueError) as exc:
         raise VLLMValidationError(
             f"Invalid {parameter} structural_tag specification.",
             parameter=parameter,

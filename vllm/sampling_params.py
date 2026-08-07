@@ -218,6 +218,15 @@ def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
     return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
 
 
+def _get_xgrammar_vocab_size(
+    model_config: ModelConfig,
+    tokenizer: TokenizerLike,
+) -> int:
+    if is_mistral_tokenizer(tokenizer):
+        return len(tokenizer.vocab)
+    return model_config.get_vocab_size()
+
+
 class SamplingParams(
     PydanticMsgspecMixin,
     msgspec.Struct,
@@ -1100,7 +1109,11 @@ class SamplingParams(
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
-            validate_xgrammar_grammar(self)
+            validate_xgrammar_grammar(
+                self,
+                vocab_size=_get_xgrammar_vocab_size(model_config, tokenizer),
+                tokenizer=tokenizer,
+            )
         elif backend.startswith("guidance"):
             if _is_non_tekken_mistral(tokenizer=tokenizer):
                 raise VLLMValidationError(
@@ -1137,7 +1150,11 @@ class SamplingParams(
             # this setting. We include fallback behavior here, but not with any
             # other setting where a specific backend was specified.
             try:
-                validate_xgrammar_grammar(self)
+                validate_xgrammar_grammar(
+                    self,
+                    vocab_size=_get_xgrammar_vocab_size(model_config, tokenizer),
+                    tokenizer=tokenizer,
+                )
                 self.structured_outputs._backend = "xgrammar"
             except VLLMValidationError:
                 # The request either failed validation
