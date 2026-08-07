@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -1048,14 +1049,37 @@ def convert_to_humming_moe_kernel_format(
     layer.weight_schemas = {}
     layer.input_schemas = {}
 
+    # Block-FP8 (group-128) activations are quantized *before* the EP all-to-all
+    # dispatch, so only the dispatched activation -- the w13 (gate/up) input --
+    # actually arrives block-quantized ([M, K // 128] float32 scale, consumed by
+    # Humming as-is). The w2 (down) input is produced locally inside the experts
+    # and quantized by Humming's may_quant_input(), which emits a per-token
+    # scale. Compiling the w2 kernel for block-128 would make it demand a
+    # [M, K // 128] scale and crash in the launcher ("as.size(1) != "
+    # "expected_shape[1] => 1 != <K//128>"). Keep block-128 only for w13 and
+    # fall back to per-token FP8 for every other sublayer.
+    dispatch_group_size = getattr(input_schema, "input_scale_group_size", 0) or 0
+    prequantizes_dispatch = (
+        dispatch_group_size == 128
+        and getattr(input_schema, "a_dtype", None) is not None
+        and str(input_schema.a_dtype).startswith("float8")
+    )
+
     for sublayer_name, configs in sublayer_configs.items():
+        sublayer_input_schema = input_schema
+        if prequantizes_dispatch and sublayer_name != "w13":
+            # Per-token FP8 (input_scale_group_size=0) for non-dispatched GEMMs.
+            sublayer_input_schema = dataclasses.replace(
+                input_schema, input_scale_group_size=0
+            )
+
         final_weight_schema, final_input_schema = _process_single_sublayer(
             layer=layer,
             sublayer_name=sublayer_name,
             shape_n=configs["shape_n"],
             shape_k=configs["shape_k"],
             weight_schema=weight_schema,
-            input_schema=input_schema,
+            input_schema=sublayer_input_schema,
             has_bias=has_bias,
             num_experts=num_experts,
             param_dtype=param_dtype,
