@@ -60,8 +60,6 @@ void fused_experts_fp_kernel_impl(
   const int64_t stride_e = 2 * N * packed_K;
   const int64_t stride_n = packed_K;
 
-  const PackedGemmBackend backend = select_moe_packed_gemm_backend<scalar_t>();
-
   int64_t B_tmp_size_per_thread = MAX_CACHE_BLOCK_SIZE * BLOCK_N * std::max(K, N);
 
   // here we only parallel on half of 2N to fuse silu_and_mul with gemm
@@ -89,7 +87,8 @@ void fused_experts_fp_kernel_impl(
       if (m_size == 0) {
         return;
       }
-      used_brgemm |= moe_uses_brgemm(backend, m_size, n_size);
+      const bool brg = can_use_brgemm<packed_t>(m_size, n_size);
+      used_brgemm |= brg;
 
       if (nb_offset == 0) {
         // 1.a load A
@@ -115,7 +114,7 @@ void fused_experts_fp_kernel_impl(
           /*   lda          */ K,
           /*   ldb          */ n_size,
           /*   ldc          */ 2 * N,
-          /*   backend      */ backend,
+          /*   brg          */ brg,
           /*   block_size_K */ block_size_K,
           /*   do_unpack    */ do_unpack);
     });
@@ -164,7 +163,8 @@ void fused_experts_fp_kernel_impl(
         return;
       }
       int64_t n_size = std::min(OC - nb * BLOCK_N, BLOCK_N);
-      used_brgemm |= moe_uses_brgemm(backend, m_size, n_size);
+      const bool brg = can_use_brgemm<packed_t>(m_size, n_size);
+      used_brgemm |= brg;
 
       // A ptr from ic1 of [M * topk, N] in sorted order
       // so as to avoid copy A to tmp buffer again
@@ -196,7 +196,7 @@ void fused_experts_fp_kernel_impl(
           /*   lda          */ IC,
           /*   ldb          */ n_size,
           /*   ldc          */ BLOCK_N,
-          /*   backend      */ backend,
+          /*   brg          */ brg,
           /*   block_size_K */ block_size_K,
           /*   do_unpack    */ do_unpack);
 
@@ -289,8 +289,6 @@ void shared_expert_fp8_kernel_impl(
   int64_t blocks_n_per_group = block_size_N / BLOCK_N;
 
   const bool use_brgemm = can_use_brgemm<at::Float8_e4m3fn>(M);
-  const PackedGemmBackend backend =
-      use_brgemm ? PackedGemmBackend::Brgemm : PackedGemmBackend::TinyGemm;
   const bool apply_scaling_factor = fused_experts_out != nullptr;
 
   int64_t B_tmp_size_per_thread = MAX_CACHE_BLOCK_SIZE * BLOCK_N * std::max(K, N);
@@ -319,7 +317,7 @@ void shared_expert_fp8_kernel_impl(
           /*   lda          */ K,
           /*   ldb          */ n_size,
           /*   ldc          */ 2 * N,
-          /*   backend      */ backend,
+          /*   brg          */ use_brgemm,
           /*   block_size_K */ block_size_K,
           /*   do_unpack    */ do_unpack);
     });
@@ -371,7 +369,7 @@ void shared_expert_fp8_kernel_impl(
           /*   lda          */ IC,
           /*   ldb          */ n_size,
           /*   ldc          */ BLOCK_N,
-          /*   backend      */ backend,
+          /*   brg          */ use_brgemm,
           /*   block_size_K */ block_size_K,
           /*   do_unpack    */ do_unpack);
 

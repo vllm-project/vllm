@@ -24,8 +24,6 @@ constexpr int block_size_n() {
   return 2 * TILE_N;
 }
 
-constexpr int MOE_TINY_GEMM_MAX_M = 4;
-
 constexpr bool brgemm_supported() {
 #if defined(CPU_CAPABILITY_AVX512)
   return true;
@@ -33,37 +31,6 @@ constexpr bool brgemm_supported() {
   return false;
 #endif
 }
-
-enum class PackedGemmBackend {
-  TinyGemm,
-  Brgemm,
-};
-
-template <typename scalar_t>
-constexpr PackedGemmBackend select_moe_packed_gemm_backend() {
-  if constexpr (std::is_same_v<scalar_t, at::BFloat16>) {
-    return brgemm_supported() ? PackedGemmBackend::Brgemm : PackedGemmBackend::TinyGemm;
-  } else {
-    return PackedGemmBackend::TinyGemm;
-  }
-}
-
-constexpr bool moe_uses_brgemm(PackedGemmBackend backend, int64_t M, int64_t N) {
-  return M > 0 && backend == PackedGemmBackend::Brgemm &&
-      (M > MOE_TINY_GEMM_MAX_M || N != block_size_n());
-}
-
-static_assert(
-    select_moe_packed_gemm_backend<at::BFloat16>() ==
-    (brgemm_supported() ? PackedGemmBackend::Brgemm : PackedGemmBackend::TinyGemm));
-static_assert(select_moe_packed_gemm_backend<at::Half>() == PackedGemmBackend::TinyGemm);
-static_assert(select_moe_packed_gemm_backend<at::Float8_e4m3fn>() == PackedGemmBackend::TinyGemm);
-static_assert(!moe_uses_brgemm(PackedGemmBackend::Brgemm, 0, block_size_n()));
-static_assert(!moe_uses_brgemm(PackedGemmBackend::Brgemm, MOE_TINY_GEMM_MAX_M, block_size_n()));
-static_assert(
-    moe_uses_brgemm(PackedGemmBackend::Brgemm, MOE_TINY_GEMM_MAX_M + 1, block_size_n()));
-static_assert(
-    moe_uses_brgemm(PackedGemmBackend::Brgemm, MOE_TINY_GEMM_MAX_M, block_size_n() - 1));
 
 // define threshold using brgemm (intel AMX)
 template <typename T>
@@ -90,6 +57,11 @@ inline bool can_use_brgemm<uint8_t>(int M) {
 template <>
 inline bool can_use_brgemm<at::Float8_e4m3fn>(int M) {
   return brgemm_supported() && M > 4;
+}
+
+template <typename T>
+inline bool can_use_brgemm(int M, int N) {
+  return brgemm_supported() && (can_use_brgemm<T>(M) || N != block_size_n());
 }
 
 // work around compiler internal error
@@ -344,7 +316,7 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    PackedGemmBackend backend,
+    bool brg,
     int64_t block_size_K,
     bool do_unpack = true);
 
@@ -381,7 +353,7 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    PackedGemmBackend backend,
+    bool brg,
     int64_t block_size_K,
     bool do_unpack = true);
 
@@ -420,6 +392,6 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc,
-    PackedGemmBackend backend,
+    bool brg,
     int64_t block_size_K,
     bool do_unpack = true);
