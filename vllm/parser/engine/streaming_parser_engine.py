@@ -5,6 +5,7 @@ incremental lexing, and state-machine-driven semantic event emission."""
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -15,6 +16,7 @@ from vllm.parser.engine.incremental_lexer import (
     LexerShape,
     LexToken,
     TerminalDef,
+    terminals_from_literals,
 )
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -36,28 +38,25 @@ class _DropInfo:
     extra_token_ids: dict[int, str]
 
 
-def _build_drop_info(
-    config: ParserEngineConfig,
-    tokenizer,
+@functools.lru_cache(maxsize=64)
+def _build_drop_info_cached(
+    terminals: tuple[tuple[str, str], ...],
+    configured_token_texts: frozenset[str],
+    preserve_tokens: frozenset[str],
+    special_tokens: tuple[tuple[str, int], ...],
 ) -> _DropInfo | None:
-    try:
-        special_tokens: list[str] = list(tokenizer.all_special_tokens)
-        special_ids: list[int] = list(tokenizer.all_special_ids)
-    except (AttributeError, NotImplementedError):
-        return None
-
     if not special_tokens:
         return None
 
     configured_texts = (
-        set(config.token_id_terminals.values())
-        | set(config.terminals.values())
-        | config.preserve_tokens
+        configured_token_texts
+        | frozenset(text for _, text in terminals)
+        | preserve_tokens
     )
 
     extra_token_ids: dict[int, str] = {}
     drop_texts: set[str] = set()
-    for text, tid in zip(special_tokens, special_ids):
+    for text, tid in special_tokens:
         if text not in configured_texts:
             extra_token_ids[tid] = DROP_TERMINAL
             drop_texts.add(text)
@@ -77,12 +76,31 @@ def _build_drop_info(
         for text in drop_texts
     ]
 
-    all_terminal_defs = list(config.terminal_defs) + drop_terminal_defs
+    all_terminal_defs = terminals_from_literals(dict(terminals)) + drop_terminal_defs
     lexer_shape = LexerShape(all_terminal_defs)
 
     return _DropInfo(
         lexer_shape=lexer_shape,
         extra_token_ids=extra_token_ids,
+    )
+
+
+def _build_drop_info(
+    config: ParserEngineConfig,
+    tokenizer,
+) -> _DropInfo | None:
+    try:
+        special_tokens = tuple(
+            zip(tokenizer.all_special_tokens, tokenizer.all_special_ids)
+        )
+    except (AttributeError, NotImplementedError):
+        return None
+
+    return _build_drop_info_cached(
+        tuple(config.terminals.items()),
+        frozenset(config.token_id_terminals.values()),
+        config.preserve_tokens,
+        special_tokens,
     )
 
 
