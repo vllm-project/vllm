@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
+    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -779,7 +780,10 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
-        Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
+        Mamba align lookups can lag the full-attention hit used by a connector.
+        Missing recurrent positions are represented by null placeholders; the
+        connector allocates and fills the final state slot. Refcounts are
+        untouched and ``blocks`` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
         for group_blocks, manager in zip(
@@ -789,8 +793,15 @@ class KVCacheManager:
         ):
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            assert num_blocks <= len(group_blocks)
-            truncated.append(list(group_blocks[:num_blocks]))
+            if num_blocks <= len(group_blocks):
+                truncated.append(list(group_blocks[:num_blocks]))
+                continue
+
+            spec = manager.kv_cache_spec
+            assert isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align"
+            padded = list(group_blocks)
+            padded.extend([self.block_pool.null_block] * (num_blocks - len(padded)))
+            truncated.append(padded)
         return self.create_kv_cache_blocks(tuple(truncated))
 
     def take_new_block_ids(self) -> list[int]:
