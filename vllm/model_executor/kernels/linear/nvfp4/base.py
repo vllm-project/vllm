@@ -3,15 +3,17 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Literal
 
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.utils.flashinfer import has_flashinfer_cutedsl_nvfp4_quant
 
-if TYPE_CHECKING:
-    from vllm.config.kernel import NvFp4InputQuantBackend
+# Backend actually used by a kernel after resolving KernelConfig.
+# nvfp4_input_quant_backend; the config's "cuda" opt-out resolves to "auto"
+# (the built-in CUDA path), so a resolved value is only ever one of these.
+ResolvedNvFp4InputQuantBackend = Literal["auto", "flashinfer_cutedsl"]
 
 
 @dataclass
@@ -41,7 +43,7 @@ class NvFp4LinearKernel(ABC):
 
     # Resolved per instance in __init__; the class-level default keeps
     # input_quant_key() safe on instances probed without running __init__.
-    input_quant_backend: "NvFp4InputQuantBackend" = "auto"
+    input_quant_backend: ResolvedNvFp4InputQuantBackend = "auto"
 
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
@@ -49,19 +51,28 @@ class NvFp4LinearKernel(ABC):
         self.config = config
         self.input_quant_backend = self._resolve_input_quant_backend()
 
-    def _resolve_input_quant_backend(self) -> "NvFp4InputQuantBackend":
+    def _resolve_input_quant_backend(self) -> ResolvedNvFp4InputQuantBackend:
         """Resolve once at setup which backend performs this kernel's activation
-        quant, so apply_weights only reads a plain attribute."""
+        quant, so apply_weights only reads a plain attribute. "auto" defaults to
+        the FlashInfer CuTe-DSL quant where this kernel supports it and it is
+        available, else the built-in CUDA kernel; "cuda" forces the CUDA kernel;
+        "flashinfer_cutedsl" forces CuTe-DSL and errors if it is unavailable."""
         from vllm.config import get_current_vllm_config_or_none
 
         config = get_current_vllm_config_or_none()
         if config is None:
             return "auto"
         backend = config.kernel_config.nvfp4_input_quant_backend
-        if backend != "flashinfer_cutedsl":
-            return backend
-        # An explicit backend request that cannot be honored is an error, matching
-        # how linear_backend rejects unsatisfiable selections.
+        if backend == "cuda":
+            return "auto"
+        if backend == "auto":
+            use_cutedsl = (
+                self.uses_flashinfer_input_quant
+                and has_flashinfer_cutedsl_nvfp4_quant()
+            )
+            return "flashinfer_cutedsl" if use_cutedsl else "auto"
+        # Explicit flashinfer_cutedsl request that cannot be honored is an error,
+        # matching how linear_backend rejects unsatisfiable selections.
         if not self.uses_flashinfer_input_quant:
             raise ValueError(
                 f"nvfp4_input_quant_backend=flashinfer_cutedsl was requested but "
@@ -75,7 +86,7 @@ class NvFp4LinearKernel(ABC):
                 "FlashInfer build with CuTe-DSL available "
                 "(flashinfer.cute_dsl.is_cute_dsl_available())."
             )
-        return backend
+        return "flashinfer_cutedsl"
 
     def input_quant_key(self) -> QuantKey | None:
         """Return the input quantization key supported by this kernel. If the kernel

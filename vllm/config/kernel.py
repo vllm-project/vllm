@@ -163,6 +163,7 @@ LinearBackend = Literal[
 
 NvFp4InputQuantBackend = Literal[
     "auto",
+    "cuda",
     "flashinfer_cutedsl",
 ]
 
@@ -240,15 +241,16 @@ class KernelConfig:
     """
 
     nvfp4_input_quant_backend: NvFp4InputQuantBackend = "auto"
-    """Backend for the NVFP4 activation (input) quantization used by NVFP4 dense
-    linear layers. Available options:
+    """Backend for the NVFP4 activation (input) quantization in NVFP4 dense linear
+    layers. Only the FlashInfer NVFP4 linear kernels honor this; other kernels
+    always use the built-in CUDA kernel. Available options:
 
-    - "auto": Use vLLM's built-in CUDA kernel (default; no behavior change)
-    - "flashinfer_cutedsl": Use FlashInfer's CuTe-DSL nvfp4_quantize kernel
-
-    "flashinfer_cutedsl" requires a Blackwell (SM100+) device and a FlashInfer
-    build exposing the CuTe-DSL nvfp4_quantize backend; it is only honored by the
-    FlashInfer NVFP4 linear kernels.
+    - "auto": Use FlashInfer's CuTe-DSL nvfp4_quantize when available (Blackwell
+      SM100+ with a CuTe-DSL FlashInfer build), else the built-in CUDA kernel
+      (default)
+    - "cuda": Always use the built-in CUDA kernel
+    - "flashinfer_cutedsl": Force the CuTe-DSL kernel; errors at setup if it is
+      unavailable
     """
 
     @field_validator("moe_backend", mode="before")
