@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -697,10 +698,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        from vllm.platforms.rocm import on_gfx1250
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
 
         uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
         )
         if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
@@ -752,10 +757,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        from vllm.platforms.rocm import on_gfx1250
+        is_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            is_gfx1250 = on_gfx1250()
 
         if self.mxfp4_backend in TRITON_BACKENDS or (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
         ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
