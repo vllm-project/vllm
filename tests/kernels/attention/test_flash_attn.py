@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import sys
+from types import ModuleType
+
 import pytest
 import torch
 
@@ -32,6 +35,45 @@ QDTYPES = [None, torch.float8_e4m3fn]
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
 SLIDING_WINDOWS = [None, 256]
+
+
+def test_fa4_dcp_forwards_native_cp_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda _device: (9, 0)
+    )
+
+    forwarded_kwargs = {}
+
+    def fake_flash_attn_fwd(*args, **kwargs):
+        forwarded_kwargs.update(kwargs)
+        return args[0], None, None, None
+
+    fake_interface = ModuleType("vllm.vllm_flash_attn.cute.interface")
+    fake_interface._flash_attn_fwd = fake_flash_attn_fwd  # type: ignore[attr-defined]
+    monkeypatch.setitem(
+        sys.modules, "vllm.vllm_flash_attn.cute.interface", fake_interface
+    )
+
+    q = torch.empty((1, 1, 64))
+    cp_tot_seqused_k = torch.tensor([2], dtype=torch.int32)
+    result = flash_attn_varlen_func(
+        q=q,
+        k=torch.empty_like(q),
+        v=torch.empty_like(q),
+        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+        seqused_k=torch.tensor([1], dtype=torch.int32),
+        max_seqlen_q=1,
+        max_seqlen_k=1,
+        fa_version=4,
+        cp_world_size=2,
+        cp_rank=1,
+        cp_tot_seqused_k=cp_tot_seqused_k,
+    )
+
+    assert result is q
+    assert forwarded_kwargs["cp_world_size"] == 2
+    assert forwarded_kwargs["cp_rank"] == 1
+    assert forwarded_kwargs["cp_tot_seqused_k"] is cp_tot_seqused_k
 
 
 def ref_paged_attn(

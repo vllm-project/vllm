@@ -124,7 +124,15 @@ def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
     dataclass_dict = dataclass_instance.__dict__
     dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}
     dataclass_dict.update(kwargs)
-    return cls(**dataclass_dict)
+    replacement = cls(**dataclass_dict)
+    for dc_field in fields(cls):
+        if not dc_field.init and dc_field.metadata.get("preserve_on_replace"):
+            setattr(
+                replacement,
+                dc_field.name,
+                getattr(dataclass_instance, dc_field.name),
+            )
+    return replacement
 
 
 def getattr_iter(

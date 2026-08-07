@@ -128,6 +128,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                     attn_config.flash_attn_version,
                 )
                 attn_config.flash_attn_version = 4
+            attn_config._flash_attn_version_required = True
             logger.info(
                 "Unlimited-OCR: FlashAttention FA%d + rswa_mask_mod — exact R-SWA.",
                 attn_config.flash_attn_version,
@@ -235,6 +236,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
                     head_dim,
                     global_head_dim,
                 )
+            if vllm_config.attention_config.flash_attn_version == 4:
+                vllm_config.attention_config._flash_attn_version_required = True
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(

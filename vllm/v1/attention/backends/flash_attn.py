@@ -387,7 +387,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.aot_schedule = get_flash_attn_version() == 3
+        self.fa_version = get_flash_attn_version()
+        self.aot_schedule = self.fa_version == 3
 
         try:
             from vllm.distributed.parallel_state import get_dcp_group
@@ -429,6 +430,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.max_num_splits = (
                 self.attention_config.flash_attn_max_num_splits_for_cuda_graph
             )
+
+        if self.fa_version == 4 and current_platform.is_device_capability(90):
+            from vllm.vllm_flash_attn.cute.split_scheduler import (
+                SplitSchedulerPlanner,
+            )
+
+            self.fa4_split_planner = SplitSchedulerPlanner(
+                device=self.device,
+                max_batch_size=max(
+                    vllm_config.scheduler_config.max_num_seqs,
+                    self.max_cudagraph_size or 0,
+                ),
+            )
+        else:
+            self.fa4_split_planner = None
 
         if self.dcp_world_size > 1:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
@@ -511,7 +527,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         if envs.VLLM_BATCH_INVARIANT:
             max_num_splits = 1
-
         def schedule(
             batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
         ):
@@ -648,8 +663,48 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 max_seq_len=max_seq_len,
                 causal=causal,
             )
-        # For FA3 + full cudagraph
-        if self.use_full_cuda_graph and scheduler_metadata is not None:
+            if (
+                self.fa_version == 4
+                and current_platform.is_device_capability(90)
+                and common_attn_metadata.query_start_loc_cpu is not None
+                and common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            ):
+                use_graph_bound = (
+                    self.use_full_cuda_graph
+                    and self.max_cudagraph_size is not None
+                    and num_actual_tokens <= self.max_cudagraph_size
+                )
+                cuda_graph_max_num_splits = (
+                    (
+                        1
+                        if envs.VLLM_BATCH_INVARIANT
+                        else self.attention_config
+                        .flash_attn_max_num_splits_for_cuda_graph
+                    )
+                    if use_graph_bound
+                    else None
+                )
+                assert self.fa4_split_planner is not None
+                split_plan = self.fa4_split_planner(
+                    common_attn_metadata.query_start_loc_cpu[: num_reqs + 1],
+                    common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs],
+                    num_heads_q=self.num_heads_q,
+                    num_heads_kv=self.num_heads_kv,
+                    head_dim=self.headdim,
+                    head_dim_v=self.headdim,
+                    has_qv=False,
+                    cp_world_size=self.dcp_world_size,
+                    cuda_graph_max_num_splits=cuda_graph_max_num_splits,
+                    fast_build=fast_build,
+                )
+                if split_plan is not None:
+                    max_num_splits = split_plan.num_splits
+                    scheduler_metadata = split_plan.scheduler_metadata
+        if (
+            self.use_full_cuda_graph
+            and self.aot_schedule
+            and scheduler_metadata is not None
+        ):
             n = scheduler_metadata.shape[0]
             self.scheduler_metadata[:n] = scheduler_metadata
             # NOTE(woosuk): We should zero out the rest of the scheduler

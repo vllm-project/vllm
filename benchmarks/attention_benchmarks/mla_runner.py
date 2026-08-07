@@ -20,6 +20,7 @@ from common import (
     MockHfConfig,
     MockIndexer,
     MockLayer,
+    resolve_mla_backend,
     run_do_bench,
     run_ncu_profile,
     setup_mla_dims,
@@ -124,6 +125,7 @@ def create_minimal_vllm_config(
     prefill_backend: str | None = None,
     kv_cache_dtype: str = "auto",
     sparse_mla_force_mqa: bool = False,
+    flash_attn_version: int | None = None,
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
@@ -142,6 +144,7 @@ def create_minimal_vllm_config(
                         the specified prefill backend.
         sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
                     forward_mqa (even prefill tokens).
+        flash_attn_version: Requested FlashAttention version for a benchmark alias.
 
     Returns:
         VllmConfig for benchmarking
@@ -166,6 +169,10 @@ def create_minimal_vllm_config(
         "num_attention_heads": mla_dims["num_q_heads"],
         "num_key_value_heads": mla_dims["num_kv_heads"],
         "hidden_size": mla_dims["head_dim"] * mla_dims["num_q_heads"],
+        "kv_lora_rank": mla_dims["kv_lora_rank"],
+        "qk_nope_head_dim": mla_dims["qk_nope_head_dim"],
+        "qk_rope_head_dim": mla_dims["qk_rope_head_dim"],
+        "v_head_dim": mla_dims["v_head_dim"],
         "torch_dtype": "bfloat16",
         "max_position_embeddings": 163840,  # DeepSeek V3 default
         "rope_theta": 10000.0,
@@ -251,6 +258,9 @@ def create_minimal_vllm_config(
     if sparse_mla_force_mqa:
         vllm_config.attention_config.sparse_mla_force_mqa = True
 
+    if flash_attn_version is not None:
+        vllm_config.attention_config.flash_attn_version = flash_attn_version
+
     return vllm_config
 
 
@@ -333,6 +343,8 @@ def _get_backend_config(backend: str) -> dict:
     from vllm.v1.attention.backend import MultipleOf
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+    backend, requested_fa_version = resolve_mla_backend(backend)
+
     try:
         backend_enum = AttentionBackendEnum[backend]
         backend_class = backend_enum.get_class()
@@ -358,6 +370,7 @@ def _get_backend_config(backend: str) -> dict:
     props = _BACKEND_PROPERTIES.get(backend, {})
 
     return {
+        "requested_fa_version": requested_fa_version,
         "backend_class": backend_class,
         "impl_class": backend_class.get_impl_cls(),
         "builder_class": backend_class.get_builder_cls(),
@@ -659,7 +672,7 @@ def _create_backend_impl(
     kv_cache_spec = FullAttentionSpec(
         block_size=backend_cfg["block_size"] or vllm_config.cache_config.block_size,
         num_kv_heads=1,  # MLA uses 1 KV head
-        head_size=576,  # MLA head dim
+        head_size=mla_dims["kv_lora_rank"] + mla_dims["qk_rope_head_dim"],
         dtype=torch.bfloat16,
     )
 
@@ -782,7 +795,6 @@ def _run_single_benchmark(
         fuse_quant_op: With output_scale set, True lets the prefill kernel write
             FP8 directly; False runs bf16 attention then a standalone static-FP8
             quant. The delta isolates the saved post-quant kernel.
-
     Returns:
         BenchmarkResult with timing statistics
     """
@@ -888,6 +900,7 @@ def _run_single_benchmark(
     query_fmt = "concat" if quantize_query else backend_cfg["query_format"]
 
     # Create decode query tensors
+    torch.manual_seed(0)
     if has_decode:
         decode_inputs, _ = _create_input_tensors(
             num_decode, mla_dims, query_fmt, device, torch.bfloat16
@@ -1067,6 +1080,15 @@ def _run_mla_benchmark_batched(
         return []
 
     backend_cfg = _get_backend_config(backend)
+    requested_fa_version = backend_cfg["requested_fa_version"]
+    if requested_fa_version is not None:
+        requested_prefill_backend = f"fa{requested_fa_version}"
+        if prefill_backend not in {None, requested_prefill_backend}:
+            raise ValueError(
+                f"All-phase alias '{backend}' requires prefill backend "
+                f"'{requested_prefill_backend}', got {prefill_backend!r}"
+            )
+        prefill_backend = requested_prefill_backend
     device = torch.device(configs_with_params[0][0].device)
     torch.accelerator.set_device_index(device)
 
@@ -1118,6 +1140,7 @@ def _run_mla_benchmark_batched(
         prefill_backend=prefill_backend,
         kv_cache_dtype=kv_cache_dtype,
         sparse_mla_force_mqa=sparse_mla_force_mqa,
+        flash_attn_version=requested_fa_version,
     )
 
     results = []
@@ -1144,6 +1167,15 @@ def _run_mla_benchmark_batched(
             index_topk=index_topk if is_sparse else None,
             kv_cache_dtype=kv_cache_dtype,
         )
+
+        if requested_fa_version is not None:
+            actual_fa_version = getattr(impl, "fa_version", None)
+            if actual_fa_version != requested_fa_version:
+                raise RuntimeError(
+                    f"Decode backend '{backend}' requested FA version "
+                    f"{requested_fa_version}, got {actual_fa_version} from "
+                    f"{type(impl).__name__}."
+                )
 
         # Verify the actual prefill backend matches what was requested. The
         # selector + impl construction already raise on misuse; here we just
@@ -1267,7 +1299,6 @@ def run_mla_benchmark(
         output_scale: Static per-tensor FP8 scale for prefill output (None = bf16).
         fuse_quant_op: With output_scale set, fuse the FP8 write into the prefill
             kernel vs a standalone post-quant kernel. See _run_single_benchmark.
-
     Returns:
         BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
     """

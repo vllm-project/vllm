@@ -983,9 +983,7 @@ class GPUModelRunner(
         """
         Re-initialize the KV cache and FP8 scales after waking from sleep.
         1. Zero out the KV cache tensors to remove garbage data from re-allocation.
-        2. Reset Attention layer scaling factors (_k_scale, _v_scale) to 1.0.
-          If these are left at 0.0 (default after wake_up), all KV cache values
-          become effectively zero, causing gibberish output.
+        2. Reset FP8 scaling factors to 1.0.
         """
         if not is_quantized_kv_cache(self.cache_config.cache_dtype):
             return
@@ -999,7 +997,7 @@ class GPUModelRunner(
         v_attr_names = ("_v_scale", "v_scale")
 
         attn_layers = self.compilation_config.static_forward_context
-        for name, module in attn_layers.items():
+        for module in attn_layers.values():
             if isinstance(module, (Attention, MLAAttention)):
                 # TODO: Generally, scale is 1.0 if user uses on-the-fly fp8
                 # kvcache quant. However, to get better accuracy, compression
@@ -5828,6 +5826,7 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        num_reqs: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5855,6 +5854,8 @@ class GPUModelRunner(
             profile_seq_lens: If provided, use this value for seq_lens instead
                 of max_query_len. Used to profile attention workspace that
                 scales with context length.
+            num_reqs: If provided, distribute tokens across exactly this many
+                requests instead of the scheduler maximum.
         """
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -5887,6 +5888,10 @@ class GPUModelRunner(
         # has num_tokens in total.
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
+        if num_reqs is not None:
+            assert not create_mixed_batch
+            assert 0 < num_reqs <= min(num_tokens, max_num_reqs)
+            max_num_reqs = num_reqs
         if create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:

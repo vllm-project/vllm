@@ -381,6 +381,14 @@ class Worker(WorkerBase):
                 current_platform.dist_backend,
             )
 
+            # Freeze a requested Hopper FA4 version before model construction,
+            # attention metadata builders, and CUDA-graph planning consume it.
+            from vllm.v1.attention.backends.fa_utils import (
+                resolve_flash_attn_version,
+            )
+
+            resolve_flash_attn_version(self.vllm_config)
+
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
 

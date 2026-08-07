@@ -42,9 +42,15 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+
 # ============================================================================
 # Backend Configuration
 # ============================================================================
+
+_FLASH_ATTN_VERSION_ALIASES = {
+    "FLASH_ATTN_FA3": 3,
+    "FLASH_ATTN_FA4": 4,
+}
 
 
 def _get_backend_config(backend: str) -> dict:
@@ -106,6 +112,7 @@ def _build_common_attn_metadata(
     query_start_loc_cpu = query_start_loc.cpu()
 
     seq_lens = torch.tensor(kv_lens, dtype=torch.int32, device=device)
+    seq_lens_cpu = torch.tensor(kv_lens, dtype=torch.int32)
     max_seq_len = int(seq_lens.max().item())
 
     max_blocks = (max(kv_lens) + block_size - 1) // block_size
@@ -121,6 +128,7 @@ def _build_common_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
         num_reqs=batch_size,
         num_actual_tokens=total_tokens,
         max_query_len=max_query_len,
@@ -137,10 +145,10 @@ def _create_vllm_config(
 ) -> VllmConfig:
     """Create a VllmConfig for benchmarking with mock model methods."""
     model_config = ModelConfig(
-        model="meta-llama/Meta-Llama-3-8B",
-        tokenizer="meta-llama/Meta-Llama-3-8B",
+        model="Qwen/Qwen3-8B",
+        tokenizer="Qwen/Qwen3-8B",
         trust_remote_code=False,
-        dtype="auto",  # Use model's native dtype
+        dtype=config.dtype,
         seed=0,
         max_model_len=1024,
     )
@@ -239,9 +247,7 @@ def _create_backend_impl(
         dtype=dtype,
     )
 
-    layer = MockLayer(device, kv_cache_spec=kv_cache_spec)
-
-    return backend_class, impl, layer
+    return backend_class, impl, MockLayer(device, kv_cache_spec=kv_cache_spec)
 
 
 def _create_metadata_builder(
@@ -470,7 +476,10 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     device = torch.device(config.device)
     torch.accelerator.set_device_index(device)
 
-    backend_cfg = _get_backend_config(config.backend)
+    flash_attn_version = _FLASH_ATTN_VERSION_ALIASES.get(config.backend)
+    backend_cfg = _get_backend_config(
+        "FLASH_ATTN" if flash_attn_version is not None else config.backend
+    )
 
     requests = parse_batch_spec(config.batch_spec)
 
@@ -491,6 +500,8 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     with log_warnings_and_errors_only():
         # Create vllm_config first - uses model's native dtype via "auto"
         vllm_config = _create_vllm_config(config, max_num_blocks)
+        if flash_attn_version is not None:
+            vllm_config.attention_config.flash_attn_version = flash_attn_version
         dtype = vllm_config.model_config.dtype
 
         # Wrap everything in set_current_vllm_config context
@@ -499,6 +510,16 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             backend_class, impl, layer = _create_backend_impl(
                 backend_cfg, config, device, dtype
             )
+            if flash_attn_version is not None:
+                actual_flash_attn_version = getattr(
+                    impl, "vllm_flash_attn_version", None
+                )
+                if actual_flash_attn_version != flash_attn_version:
+                    raise RuntimeError(
+                        f"Backend alias '{config.backend}' requested FA"
+                        f"{flash_attn_version}, but {type(impl).__name__} resolved "
+                        f"vllm_flash_attn_version={actual_flash_attn_version!r}."
+                    )
 
             # Set KV cache layout if the backend requires a specific one
             # (e.g., FlashInfer requires HND on SM100/Blackwell for TRTLLM attention)
@@ -537,6 +558,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             quantize_query = config.kv_cache_dtype.startswith("fp8") and getattr(
                 impl, "supports_quant_query_input", False
             )
+            torch.manual_seed(0)
             q_list, k_list, v_list = _create_input_tensors(
                 config, total_q, device, dtype, quantize_query=quantize_query
             )

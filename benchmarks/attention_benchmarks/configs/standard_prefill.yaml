@@ -41,6 +41,7 @@ model_parameter_sweep:
     - { num_q_heads: 64, num_kv_heads: 4, head_dim: 128 } # Llama 3 405B TP2
     - { num_q_heads: 128, num_kv_heads: 8, head_dim: 128 } # Llama 3 405B TP1
     # --- head_dim=64 (GPT-OSS 120B) ---
+    # https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json
     - { num_q_heads: 8, num_kv_heads: 1, head_dim: 64 } # GPT-OSS 120B TP8
     - { num_q_heads: 16, num_kv_heads: 2, head_dim: 64 } # GPT-OSS 120B TP4
     - { num_q_heads: 32, num_kv_heads: 4, head_dim: 64 } # GPT-OSS 120B TP2
