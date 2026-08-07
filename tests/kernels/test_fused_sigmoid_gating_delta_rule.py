@@ -5,6 +5,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    ChunkGatedDeltaRule,
+)
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
@@ -13,6 +16,65 @@ from vllm.third_party.flash_linear_attention.ops import (
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    "forward_method", ["forward_cuda", "forward_native", "forward_cutedsl"]
+)
+def test_float32_gdn_prefill_uses_recurrent_fallback(forward_method: str) -> None:
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    cu_seqlens = torch.tensor([0, 5, 8], dtype=torch.int32)
+    num_tokens = int(cu_seqlens[-1].item())
+    q = torch.randn(1, num_tokens, 2, 16, dtype=torch.float32)
+    k = torch.randn_like(q)
+    v = torch.randn(1, num_tokens, 4, 16, dtype=torch.float32)
+    g = torch.randn(1, num_tokens, 4, dtype=torch.float32)
+    beta = torch.sigmoid(torch.randn_like(g))
+    initial_state = torch.randn(2, 4, 16, 16, dtype=torch.float32)
+
+    expected_output = torch.empty_like(v)
+    expected_state = torch.empty_like(initial_state)
+    qk_repeat = v.shape[2] // q.shape[2]
+    scale = q.shape[-1] ** -0.5
+    for seq_idx in range(2):
+        start = int(cu_seqlens[seq_idx].item())
+        end = int(cu_seqlens[seq_idx + 1].item())
+        state = initial_state[seq_idx].clone()
+        for token_idx in range(start, end):
+            q_t = q[0, token_idx].repeat_interleave(qk_repeat, dim=0)
+            k_t = k[0, token_idx].repeat_interleave(qk_repeat, dim=0)
+            state = state * g[0, token_idx].exp()[:, None, None]
+            state_value = (state * k_t[:, None, :]).sum(dim=-1)
+            delta = (v[0, token_idx] - state_value) * beta[0, token_idx, :, None]
+            state = state + delta[:, :, None] * k_t[:, None, :]
+            expected_output[0, token_idx] = (state * (q_t * scale)[:, None, :]).sum(
+                dim=-1
+            )
+        expected_state[seq_idx] = state
+
+    layer = object.__new__(ChunkGatedDeltaRule)
+    torch.nn.Module.__init__(layer)
+    core_attn_out = torch.empty_like(v.squeeze(0))
+    output, final_state = getattr(layer, forward_method)(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=False,
+        core_attn_out=core_attn_out,
+    )
+
+    torch.testing.assert_close(output, expected_output, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(final_state, expected_state, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(
+        core_attn_out, expected_output.squeeze(0), atol=1e-5, rtol=1e-5
+    )
 
 
 @pytest.mark.parametrize("tp_size", [1])
