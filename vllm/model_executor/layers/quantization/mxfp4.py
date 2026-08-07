@@ -845,7 +845,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             is_gfx1250 = on_gfx1250()
 
-        if self.mxfp4_backend in TRITON_BACKENDS or is_gfx1250:
+        if self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
+        ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None
