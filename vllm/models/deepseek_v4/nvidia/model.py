@@ -41,6 +41,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
+    prepare_sequence_parallel_input,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -68,7 +69,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
-    sp_reduce_scatter,
     sp_shard,
 )
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
@@ -837,7 +837,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             eager_scratch_pool=eager_scratch_pool,
         )
         if self.use_sequence_parallel:
-            self.attn.wo_b.reduce_results = False
+            self.attn.wo_b.sequence_parallel = True
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
@@ -961,11 +961,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
 
         if self.use_sequence_parallel:
-            x = sp_all_gather(x)[: positions.shape[0]]
+            x = prepare_sequence_parallel_input(x, True)
 
         x = self.attn(positions, x, None)
-        if self.use_sequence_parallel:
-            x = sp_reduce_scatter(x)
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon

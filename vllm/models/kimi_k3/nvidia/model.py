@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    prepare_sequence_parallel_input,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
@@ -88,7 +89,6 @@ from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
-    sp_reduce_scatter,
     sp_shard,
 )
 from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
@@ -158,10 +158,10 @@ class KimiMLP(nn.Module):
 
     With ``VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT`` the weights are TP-sharded
     instead. A rank then holds only a slice of the intermediate dim, so it
-    cannot finish its own tokens alone: ``forward`` all-gathers the full token
-    set, computes this rank's partial, and reduce-scatters. The reduce-scatter
-    sums across TP and restores the sequence sharding in one collective, so the
-    block still ends with one collective per direction.
+    cannot finish its own tokens alone. The merged column linear gathers the
+    full token set, and the row linear reduce-scatters its partial output. The
+    reduce-scatter sums across TP and restores sequence sharding, so the block
+    still uses one collective per direction.
     """
 
     def __init__(
@@ -192,17 +192,17 @@ class KimiMLP(nn.Module):
             quant_config=quant_config,
             disable_tp=replicate,
             prefix=f"{prefix}.gate_up_proj",
+            sequence_parallel=self.shard_sequence_parallel,
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
             quant_config=quant_config,
-            # Sharded sequence parallel reduces via the reduce-scatter in
-            # forward(), which also restores the sequence sharding.
-            reduce_results=False if self.shard_sequence_parallel else reduce_results,
+            reduce_results=self.shard_sequence_parallel or reduce_results,
             disable_tp=replicate,
             prefix=f"{prefix}.down_proj",
+            sequence_parallel=self.shard_sequence_parallel,
         )
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
@@ -218,17 +218,9 @@ class KimiMLP(nn.Module):
             )
 
     def forward(self, x):
-        if self.shard_sequence_parallel:
-            # Each rank holds a weight shard but only its own tokens, so it
-            # cannot finish those tokens alone: gather the full token set,
-            # compute this rank's partial for all of them, then reduce-scatter,
-            # which sums across TP and restores the sequence sharding.
-            x = sp_all_gather(x)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
-        if self.shard_sequence_parallel:
-            x = sp_reduce_scatter(x)
         return x
 
 
@@ -838,7 +830,7 @@ class KimiDecoderLayer(nn.Module):
             self._self_attn_writes_output = False
 
         if self.use_sequence_parallel:
-            self.self_attn.o_proj.reduce_results = False
+            self.self_attn.o_proj.sequence_parallel = True
 
         if self.is_moe_layer:
             self.block_sparse_moe = KimiMoE(
@@ -899,7 +891,18 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self._self_attn_writes_output:
-            output = torch.empty_like(hidden_states)
+            if self.use_sequence_parallel:
+                tp_size = get_tensor_model_parallel_world_size()
+                if hidden_states.shape[0] % tp_size != 0:
+                    raise ValueError(
+                        "Sequence-parallel attention requires the token "
+                        "dimension to be divisible by tensor parallel size."
+                    )
+                output = hidden_states.new_empty(
+                    (hidden_states.shape[0] // tp_size, *hidden_states.shape[1:])
+                )
+            else:
+                output = torch.empty_like(hidden_states)
             self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
@@ -989,16 +992,10 @@ class KimiDecoderLayer(nn.Module):
         assert hidden_states is not None
 
         if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)
-            # Remove SP padding before attention.
-            hidden_states = hidden_states[: positions.shape[0]]
+            hidden_states = prepare_sequence_parallel_input(hidden_states, True)
 
         # Attention.
         hidden_states = self._run_self_attn(positions, hidden_states)
-
-        if self.use_sequence_parallel:
-            # Add SP padding if needed, and then perform reduce scatter.
-            hidden_states = sp_reduce_scatter(hidden_states)
 
         hidden_states, prefix_sum, residual = self._post_attn_norm(
             hidden_states, residual, prefix_sum

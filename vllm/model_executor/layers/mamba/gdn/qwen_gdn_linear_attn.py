@@ -363,6 +363,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         prefix: str = "",
         gqa_interleaved_layout=False,
         reduce_results: bool = True,
+        sequence_parallel: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -374,6 +375,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        self.sequence_parallel = sequence_parallel
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
@@ -474,6 +476,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             bias=False,
             input_is_parallel=True,
             reduce_results=reduce_results,
+            sequence_parallel=sequence_parallel,
             quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
         )

@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from vllm.config import ParallelConfig
+from vllm.distributed import communication_op as sp_comm
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.models.common.ops import sequence_parallel as sp_ops
 from vllm.models.kimi_k3.nvidia import model as kimi_model
@@ -69,11 +70,6 @@ class _SequenceParallelMTPBlock:
 def _mock_sequence_parallel_collectives(monkeypatch):
     monkeypatch.setattr(
         kimi_model,
-        "sp_reduce_scatter",
-        lambda tensor: tensor.chunk(2, dim=0)[0],
-    )
-    monkeypatch.setattr(
-        kimi_model,
         "sp_shard",
         lambda tensor: torch.nn.functional.pad(tensor, (0, 0, 0, 1))[:2],
     )
@@ -81,6 +77,13 @@ def _mock_sequence_parallel_collectives(monkeypatch):
         kimi_model,
         "sp_all_gather",
         lambda tensor: torch.cat([tensor, tensor], dim=0),
+    )
+    monkeypatch.setattr(
+        kimi_model,
+        "prepare_sequence_parallel_input",
+        lambda tensor, enabled: (
+            torch.cat([tensor, tensor], dim=0) if enabled else tensor
+        ),
     )
 
 
@@ -143,7 +146,7 @@ def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
     layer.post_attention_layernorm = _IdentityNorm()
     layer.mlp = _RecordingMoE()
     layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+        lambda self, positions, hidden_states: hidden_states.chunk(2, dim=0)[0],
         layer,
     )
 
@@ -189,7 +192,7 @@ def test_kimi_attn_residual_states_stay_sequence_sharded(monkeypatch):
     layer.mlp_res_proj = _Projection()
     layer.mlp = _RecordingMoE()
     layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+        lambda self, positions, hidden_states: hidden_states.chunk(2, dim=0)[0],
         layer,
     )
 
@@ -349,12 +352,15 @@ def test_sp_all_gather_uses_custom_kernel(monkeypatch):
         custom_all_gather=custom_all_gather,
     )
     monkeypatch.setattr(
-        sp_ops,
+        sp_comm,
         "get_tp_group",
-        lambda: SimpleNamespace(device_communicator=device_communicator),
+        lambda: SimpleNamespace(
+            device_communicator=device_communicator,
+            world_size=2,
+        ),
     )
     fallback = Mock(side_effect=AssertionError("unexpected fallback"))
-    monkeypatch.setattr(sp_ops, "tensor_model_parallel_all_gather", fallback)
+    monkeypatch.setattr(sp_comm, "tensor_model_parallel_all_gather", fallback)
 
     output = sp_ops.sp_all_gather(hidden_states)
 
@@ -363,34 +369,32 @@ def test_sp_all_gather_uses_custom_kernel(monkeypatch):
     fallback.assert_not_called()
 
 
-def test_sp_reduce_scatter_uses_custom_kernel_after_padding(monkeypatch):
+def test_sp_reduce_scatter_uses_custom_kernel_without_padding(monkeypatch):
     hidden_states = torch.arange(6, dtype=torch.float32).view(3, 2)
-    expected = torch.arange(4, dtype=torch.float32).view(2, 2)
+    expected = hidden_states[:1]
     custom_reduce_scatter = Mock(return_value=expected)
     device_communicator = SimpleNamespace(
         custom_reduce_scatter=custom_reduce_scatter,
     )
     monkeypatch.setattr(
-        sp_ops,
+        sp_comm,
         "get_tp_group",
-        lambda: SimpleNamespace(device_communicator=device_communicator),
+        lambda: SimpleNamespace(
+            device_communicator=device_communicator,
+            world_size=2,
+        ),
     )
     monkeypatch.setattr(
-        sp_ops,
-        "get_tensor_model_parallel_world_size",
-        lambda: 2,
+        sp_comm,
+        "tensor_model_parallel_reduce_scatter",
+        Mock(side_effect=AssertionError("unexpected fallback")),
     )
-    fallback = Mock(side_effect=AssertionError("unexpected fallback"))
-    monkeypatch.setattr(sp_ops, "tensor_model_parallel_reduce_scatter", fallback)
 
     output = sp_ops.sp_reduce_scatter(hidden_states)
 
     torch.testing.assert_close(output, expected)
-    padded = custom_reduce_scatter.call_args.args[0]
-    assert padded.shape == (4, 2)
-    torch.testing.assert_close(padded[:3], hidden_states)
-    torch.testing.assert_close(padded[3], torch.zeros(2))
-    fallback.assert_not_called()
+    custom_reduce_scatter.assert_called_once_with(hidden_states)
+    sp_comm.tensor_model_parallel_reduce_scatter.assert_not_called()
 
 
 @pytest.mark.parametrize("shape", [(3,), (3, 2, 2)])
@@ -413,25 +417,20 @@ def test_sp_shard_pads_only_the_token_axis(monkeypatch, shape):
 def test_sp_collectives_fall_back_without_custom_kernel(monkeypatch):
     hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
     monkeypatch.setattr(
-        sp_ops,
+        sp_comm,
         "get_tp_group",
-        lambda: SimpleNamespace(device_communicator=None),
-    )
-    monkeypatch.setattr(
-        sp_ops,
-        "get_tensor_model_parallel_world_size",
-        lambda: 2,
+        lambda: SimpleNamespace(device_communicator=None, world_size=2),
     )
     all_gather = Mock(return_value=hidden_states)
     reduce_scatter = Mock(return_value=hidden_states)
-    monkeypatch.setattr(sp_ops, "tensor_model_parallel_all_gather", all_gather)
+    monkeypatch.setattr(sp_comm, "tensor_model_parallel_all_gather", all_gather)
     monkeypatch.setattr(
-        sp_ops,
+        sp_comm,
         "tensor_model_parallel_reduce_scatter",
         reduce_scatter,
     )
 
     torch.testing.assert_close(sp_ops.sp_all_gather(hidden_states), hidden_states)
     torch.testing.assert_close(sp_ops.sp_reduce_scatter(hidden_states), hidden_states)
-    all_gather.assert_called_once_with(hidden_states, 0)
-    reduce_scatter.assert_called_once_with(hidden_states, 0)
+    all_gather.assert_called_once_with(hidden_states, dim=0)
+    reduce_scatter.assert_called_once_with(hidden_states, dim=0)
