@@ -2804,8 +2804,8 @@ def test_speculative_config_compatibility_hash(
     _set_test_speculative_config(local_config)
     _set_test_speculative_config(remote_config, **remote_overrides)
 
-    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN", False)
-    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN", False)
+    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN")
+    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN")
 
     assert (local_hash == remote_hash) is should_match
 
@@ -2816,10 +2816,8 @@ def test_missing_speculative_config_changes_compatibility_hash():
     speculative_config = create_vllm_config()
     _set_test_speculative_config(speculative_config)
 
-    regular_hash = compute_nixl_compatibility_hash(regular_config, "FLASH_ATTN", False)
-    speculative_hash = compute_nixl_compatibility_hash(
-        speculative_config, "FLASH_ATTN", False
-    )
+    regular_hash = compute_nixl_compatibility_hash(regular_config, "FLASH_ATTN")
+    speculative_hash = compute_nixl_compatibility_hash(speculative_config, "FLASH_ATTN")
 
     assert regular_hash != speculative_hash
 
@@ -2834,8 +2832,8 @@ def test_speculative_kv_cache_dtype_resolves_to_target():
     _set_test_speculative_config(local_config, kv_cache_dtype="fp8")  # explicit
     _set_test_speculative_config(remote_config, kv_cache_dtype=None)  # inherits
 
-    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN", False)
-    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN", False)
+    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN")
+    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN")
 
     assert local_hash == remote_hash
 
@@ -2851,8 +2849,8 @@ def test_speculative_attention_backend_not_in_compatibility_hash():
     _set_test_speculative_config(local_config, attention_backend=None)
     _set_test_speculative_config(remote_config, attention_backend="FLASHINFER")
 
-    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN", False)
-    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN", False)
+    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN")
+    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN")
 
     assert local_hash == remote_hash
 
