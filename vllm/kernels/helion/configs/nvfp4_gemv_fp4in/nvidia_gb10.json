@@ -1,0 +1,78 @@
+[
+  {
+    "key": {
+      "m": 4096,
+      "k": 4096
+    },
+    "config": {
+      "block_sizes": [
+        1,
+        128
+      ],
+      "range_unroll_factors": [
+        0,
+        0
+      ],
+      "range_warp_specializes": [
+        null
+      ],
+      "range_num_stages": [],
+      "range_multi_buffers": [
+        null,
+        null
+      ],
+      "range_flattens": [
+        null,
+        null
+      ],
+      "load_eviction_policies": [
+        "first",
+        "last",
+        "",
+        "last"
+      ],
+      "num_warps": 4,
+      "num_stages": 3,
+      "atomic_indexing": [],
+      "pid_type": "flat"
+    }
+  },
+  {
+    "key": {
+      "m": 2048,
+      "k": 7168
+    },
+    "config": {
+      "block_sizes": [
+        1,
+        128
+      ],
+      "range_unroll_factors": [
+        0,
+        0
+      ],
+      "range_warp_specializes": [
+        null
+      ],
+      "range_num_stages": [],
+      "range_multi_buffers": [
+        null,
+        null
+      ],
+      "range_flattens": [
+        null,
+        null
+      ],
+      "load_eviction_policies": [
+        "first",
+        "last",
+        "",
+        "last"
+      ],
+      "num_warps": 4,
+      "num_stages": 3,
+      "atomic_indexing": [],
+      "pid_type": "flat"
+    }
+  }
+]

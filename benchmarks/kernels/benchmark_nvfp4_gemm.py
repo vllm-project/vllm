@@ -16,6 +16,8 @@ from vllm.triton_utils import triton
 if not current_platform.has_device_capability(100):
     raise RuntimeError("NVFP4 requires compute capability of 10.0 (Blackwell)")
 
+import sys
+import vllm.model_executor.kernels.linear.nvfp4.helion
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
@@ -26,6 +28,8 @@ PROVIDER_CFGS = {
     "nvfp4-noquant": dict(no_a_quant=True, enabled=True),
     "fbgemm-nvfp4": dict(fbgemm=True, no_a_quant=False, enabled=True),
     "fbgemm-nvfp4-noquant": dict(fbgemm=True, no_a_quant=True, enabled=True),
+    "helion-gemv-w4a4": dict(helion=True, no_a_quant=False, enabled=True),
+    "helion-gemv-w4a4-noquant": dict(helion=True, no_a_quant=True, enabled=True),
 }
 
 _needs_fbgemm = any(
@@ -71,6 +75,7 @@ def build_nvfp4_runner(cfg, a, b, dtype, device):
 
     # Alpha for the GEMM operation
     alpha = 1.0 / (a_global_scale * b_global_scale)
+    alpha_scalar = float(alpha)
     if "fbgemm" in cfg and cfg["fbgemm"]:
         if cfg["no_a_quant"]:
             a_fp4, scale_a_fp4 = triton_scale_nvfp4_quant(a, a_global_scale)
@@ -104,7 +109,23 @@ def build_nvfp4_runner(cfg, a, b, dtype, device):
     if cfg["no_a_quant"]:
         # Pre-quantize activation
         a_fp4, scale_a_fp4 = ops.scaled_fp4_quant(a, a_global_scale)
+        if  cfg.get("helion"):
+            M = a.shape[0]
+            N = b_fp4.shape[0]
+            def run():
+                out = torch.empty((M,N), dtype=a.dtype, device=a.device)
+                torch.ops.vllm.nvfp4_gemv_fp4in(
+                    out,
+                    b_fp4,  # weight [N, K_bytes]
+                    a_fp4,  # input [K]
+                    scale_b_fp4,
+                    scale_a_fp4,
+                    alpha=alpha,
+                    alpha_scalar=alpha_scalar
+                )
+                return out
 
+            return run
         def run():
             return ops.cutlass_scaled_fp4_mm(
                 a_fp4, b_fp4, scale_a_fp4, scale_b_fp4, alpha, dtype
@@ -113,6 +134,18 @@ def build_nvfp4_runner(cfg, a, b, dtype, device):
         return run
 
     # Quantize activation on-the-fly
+    if cfg.get("helion"):
+        M = a.shape[0]  
+        N = b_fp4.shape[0]
+        def run():
+            a_fp4, scale_a_fp4 = ops.scaled_fp4_quant(a, a_global_scale)
+            out = torch.empty((M, N), dtype=a.dtype, device=a.device)
+            torch.ops.vllm.nvfp4_gemv_fp4in(
+                out, b_fp4, a_fp4, scale_b_fp4, scale_a_fp4, alpha, alpha_scalar
+            )
+            return out
+        return run
+
     def run():
         a_fp4, scale_a_fp4 = ops.scaled_fp4_quant(a, a_global_scale)
         return ops.cutlass_scaled_fp4_mm(
@@ -148,6 +181,14 @@ def benchmark(batch_size, provider, N, K):
     if provider == "torch-bf16":
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             lambda: torch.nn.functional.linear(a, b), quantiles=quantiles
+        )
+    elif provider in ["helion-gemv-w4a4", "helion-gemv-w4a4-noquant"]:
+        # if M!= 1:
+        #     return 0, 0, 0
+        cfg = PROVIDER_CFGS[provider]
+        run_quant = build_nvfp4_runner(cfg, a, b, dtype, device)
+        ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
+          lambda: run_quant(), quantiles=quantiles
         )
     else:
         cfg = PROVIDER_CFGS[provider]
