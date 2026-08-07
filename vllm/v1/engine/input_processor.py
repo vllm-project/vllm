@@ -481,6 +481,11 @@ class InputProcessor:
                             f"by setting --limit-mm-per-prompt at startup."
                         )
 
+        if prompt_ids:
+            min_input_id = min(prompt_ids)
+            if min_input_id < 0:
+                raise ValueError(f"Token id {min_input_id} is out of vocabulary")
+
         if prompt_ids and tokenizer is not None:
             max_input_id = max(prompt_ids, default=0)
             min_input_id = min(prompt_ids, default=0)
