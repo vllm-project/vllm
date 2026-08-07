@@ -353,22 +353,6 @@ class DeepseekV32Attention(MLAAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._fused_attention(
-            positions, q_c, kv_c, k_pe, index_k, index_weights, output
-        )
-        return self.o_proj(output)[0]
-
-    @eager_break_during_capture
-    def _fused_attention(
-        self,
-        positions: torch.Tensor,
-        q_c: torch.Tensor,
-        kv_c: torch.Tensor,
-        k_pe: torch.Tensor,
-        index_k: torch.Tensor | None,
-        index_weights: torch.Tensor | None,
-        output: torch.Tensor,
-    ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         if isinstance(attn_metadata_raw, dict):
@@ -462,6 +446,26 @@ class DeepseekV32Attention(MLAAttention):
             quantize_mqa=self._fp8_query,
         )
 
+        self._sparse_indexer_and_attn(
+            q_c,
+            index_q_fp8,
+            index_weights_out,
+            ql_nope,
+            mqa_q,
+            output,
+        )
+        return self.o_proj(output)[0]
+
+    @eager_break_during_capture
+    def _sparse_indexer_and_attn(
+        self,
+        q_c: torch.Tensor,
+        index_q_fp8: torch.Tensor | None,
+        index_weights_out: torch.Tensor | None,
+        ql_nope: torch.Tensor,
+        mqa_q: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
         if self.indexer is not None and not self.skip_topk:
             sparse_attn_indexer(
                 q_c,
@@ -486,6 +490,14 @@ class DeepseekV32Attention(MLAAttention):
                 skip_topk_buffer_clear=True,
             )
 
+        attn_metadata_raw = get_forward_context().attn_metadata
+        if isinstance(attn_metadata_raw, dict):
+            attn_metadata = attn_metadata_raw.get(self.layer_name)
+        elif isinstance(attn_metadata_raw, list):
+            attn_metadata = attn_metadata_raw[0].get(self.layer_name)
+        else:
+            attn_metadata = attn_metadata_raw
+
         if attn_metadata is None:
             output.zero_()
             return
@@ -504,6 +516,10 @@ class DeepseekV32Attention(MLAAttention):
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
             mqa_q_arg, kv_cache, attn_metadata, self
         )
+
+        # NOTE(woosuk): While the below does not need to be in the eager region,
+        # we put it here to avoid copying the attention output. Move this back to the
+        # captured region once forward_mqa supports `out` argument.
         x = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
         ).transpose(0, 1)
