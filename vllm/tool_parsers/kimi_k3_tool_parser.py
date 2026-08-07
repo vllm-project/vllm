@@ -264,9 +264,28 @@ class KimiK3ToolParser(ToolParser):
     def _content(self, model_output: str, before: str) -> str | None:
         # prefer the unwrapped response channel; else the text before the tools
         m = self._response_re.search(model_output)
-        if m is not None:
-            return m["c"] or None
-        return self._strip_response_content(before)
+        body = m["c"] if m is not None else self._strip_response_content(before)
+        return self._trim_channel_markers(body)
+
+    def _trim_channel_markers(self, body: str | None) -> str | None:
+        """Drop a tools channel (or a dangling partial marker) from the body.
+
+        The response body is returned raw, so a marker the model typed inside
+        the channel would otherwise surface as user-visible content. Streaming
+        already stops at the tools marker and holds back partial markers
+        (see ``_extract_response_content``); do the same here.
+        """
+        if not body:
+            return None
+        m_tools = self._tools_open_re.search(body)
+        if m_tools is not None:
+            body = body[: m_tools.start()]
+        # Only hold back a marker the model actually started: a lone "<" is far
+        # more likely to be content than a truncated channel marker.
+        overlap = _partial_tag_overlap(body, self.tools_open)
+        if overlap > 1:
+            body = body[: len(body) - overlap]
+        return body or None
 
     def _extract_response_content(self, current_text: str) -> str | None:
         # Streaming response text is computed from the accumulated text. This is
@@ -320,20 +339,28 @@ class KimiK3ToolParser(ToolParser):
                 content=self._content(model_output, model_output),
             )
         try:
+            # A tools marker can also show up as response text (the model
+            # typing it, or an echo of it in the prompt). Anchoring blindly on
+            # the first one drops the real call that follows, so scan the
+            # sections in order and keep the first one that carries a call.
             before = model_output[: m_open.start()]
-            start = m_open.end()
-            m_close = self._tools_close_re.search(model_output, start)
-            section = (
-                model_output[start:]
-                if m_close is None
-                else model_output[start : m_close.start()]
-            )
-
-            tool_calls = [
-                tc
-                for m in self._call_re.finditer(section)
-                if (tc := self._decode_call(m["attrs"], m["body"])) is not None
-            ]
+            tool_calls: list[ToolCall] = []
+            for m_open in self._tools_open_re.finditer(model_output):
+                start = m_open.end()
+                m_close = self._tools_close_re.search(model_output, start)
+                section = (
+                    model_output[start:]
+                    if m_close is None
+                    else model_output[start : m_close.start()]
+                )
+                tool_calls = [
+                    tc
+                    for m in self._call_re.finditer(section)
+                    if (tc := self._decode_call(m["attrs"], m["body"])) is not None
+                ]
+                if tool_calls:
+                    before = model_output[: m_open.start()]
+                    break
             if not tool_calls:
                 return ExtractedToolCallInformation(
                     tools_called=False,

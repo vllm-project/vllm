@@ -604,3 +604,48 @@ def test_chat_params_keeps_template_tool_choice_when_api_auto():
 
     assert chat_params.chat_template_kwargs["tool_choice"] == "required"
     assert chat_params.tool_choice == "auto"
+
+
+# A tools marker can appear inside the response channel (the model typing it, or
+# an echo from the prompt). The real call must still be found, and the marker
+# must not surface as user-visible content.
+def test_extract_skips_marker_in_response_body_and_finds_real_call():
+    parser = KimiK3ToolParser(DummyTokenizer())
+    output = (
+        "<|open|>response<|sep|>Let me check.<|open|>tools<|sep|><|close|>tools<|sep|>"
+        "<|close|>response<|sep|>"
+        '<|open|>tools<|sep|><|open|>call tool="get_weather" index="1"<|sep|>'
+        '<|open|>argument key="city" type="string"<|sep|>Paris<|close|>argument<|sep|>'
+        "<|close|>call<|sep|><|close|>tools<|sep|>"
+    )
+
+    result = parser.extract_tool_calls(output, _request())
+
+    assert result.tools_called
+    assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
+    assert result.content == "Let me check."
+
+
+def test_extract_keeps_content_that_merely_looks_like_a_marker_start():
+    # A trailing "<" is content, not a truncated marker: an end-to-end probe
+    # showed an answer of "3 <" losing its last character.
+    parser = KimiK3ToolParser(DummyTokenizer())
+
+    for body in ("3 <", "a < b", "compare 5 <"):
+        result = parser.extract_tool_calls(
+            f"<|open|>response<|sep|>{body}<|close|>response<|sep|>", _request()
+        )
+        assert result.content == body
+
+
+def test_extract_does_not_leak_a_dangling_marker_into_content():
+    # Generation stopped mid-marker inside the response channel: the partial
+    # marker is held back, like the streaming path does.
+    parser = KimiK3ToolParser(DummyTokenizer())
+
+    result = parser.extract_tool_calls(
+        "<|open|>response<|sep|>Let me check.<|open|>tools", _request()
+    )
+
+    assert not result.tools_called
+    assert result.content == "Let me check."
