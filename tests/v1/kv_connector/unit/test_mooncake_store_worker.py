@@ -34,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 
@@ -808,6 +809,69 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
 
     assert full_hashes == [b"a2".hex(), b"a3".hex()]
     assert masked_hashes == [b"a2".hex()]
+
+
+def test_store_sending_thread_skips_null_sparse_group_blocks():
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, replicate_config: [256] * len(keys)
+    )
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([512])
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_mamba],
+    )
+    thread.add_stored_request("req-a")
+    thread._handle_request(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=48,
+            block_ids=([0, 1, 2], [NULL_BLOCK_ID, 4, NULL_BLOCK_ID]),
+            block_hashes=[b"a0", b"a1", b"a2"],
+            can_save=True,
+        )
+    )
+
+    keys, addrs, _, _ = store.batch_put_from_multi_buffers.call_args.args
+    mamba_keys = [key for key in keys if "@group:1" in key]
+    assert [key.rsplit("@", 1)[-1] for key in mamba_keys] == [b"a1".hex()]
+    assert all(addr[0] >= 0x2000 for key, addr in zip(keys, addrs) if "@group:1" in key)
 
 
 def test_store_sending_thread_prepares_missing_chunks_once_per_group():

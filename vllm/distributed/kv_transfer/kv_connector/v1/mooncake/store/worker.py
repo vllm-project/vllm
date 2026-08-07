@@ -505,6 +505,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Only ranks with identical group bytes may stripe PUTs (e.g., MLA).
         self.group_put_steps = group_put_steps
         self.coord = coord
+        self._mamba_group_ids = {
+            g_idx
+            for g_idx, group in enumerate(getattr(coord, "kv_cache_groups", ()))
+            if any(
+                isinstance(spec, MambaSpec)
+                for spec in (
+                    group.kv_cache_spec.kv_cache_specs.values()
+                    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                    else (group.kv_cache_spec,)
+                )
+            )
+        }
         self.kv_role = kv_role
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.enable_kv_event = enable_kv_event
@@ -800,6 +812,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     put_step=put_step,
                     put_step_rank=put_step_rank,
                 ):
+                    block_idx = start // db.block_size
+                    group_blocks = block_ids_per_group[g_idx]
+                    if block_idx >= len(group_blocks) or (
+                        g_idx in self._mamba_group_ids
+                        and group_blocks[block_idx] == NULL_BLOCK_ID
+                    ):
+                        logger.debug(
+                            "Skipping unavailable Mooncake store source block "
+                            "(req=%s, group=%d, block=%d)",
+                            req_id,
+                            g_idx,
+                            block_idx,
+                        )
+                        continue
                     starts.append(start)
                     ends.append(end)
                     keys.append(db.key_for(block_hash))
