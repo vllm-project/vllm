@@ -23,6 +23,7 @@ llm = LLM(
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from vllm import LLM, EngineArgs
@@ -55,15 +56,18 @@ def main(args):
     engine_args = EngineArgs.from_cli_args(args)
     if engine_args.enable_lora:
         raise ValueError("Saving with enable_lora=True is not supported!")
+    if Path(args.output).exists():
+        sys.stderr.write("Output directory already exists!\n")
     model_path = engine_args.model
     if not Path(model_path).is_dir():
         raise ValueError("model path must be a local directory")
+    # Prepare output directory
+    Path(args.output).mkdir(parents=True, exist_ok=True)
+
     # Create LLM instance from arguments
     llm = LLM.from_engine_args(engine_args)
-    # Prepare output directory
-    Path(args.output).mkdir(exist_ok=True)
-    # Dump worker states to output directory
 
+    # Dump worker states to output directory
     llm.llm_engine.engine_core.save_sharded_state(
         path=args.output, pattern=args.file_pattern, max_size=args.max_file_size
     )
