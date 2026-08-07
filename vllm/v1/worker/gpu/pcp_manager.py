@@ -357,7 +357,7 @@ class PCPManager:
 
         local_to_global_batch_req_idx_np = np.fromiter(
             (segment.global_batch_req_idx for segment in local_segments),
-            dtype=np.int32,
+            dtype=np.intp,
             count=num_local_reqs,
         )
         local_start_pos_np = np.fromiter(
