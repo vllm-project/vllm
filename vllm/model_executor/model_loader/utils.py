@@ -313,11 +313,4 @@ def configure_quant_config(
         if hf_to_vllm_mapper is not None:
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_unstacked_mapper())
         if packed_mapping is not None:
-            from vllm.model_executor.layers.quantization.online.base import (
-                ComposedQuantizationConfig,
-            )
-
-            if isinstance(quant_config, ComposedQuantizationConfig):
-                quant_config.set_packed_modules_mapping(packed_mapping)
-            else:
-                quant_config.packed_modules_mapping = packed_mapping
+            quant_config.packed_modules_mapping = packed_mapping

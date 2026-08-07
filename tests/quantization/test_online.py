@@ -16,6 +16,7 @@ from tests.quantization.utils import (
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.linear import (
@@ -30,9 +31,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
-from vllm.model_executor.layers.quantization.online.base import (
-    compose_quantization_config,
-)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -51,13 +49,17 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
 )
-from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+from vllm.model_executor.layers.quantization.quark.quark import (
+    QuarkConfig,
+    QuarkLinearMethod,
+)
 from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     weight_amax,
 )
+from vllm.model_executor.model_loader import weight_utils
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -125,10 +127,8 @@ def test_online_prequantized_compatibility(
     default_vllm_config.model_config = ModelConfig()
     checkpoint_config = checkpoint_config_factory()
 
-    config = compose_quantization_config(
-        checkpoint_config,
-        QuantizationConfigArgs(linear="mxfp8"),
-    )
+    checkpoint_config.set_online_quantization(QuantizationConfigArgs(linear="mxfp8"))
+    config = checkpoint_config
 
     layer_kwargs = {
         "input_size": 32,
@@ -141,11 +141,59 @@ def test_online_prequantized_compatibility(
     }
 
     if raises_conflict:
-        with pytest.raises(ValueError, match="leave selected layer"):
+        with pytest.raises(ValueError, match="checkpoint-quantized layer"):
             ColumnParallelLinear(**layer_kwargs)
     else:
         layer = ColumnParallelLinear(**layer_kwargs)
         assert isinstance(layer.quant_method, Mxfp8OnlineLinearMethod)
+
+
+def test_online_ignore_keeps_checkpoint_quantization(default_vllm_config, dist_init):
+    """Ignoring online quantization does not replace a checkpoint method."""
+    default_vllm_config.model_config = ModelConfig()
+    quant_config = _fully_quantized_quark_config()
+    prefix = "model.layers.0.self_attn.o_proj"
+    quant_config.set_online_quantization(
+        QuantizationConfigArgs(linear="mxfp8", ignore=[prefix])
+    )
+
+    layer = ColumnParallelLinear(
+        input_size=32,
+        output_size=32,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=quant_config,
+        prefix=prefix,
+        disable_tp=True,
+    )
+
+    assert isinstance(layer.quant_method, QuarkLinearMethod)
+
+
+def test_activation_only_override_keeps_checkpoint_config(monkeypatch) -> None:
+    """Activation-only overrides do not attach an online quantization overlay."""
+    checkpoint_config = _moe_only_compressed_tensors_config()
+    quant_cls = SimpleNamespace(from_config=lambda _: checkpoint_config)
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            quantization="compressed-tensors",
+            quantization_config=QuantizationConfigArgs(moe={"activation": "mxfp8"}),
+            hf_config=SimpleNamespace(
+                quantization_config={"quant_method": "compressed-tensors"},
+                text_config=None,
+            ),
+            hf_overrides={},
+        ),
+    )
+    monkeypatch.setattr(weight_utils, "get_quantization_config", lambda _: quant_cls)
+
+    result = weight_utils.get_quant_config(
+        model_config, cast(LoadConfig, SimpleNamespace())
+    )
+
+    assert result is checkpoint_config
+    assert result.online_quant_config is None
 
 
 @pytest.mark.skipif(
