@@ -204,7 +204,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             gemm1_weights=w1,
             gemm2_weights=w2,
             num_experts=global_num_experts,
-            top_k=self.topk,
+            top_k=topk_ids.size(1),
             n_group=None,
             topk_group=None,
             intermediate_size=self.intermediate_size_per_partition,
