@@ -337,7 +337,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type == "dots3_note":
+        if hf_config.model_type == "dots3_note_omni":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
             if mtp_layer_types is None:

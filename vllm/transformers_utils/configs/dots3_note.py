@@ -7,7 +7,7 @@ from transformers import DeepseekV3Config
 class Dots3NoteConfig(DeepseekV3Config):
     """Configuration for the Dots3 Note hybrid DSA/SWA model."""
 
-    model_type = "dots3_note"
+    model_type = "dots3_note_omni"
 
     def __init__(self, **kwargs):
         # These fields are absent from existing Note config.json files.  Do

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dot3 Note model entry point."""
+"""Dots3 Note model entry point."""
 
-from .model import Dot3NoteForCausalLM
 from .mtp import Dot3NoteMTP
+from .omni import Dots3NoteOmniForCausalLM
 
-__all__ = ["Dot3NoteForCausalLM", "Dot3NoteMTP"]
+__all__ = ["Dots3NoteOmniForCausalLM", "Dot3NoteMTP"]

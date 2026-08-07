@@ -37,12 +37,14 @@ _HOP_LENGTH = 160
 _DEFAULT_SAMPLE_RATE = 16000
 
 
-def load_note_subconfig(
+def load_note_config_section(
     model: str,
     revision: str | None,
-    subfolder: str,
+    section: str,
 ) -> dict[str, Any] | None:
-    return get_hf_file_to_dict(f"{subfolder}/config.json", model, revision)
+    config = get_hf_file_to_dict("config.json", model, revision)
+    value = (config or {}).get(section)
+    return value if isinstance(value, dict) else None
 
 
 class DotsNoteImageProcessor:
@@ -264,19 +266,19 @@ class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
     @cached_property
     def vision_config(self) -> dict[str, Any] | None:
         model_config = self.ctx.model_config
-        return load_note_subconfig(
+        return load_note_config_section(
             model_config.model,
             model_config.revision,
-            "new_ve",
+            "vision_config",
         )
 
     @cached_property
     def audio_config(self) -> dict[str, Any] | None:
         model_config = self.ctx.model_config
-        return load_note_subconfig(
+        return load_note_config_section(
             model_config.model,
             model_config.revision,
-            "new_ae",
+            "audio_config",
         )
 
     @cached_property
@@ -284,21 +286,17 @@ class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
         if self.vision_config is None:
             return None
         model_config = self.ctx.model_config
-        preprocessor_config = get_hf_file_to_dict(
-            "new_ve/preprocessor_config.json",
+        processor_config = get_hf_file_to_dict(
+            "preprocessor_config.json",
             model_config.model,
             model_config.revision,
         )
-        if preprocessor_config is None:
+        preprocessor_config = (processor_config or {}).get("vision_config")
+        if not isinstance(preprocessor_config, dict):
             raise ValueError(
                 "NOTE vision checkpoint is missing preprocessor_config.json"
             )
-        image_detail_config = get_hf_file_to_dict(
-            "new_ve/image_detail.json",
-            model_config.model,
-            model_config.revision,
-        )
-        image_details = (image_detail_config or {}).get("image_details", {})
+        image_details = preprocessor_config.get("image_details", {})
         return DotsNoteImageProcessor(preprocessor_config, image_details)
 
     @cached_property

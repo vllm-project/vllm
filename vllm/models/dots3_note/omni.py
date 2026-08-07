@@ -8,7 +8,6 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -36,7 +35,7 @@ from .processor import (
     DotsNoteOmniDummyInputsBuilder,
     DotsNoteOmniMultiModalProcessor,
     DotsNoteOmniProcessingInfo,
-    load_note_subconfig,
+    load_note_config_section,
 )
 from .vision import DotsMoEVitConfig, DotsMoEVitModel
 
@@ -46,8 +45,8 @@ from .vision import DotsMoEVitConfig, DotsMoEVitModel
     info=DotsNoteOmniProcessingInfo,
     dummy_inputs=DotsNoteOmniDummyInputsBuilder,
 )
-class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    """NOTE language model with checkpoint-local ``new_ve`` and ``new_ae`` towers."""
+class Dots3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+    """Dots3 NOTE Omni model with optional image and audio towers."""
 
     supports_encoder_tp_data = True
 
@@ -56,6 +55,8 @@ class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             "model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "mtp.": "language_model.mtp.",
+            "vision_encoder.": "visual.",
+            "audio_encoder.": "audio_tower.",
         }
     )
 
@@ -84,15 +85,15 @@ class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             raise ValueError("NOTE tokenizer is missing the image padding token")
         self.config.image_token_index = int(added_tokens[IMAGE_PAD])
 
-        vision_config_dict = load_note_subconfig(
+        vision_config_dict = load_note_config_section(
             model_config.model,
             model_config.revision,
-            "new_ve",
+            "vision_config",
         )
-        audio_config_dict = load_note_subconfig(
+        audio_config_dict = load_note_config_section(
             model_config.model,
             model_config.revision,
-            "new_ae",
+            "audio_config",
         )
         image_enabled = (
             vision_config_dict is not None
@@ -103,7 +104,6 @@ class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             and self.multimodal_config.get_limit_per_prompt("audio") > 0
         )
 
-        self.secondary_weights: list[DefaultModelLoader.Source] = []
         with self._mark_tower_model(vllm_config, {"image", "audio"}):
             self.visual: DotsMoEVitModel | None
             if image_enabled:
@@ -125,26 +125,6 @@ class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 self.visual.to(dtype=model_config.dtype)
             if self.audio_tower is not None:
                 self.audio_tower.to(dtype=model_config.dtype)
-        if image_enabled:
-            self.secondary_weights.append(
-                DefaultModelLoader.Source(
-                    model_or_path=model_config.model,
-                    revision=model_config.revision,
-                    subfolder="new_ve",
-                    prefix="visual.",
-                )
-            )
-
-        if audio_enabled:
-            self.secondary_weights.append(
-                DefaultModelLoader.Source(
-                    model_or_path=model_config.model,
-                    revision=model_config.revision,
-                    subfolder="new_ae",
-                    prefix="audio_tower.",
-                )
-            )
-
         with self._mark_language_model(vllm_config):
             self.language_model = Dot3NoteLanguageModelForCausalLM(
                 vllm_config=vllm_config,
@@ -227,7 +207,12 @@ class Dot3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return AutoWeightsLoader(self).load_weights(
+        skip_prefixes = []
+        if self.visual is None:
+            skip_prefixes.append("visual.")
+        if self.audio_tower is None:
+            skip_prefixes.append("audio_tower.")
+        return AutoWeightsLoader(self, skip_prefixes=skip_prefixes).load_weights(
             weights,
             mapper=self.hf_to_vllm_mapper,
         )
