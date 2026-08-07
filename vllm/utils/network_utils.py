@@ -5,6 +5,7 @@ import ipaddress
 import os
 import socket
 import sys
+import threading
 import warnings
 from collections.abc import (
     Iterator,
@@ -12,6 +13,11 @@ from collections.abc import (
 )
 from typing import Any
 from uuid import uuid4
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 import psutil
 import zmq
@@ -22,6 +28,9 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+_open_port_lock = threading.RLock()
+_next_port_from_env: dict[int, int] = {}
 
 
 def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
@@ -156,14 +165,15 @@ def get_open_port() -> int:
     Right now we reserve 10 ports for the data parallel master
     process. Currently it uses 2 ports.
     """
-    if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_master_port = envs.VLLM_DP_MASTER_PORT
-        reserved_port_range = range(dp_master_port, dp_master_port + 10)
-        while True:
-            candidate_port = _get_open_port()
-            if candidate_port not in reserved_port_range:
-                return candidate_port
-    return _get_open_port()
+    with _open_port_lock:
+        if "VLLM_DP_MASTER_PORT" in os.environ:
+            dp_master_port = envs.VLLM_DP_MASTER_PORT
+            reserved_port_range = range(dp_master_port, dp_master_port + 10)
+            while True:
+                candidate_port = _get_open_port()
+                if candidate_port not in reserved_port_range:
+                    return candidate_port
+        return _get_open_port()
 
 
 def get_open_ports_list(count: int = 5) -> list[int]:
@@ -172,19 +182,18 @@ def get_open_ports_list(count: int = 5) -> list[int]:
     When VLLM_PORT is set, scans upward from that port, advancing
     the start position after each find so every port is unique.
     """
-    ports_set = set[int]()
-    if envs.VLLM_PORT is not None:
-        next_port = envs.VLLM_PORT
-        for _ in range(count):
-            port = _get_open_port(start_port=next_port, max_attempts=1000)
-            ports_set.add(port)
-            next_port = port + 1
-        return list(ports_set)
-    else:
-        while len(ports_set) < count:
-            ports_set.add(get_open_port())
+    with _open_port_lock:
+        ports: list[int] = []
+        if envs.VLLM_PORT is not None:
+            for _ in range(count):
+                ports.append(_get_open_port(max_attempts=1000))
+        else:
+            while len(ports) < count:
+                port = get_open_port()
+                if port not in ports:
+                    ports.append(port)
 
-    return list(ports_set)
+        return ports
 
 
 def _get_open_port(
@@ -192,6 +201,79 @@ def _get_open_port(
     max_attempts: int | None = None,
 ) -> int:
     start_port = start_port if start_port is not None else envs.VLLM_PORT
+    if start_port is not None:
+        return _get_open_port_from_env(start_port, max_attempts)
+    return _get_open_port_uncached(start_port, max_attempts)
+
+
+def _get_open_port_in_process(
+    start_port: int,
+    max_attempts: int | None = None,
+) -> int:
+    next_port = max(start_port, _next_port_from_env.get(start_port, start_port))
+    port = _get_open_port_uncached(next_port, max_attempts)
+    _next_port_from_env[start_port] = port + 1
+    return port
+
+
+def _get_open_port_from_env(
+    start_port: int,
+    max_attempts: int | None = None,
+) -> int:
+    """Get an open port using a cross-process cursor.
+
+    Multiple independent vLLM processes can scan from the same starting port
+    concurrently, so the scan cursor must be shared across processes; otherwise
+    each process can select the same still-unbound port and race when binding
+    later.
+    """
+    lock_path = os.path.join(envs.VLLM_RPC_BASE_PATH, f"vllm_port_{start_port}.lock")
+    if fcntl is None:
+        return _get_open_port_in_process(start_port, max_attempts)
+
+    try:
+        os.makedirs(envs.VLLM_RPC_BASE_PATH, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(lock_path, flags, 0o600)
+        with os.fdopen(fd, "r+") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+
+            lock_file.seek(0)
+            content = lock_file.read().strip()
+            try:
+                next_port = int(content) if content else start_port
+            except ValueError:
+                next_port = start_port
+            next_port = max(
+                start_port,
+                _next_port_from_env.get(start_port, start_port),
+                next_port,
+            )
+
+            port = _get_open_port_uncached(next_port, max_attempts)
+            _next_port_from_env[start_port] = port + 1
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(str(_next_port_from_env[start_port]))
+            lock_file.flush()
+            os.fsync(lock_file.fileno())
+            return port
+    except OSError as e:
+        logger.warning(
+            "Failed to use port lock file %s: %s. Falling back to uncached "
+            "port allocation.",
+            lock_path,
+            e,
+        )
+        return _get_open_port_in_process(start_port, max_attempts)
+
+
+def _get_open_port_uncached(
+    start_port: int | None = None,
+    max_attempts: int | None = None,
+) -> int:
     port = start_port
     if port is not None:
         attempts = 0
