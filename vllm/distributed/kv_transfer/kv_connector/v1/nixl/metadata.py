@@ -24,6 +24,11 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+
+# Push-mode WRITE failure notification. Sent P worker -> D worker as
+# PUSH_FAIL_NOTIF_PREFIX + the completion notification body; stands in for a
+# WRITE that could not be posted so the consumer's count still adds up.
+PUSH_FAIL_NOTIF_PREFIX = b"PUSH_FAIL:"
 #
 # NIXL Connector Version
 #
