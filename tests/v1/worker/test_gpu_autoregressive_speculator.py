@@ -386,12 +386,11 @@ def test_mrv2_sparse_mla_reuses_topk_with_sequential_draft_positions(monkeypatch
         step = int(speculator.current_draft_step.item())
         observed_steps.append(step)
         observed_positions.append(int(speculator.input_buffers.positions[0].item()))
-        if manager_buffers["tp_fence_token"].item() == step:
-            if step == 0:
-                manager_buffers["topk_logical_ids"][0, 0].copy_(transient_topk[0])
-            consumed_topk.append(manager_buffers["topk_logical_ids"][0, 0].clone())
+        if step == 0:
+            consumed_topk.append(transient_topk[0])
+            manager_buffers["topk_logical_ids"][0, 0].copy_(transient_topk[0])
         else:
-            consumed_topk.append(transient_topk[step])
+            consumed_topk.append(manager_buffers["topk_logical_ids"][0, 0].clone())
         saved_topk.append(manager_buffers["topk_logical_ids"][0, 0].clone())
         return torch.zeros(1, 1), torch.zeros(1, 1)
 
@@ -550,7 +549,6 @@ def test_mrv2_sparse_mla_reuses_topk_with_sequential_draft_positions(monkeypatch
             saved_topk_logical_ids[0, 0],
             torch.tensor([10, 11], dtype=torch.int32),
         )
-        saved_topk_logical_ids[0, 0].copy_(live_topk_logical_ids[0, 0])
 
     monkeypatch.setattr(flashmla.ops, "sparse_mla_cache_plan", native_cache_plan)
     manager._fence_mtp_target()
@@ -577,7 +575,7 @@ def test_mrv2_sparse_mla_reuses_topk_with_sequential_draft_positions(monkeypatch
         )
     assert torch.equal(
         manager_buffers["topk_logical_ids"][0, 0],
-        torch.tensor([22, 23], dtype=torch.int32),
+        torch.tensor([10, 11], dtype=torch.int32),
     )
     assert manager_buffers["topk_logical_ids"].data_ptr() == topk_ptr
     assert manager_buffers["tp_fence_token"].data_ptr() == fence_ptr

@@ -271,6 +271,8 @@ def test_mtp_sparse_mla_rollback(outcome, monkeypatch):
         "resident_last_access": resident_access.clone(),
         "newest_main_kv": newest_main_kv.clone(),
         "newest_logical_ids": newest_ids.clone(),
+        "miss_counts": torch.zeros((1, num_newest_slots), dtype=torch.int32),
+        "accepted_counts": torch.zeros((1, num_newest_slots), dtype=torch.int32),
         "provisional_slots": provisional_slots.clone(),
         "tp_fence_token": torch.tensor([-1], dtype=torch.int32),
     }
@@ -301,6 +303,13 @@ def test_mtp_sparse_mla_rollback(outcome, monkeypatch):
         ]
     ] = []
     native_phase_events: list[tuple[int, int]] = []
+    execution_events: list[tuple[int | str, ...]] = []
+
+    def all_reduce(status):
+        execution_events.append(("reduce",))
+        return status
+
+    manager._tp_group = SimpleNamespace(all_reduce=all_reduce)
 
     def finalize_transfer(*args, **kwargs):
         native_calls.append((args, kwargs))
@@ -334,6 +343,15 @@ def test_mtp_sparse_mla_rollback(outcome, monkeypatch):
         assert status.dtype == expected_status.dtype
         assert status.device == expected_status.device
         assert args[20] is True
+        for argument_index, buffer_name in (
+            (10, "miss_counts"),
+            (11, "accepted_counts"),
+        ):
+            count_buffer = args[argument_index]
+            expected_buffer = buffers[buffer_name]
+            assert isinstance(count_buffer, torch.Tensor)
+            assert count_buffer.data_ptr() == expected_buffer.data_ptr()
+            assert count_buffer.is_contiguous()
         expected_argument_views = {
             7: buffers["newest_logical_ids"][layer_index],
             8: buffers["provisional_slots"][layer_index],
@@ -352,6 +370,7 @@ def test_mtp_sparse_mla_rollback(outcome, monkeypatch):
             assert actual_view.dtype == expected_view.dtype
             assert actual_view.device == expected_view.device
         native_phase_events.append((phase, layer_index))
+        execution_events.append((phase, layer_index))
         if phase == 0:
             assert torch.equal(status, torch.zeros_like(status))
             if any(
@@ -402,6 +421,7 @@ def test_mtp_sparse_mla_rollback(outcome, monkeypatch):
 
     assert len(native_calls) == 2 * len(layer_names)
     assert native_phase_events == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert execution_events == [(0, 0), (0, 1), ("reduce",), (1, 0), (1, 1)]
     assert manager._local_buffers["request_num_tokens"].tolist() == [committed_boundary]
     for layer_index, host_view in enumerate(host_views.values()):
         for newest_slot, logical_id in enumerate((9, 10, 8)):
@@ -486,8 +506,11 @@ def test_mtp_sparse_mla_rollback(outcome, monkeypatch):
         }
         native_calls.clear()
         native_phase_events.clear()
-        finalizer(idx_mapping, postprocessed_num_computed_tokens)
-        assert native_phase_events == [(0, 0), (0, 1), (1, 0), (1, 1)]
+        execution_events.clear()
+        with pytest.raises(RuntimeError, match="MTP finalize validation"):
+            finalizer(idx_mapping, postprocessed_num_computed_tokens)
+        assert native_phase_events == [(0, 0), (0, 1)]
+        assert execution_events == [(0, 0), (0, 1), ("reduce",)]
         assert all(
             torch.equal(host_views[name], value)
             for name, value in host_before_mismatch.items()
@@ -508,6 +531,7 @@ def test_mtp_sparse_mla_rollback(outcome, monkeypatch):
     host_before_follower = {name: value.clone() for name, value in host_views.items()}
     native_calls.clear()
     native_phase_events.clear()
+    execution_events.clear()
     finalizer(idx_mapping, postprocessed_num_computed_tokens)
     assert all(
         torch.equal(host_views[name], value)

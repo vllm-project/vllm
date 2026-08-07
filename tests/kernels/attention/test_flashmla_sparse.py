@@ -110,8 +110,10 @@ def _make_sparse_mla_offload_case(num_heads: int, *, writer: bool):
             _OFFLOAD_REQUESTS, 1, dtype=torch.int32, device=device
         ),
         "accepted_counts": torch.zeros(
-            _OFFLOAD_REQUESTS, dtype=torch.int32, device=device
+            _OFFLOAD_REQUESTS, 1, dtype=torch.int32, device=device
         ),
+        "provisional_slots": torch.zeros_like(topk),
+        "tp_fence_token": torch.zeros(1, dtype=torch.int32, device=device),
         "hit_output": torch.empty_like(output).unsqueeze(1),
         "hit_lse": torch.empty(
             _OFFLOAD_REQUESTS,
@@ -144,9 +146,15 @@ def _make_sparse_mla_offload_case(num_heads: int, *, writer: bool):
         miss_ready_events=(ready_event,),
     )
     req_ids = torch.arange(_OFFLOAD_REQUESTS, dtype=torch.int32, device=device)
+    positions = torch.full((_OFFLOAD_REQUESTS,), 127, dtype=torch.int64, device=device)
     context = ForwardContext(
         no_compile_layers={_OFFLOAD_LAYER: view},
-        attn_metadata={_OFFLOAD_LAYER: SimpleNamespace(req_id_per_token=req_ids)},
+        attn_metadata={
+            _OFFLOAD_LAYER: SimpleNamespace(
+                req_id_per_token=req_ids,
+                positions=positions,
+            )
+        },
         slot_mapping={},
     )
     return SimpleNamespace(
@@ -157,6 +165,7 @@ def _make_sparse_mla_offload_case(num_heads: int, *, writer: bool):
         query=query,
         topk=topk,
         output=output,
+        positions=positions,
         req_ids=req_ids,
         context=context,
         view=view,
@@ -836,6 +845,163 @@ def test_sparse_mla_offload_operator_path_eager_writer_and_follower():
     ):
         assert torch.equal(writer.buffers[name], follower.buffers[name])
     torch.testing.assert_close(writer.output, writer_reference, rtol=2e-2, atol=2e-2)
+
+    mtp = _make_sparse_mla_offload_case(64, writer=False)
+    token_rows = 4
+    window = 3
+    mtp.current = torch.randn(
+        token_rows,
+        _OFFLOAD_QK_DIM,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    mtp.topk = torch.full(
+        (token_rows, 1, _OFFLOAD_TOPK),
+        -1,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    mtp.topk[:, 0, 0] = torch.tensor((10, 11, 20, 21), device="cuda")
+    mtp.req_ids = torch.tensor((0, 0, 1, 1), dtype=torch.int32, device="cuda")
+    mtp.positions = torch.tensor((40, 41, 70, 71), device="cuda")
+    mtp_metadata = mtp.context.attn_metadata[_OFFLOAD_LAYER]
+    mtp_metadata.req_id_per_token = mtp.req_ids
+    mtp_metadata.positions = mtp.positions
+    mtp.buffers["request_num_tokens"].copy_(
+        torch.tensor((42, 72), dtype=torch.int32, device="cuda")
+    )
+    for name, fill_value in (
+        ("topk_logical_ids", -1),
+        ("topk_physical_ids", 0),
+        ("miss_logical_ids", -1),
+        ("miss_victim_slots", 0),
+        ("provisional_slots", 0),
+    ):
+        mtp.buffers[name] = torch.full(
+            (_OFFLOAD_REQUESTS, window, _OFFLOAD_TOPK),
+            fill_value,
+            dtype=torch.int32,
+            device="cuda",
+        )
+    mtp.buffers["topk_hit_mask"] = torch.zeros(
+        (_OFFLOAD_REQUESTS, window, _OFFLOAD_TOPK),
+        dtype=torch.bool,
+        device="cuda",
+    )
+    mtp.buffers["miss_counts"] = torch.zeros(
+        (_OFFLOAD_REQUESTS, window), dtype=torch.int32, device="cuda"
+    )
+    mtp.buffers["accepted_counts"] = torch.zeros_like(mtp.buffers["miss_counts"])
+    mtp.buffers["newest_main_kv"] = torch.empty(
+        _OFFLOAD_REQUESTS,
+        window,
+        _OFFLOAD_QK_DIM,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    mtp.buffers["newest_logical_ids"] = torch.full(
+        (_OFFLOAD_REQUESTS, window), -1, dtype=torch.int64, device="cuda"
+    )
+    mtp.buffers["tp_fence_token"].fill_(-1)
+    with override_forward_context(mtp.context):
+        torch.ops.vllm.sparse_mla_cache_plan(mtp.current, mtp.topk, _OFFLOAD_LAYER)
+    torch.accelerator.synchronize()
+    assert mtp.buffers["accepted_counts"].view(-1)[:token_rows].tolist() == [1] * 4
+    assert mtp.buffers["topk_physical_ids"].view(-1, _OFFLOAD_TOPK)[
+        :token_rows, 0
+    ].tolist() == [10, 11, 148, 149]
+
+    mtp.topk[:, 0, 0] = torch.tensor((30, 31, 22, 23), device="cuda")
+    mtp.buffers["tp_fence_token"].zero_()
+    with override_forward_context(mtp.context):
+        torch.ops.vllm.sparse_mla_cache_plan(mtp.current, mtp.topk, _OFFLOAD_LAYER)
+    torch.accelerator.synchronize()
+    assert mtp.buffers["topk_logical_ids"][:, 0, 0].tolist() == [31, 23]
+    assert mtp.buffers["topk_physical_ids"].view(-1, _OFFLOAD_TOPK)[
+        :token_rows, 0
+    ].tolist() == [30, 31, 150, 151]
+    host_before_mtp_draft = mtp.host.clone()
+    torch.ops.vllm.sparse_mla_offload_transfer(
+        mtp.host_uva,
+        mtp.buffers["request_block_ids"],
+        mtp.buffers["request_num_blocks"],
+        mtp.buffers["request_num_tokens"],
+        mtp.buffers["request_active"],
+        mtp.req_ids,
+        mtp.buffers["newest_main_kv"],
+        mtp.buffers["newest_logical_ids"],
+        mtp.buffers["miss_logical_ids"],
+        mtp.buffers["miss_victim_slots"],
+        mtp.buffers["miss_counts"],
+        mtp.buffers["accepted_counts"],
+        mtp.buffers["resident_main_kv"],
+        mtp.buffers["resident_logical_ids"],
+        mtp.buffers["resident_last_access"],
+        mtp.buffers["provisional_slots"],
+        mtp.positions,
+        mtp.buffers["tp_fence_token"],
+        True,
+        _OFFLOAD_BLOCK_SIZE,
+        False,
+        0,
+    )
+    torch.accelerator.synchronize()
+    assert torch.equal(mtp.host, host_before_mtp_draft)
+
+    mtp.topk[:, 0, 0] = torch.tensor((4, 5, 6, 7), device="cuda")
+    mtp.buffers["tp_fence_token"].fill_(1)
+    with override_forward_context(mtp.context):
+        torch.ops.vllm.sparse_mla_cache_plan(mtp.current, mtp.topk, _OFFLOAD_LAYER)
+    torch.accelerator.synchronize()
+    assert mtp.buffers["topk_logical_ids"][:, 0, 0].tolist() == [31, 23]
+    assert mtp.buffers["topk_physical_ids"].view(-1, _OFFLOAD_TOPK)[
+        :token_rows, 0
+    ].tolist() == [31, 31, 151, 151]
+
+    all_padding = _make_sparse_mla_offload_case(64, writer=True)
+    all_padding.topk.fill_(-1)
+    _run_sparse_mla_offload(all_padding)
+    torch.accelerator.synchronize()
+    for request, physical_block in enumerate((1, 3)):
+        assert torch.equal(
+            all_padding.host[physical_block, 63], all_padding.current[request]
+        )
+
+    mismatched = _make_sparse_mla_offload_case(64, writer=True)
+    smaller_provisional = mismatched.buffers["provisional_slots"][
+        :, :, :-1
+    ].contiguous()
+    state_before, host_before = _snapshot_sparse_mla_case(mismatched)
+    from vllm import _custom_ops as ops
+
+    with pytest.raises(RuntimeError, match="invalid sparse MLA transfer static shape"):
+        ops.sparse_mla_offload_transfer(
+            mismatched.host_uva,
+            mismatched.buffers["request_block_ids"],
+            mismatched.buffers["request_num_blocks"],
+            mismatched.buffers["request_num_tokens"],
+            mismatched.buffers["request_active"],
+            mismatched.req_ids,
+            mismatched.buffers["newest_main_kv"],
+            mismatched.buffers["newest_logical_ids"],
+            mismatched.buffers["miss_logical_ids"],
+            mismatched.buffers["miss_victim_slots"],
+            mismatched.buffers["miss_counts"],
+            mismatched.buffers["accepted_counts"],
+            mismatched.buffers["resident_main_kv"],
+            mismatched.buffers["resident_logical_ids"],
+            mismatched.buffers["resident_last_access"],
+            smaller_provisional,
+            mismatched.positions,
+            mismatched.buffers["tp_fence_token"],
+            True,
+            _OFFLOAD_BLOCK_SIZE,
+            False,
+            0,
+        )
+    for name, before in state_before.items():
+        assert torch.equal(mismatched.buffers[name], before)
+    assert torch.equal(mismatched.host, host_before)
 
     victims = _make_sparse_mla_offload_case(64, writer=False)
     victims.buffers["resident_logical_ids"].copy_(
