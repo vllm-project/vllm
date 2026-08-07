@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.reload_arena import ReloadArena, get_reload_arena
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
@@ -91,6 +92,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.w2_sf_mma: torch.Tensor | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        arena = get_reload_arena(layer)
         # Normalise block scales to absorb the per-expert weight global scale
         # (w_gs).  vLLM's NVFP4 convention stores:
         #   block_scale = max_abs * w_gs / fp4_max,  g1_alphas = 1/w_gs
@@ -128,10 +130,13 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             # 1.0 scale per expert is equivalent to the bake-in above for
             # static-quant checkpoints. Allocate once here so apply() stays
             # alloc-free.
-            self._fc2_input_scale = torch.ones(
-                self.num_local_experts,
-                device=layer.w13_weight.device,
-                dtype=torch.float32,
+            self._fc2_input_scale = arena.put(
+                "flashinfer_b12x.fc2_input_scale",
+                torch.ones(
+                    self.num_local_experts,
+                    device=layer.w13_weight.device,
+                    dtype=torch.float32,
+                ),
             )
 
         # Precompute MMA-layout views of the weight scale factors once here
@@ -139,22 +144,33 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         assert self.w1_scale is not None
         num_experts_w1, m1, k1_sf = self.w1_scale.shape
         k1 = k1_sf * 16
-        self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1,
-            k=k1,
-            num_groups=num_experts_w1,
+        self.w1_sf_mma = arena.put(
+            "flashinfer_b12x.w1_sf_mma",
+            flashinfer_convert_sf_to_mma_layout(
+                self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
+                m=m1,
+                k=k1,
+                num_groups=num_experts_w1,
+            ),
         )
 
         assert self.w2_scale is not None
         num_experts_w2, m2, k2_sf = self.w2_scale.shape
         k2 = k2_sf * 16
-        self.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2,
-            k=k2,
-            num_groups=num_experts_w2,
+        self.w2_sf_mma = arena.put(
+            "flashinfer_b12x.w2_sf_mma",
+            flashinfer_convert_sf_to_mma_layout(
+                self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
+                m=m2,
+                k=k2,
+                num_groups=num_experts_w2,
+            ),
         )
+
+        # The wrapper owns private CUDA-graph workspaces that the arena cannot
+        # adopt individually. Persist the wrapper in an object slot so a
+        # rebuilt experts object borrows the same wrapper.
+        self._bind_arena_wrapper(arena)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -227,14 +243,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # from pre-quantizing activations.
         return True
 
-    def _ensure_wrapper(self) -> None:
-        """Lazily create B12xMoEWrapper on first use."""
-        if self._wrapper is not None:
-            return
-
+    def _build_wrapper(self) -> Any:
         from flashinfer.fused_moe import B12xMoEWrapper
 
-        self._wrapper = B12xMoEWrapper(
+        return B12xMoEWrapper(
             num_experts=self.global_num_experts,
             top_k=self.topk,
             hidden_size=self.hidden_dim,
@@ -244,6 +256,16 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.num_local_experts,
             activation=self._activation_str,
         )
+
+    def _bind_arena_wrapper(self, arena: ReloadArena) -> None:
+        self._wrapper = arena.get_or_create_object(
+            "flashinfer_b12x.wrapper", self._build_wrapper
+        )
+
+    def _ensure_wrapper(self) -> None:
+        """Build a wrapper for direct use without layer PWAL."""
+        if self._wrapper is None:
+            self._wrapper = self._build_wrapper()
 
     def apply(
         self,

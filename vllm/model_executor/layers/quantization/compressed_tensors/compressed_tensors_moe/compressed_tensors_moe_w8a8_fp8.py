@@ -3,6 +3,9 @@
 
 
 import torch
+
+from vllm.model_executor.reload_arena import (arena_scope,
+                                               get_reload_arena)
 from compressed_tensors.quantization import (
     QuantizationArgs,
     QuantizationStrategy,
@@ -332,14 +335,18 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.moe_kernel = make_fp8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-                layer=layer,
-            )
+            # The kernel rebuild replaces the experts object; graph-visible
+            # tensors it allocates (strides, permute scratch) must land in
+            # the layer's arena so the rebuilt object reuses their storage.
+            with arena_scope(get_reload_arena(layer)):
+                self.moe_kernel = make_fp8_moe_kernel(
+                    moe_quant_config=self.moe_quant_config,
+                    moe_config=self.moe,
+                    fp8_backend=self.fp8_backend,
+                    experts_cls=self.experts_cls,
+                    routing_tables=layer._expert_routing_tables(),
+                    layer=layer,
+                )
 
     def maybe_make_prepare_finalize(
         self,

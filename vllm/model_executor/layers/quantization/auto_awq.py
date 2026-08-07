@@ -48,7 +48,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_layer,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
+    marlin_get_workspace,
     verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -661,7 +661,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
         device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
+        layer.workspace = marlin_get_workspace(layer, device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         converted = convert_to_wna16_moe_kernel_format(

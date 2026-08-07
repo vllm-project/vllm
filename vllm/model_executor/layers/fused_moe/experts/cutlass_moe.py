@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
 )
+from vllm.model_executor.reload_arena import current_arena
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8DynamicTensorSym,
@@ -286,9 +287,28 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         n = moe_config.intermediate_size_per_partition
         k = moe_config.hidden_dim
         device = moe_config.device
-        ab_strides1_c_strides2 = torch.full((e,), k, device=device, dtype=torch.int64)
-        ab_strides2 = torch.full((e,), n, device=device, dtype=torch.int64)
-        c_strides1 = torch.full((e,), 2 * n, device=device, dtype=torch.int64)
+
+        # Stride tensors are passed to every grouped-GEMM launch, so their
+        # addresses live inside captured graphs; this object is rebuilt by
+        # every post-load pass. Publish them through the layer's reload
+        # arena (ambient during PWAL) so the rebuild reuses the same
+        # storage. Captured here as well for the lazily-built scratch.
+        self._reload_arena = current_arena()
+
+        def _stable(slot: str, t: torch.Tensor) -> torch.Tensor:
+            if self._reload_arena is not None:
+                return self._reload_arena.put(f"cutlass_fp8.{slot}", t)
+            return t
+
+        ab_strides1_c_strides2 = _stable(
+            "ab_strides1_c_strides2",
+            torch.full((e,), k, device=device, dtype=torch.int64))
+        ab_strides2 = _stable(
+            "ab_strides2", torch.full((e,), n, device=device,
+                                      dtype=torch.int64))
+        c_strides1 = _stable(
+            "c_strides1", torch.full((e,), 2 * n, device=device,
+                                     dtype=torch.int64))
 
         self.out_dtype = moe_config.in_dtype
         self.ab_strides1 = ab_strides1_c_strides2
@@ -338,6 +358,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
                 num_experts=self.moe_config.num_experts,
                 num_local_experts=self.moe_config.num_local_experts,
                 device=torch.device(self.moe_config.device),
+                arena=self._reload_arena,
             )
         return self._permute_scratch
 
@@ -1265,20 +1286,37 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
         self.out_dtype = moe_config.in_dtype
 
-        a_strides1_c_strides2 = torch.full((e,), k, device=device, dtype=torch.int64)
+        # Same rationale as CutlassExpertsFp8Base: stride addresses are
+        # graph-captured, this object is rebuilt per post-load pass.
+        self._reload_arena = current_arena()
+
+        def _stable(slot: str, t: torch.Tensor) -> torch.Tensor:
+            if self._reload_arena is not None:
+                return self._reload_arena.put(f"cutlass_w4a8.{slot}", t)
+            return t
+
+        a_strides1_c_strides2 = _stable(
+            "a_strides1_c_strides2",
+            torch.full((e,), k, device=device, dtype=torch.int64))
         self.a_strides1 = a_strides1_c_strides2
-        self.a_strides2 = torch.full((e,), n, device=device, dtype=torch.int64)
-        self.c_strides1 = torch.full((e,), 2 * n, device=device, dtype=torch.int64)
+        self.a_strides2 = _stable(
+            "a_strides2", torch.full((e,), n, device=device,
+                                     dtype=torch.int64))
+        self.c_strides1 = _stable(
+            "c_strides1", torch.full((e,), 2 * n, device=device,
+                                     dtype=torch.int64))
         self.c_strides2 = a_strides1_c_strides2
 
-        self.b_strides1 = b_strides1
-        self.b_strides2 = b_strides2
+        self.b_strides1 = _stable("b_strides1", b_strides1)
+        self.b_strides2 = _stable("b_strides2", b_strides2)
 
         # sizeof(StrideS) = 16 bytes, encoded as 2xint64.
-        self.s_strides1 = torch.zeros((e, 2), device=device, dtype=torch.int64)
-        self.s_strides1[:, 0] = 2 * n
-        self.s_strides2 = torch.zeros((e, 2), device=device, dtype=torch.int64)
-        self.s_strides2[:, 0] = k
+        s_strides1 = torch.zeros((e, 2), device=device, dtype=torch.int64)
+        s_strides1[:, 0] = 2 * n
+        self.s_strides1 = _stable("s_strides1", s_strides1)
+        s_strides2 = torch.zeros((e, 2), device=device, dtype=torch.int64)
+        s_strides2[:, 0] = k
+        self.s_strides2 = _stable("s_strides2", s_strides2)
 
         self.group_size = group_size
         self._permute_scratch: MoEPermuteScratch | None = None
@@ -1351,6 +1389,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
                 num_experts=self.moe_config.num_experts,
                 num_local_experts=self.moe_config.num_local_experts,
                 device=torch.device(self.moe_config.device),
+                arena=self._reload_arena,
             )
         return self._permute_scratch
 

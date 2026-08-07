@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.reload_arena import current_arena
 
 logger = init_logger(__name__)
 
@@ -501,11 +502,32 @@ def make_nvfp4_moe_quant_config(
     # The expert's process_weights_after_loading will fuse activation
     # scales in-place. Since the quant config references the same tensor
     # as the registered parameter, EPLB rearrangement stays in sync.
+    g1_alphas = w13_scale_2
+    g2_alphas = w2_scale_2
+    a1_gscale = 1.0 / a13_scale
+    a2_gscale = 1.0 / a2_scale
+
+    arena = current_arena()
+    if arena is not None and backend in (
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.VLLM_CUTLASS,
+    ):
+        g1_alphas = arena.put("nvfp4.g1_alphas", g1_alphas)
+        g2_alphas = arena.put("nvfp4.g2_alphas", g2_alphas)
+        a1_gscale = arena.put("nvfp4.a1_gscale", a1_gscale)
+        a2_gscale = arena.put("nvfp4.a2_gscale", a2_gscale)
+
+        # CUTLASS fuses activation scales through these layer aliases. Keep
+        # them bound to the same stable tensors retained by the quant config.
+        if layer is not None:
+            layer.w13_weight_scale_2 = g1_alphas
+            layer.w2_weight_scale_2 = g2_alphas
+
     return nvfp4_moe_quant_config(
-        g1_alphas=w13_scale_2,
-        g2_alphas=w2_scale_2,
-        a1_gscale=(1.0 / a13_scale),
-        a2_gscale=(1.0 / a2_scale),
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
+        a1_gscale=a1_gscale,
+        a2_gscale=a2_gscale,
         w1_scale=w13_scale,
         w2_scale=w2_scale,
         # NOTE(rob): this is a hack until the MoE kernels

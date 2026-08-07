@@ -27,9 +27,11 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
+    record_modelwise_reload_metadata,
     set_torchao_reload_attrs,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.reload_arena import arena_scope, get_reload_arena
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -62,6 +64,7 @@ def initialize_model(
         with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
             record_metadata_for_reloading(model)
+            record_modelwise_reload_metadata(model)
             return model
 
     msg = (
@@ -94,22 +97,34 @@ def initialize_model(
     with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
         model = model_class(**kwargs)
         record_metadata_for_reloading(model)
+        record_modelwise_reload_metadata(model)
 
     return model
 
 
 def process_weights_after_loading(
-    model: nn.Module, model_config: ModelConfig, target_device: torch.device
+    model: nn.Module,
+    model_config: ModelConfig,
+    target_device: torch.device,
+    *,
+    force: bool = False,
 ) -> None:
     for _, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
+            if force and hasattr(
+                module, "_already_called_process_weights_after_loading"
+            ):
+                delattr(module, "_already_called_process_weights_after_loading")
             # When quant methods need to process weights after loading
             # (for repacking, quantizing, etc), they expect parameters
             # to be on the global target device. This scope is for the
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
-            with device_loading_context(module, target_device):
+            with (
+                device_loading_context(module, target_device),
+                arena_scope(get_reload_arena(module)),
+            ):
                 quant_method.process_weights_after_loading(module)
             # Repacking transients above can leave large amounts of memory in
             # the caching allocator, which starves the OS on UMA devices.
@@ -123,7 +138,10 @@ def process_weights_after_loading(
         ) and hasattr(module, "process_weights_after_loading"):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
-            with device_loading_context(module, target_device):
+            with (
+                device_loading_context(module, target_device),
+                arena_scope(get_reload_arena(module)),
+            ):
                 module.process_weights_after_loading(model_config.dtype)
 
     # Process HPC modules (HpcRopeNorm, etc.) that rely on

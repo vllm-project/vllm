@@ -14,6 +14,7 @@ import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm import envs
+from vllm.config import set_current_vllm_config
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
@@ -23,6 +24,7 @@ from vllm.distributed.weight_transfer.base import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.model_executor.model_loader.reload import ModelwiseReloadSession
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_ipc_consumer,
@@ -164,6 +166,7 @@ class IPCWeightTransferEngine(
             model: The local model instance which will receive the weights
         """
         super().__init__(config, vllm_config, device, model)
+        self.reload_session: ModelwiseReloadSession | None = None
 
     def parse_update_info(
         self, update_dict: dict[str, Any]
@@ -207,20 +210,33 @@ class IPCWeightTransferEngine(
         pass
 
     def start_weight_update(self) -> None:
-        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        """Open a model-wide transaction for incoming checkpoint weights."""
         from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
+            ModelwiseReloadSession,
         )
 
-        initialize_layerwise_reload(self.model)
+        session = ModelwiseReloadSession(
+            self.model,
+            self.model_config,
+            self.device,
+        )
+        session.start()
+        self.reload_session = session
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading after all weights have been received."""
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
+        """Run model-wide post-load processing and commit the update."""
+        session = self.reload_session
+        if session is None:
+            raise RuntimeError("IPC weight update session is not active")
+        self.reload_session = None
+        with set_current_vllm_config(self.vllm_config):
+            session.finish()
 
-        finalize_layerwise_reload(self.model, self.model_config)
+    def abort_weight_update(self) -> None:
+        session = self.reload_session
+        self.reload_session = None
+        if session is not None:
+            session.abort()
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
@@ -274,10 +290,16 @@ class IPCWeightTransferEngine(
                 weight = rebuild_cuda_tensor(*list_args)
                 weights.append((name, weight))
 
-        self.model.load_weights(weights)
+        if self.reload_session is None:
+            raise RuntimeError(
+                "IPC weight update session is not active. "
+                "Call start_weight_update() first."
+            )
+        with set_current_vllm_config(self.vllm_config):
+            self.reload_session.load_weights(weights)
 
     def shutdown(self) -> None:
-        pass
+        self.abort_weight_update()
 
     @staticmethod
     def trainer_send_weights(

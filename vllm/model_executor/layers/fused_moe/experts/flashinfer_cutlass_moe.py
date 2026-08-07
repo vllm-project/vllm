@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.reload_arena import current_arena
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
@@ -93,34 +94,60 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
+        arena = current_arena()
+
+        def stable(slot: str, value: torch.Tensor) -> torch.Tensor:
+            if arena is None:
+                return value
+            return arena.put(f"flashinfer_experts.{slot}", value)
+
         self.gemm1_clamp_limit: torch.Tensor | None = None
         if quant_config.gemm1_clamp_limit is not None:
-            self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.num_experts,
-                dtype=torch.float32,
-                device=self.device,
+            self.gemm1_clamp_limit = stable(
+                "gemm1_clamp_limit",
+                torch.tensor(
+                    [quant_config.gemm1_clamp_limit] * self.num_experts,
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
             )
 
         if quant_config.weight_quant_dtype == "mxfp4":
             # This value is used specifically for gpt-oss,
             # Need to revisit this for other models
-            self.gemm1_alpha = torch.tensor(
-                [1.702] * self.num_experts, dtype=torch.float32, device=self.device
+            self.gemm1_alpha = stable(
+                "gemm1_alpha",
+                torch.tensor(
+                    [1.702] * self.num_experts,
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
             )
-            self.gemm1_beta = torch.tensor(
-                [1.0] * self.num_experts, dtype=torch.float32, device=self.device
+            self.gemm1_beta = stable(
+                "gemm1_beta",
+                torch.tensor(
+                    [1.0] * self.num_experts,
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
             )
             if self.gemm1_clamp_limit is None:
-                self.gemm1_clamp_limit = torch.tensor(
-                    [7.0] * self.num_experts,
-                    dtype=torch.float32,
-                    device=self.device,
+                self.gemm1_clamp_limit = stable(
+                    "gemm1_clamp_limit",
+                    torch.tensor(
+                        [7.0] * self.num_experts,
+                        dtype=torch.float32,
+                        device=self.device,
+                    ),
                 )
             if quant_config.quant_dtype == "mxfp8":
-                self.fake_input_scale = torch.ones(
-                    self.num_experts,
-                    device=self.device,
-                    dtype=torch.float32,
+                self.fake_input_scale = stable(
+                    "fake_input_scale",
+                    torch.ones(
+                        self.num_experts,
+                        device=self.device,
+                        dtype=torch.float32,
+                    ),
                 )
 
     @property

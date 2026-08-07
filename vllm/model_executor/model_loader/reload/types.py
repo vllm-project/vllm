@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
 from inspect import BoundArguments
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.reload_arena import ArenaIdentity
 
 __all__ = ["LayerTensors", "LayerReloadingInfo"]
 
@@ -28,6 +32,16 @@ class LayerReloadingInfo:
 
     # kernel formatted tensors, copied into by `_layerwise_process` when reloading
     kernel_tensors: LayerTensors | None = None
+
+    # Per-layer arena storage identities snapshotted at the start of a reload,
+    # verified at finalize. VERIFY-ONLY: unlike kernel_tensors, these are never
+    # restored-to-meta or copied back. Arena slots already keep their storage
+    # stable across the PWAL rebuild by construction (the arena reuses the same
+    # buffer); this field only records what those addresses were so finalize
+    # can prove none drifted. reset() clearing it each reload is correct -- the
+    # arena, not this field, owns the storage, and a fresh snapshot is taken at
+    # the next reload's initialize.
+    arena_snapshot: "dict[str, ArenaIdentity] | None" = None
 
     def reset(self):
         self.__init__(  # type: ignore[misc]

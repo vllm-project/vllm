@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
 )
+from vllm.model_executor.reload_arena import InitPolicy, get_reload_arena
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -52,6 +53,64 @@ def _synthesize_qzeros(
         device=device,
     )
     return pack_quantized_values_into_int32(zeros, scalar_types.uint4b8, packed_dim=1)
+
+
+# Decode-path buffer geometry. Sized for the common decode shape; the apply
+# path falls back to a fresh allocation when a batch exceeds it.
+_MAX_DECODE_TOKENS = 16
+_CONSERVATIVE_TOP_K = 8
+
+
+def allocate_rdna3_decode_buffers(
+    layer: torch.nn.Module,
+    *,
+    n_gate_up: int,
+    hidden_size: int,
+    act_dtype: torch.dtype,
+    device: torch.device,
+) -> None:
+    """Bind the decode scratch buffers the fused HIP kernel reads.
+
+    These are plain layer attributes, not parameters or buffers, so reload
+    copy-back never sees them -- and ``process_weights_after_loading`` runs
+    again on every reload. Allocating them fresh there leaves any HIP graph
+    captured before the reload pointing at freed storage (RFC #48312
+    category 1: the same shape as the Marlin workspace and CUTLASS stride
+    failures reproduced on CUDA hardware).
+
+    Going through the layer's reload arena keeps one storage per slot for
+    the layer's lifetime, so a second post-load pass rebinds the attributes
+    to the same memory. PRESERVE is the right policy because contents never
+    have to survive: ``rdna3_w1_buf`` is explicitly zeroed at its use site
+    and ``rdna3_act_buf`` is fully overwritten by the activation. What must
+    survive is the address.
+    """
+    arena = get_reload_arena(layer)
+    intermediate = n_gate_up // 2  # gated activation
+    buf_size = _MAX_DECODE_TOKENS * _CONSERVATIVE_TOP_K
+
+    layer.rdna3_w1_buf = arena.get_or_alloc(
+        "rdna3_w1_buf", (buf_size, n_gate_up), act_dtype, device,
+        init=InitPolicy.PRESERVE,
+    )
+    layer.rdna3_act_buf = arena.get_or_alloc(
+        "rdna3_act_buf", (buf_size, intermediate), act_dtype, device,
+        init=InitPolicy.PRESERVE,
+    )
+    # No reader today, but it is bound on the layer and would be captured
+    # the moment one appears; treat it like the rest rather than leaving a
+    # rebinding attribute behind.
+    layer.rdna3_out_buf = arena.get_or_alloc(
+        "rdna3_out_buf", (_MAX_DECODE_TOKENS, hidden_size), act_dtype,
+        device, init=InitPolicy.PRESERVE,
+    )
+    # dtype deliberately left at the ambient default, matching the original
+    # `torch.empty(0, device=device)`: this stands in for the float32
+    # `topk_w_float` argument, and changing it is not part of this fix.
+    layer.rdna3_empty_tw = arena.get_or_alloc(
+        "rdna3_empty_tw", (0,), torch.get_default_dtype(), device,
+        init=InitPolicy.PRESERVE,
+    )
 
 
 class CompressedTensorsWNA16RDNA3MoEMethod(CompressedTensorsWNA16MoEMethod):
@@ -104,24 +163,13 @@ class CompressedTensorsWNA16RDNA3MoEMethod(CompressedTensorsWNA16MoEMethod):
             requires_grad=False,
         )
 
-        # Pre-allocate reusable buffers for decode (sizes based on top_k=8)
-        N_gate_up = w13_N
-        hidden_size = w2_N
-        intermediate = N_gate_up // 2  # gated activation
-        # Max tokens we expect in decode; prefill will re-allocate if needed
-        max_decode_tokens = 16
-        top_k = 8  # conservative default
-        buf_size = max_decode_tokens * top_k
-        layer.rdna3_w1_buf = torch.zeros(
-            buf_size, N_gate_up, dtype=act_dtype, device=device
+        allocate_rdna3_decode_buffers(
+            layer,
+            n_gate_up=w13_N,
+            hidden_size=w2_N,
+            act_dtype=act_dtype,
+            device=device,
         )
-        layer.rdna3_act_buf = torch.empty(
-            buf_size, intermediate, dtype=act_dtype, device=device
-        )
-        layer.rdna3_out_buf = torch.zeros(
-            max_decode_tokens, hidden_size, dtype=act_dtype, device=device
-        )
-        layer.rdna3_empty_tw = torch.empty(0, device=device)
 
     def apply(
         self,

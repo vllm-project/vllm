@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.model_executor.reload_arena import current_arena
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -58,29 +59,45 @@ class TrtLlmFp8ExpertsBase:
 
         # Per-expert SwiGLU parameters from quant_config (MXFP8 + Swiglu only).
         device = torch.accelerator.current_device_index()
+        arena = current_arena()
+
+        def stable(slot: str, value: torch.Tensor) -> torch.Tensor:
+            if arena is None:
+                return value
+            return arena.put(f"trtllm_fp8.{slot}", value)
+
         if quant_config.gemm1_alpha is not None:
-            self.gemm1_alpha = torch.tensor(
-                [quant_config.gemm1_alpha] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
+            self.gemm1_alpha = stable(
+                "gemm1_alpha",
+                torch.tensor(
+                    [quant_config.gemm1_alpha] * self.local_num_experts,
+                    dtype=torch.float32,
+                    device=device,
+                ),
             )
         else:
             self.gemm1_alpha = None
 
         if quant_config.gemm1_beta is not None:
-            self.gemm1_beta = torch.tensor(
-                [quant_config.gemm1_beta] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
+            self.gemm1_beta = stable(
+                "gemm1_beta",
+                torch.tensor(
+                    [quant_config.gemm1_beta] * self.local_num_experts,
+                    dtype=torch.float32,
+                    device=device,
+                ),
             )
         else:
             self.gemm1_beta = None
 
         if quant_config.gemm1_clamp_limit is not None:
-            self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
+            self.gemm1_clamp_limit = stable(
+                "gemm1_clamp_limit",
+                torch.tensor(
+                    [quant_config.gemm1_clamp_limit] * self.local_num_experts,
+                    dtype=torch.float32,
+                    device=device,
+                ),
             )
         else:
             self.gemm1_clamp_limit = None
@@ -284,6 +301,17 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 if moe_config.is_act_and_mul
                 else torch.ones_like(self._g1_alphas) / self.quant_config.a2_scale
             )
+            arena = current_arena()
+            if arena is not None:
+                self._g1_alphas = arena.put(
+                    "trtllm_fp8.g1_alphas", self._g1_alphas
+                )
+                self._g2_alphas = arena.put(
+                    "trtllm_fp8.g2_alphas", self._g2_alphas
+                )
+                self._g1_scale_c = arena.put(
+                    "trtllm_fp8.g1_scale_c", self._g1_scale_c
+                )
 
     @staticmethod
     def _supports_quant_scheme(

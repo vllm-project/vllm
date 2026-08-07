@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
+    marlin_get_workspace,
     marlin_pad_dim,
     marlin_pad_qweight,
     marlin_pad_scales,
@@ -240,7 +240,7 @@ def prepare_fp4_layer_for_marlin(
     device = layer.weight.device
 
     # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(device)
+    layer.workspace = marlin_get_workspace(layer, device)
 
     # WEIGHT
     # Repack weights to marlin format
@@ -365,7 +365,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
     # WORKSPACE
-    layer.workspace = marlin_make_workspace_new(device, 4)
+    layer.workspace = marlin_get_workspace(layer, device, 4)
     perm = torch.empty(0, dtype=torch.int, device=device)
 
     # WEIGHT
@@ -464,7 +464,7 @@ def prepare_moe_fp4_layer_for_marlin(
     # WORKSPACE
     device = layer.w13_weight.device
     param_dtype = layer.params_dtype
-    layer.workspace = marlin_make_workspace_new(device, 4)
+    layer.workspace = marlin_get_workspace(layer, device, 4)
     perm = torch.empty(0, dtype=torch.int, device=device)
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 

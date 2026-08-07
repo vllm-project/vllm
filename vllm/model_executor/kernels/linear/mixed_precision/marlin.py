@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
     marlin_is_k_full,
     marlin_make_empty_g_idx,
-    marlin_make_workspace_new,
+    marlin_get_workspace,
     marlin_pad_dim,
     marlin_pad_qweight,
     marlin_pad_scales,
@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     unpack_cols,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.reload_arena import get_reload_arena
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -111,8 +112,12 @@ class MarlinLinearKernel(MPLinearKernel):
         else:
             padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
 
-        # Allocate marlin workspace.
-        self.workspace = marlin_make_workspace_new(device)
+        # Allocate marlin workspace through the layer's reload arena: the
+        # workspace address is baked into captured graphs, and it holds sync
+        # counters -- a rebind on reload leaves replay spinning on freed
+        # memory (livelock). Reacquisition keeps the address and clears the
+        # counters without allocating a throwaway workspace.
+        self.workspace = marlin_get_workspace(layer, device)
 
         # Default names since marlin requires empty parameters for these,
         # TODO: remove this requirement from marlin (allow optional tensors)
@@ -174,7 +179,10 @@ class MarlinLinearKernel(MPLinearKernel):
                 getattr(layer, self.w_gidx_name)
             )
             self._transform_param(layer, self.w_gidx_name, lambda _: g_idx)
-            layer.g_idx_sort_indices = g_idx_sort_indices
+            # Bare attribute read by every act-order kernel launch; publish
+            # at a stable address so graph replay keeps a valid pointer.
+            layer.g_idx_sort_indices = get_reload_arena(layer).put(
+                "g_idx_sort_indices", g_idx_sort_indices)
         else:
             setattr(layer, self.w_gidx_name, marlin_make_empty_g_idx(device))
             layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)

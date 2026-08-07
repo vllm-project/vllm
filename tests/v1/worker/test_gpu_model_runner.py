@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -827,6 +828,42 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 def test_reload_weights_before_load_model(model_runner):
     with pytest.raises(ValueError):
         model_runner.reload_weights()
+
+
+def test_checkpoint_reload_uses_modelwise_reloader(monkeypatch):
+    class ReloadableModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(2))
+
+        def load_weights(self, weights):
+            loaded = set()
+            for name, value in weights:
+                self.get_parameter(name).data.copy_(value)
+                loaded.add(name)
+            return loaded
+
+    model = ReloadableModel()
+    runner = object.__new__(GPUModelRunner)
+    runner.model_config = SimpleNamespace(quantization="fp8")
+    runner.vllm_config = get_vllm_config()
+    runner.device = torch.device("cpu")
+    runner.get_model = Mock(return_value=model)
+    runner.reset_encoder_cache = Mock()
+    runner.reset_mm_cache = Mock()
+
+    reloader = Mock()
+    reloader.return_value.reload.return_value = {"weight"}
+    monkeypatch.setattr(gpu_model_runner_module, "ModelwiseReloader", reloader)
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.reload.validation.reload_storage_guard",
+        lambda _model: nullcontext(),
+    )
+
+    runner.reload_weights(weights_iterator=[("weight", torch.ones(2))])
+
+    reloader.assert_called_once_with(model, runner.model_config, runner.device)
+    reloader.return_value.reload.assert_called_once()
 
 
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():

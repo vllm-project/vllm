@@ -510,6 +510,11 @@ def inference_receive_tensor(
     vllm_config.model_config = MagicMock()
 
     recorder = Recorder()
+    from vllm.model_executor.model_loader.reload import (
+        record_modelwise_reload_metadata,
+    )
+
+    record_modelwise_reload_metadata(recorder)
     engine = NCCLWeightTransferEngine(
         config, vllm_config, torch.device("cuda"), recorder
     )
@@ -527,6 +532,7 @@ def inference_receive_tensor(
         world_size=world_size,
     )
     engine.init_transfer_engine(init_info)
+    engine.start_weight_update()
 
     update_info = NCCLWeightTransferUpdateInfo(
         names=["test.weight"],
@@ -535,6 +541,7 @@ def inference_receive_tensor(
     )
     engine.receive_weights(update_info)
     torch.accelerator.synchronize()
+    engine.finish_weight_update()
 
     # Verify we received the tensor
     success = False
@@ -1087,6 +1094,11 @@ def inference_receive_ipc_tensor(
     vllm_config.model_config = MagicMock()
 
     recorder = Recorder()
+    from vllm.model_executor.model_loader.reload import (
+        record_modelwise_reload_metadata,
+    )
+
+    record_modelwise_reload_metadata(recorder)
     engine = IPCWeightTransferEngine(
         config, vllm_config, _get_ray_assigned_device(), recorder
     )
@@ -1098,6 +1110,7 @@ def inference_receive_ipc_tensor(
 
     init_info = IPCWeightTransferInitInfo()
     engine.init_transfer_engine(init_info)
+    engine.start_weight_update()
 
     ipc_handles = [{ipc_handle_dict["gpu_uuid"]: ipc_handle_dict["ipc_handle"]}]
 
@@ -1122,6 +1135,7 @@ def inference_receive_ipc_tensor(
     update_info = engine.parse_update_info(update_dict)
     engine.receive_weights(update_info)
     torch.accelerator.synchronize()
+    engine.finish_weight_update()
 
     success = False
     received_shape = None
