@@ -11,6 +11,7 @@ import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -354,10 +355,14 @@ def test_deep_ep_v2_moe(
     )
 
 
-TRTLLM_BACKENDS = ["trtllm_bf16", "trtllm_fp8"]
+EXPERTS_BACKENDS = [
+    "flashinfer_trtllm",
+    "flashinfer_cutlass",
+    "trtllm_fp8",
+]
 
 
-def _make_trtllm_experts(
+def _make_experts(
     experts_backend: str,
     config: TestConfig,
     moe_config,
@@ -367,7 +372,7 @@ def _make_trtllm_experts(
     w2_bf16: torch.Tensor,
     test_tensors: TestTensors,
 ):
-    """Build the TRTLLM expert wrapper plus its EP-sliced weights.
+    """Build the expert wrapper plus its EP-sliced weights.
 
     Returns the expert instance, the kernel-format weights, the torch
     reference output computed from the full weights, and the tolerances.
@@ -375,15 +380,14 @@ def _make_trtllm_experts(
     e_start = num_local_experts * rank
     e_end = e_start + num_local_experts
 
-    if experts_backend == "trtllm_bf16":
+    if experts_backend != "trtllm_fp8":
         from vllm.model_executor.layers.fused_moe.config import (
             FUSED_MOE_UNQUANTIZED_CONFIG,
         )
-        from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
-            TrtLlmBf16ExpertsModular,
-        )
-        from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-            convert_moe_weights_to_flashinfer_trtllm_block_layout,
+        from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+            backend_to_kernel_cls,
+            convert_to_unquantized_kernel_format,
+            map_unquantized_backend,
         )
 
         torch_combined = torch_experts(
@@ -393,12 +397,19 @@ def _make_trtllm_experts(
             test_tensors.topk_weights,
             test_tensors.topk,
         )
-        w1_ep, w2_ep = convert_moe_weights_to_flashinfer_trtllm_block_layout(
-            {},
+        backend = map_unquantized_backend(experts_backend)
+        w1_ep, w2_ep = convert_to_unquantized_kernel_format(
+            backend,
+            moe_config,
             w1_bf16[e_start:e_end],
             w2_bf16[e_start:e_end],
         )
-        fused_experts = TrtLlmBf16ExpertsModular(
+        experts_cls = next(
+            cls
+            for cls in backend_to_kernel_cls(backend)
+            if issubclass(cls, mk.FusedMoEExpertsModular)
+        )
+        fused_experts = experts_cls(
             moe_config=moe_config,
             quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
         )
@@ -470,7 +481,7 @@ def _make_trtllm_experts(
     return fused_experts, w1_ep, w2_ep, torch_combined, 6e-2, 6e-2
 
 
-def _deep_ep_v2_moe_trtllm(
+def _deep_ep_v2_moe_backends(
     pgi: ProcessGroupInfo,
     dp_size: int,
     config: TestConfig,
@@ -552,7 +563,7 @@ def _deep_ep_v2_moe_trtllm(
             torch_combined,
             atol,
             rtol,
-        ) = _make_trtllm_experts(
+        ) = _make_experts(
             experts_backend,
             config,
             moe_config,
@@ -604,7 +615,7 @@ def _deep_ep_v2_moe_trtllm(
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
-@pytest.mark.parametrize("experts_backend", TRTLLM_BACKENDS)
+@pytest.mark.parametrize("experts_backend", EXPERTS_BACKENDS)
 @pytest.mark.parametrize("use_cudagraph", [True, False])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
@@ -613,7 +624,7 @@ def _deep_ep_v2_moe_trtllm(
     or not current_platform.has_device_capability(100),
     reason="Requires FlashInfer TRTLLM fused MoE (SM100)",
 )
-def test_deep_ep_v2_moe_trtllm(
+def test_deep_ep_v2_moe_backends(
     m: int,
     n: int,
     k: int,
@@ -625,15 +636,15 @@ def test_deep_ep_v2_moe_trtllm(
     workspace_init,
 ):
     """DeepEP v2 dispatches the non-expanded routing layout with cudagraphs and
-    the expanded [num_expanded_tokens, 1] layout without them. Both must reach
-    the TRTLLM experts intact.
+    the expanded [num_expanded_tokens, 1] layout without them. Every expert
+    backend must handle both.
     """
     set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(
-        dtype=torch.bfloat16
-        if experts_backend == "trtllm_bf16"
-        else torch.float8_e4m3fn,
+        dtype=torch.float8_e4m3fn
+        if experts_backend == "trtllm_fp8"
+        else torch.bfloat16,
         topk=topk,
         m=m,
         k=k,
@@ -643,7 +654,7 @@ def test_deep_ep_v2_moe_trtllm(
 
     parallel_launch(
         world_size,
-        _deep_ep_v2_moe_trtllm,
+        _deep_ep_v2_moe_backends,
         dp_size,
         config,
         use_cudagraph,
