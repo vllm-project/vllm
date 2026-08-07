@@ -139,6 +139,16 @@ class MooncakeStoreScheduler:
             return None, False
         num_external_hit_tokens = lookup_result.hit_length
 
+        # Cap at num_tokens - 1: the last prompt token must be recomputed
+        # locally for logits, matching the idiom applied by example, hf3fs,
+        # lmcache v1, moriio-READ and the local get_computed_blocks. Without
+        # this, a sync (`load_async=False`) lookup covering the full prompt
+        # drives num_new_tokens==0 in the scheduler and trips
+        # assert num_new_tokens > 0 (scheduler.py:923).
+        num_external_hit_tokens = min(
+            num_external_hit_tokens, max(request.num_tokens - 1, 0)
+        )
+
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
         else:
