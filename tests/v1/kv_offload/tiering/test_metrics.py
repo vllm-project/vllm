@@ -146,6 +146,39 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
     tracker.assert_idle()
 
 
+def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
+    tracker = TieringMetricsTracker(
+        tier_types=["fs"],
+        num_primary_blocks=5,
+        primary_block_size=16,
+    )
+    keys = to_keys(range(3))
+    job = JobMetadata(
+        TransferJob(0, keys, np.array([0, 1, 2]), True, _CTX),
+        0,
+    )
+    tracker.on_job_registered(job)
+
+    tracker.on_job_finished(
+        job,
+        JobResult(
+            job_id=0,
+            success=False,
+            successful_keys=(keys[0], keys[2]),
+            transfer_time=0.5,
+        ),
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    label = ("1:fs",)
+    assert values[TieringOffloadingMetrics.READ_BYTES][label] == 32
+    assert values[TieringOffloadingMetrics.READ_TIME][label] == 0.5
+    assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
+    tracker.assert_idle()
+
+
 def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
     tracker = TieringMetricsTracker(
         tier_types=["fs", "p2p"],
