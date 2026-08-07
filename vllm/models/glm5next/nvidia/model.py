@@ -75,6 +75,11 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -297,6 +302,7 @@ class Glm5NextDecoderLayer(nn.Module):
         self.is_mtp_layer = is_mtp_layer
         self.mhc = config.mhc
         self.layer_kind = "kda" if config.is_kda_layer(layer_idx) else "mla"
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         if config.is_kda_layer(layer_idx):
             self.self_attn = Glm5NextLinearAttention(
@@ -353,6 +359,10 @@ class Glm5NextDecoderLayer(nn.Module):
                 swiglu_limit=config.swiglu_limit,
             )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # In SP, the attention output projection leaves a partial sum; the
+        # decoder-layer reduce_scatter after attention completes it (DSv4 pattern).
+        if self.is_sequence_parallel:
+            self.self_attn.o_proj.reduce_results = False
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
@@ -449,10 +459,18 @@ class Glm5NextDecoderLayer(nn.Module):
                 norm_eps=self.input_layernorm.variance_epsilon,
             )
 
+        # Attention needs the full token sequence; mHC above ran on the SP
+        # shard. Gather for attention, scatter back afterward (DSv4 pattern).
+        if self.is_sequence_parallel:
+            x = sp_all_gather(x)[: positions.shape[0]]
+
         x = self.self_attn(
             hidden_states=x,
             positions=positions,
         )
+
+        if self.is_sequence_parallel:
+            x = sp_reduce_scatter(x)
 
         # Fuse post-attn hc_post + pre-FFN hc_pre (+ RMSNorm) into one kernel.
         residual, post, comb, x = self.hc_fused_post_pre(
@@ -468,7 +486,10 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
         # Fully Connected
-        x = self.mlp(x)
+        if isinstance(self.mlp, Glm5NextMoE):
+            x = self.mlp(x, already_sequence_parallel=self.is_sequence_parallel)
+        else:
+            x = self.mlp(x)
 
         # mHC end. The last mHC layer materializes its final hc_post (nothing
         # to fuse with) then contracts; every other layer defers its hc_post to
@@ -629,6 +650,10 @@ class Glm5NextModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
+        self.is_sequence_parallel = (
+            vllm_config.parallel_config.use_sequence_parallel_moe
+        )
+
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
@@ -662,6 +687,10 @@ class Glm5NextModel(nn.Module):
             post = None
             comb = None
 
+        full_num_tokens = positions.shape[0]
+        if self.is_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
+
         for i, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
             hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
@@ -676,6 +705,9 @@ class Glm5NextModel(nn.Module):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
+
+        if self.is_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
