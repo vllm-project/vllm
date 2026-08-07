@@ -644,10 +644,9 @@ def resolve_kv_cache_block_sizes(
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size, scheduler_block_size
 
-    # Mamba groups outside cache mode "align" break divisibility; back off to
-    # the scheduler block size. Do not infer the mode from cache_config's block
-    # size: hybrid group construction can lower that global value after Mamba
-    # specs have already been created.
+    # Mamba groups outside align mode break divisibility; back off to the
+    # scheduler block size. Read the mode from the resolved group spec because
+    # its block size may have been updated independently of cache_config.
     if any(
         isinstance(g.kv_cache_spec, MambaSpec)
         and g.kv_cache_spec.mamba_cache_mode != "align"
@@ -1744,6 +1743,13 @@ def _annotate_eagle_groups_deepseek_v4(
             break
 
 
+def _largest_divisor_at_most(value: int, limit: int) -> int:
+    for candidate in range(min(value, limit), 0, -1):
+        if value % candidate == 0:
+            return candidate
+    return 1
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec]:
@@ -1809,44 +1815,24 @@ def get_kv_cache_groups(
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
         common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
-        dcp = vllm_config.parallel_config.decode_context_parallel_size
-        effective_block_sizes = [
-            g.kv_cache_spec.block_size * dcp
-            if isinstance(g.kv_cache_spec, AttentionSpec)
-            else g.kv_cache_spec.block_size
-            for g in groups
-        ]
-        effective_alignment = math.lcm(*effective_block_sizes, dcp)
-        # HiddenStateCacheSpec is an AttentionSpec, so its block size is also
-        # multiplied by DCP when the scheduler alignment is resolved.
-        hidden_block_alignment = effective_alignment // dcp
+        group_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in groups))
         for name, spec in hidden_specs.items():
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
             max_block_size = max(common_page // per_token, 1)
-            # Its page can be padded, so use the largest raw block size whose
-            # DCP-scaled value divides the effective scheduler alignment.
-            new_bs = _largest_divisor_not_exceeding(
-                hidden_block_alignment, max_block_size
+            new_bs = _largest_divisor_at_most(group_block_size, max_block_size)
+            wasted_bytes = common_page - new_bs * per_token
+            logger.info(
+                "Using block size %d for hidden-state cache layer %s; "
+                "page alignment wastes %d bytes (%.2f%%) per block",
+                new_bs,
+                name,
+                wasted_bytes,
+                wasted_bytes / common_page * 100,
             )
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
     return groups
-
-
-def _largest_divisor_not_exceeding(value: int, limit: int) -> int:
-    """Return the largest divisor of ``value`` that is at most ``limit``."""
-    assert value > 0 and limit > 0
-    largest = 1
-    for divisor in range(1, math.isqrt(value) + 1):
-        if value % divisor != 0:
-            continue
-        paired_divisor = value // divisor
-        if divisor <= limit:
-            largest = max(largest, divisor)
-        if paired_divisor <= limit:
-            largest = max(largest, paired_divisor)
-    return largest
 
 
 def generate_scheduler_kv_cache_config(
