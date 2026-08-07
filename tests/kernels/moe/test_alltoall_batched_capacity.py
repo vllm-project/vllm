@@ -4,13 +4,13 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_low_latency import (
-    NaiveLowLatencyPrepareAndFinalize,
+from vllm.model_executor.layers.fused_moe.prepare_finalize.alltoall_batched import (
+    AllToAllBatchedPrepareAndFinalize,
 )
 
 
 def make_pf(max_num_tokens: int, num_local_experts: int, num_dispatchers: int):
-    return NaiveLowLatencyPrepareAndFinalize(
+    return AllToAllBatchedPrepareAndFinalize(
         max_num_tokens=max_num_tokens,
         num_local_experts=num_local_experts,
         num_dispatchers=num_dispatchers,

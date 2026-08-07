@@ -49,7 +49,7 @@ All2AllBackend = Literal[
     "mori_low_latency",
     "nixl_ep",
     "allgather_reducescatter",
-    "naive_low_latency",
+    "alltoall_batched",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
@@ -190,7 +190,7 @@ class ParallelConfig:
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
-    - "naive_low_latency": All2all based on all_to_all_single, routing each
+    - "alltoall_batched": All2all based on all_to_all_single, routing each
       token only to the ranks owning its experts, in batched activation format
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
@@ -699,11 +699,13 @@ class ParallelConfig:
 
     @property
     def use_batched_dp_moe(self) -> bool:
+        # Every backend emitting the batched activation format belongs here.
         return (
             self.all2all_backend
             in (
                 "deepep_low_latency",
                 "nixl_ep",
+                "alltoall_batched",
             )
             and self.enable_expert_parallel
             and self.data_parallel_size > 1

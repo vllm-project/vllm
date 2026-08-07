@@ -19,8 +19,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    AllToAllBatchedPrepareAndFinalize,
     BatchedPrepareAndFinalize,
-    NaiveLowLatencyPrepareAndFinalize,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )
@@ -313,16 +313,16 @@ def maybe_make_prepare_finalize(
             dispatch_scale_bytes_per_token=dispatch_scale_bytes_per_token,
         )
 
-    elif moe.use_naive_ll_kernels and allow_new_interface:
+    elif moe.use_alltoall_batched_kernels and allow_new_interface:
         if current_platform.is_xpu() and not use_monolithic:
-            prepare_finalize = NaiveLowLatencyPrepareAndFinalize(
+            prepare_finalize = AllToAllBatchedPrepareAndFinalize(
                 max_num_tokens=moe.max_num_tokens,
                 num_local_experts=moe.num_local_experts,
                 num_dispatchers=all2all_manager.world_size,
                 rank=moe.moe_parallel_config.ep_rank,
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             )
-            logger.info_once("XPU MoE EP: using NaiveLowLatencyPrepareAndFinalize.")
+            logger.info_once("XPU MoE EP: using AllToAllBatchedPrepareAndFinalize.")
         else:
             prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
                 use_monolithic=use_monolithic,
