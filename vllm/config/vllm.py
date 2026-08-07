@@ -593,6 +593,27 @@ class VllmConfig:
         return 0
 
     @property
+    def uniform_decode_query_len(self) -> int:
+        """Query length of every request in a uniform decode batch.
+
+        A decode step submits one query for the newly sampled token plus one
+        for each draft token, so the widest uniform decode batch the scheduler
+        can build is `max_num_seqs * uniform_decode_query_len` tokens. Anything
+        that has to cover a decode batch reads this, so the sizing rule cannot
+        drift between the places that apply it.
+
+        This deliberately does not derive from the KV slots a drafter reserves
+        past the target's query range, which is a *reservation* contract rather
+        than a query-length one. The two do not differ by a constant: DFlash
+        reserves `num_speculative_tokens + 1` slots yet still verifies `1 +
+        num_speculative_tokens` queries, while EAGLE reserves
+        `num_speculative_tokens` and verifies the same `1 + n`. Deriving one
+        from the other would under-size EAGLE by a full request width, which is
+        the failure this property exists to prevent.
+        """
+        return 1 + self.num_speculative_tokens
+
+    @property
     def use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
@@ -1808,7 +1829,13 @@ class VllmConfig:
         capture as:
 
         ```python
-        max_graph_size = min(max_num_seqs * 2, 512)
+        decode_query_len = 1 + num_speculative_tokens
+        # The 512 ceiling bounds a request count but is written in tokens, so
+        # it is converted into the same units a speculative request is
+        # measured in. Without speculation min(max_num_seqs, 512) * 1 never
+        # exceeds 512, so this stays exactly 512 as in every prior release.
+        size_ceiling = max(512, min(max_num_seqs, 512) * decode_query_len)
+        max_graph_size = min(max_num_seqs * decode_query_len * 2, size_ceiling)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
@@ -1816,7 +1843,10 @@ class VllmConfig:
 
         `max_num_batched_tokens` is also appended to the list if it fits
         within `max_cudagraph_capture_size`, so the max batch size is captured
-        even when off-stride.
+        even when off-stride. Likewise, once more than one speculative token
+        is in play, the widest uniform decode batch (`max_num_seqs *
+        decode_query_len`) is appended when it fits, since it need not land on
+        an 8- or 16-token stride.
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
         will be the final sizes to capture cudagraph (in ascending order).
@@ -1855,11 +1885,72 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
+            # Decode sizes to cover, in tokens. Populated only when a request
+            # is more than one token wide and only when the default is computed
+            # here, so an explicit capture range is left exactly as configured.
+            uniform_decode_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
-                decode_query_len = 1 + self.num_speculative_tokens
-                max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
-                )
+                decode_query_len = self.uniform_decode_query_len
+                max_num_seqs = self.scheduler_config.max_num_seqs
+                max_cudagraph_capture_size = min(max_num_seqs * 2, 512)
+                if decode_query_len > 1:
+                    # A speculative decode batch is decode_query_len tokens per
+                    # request, so the widest one is far outside this ceiling.
+                    # It is covered by adding the decode sizes themselves rather
+                    # than by raising the ceiling: the range below is strided in
+                    # tokens, and extending it would multiply the whole grid --
+                    # at max_num_seqs=256 and 16 draft tokens, 51 entries become
+                    # 291, each captured for PIECEWISE and again as a FULL
+                    # decode descriptor.
+                    #
+                    # The grid would not buy decode coverage anyway. Dispatch
+                    # requires an exact multiple of decode_query_len, so a
+                    # token-strided entry is only usable when it happens to be
+                    # one; at query length 17 a captured 560 rounds to 561 and
+                    # is rejected. Scaling a request-count grid keeps every
+                    # entry usable and the count comparable to the non-
+                    # speculative case.
+                    def request_counts(max_reqs: int) -> list[int]:
+                        # At most 512 requests, mirroring the ceiling the token
+                        # grid applies to a one-token-per-request batch.
+                        max_reqs = min(max_reqs, 512)
+                        counts = [n for n in (1, 2, 4) if n <= max_reqs]
+                        counts += list(range(8, min(max_reqs + 1, 256), 8))
+                        counts += list(range(256, max_reqs + 1, 16))
+                        return sorted(set(counts + [max_reqs]))
+
+                    # Dynamic speculative decoding picks the draft width from
+                    # the batch size, so a decode step is only uniform within a
+                    # tier and each tier needs its own sizes. Scaling by the
+                    # widest one alone leaves the narrower tiers short: the
+                    # manager rounds a capture size up to a multiple of the
+                    # tier's query length and drops it once the implied request
+                    # count exceeds max_num_seqs, so at query length 3 sizes
+                    # built from 17 stop covering at 227 of 256 requests.
+                    decode_tiers = [(decode_query_len, max_num_seqs)]
+                    speculative_config = self.speculative_config
+                    if (
+                        speculative_config is not None
+                        and speculative_config.uses_dynamic_speculative_decoding()
+                    ):
+                        schedule = (
+                            speculative_config.num_speculative_tokens_per_batch_size
+                        )
+                        assert schedule is not None
+                        # (range_start, range_end, num_speculative_tokens), and
+                        # a tier only ever runs up to the end of its range.
+                        decode_tiers = [
+                            (num_spec + 1, min(range_end, max_num_seqs))
+                            for _, range_end, num_spec in schedule
+                        ]
+
+                    uniform_decode_sizes = sorted(
+                        {
+                            n * query_len
+                            for query_len, tier_max_reqs in decode_tiers
+                            for n in request_counts(tier_max_reqs)
+                        }
+                    )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
@@ -1907,6 +1998,11 @@ class VllmConfig:
                     and max_num_tokens not in cudagraph_capture_sizes
                 ):
                     cudagraph_capture_sizes.append(max_num_tokens)
+                # Not gated on max_cudagraph_capture_size: these deliberately
+                # reach past a ceiling that counts one token per request.
+                cudagraph_capture_sizes += [
+                    size for size in uniform_decode_sizes if size <= max_num_tokens
+                ]
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 

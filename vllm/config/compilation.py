@@ -700,10 +700,17 @@ class CompilationConfig:
         [1, 2, 4] + list(range(8, 256, 8)) + list(
         range(256, max_cudagraph_capture_size + 1, 16))
 
-    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
-    512) by default. This voids OOM in tight memory scenarios with small
-    max_num_seqs, and prevents capture of many large graphs (>512) that would
-    greatly increase startup time with limited performance benefit.
+    If not specified, max_cudagraph_capture_size is set to
+    min(max_num_seqs*decode_query_len*2, ceiling) by default, where
+    decode_query_len is 1 + num_speculative_tokens and ceiling is
+    max(512, min(max_num_seqs, 512) * decode_query_len). The 512 converts
+    from a token count into a request count, so speculation widens each
+    captured graph instead of capturing more of them. Without speculation
+    min(max_num_seqs, 512) * 1 never exceeds 512, so the default remains
+    min(max_num_seqs*2, 512) as in every prior release. This voids OOM in
+    tight memory scenarios with small max_num_seqs, and prevents capture of
+    many large graphs that would greatly increase startup time with limited
+    performance benefit.
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
