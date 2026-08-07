@@ -501,12 +501,14 @@ __device__ __forceinline__ bool get_masked_row_range(
     const int* __restrict__ valid_token_counts, const int max_num_tokens,
     int64_t& first_row, int64_t& end_row) {
   if constexpr (BATCHED_EXPERTS) {
+    // [E, T, *]: each block handles one expert's valid token prefix.
     const int expert = blockIdx.y;
     const int num_tokens =
         max(0, min(valid_token_counts[expert], max_num_tokens));
     first_row = static_cast<int64_t>(expert) * max_num_tokens;
     end_row = first_row + num_tokens;
   } else {
+    // [T, *]: each block handles one row, masked by a single valid prefix.
     const int row = blockIdx.x;
     const int num_tokens = max(0, min(valid_token_counts[0], max_num_tokens));
     if (row >= num_tokens) {
@@ -520,6 +522,7 @@ __device__ __forceinline__ bool get_masked_row_range(
 
 template <bool BATCHED_EXPERTS>
 __device__ __forceinline__ int get_masked_feature_index() {
+  // Feature tiles occupy x for batched layouts and y for flat layouts.
   if constexpr (BATCHED_EXPERTS) {
     return blockIdx.x * blockDim.x + threadIdx.x;
   } else {
@@ -835,6 +838,7 @@ void masked_moe_activation(
 
   constexpr int block_size = 256;
   const int feature_blocks = (d + block_size - 1) / block_size;
+  // Batched grid: (feature tile, expert); flat grid: (row, feature tile).
   dim3 grid = batched_experts ? dim3(feature_blocks, num_experts)
                               : dim3(max_num_tokens, feature_blocks);
   dim3 block(block_size);
