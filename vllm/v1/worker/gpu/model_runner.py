@@ -63,6 +63,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.notifications import take_worker_notifications
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -1857,6 +1858,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
+        model_runner_output.worker_notifications = take_worker_notifications() or None
 
         return async_output
 
@@ -1895,6 +1897,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
             ec_connector_output=ec_connector_output,
+            worker_notifications=take_worker_notifications() or None,
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
