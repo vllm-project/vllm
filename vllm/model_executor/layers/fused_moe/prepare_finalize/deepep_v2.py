@@ -27,13 +27,9 @@ from vllm.v1.worker.ubatching import (
 def _quantize_before_dispatch(
     quant_config: FusedMoEQuantConfig, defer_input_quant: bool
 ) -> bool:
-    """Whether activations are quantized on the send side of the dispatch.
-
-    Low-precision dispatch halves (fp8) or quarters (mxfp8 vs bf16) the bytes on
-    the wire, but only works for schemes whose scales are per-token rows that can
-    travel alongside their token: fp8/int8 block quant (fp32 scales) and mxfp8
-    (UE8M0 scales, packed below). Everything else dispatches unquantized and is
-    quantized in `_receiver`.
+    """
+    Do quantized dispatch for blockfp8 and mxfp8, unless the
+    subsequent moe kernel requires bf16 inputs.
     """
     if defer_input_quant:
         return False
@@ -363,14 +359,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
             if quant_config.quant_dtype == "mxfp8":
-                # mx_alignment pads the hidden dim (TRTLLM asks for 256). The
-                # DeepEP buffer is sized from the layer's hidden size, so a pad
-                # that actually grew the tokens would not fit on the wire.
-                assert a1q.size(-1) == a1.size(-1), (
-                    f"mx_alignment={quant_config.mx_alignment} padded hidden "
-                    f"{a1.size(-1)} -> {a1q.size(-1)}, which DeepEP v2 dispatch "
-                    "cannot carry; round up the layer hidden size instead"
-                )
                 a1q_scale = _pack_mxfp8_scale(a1q_scale)
             a1_post_scale = None
         else:
