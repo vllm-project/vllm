@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 import torch
@@ -1598,8 +1598,64 @@ def test_rocm_mxfp4_moe_oracle(
 
 
 # -----------------------------------------------------------------------------
-# MXFP4 emulation size-rounding tests
+# MXFP4 size-rounding tests
 # -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("num_fused_shared_experts", "expected_intermediate_size"),
+    [(0, 384), (1, 512)],
+)
+def test_aiter_mxfp4_bf16_only_pads_dsv4_for_active_shared_expert_fusion(
+    num_fused_shared_experts: int,
+    expected_intermediate_size: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Keep DSV4's TP8 shard native unless shared-expert fusion is active."""
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+    )
+    from vllm.models.deepseek_v4.amd.mxfp4 import DeepseekV4AmdMxfp4MoEMethod
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    moe_parallel_config = replace(
+        FusedMoEParallelConfig.make_no_parallel(),
+        tp_size=8,
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=384,
+        experts_per_token=6,
+        hidden_dim=7168,
+        intermediate_size=3072,
+        num_local_experts=384,
+        num_logical_experts=384,
+        activation=MoEActivation.SILU,
+        device="cpu",
+        routing_method=RoutingMethodType.DeepseekV4,
+        moe_parallel_config=moe_parallel_config,
+        in_dtype=torch.bfloat16,
+    )
+    method = object.__new__(DeepseekV4AmdMxfp4MoEMethod)
+    method.moe = moe_config
+    method.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+    method.num_fused_shared_experts = num_fused_shared_experts
+
+    rounded_shape = method.maybe_roundup_sizes(
+        hidden_size=7168,
+        intermediate_size_per_partition=moe_config.intermediate_size_per_partition,
+        act_dtype=torch.bfloat16,
+        moe_parallel_config=moe_config.moe_parallel_config,
+    )
+
+    assert rounded_shape == (7168, expected_intermediate_size)
+
+
 # Emulation needs each per-partition dim rounded up to OCP_MX_BLOCK_SIZE (32);
 # a non-block-aligned shard (e.g. GPT-OSS 2880 // 4 = 720) otherwise truncates
 # the scale buffer and fails weight loading.
