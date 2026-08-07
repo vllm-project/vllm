@@ -475,6 +475,59 @@ def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
         waiter.join(timeout=5.0)
 
 
+@pytest.mark.parametrize(
+    ("n_tasks", "n_threads", "expected_sizes"),
+    [
+        (7, 3, [3, 2, 2]),
+        (6, 3, [2, 2, 2]),
+        (2, 5, [1, 1]),
+        (0, 3, []),
+    ],
+)
+def test_batch_tasks_distribution(n_tasks, n_threads, expected_sizes):
+    """_batch_tasks splits tasks evenly across n_threads (largest remainder
+    first), preserving order and accounting for every task."""
+    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    try:
+        tasks = [Task(path=f"p{i}", offset=i) for i in range(n_tasks)]
+        batches = list(pool._batch_tasks(tasks, n_threads))
+        assert [len(b) for b in batches] == expected_sizes
+        assert [t for b in batches for t in b] == tasks
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_store_job_parallelized_across_threads():
+    """A single job's batches must be serviced by multiple threads at once,
+    not funneled through a single thread."""
+    n_threads = 4
+    barrier = threading.Barrier(n_threads, timeout=5.0)
+    seen_threads: set[str] = set()
+    lock = threading.Lock()
+
+    def make_batch_fn(batch: list[Task]):
+        def run() -> None:
+            with lock:
+                seen_threads.add(threading.current_thread().name)
+            barrier.wait()
+
+        return run
+
+    pool = DualQueueThreadPool(n_read_threads=0, n_write_threads=n_threads)
+    try:
+        tasks = [Task(path=f"p{i}", offset=i) for i in range(n_threads)]
+        pool.enqueue_store(
+            job_id=1,
+            n_tasks=n_threads,
+            tasks=tasks,
+            make_batch_fn=make_batch_fn,
+        )
+        pool.wait_idle()
+        assert len(seen_threads) == n_threads
+    finally:
+        pool.shutdown(wait=True)
+
+
 def test_batch_lookup_c_extension(tmp_path):
     """Validates batch_lookup_C: empty, single, all-existing, all-missing,
     mixed ordering, and input type validation."""
