@@ -97,4 +97,4 @@ def test_dense_nvfp4_generation_is_deterministic_across_batch_sizes_e2e(backend)
     finally:
         if llm is not None:
             with contextlib.suppress(Exception):
-                llm.shutdown()
+                llm.shutdown()  # type: ignore[attr-defined]

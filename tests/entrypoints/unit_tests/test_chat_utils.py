@@ -17,6 +17,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
+    ChatCompletionMessageParam,
     ConversationMessage,
     _postprocess_messages,
     parse_chat_messages,
@@ -163,7 +164,7 @@ def video_url():
 @pytest.fixture(scope="module")
 def audio_url():
     audio = AudioAsset("mary_had_lamb")
-    return encode_audio_url(*audio.audio_and_sample_rate)
+    return encode_audio_url(*audio.audio_and_sample_rate)  # type: ignore[arg-type]
 
 
 def _assert_mm_data_is_image_input(
@@ -717,7 +718,9 @@ async def test_text_only_chat_does_not_initialize_media_connector(
 ):
     load_connector = MagicMock()
     monkeypatch.setattr(MEDIA_CONNECTOR_REGISTRY, "load", load_connector)
-    messages = [{"role": "user", "content": "Who are you?"}]
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "user", "content": "Who are you?"}
+    ]
 
     parse_chat_messages(
         messages,
@@ -2248,7 +2251,7 @@ def test_parse_chat_messages_image_vision_chunk(
     kimi_k2_5_model_config,
     image_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2284,7 +2287,7 @@ def test_parse_chat_messages_video_vision_chunk(
     kimi_k2_5_model_config,
     video_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2321,7 +2324,7 @@ def test_parse_chat_messages_image_vision_chunk_with_uuid(
     image_url,
 ):
     image_uuid = "image_123"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2359,7 +2362,7 @@ def test_parse_chat_messages_video_vision_chunk_with_uuid(
     video_url,
 ):
     video_uuid = "video_456"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2397,7 +2400,7 @@ def test_parse_chat_messages_mixed_vision_chunk(
     image_url,
     video_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2446,7 +2449,7 @@ def test_parse_chat_messages_mixed_vision_chunk_with_uuid(
 ):
     image_uuid = "image_123"
     video_uuid = "video_456"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2498,7 +2501,7 @@ async def test_parse_chat_messages_mixed_vision_chunk_async(
     image_url,
     video_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2548,7 +2551,7 @@ async def test_parse_chat_messages_mixed_vision_chunk_with_uuid_async(
 ):
     image_uuid = "image_123"
     video_uuid = "video_456"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2599,7 +2602,7 @@ async def test_parse_chat_messages_image_vision_chunk_async(
     kimi_k2_5_model_config,
     image_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2636,7 +2639,7 @@ async def test_parse_chat_messages_video_vision_chunk_async(
     kimi_k2_5_model_config,
     video_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2674,7 +2677,7 @@ async def test_parse_chat_messages_image_vision_chunk_with_uuid_async(
     image_url,
 ):
     image_uuid = "image_123"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2713,7 +2716,7 @@ async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
     video_url,
 ):
     video_uuid = "video_456"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [

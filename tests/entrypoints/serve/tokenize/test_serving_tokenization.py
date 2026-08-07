@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeChatRequest,
     TokenizeCompletionRequest,
+    TokenizeResponse,
 )
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -87,7 +88,7 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
     mock_engine.renderer = MagicMock()
 
     serving = _build_serving_tokenization(mock_engine)
-    serving.online_renderer.preprocess_chat = AsyncMock(
+    serving.online_renderer.preprocess_chat = AsyncMock(  # type: ignore[method-assign]
         return_value=(
             [{"role": "user", "content": "Test"}],
             [{"prompt_token_ids": [1, 2, 3]}],
@@ -101,7 +102,7 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
 
     response = await serving.create_tokenize(request, MagicMock(headers={}))
 
-    assert response.tokens == [1, 2, 3]
+    assert isinstance(response, TokenizeResponse) and response.tokens == [1, 2, 3]
     assert (
         serving.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is True
@@ -117,7 +118,7 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
     mock_engine.renderer = MagicMock()
 
     serving = _build_serving_tokenization(mock_engine)
-    serving.online_renderer.preprocess_completion = AsyncMock(
+    serving.online_renderer.preprocess_completion = AsyncMock(  # type: ignore[method-assign]
         return_value=[{"prompt_token_ids": [1, 2, 3]}]
     )
 
@@ -128,7 +129,7 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
 
     response = await serving.create_tokenize(request, MagicMock(headers={}))
 
-    assert response.tokens == [1, 2, 3]
+    assert isinstance(response, TokenizeResponse) and response.tokens == [1, 2, 3]
     assert (
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True

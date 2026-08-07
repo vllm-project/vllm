@@ -75,6 +75,7 @@ def test_detach_zero_copy_routed_experts_without_logprobs():
 
     detached = output.routed_experts
     assert detached is not None
+    assert original is not None
     assert detached is not original
     assert detached.routing_data is not original.routing_data
     assert detached.slot_mapping is not original.slot_mapping

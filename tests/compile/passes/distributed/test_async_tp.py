@@ -297,7 +297,7 @@ def test_async_tp_pass_requires_full_graph_compilation():
     ]
 
     async_tp_pass = object.__new__(AsyncTPPass)
-    async_tp_pass.compilation_config = vllm_config.compilation_config
+    async_tp_pass.compilation_config = vllm_config.compilation_config  # type: ignore[assignment]
 
     with pytest.raises(
         AssertionError, match="AsyncTPPass requires full-graph compilation"

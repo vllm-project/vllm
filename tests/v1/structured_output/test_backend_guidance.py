@@ -91,7 +91,7 @@ def test_grammar_bitmask_with_specdec():
                 json='{"type": "object"}',
             ),
         )
-        sampling_params.structured_outputs._backend = "guidance"
+        sampling_params.structured_outputs._backend = "guidance"  # type: ignore[union-attr]
         sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
         my_req_id = f"my_req_id_{i}"
@@ -107,19 +107,23 @@ def test_grammar_bitmask_with_specdec():
         def grammar_bitmask(req: Request, tokens: list[int]) -> None:
             structured_output_manager.grammar_bitmask(
                 requests={req.request_id: req},
-                structured_output_request_ids={req.request_id: 0},
+                structured_output_request_ids=[req.request_id],
                 scheduled_spec_decode_tokens={req.request_id: tokens},
             )
             # At this point, we rolled-back, so should not be terminated
-            assert not req.structured_output_request.grammar.is_terminated()
+            assert req.structured_output_request is not None
+            grammar = req.structured_output_request.grammar
+            assert grammar is not None and not isinstance(grammar, Exception)
+            assert not grammar.is_terminated()
 
         # The grammar might not yet be compiled, so we wait for it
+        assert request.structured_output_request is not None
         while not request.structured_output_request._check_grammar_completion():
             continue
 
-        assert request.structured_output_request.grammar.accept_tokens(
-            request.request_id, prompt[:i]
-        )
+        grammar = request.structured_output_request.grammar
+        assert grammar is not None and not isinstance(grammar, Exception)
+        assert grammar.accept_tokens(request.request_id, prompt[:i])
 
         grammar_bitmask(request, prompt[i:] + [tokenizer.eos_token_id])
         grammar_bitmask(
@@ -155,7 +159,7 @@ def test_grammar_init_async_and_sync(async_grammar):
             json='{"type": "object"}',
         ),
     )
-    sampling_params.structured_outputs._backend = "guidance"
+    sampling_params.structured_outputs._backend = "guidance"  # type: ignore[union-attr]
     sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
     request = Request(
@@ -169,6 +173,7 @@ def test_grammar_init_async_and_sync(async_grammar):
 
     # Check the internal _grammar type immediately after init
     # Before _check_grammar_completion is called, async mode should have a Future
+    assert request.structured_output_request is not None
     raw_grammar = request.structured_output_request._grammar
     if async_grammar:
         assert isinstance(raw_grammar, Future), (
@@ -191,7 +196,7 @@ def test_grammar_init_async_and_sync(async_grammar):
 
     # Verify grammar is properly initialized and functional
     grammar = request.structured_output_request.grammar
-    assert grammar is not None
+    assert grammar is not None and not isinstance(grammar, Exception)
     assert not grammar.is_terminated()
 
     # Verify the grammar can accept valid tokens

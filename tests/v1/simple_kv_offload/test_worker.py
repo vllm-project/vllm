@@ -152,10 +152,12 @@ class _RecordingBackend:
 def test_get_finished_passes_wait_event_for_store_only():
     """get_finished gates stores on a compute-done event but not loads."""
     worker = SimpleCPUOffloadWorker(
-        vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
+        vllm_config=None,  # type: ignore[arg-type]
+        kv_cache_config=None,
+        cpu_capacity_bytes=0,
     )
     recording = _RecordingBackend()
-    worker._backend = recording
+    worker._backend = recording  # type: ignore[assignment]
     worker._connector_metadata = SimpleCPUOffloadMetadata(
         load_event=0,
         load_gpu_blocks=[0],

@@ -35,7 +35,7 @@ def test_structured_outputs_rejected_for_diffusion_models():
     )
     with pytest.raises(VLLMValidationError, match="not yet supported for diffusion"):
         params._validate_structured_outputs(
-            _StubModelConfig(is_diffusion=True),
+            _StubModelConfig(is_diffusion=True),  # type: ignore[arg-type]
             StructuredOutputsConfig(),
             tokenizer=None,
         )
@@ -45,7 +45,7 @@ def test_plain_request_allowed_for_diffusion_models():
     """Requests without structured outputs are unaffected by the guard."""
     params = SamplingParams()
     params._validate_structured_outputs(
-        _StubModelConfig(is_diffusion=True),
+        _StubModelConfig(is_diffusion=True),  # type: ignore[arg-type]
         StructuredOutputsConfig(),
         tokenizer=None,
     )
@@ -66,7 +66,7 @@ def test_degenerate_structured_outputs_rejected(structured_outputs, match):
     params = SamplingParams(structured_outputs=structured_outputs)
     with pytest.raises(VLLMValidationError, match=match):
         params._validate_structured_outputs(
-            _StubModelConfig(is_diffusion=False),
+            _StubModelConfig(is_diffusion=False),  # type: ignore[arg-type]
             StructuredOutputsConfig(),
-            tokenizer=object(),
+            tokenizer=object(),  # type: ignore[arg-type]
         )

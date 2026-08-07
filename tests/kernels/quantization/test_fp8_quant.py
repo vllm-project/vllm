@@ -12,6 +12,7 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     scaled_quantize,
 )
 from vllm.platforms import current_platform
@@ -178,7 +179,10 @@ def test_static_fp8_quant_group_2d(
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ref_out, scale = scaled_quantize(
-        x, group_shape, current_platform.fp8_dtype(), compute_dtype=torch.float32
+        x,
+        GroupShape(*group_shape),
+        current_platform.fp8_dtype(),
+        compute_dtype=torch.float32,
     )
     ops_out, ops_scale = ops.scaled_fp8_quant(x, scale=scale, group_shape=group_shape)
 
@@ -206,7 +210,7 @@ def test_static_fp8_quant_1d_scale(
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ref_out, scale_2d = scaled_quantize(
-        x, group_shape, FP8_DTYPE, compute_dtype=torch.float32
+        x, GroupShape(*group_shape), FP8_DTYPE, compute_dtype=torch.float32
     )
 
     # Flatten scale to 1D for testing 1D scale path

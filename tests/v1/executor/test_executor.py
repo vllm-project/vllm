@@ -84,12 +84,12 @@ def test_multiproc_executor_worker_termination_timeout(
     monkeypatch.setattr(multiproc_executor_module.time, "sleep", clock.sleep)
     executor = MultiprocExecutor.__new__(MultiprocExecutor)
     proc = _FakeProcess(clock, exits_at=exits_at)
-    executor._ensure_worker_termination([proc])
+    executor._ensure_worker_termination([proc])  # type: ignore[list-item]
     assert proc.terminate_called is expected_terminate
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
-    def collective_rpc(
+    def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
         timeout: float | None = None,
@@ -97,7 +97,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
         kwargs: dict | None = None,
         non_block: bool = False,
         unique_reply_rank: int | None = None,
-        kv_output_aggregator: KVOutputAggregator = None,
+        kv_output_aggregator: KVOutputAggregator | None = None,
     ) -> Any | list[Any] | Future[Any | list[Any]]:
         # Drop marker to show that this was run
         with open(".marker", "w"):
@@ -123,7 +123,7 @@ def test_custom_executor_type_checking():
             model=MODEL,
             gpu_memory_utilization=0.2,
             max_model_len=8192,
-            distributed_executor_backend=Mock,
+            distributed_executor_backend=Mock,  # type: ignore[arg-type]
         )
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
@@ -131,7 +131,7 @@ def test_custom_executor_type_checking():
             model=MODEL,
             gpu_memory_utilization=0.2,
             max_model_len=8192,
-            distributed_executor_backend=Mock,
+            distributed_executor_backend=Mock,  # type: ignore[arg-type]
         )
         AsyncLLM.from_engine_args(engine_args)
 

@@ -29,7 +29,8 @@ if not current_platform.is_cuda():
 #  `is_quant_method_supported` conflates kernels with quantization methods
 #  an assumption which is breaking down as quantizations methods can have
 #  have kernels and some kernels support multiple quantization methods.
-IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
+capability = current_platform.get_device_capability()
+IS_SUPPORTED_BY_GPU = capability is not None and capability[0] >= 9
 
 MNK_SHAPES = [
     (1, 128, 128),
@@ -207,7 +208,7 @@ def mm_test_helper(
         a=tensors.a,
         b_q=tensors.w_q,
         b_group_scales=tensors.w_g_s,
-        b_group_size=group_size,
+        b_group_size=group_size,  # type: ignore[arg-type]
         b_channel_scales=tensors.w_ch_s,
         a_token_scales=tensors.w_tok_s,
     )

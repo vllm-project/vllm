@@ -70,7 +70,7 @@ def _make_metadata(
     if tasks is None:
         tasks = ["embed"] * n_seqs
     if pooling_params is None:
-        pooling_params = [PoolingParams(task=t) for t in tasks]
+        pooling_params = [PoolingParams(task=t) for t in tasks]  # type: ignore[arg-type]
 
     prompt_lens_tensor = torch.tensor(prompt_lens, dtype=torch.long)
 

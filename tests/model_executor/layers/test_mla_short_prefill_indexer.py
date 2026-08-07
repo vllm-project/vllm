@@ -32,7 +32,7 @@ def make_indexer_metadata(
         num_decode_tokens=num_decode_tokens,
         num_prefills=num_prefills,
         num_prefill_tokens=num_prefill_tokens,
-        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,
+        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,  # type: ignore[arg-type]
     )
 
 
@@ -74,7 +74,7 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
         slot_mapping=slot_mapping,
     )
     if indexer_metadata.num_decodes:
-        indexer_metadata.decode = object()
+        indexer_metadata.decode = object()  # type: ignore[assignment]
     mla_metadata = make_mla_metadata(
         use_dense_mha=batch_kind != "force_mqa",
         num_decode_tokens=mla_num_decode_tokens,

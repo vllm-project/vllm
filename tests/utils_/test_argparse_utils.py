@@ -454,32 +454,32 @@ def test_compilation_config_mode_validator():
     """Test that CompilationConfig.mode field validator converts strings to integers."""
     from vllm.config.compilation import CompilationConfig, CompilationMode
 
-    config = CompilationConfig(mode=0)
+    config = CompilationConfig(mode=0)  # type: ignore[arg-type]
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode=3)
+    config = CompilationConfig(mode=3)  # type: ignore[arg-type]
     assert config.mode == CompilationMode.VLLM_COMPILE
 
-    config = CompilationConfig(mode="NONE")
+    config = CompilationConfig(mode="NONE")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode="STOCK_TORCH_COMPILE")
+    config = CompilationConfig(mode="STOCK_TORCH_COMPILE")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.STOCK_TORCH_COMPILE
 
-    config = CompilationConfig(mode="DYNAMO_TRACE_ONCE")
+    config = CompilationConfig(mode="DYNAMO_TRACE_ONCE")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.DYNAMO_TRACE_ONCE
 
-    config = CompilationConfig(mode="VLLM_COMPILE")
+    config = CompilationConfig(mode="VLLM_COMPILE")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.VLLM_COMPILE
 
-    config = CompilationConfig(mode="none")
+    config = CompilationConfig(mode="none")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.NONE
 
-    config = CompilationConfig(mode="vllm_compile")
+    config = CompilationConfig(mode="vllm_compile")  # type: ignore[arg-type]
     assert config.mode == CompilationMode.VLLM_COMPILE
 
     with pytest.raises(ValidationError, match="Invalid compilation mode"):
-        CompilationConfig(mode="INVALID_MODE")
+        CompilationConfig(mode="INVALID_MODE")  # type: ignore[arg-type]
 
 
 def test_flat_product():

@@ -8,11 +8,13 @@ Run `pytest tests/samplers/test_no_bad_words.py`.
 
 from transformers import AutoTokenizer
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
+
+from ..conftest import VllmRunner
 
 
 def _generate(
-    llm: LLM,
+    llm: VllmRunner,
     prompt: str,
     num_prompt_tokens: int,
     temperature: float = 0,
@@ -56,7 +58,9 @@ class TestOneTokenBadWord:
             output_token_ids = self._generate(llm, bad_words=[self.TARGET_TOKEN])
             assert self.target_token_id not in output_token_ids
 
-    def _generate(self, llm: LLM, bad_words: list[str] | None = None) -> list[int]:
+    def _generate(
+        self, llm: VllmRunner, bad_words: list[str] | None = None
+    ) -> list[int]:
         return _generate(
             llm=llm,
             prompt=self.PROMPT,
@@ -151,7 +155,9 @@ class TestTwoTokenBadWord:
                 self.neighbour_token_id2 in output_token_ids
             )
 
-    def _generate(self, llm: LLM, bad_words: list[str] | None = None) -> list[int]:
+    def _generate(
+        self, llm: VllmRunner, bad_words: list[str] | None = None
+    ) -> list[int]:
         return _generate(
             llm=llm,
             prompt=self.PROMPT,

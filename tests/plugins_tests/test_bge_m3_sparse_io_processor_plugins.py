@@ -114,6 +114,7 @@ async def test_bge_m3_sparse_plugin_online(
     response = ret.json()
 
     # Verify the request response is in the correct format
+    parsed_response: object
     assert (parsed_response := IOProcessorResponse(**response).data)
 
     # Verify the output is formatted as expected for this plugin

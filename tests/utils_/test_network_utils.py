@@ -101,8 +101,8 @@ def test_make_zmq_socket_ipv6():
 
 
 def test_make_zmq_path():
-    assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
-    assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"
+    assert make_zmq_path("tcp", "127.0.0.1", 5555) == "tcp://127.0.0.1:5555"
+    assert make_zmq_path("tcp", "::1", 5555) == "tcp://[::1]:5555"
 
 
 def test_get_tcp_uri():
