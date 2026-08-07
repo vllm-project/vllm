@@ -189,11 +189,10 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
 
-- label: LM Eval Humming Act int8 (A100 - TEMPORARY)
+- label: LM Eval Humming Act Quant (A100 - TEMPORARY)
   key: lm-eval-humming-act-a100
   timeout_in_minutes: 45
   device: a100
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
@@ -203,12 +202,12 @@ steps:
   - vllm/model_executor/kernels/linear/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-online-quant-w4a4-hadamard.txt
 
 - label: LM Eval Humming f16 (H100 - TEMPORARY)
   key: lm-eval-humming-f16-h100
   timeout_in_minutes: 70
   device: h100
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
@@ -219,7 +218,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
 
-- label: LM Eval Humming Act fp8/int8 (H100 - TEMPORARY)
+- label: LM Eval Humming Act Quant (H100 - TEMPORARY)
   key: lm-eval-humming-act-h100
   timeout_in_minutes: 70
   device: h100
@@ -239,7 +238,6 @@ steps:
   key: lm-eval-humming-f16-b200
   timeout_in_minutes: 50
   device: b200-k8s
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
@@ -250,7 +248,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
 
-- label: LM Eval Humming Act fp8/int8 (B200 - TEMPORARY)
+- label: LM Eval Humming Act Quant (B200 - TEMPORARY)
   key: lm-eval-humming-act-b200
   timeout_in_minutes: 50
   device: b200-k8s

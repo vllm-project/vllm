@@ -12,6 +12,7 @@ import importlib
 from typing import Any
 
 _EXPORTS: dict[str, str] = {
+    "ops": "humming.ops",
     "dtypes": "humming.dtypes",
     "DataType": "humming.dtypes:DataType",
     "GemmType": "humming.config:GemmType",

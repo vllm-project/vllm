@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -371,6 +372,25 @@ def input_schema_to_quant_key(
         return _compressed_tensors_input_schema_to_quant_key(schema)
 
     raise TypeError(f"Unsupported input schema type: {type(schema)}")
+
+
+def humming_update_schema_hadamard_block_size(
+    weight_schema: "HummingWeightSchema",
+    input_schema: "HummingInputSchema",
+    shape_k: int,
+) -> "HummingWeightSchema":
+    block_size = 256
+    weight_scale_group_size = weight_schema.weight_scale_group_size
+    input_scale_group_size = input_schema.input_scale_group_size
+    if weight_scale_group_size:
+        block_size = min(block_size, weight_scale_group_size)
+    if input_scale_group_size:
+        block_size = min(block_size, input_scale_group_size)
+
+    while shape_k % block_size > 0:
+        block_size = block_size // 2
+
+    return dataclasses.replace(weight_schema, hadamard_block_size=block_size)
 
 
 def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
@@ -897,6 +917,19 @@ def _process_single_sublayer(
     # Step 2: Force requant if needed
     assert isinstance(current_weight_schema, HummingWeightSchema)
     if force_weight_schema is not None and current_weight_schema != force_weight_schema:
+        assert isinstance(force_weight_schema, HummingWeightSchema)
+        if force_weight_schema.hadamard_block_size == -1:
+            force_weight_schema = humming_update_schema_hadamard_block_size(
+                weight_schema=force_weight_schema,
+                input_schema=current_input_schema,
+                shape_k=shape_k,
+            )
+        setattr(
+            layer,
+            f"{sublayer_name}_hadamard_block_size",
+            force_weight_schema.hadamard_block_size,
+        )
+
         tensors = _extract_sublayer_tensors(layer, sublayer_name)
 
         tensors = current_weight_schema.requant_tensors(
@@ -908,6 +941,21 @@ def _process_single_sublayer(
         current_weight_schema = force_weight_schema
         _replace_layer_parameters(layer, sublayer_name, tensors, preserve_bias=True)
         del tensors
+    elif current_weight_schema.hadamard_block_size == -1:
+        # Resolve auto hadamard block size to a concrete per-sublayer value so
+        # prepare_layer_meta receives the final layout. For online-quantized
+        # weights the transform itself was already applied in the weight loader.
+        current_weight_schema = humming_update_schema_hadamard_block_size(
+            weight_schema=current_weight_schema,
+            input_schema=current_input_schema,
+            shape_k=shape_k,
+        )
+        if current_weight_schema.hadamard_block_size > 1:
+            setattr(
+                layer,
+                f"{sublayer_name}_hadamard_block_size",
+                current_weight_schema.hadamard_block_size,
+            )
 
     # Step 3: Prepare layer metadata and transform weights
     _prepare_and_transform_sublayer(
