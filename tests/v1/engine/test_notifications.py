@@ -6,16 +6,20 @@ Hits the real `EngineCore` buffer helpers without a model: they only touch
 `_pending_notifications`, so a bare instance is enough.
 """
 
+import queue
+from types import SimpleNamespace
+
+import msgspec
 import pytest
 
 from vllm.v1.engine import EngineCoreOutputs
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.notifications import (
     CustomNotification,
     publish_worker_notification,
     take_worker_notifications,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.outputs import ModelRunnerOutput
 
 
 @pytest.fixture(autouse=True)
@@ -115,17 +119,68 @@ def test_worker_notifications_survive_until_the_first_drain():
     assert take_worker_notifications() == [first, second]
 
 
+def _model_output(
+    notifications: list[CustomNotification] | None = None,
+) -> ModelRunnerOutput:
+    return ModelRunnerOutput(
+        req_ids=[], req_id_to_index={}, worker_notifications=notifications
+    )
+
+
 def test_collect_forwards_worker_notifications():
     """Worker-sourced events flow out through EngineCore."""
     engine_core = _bare_engine_core()
 
     event = CustomNotification(key="my_plugin", payload={"n": 1})
-    model_output = EMPTY_MODEL_RUNNER_OUTPUT
-    model_output.worker_notifications = [event]
-    try:
-        outputs: dict[int, EngineCoreOutputs] = {}
-        engine_core._collect_step_notifications(model_output, outputs)
-    finally:
-        model_output.worker_notifications = None
+    outputs: dict[int, EngineCoreOutputs] = {}
+    engine_core._collect_step_notifications(_model_output([event]), outputs)
 
     assert outputs[0].engine_notifications == [event]
+
+
+def test_collect_is_noop_without_worker_notifications():
+    """A step that produced no events must not manufacture an outputs entry."""
+    engine_core = _bare_engine_core()
+
+    outputs: dict[int, EngineCoreOutputs] = {}
+    engine_core._collect_step_notifications(_model_output(), outputs)
+
+    assert outputs == {}
+
+
+def test_engine_core_outputs_round_trip_over_the_wire():
+    """EngineCoreOutputs is array_like, so the appended field is positional.
+
+    omit_defaults does not trim trailing fields for array_like structs, so
+    every message carries the extra element once this field exists; non-Python
+    frontends decode by position and reject a longer array than they know.
+    """
+    event = CustomNotification(key="my_plugin", payload={"count": 5})
+    encoded = msgspec.msgpack.encode(
+        EngineCoreOutputs(engine_index=1, engine_notifications=[event])
+    )
+
+    as_array = msgspec.msgpack.decode(encoded)
+    assert isinstance(as_array, list)
+    assert as_array[-1] == [
+        {"type": "custom", "key": "my_plugin", "payload": {"count": 5}}
+    ]
+
+    decoded = msgspec.msgpack.decode(encoded, type=EngineCoreOutputs)
+    assert decoded.engine_notifications == [event]
+
+
+def test_proc_broadcasts_to_every_frontend():
+    """One-shot events must reach all API servers, not just one client's
+    step outputs, or every other frontend stays permanently stale."""
+    proc = EngineCoreProc.__new__(EngineCoreProc)
+    proc.addresses = SimpleNamespace(outputs=["a", "b", "c"])
+    proc.output_queue = queue.Queue()
+
+    event = CustomNotification(key="my_plugin")
+    proc._publish_notifications([event])
+
+    delivered = [proc.output_queue.get_nowait() for _ in range(3)]
+    assert [client_index for client_index, _ in delivered] == [0, 1, 2]
+    assert all(out.engine_notifications == [event] for _, out in delivered)
+    assert proc.output_queue.empty()
