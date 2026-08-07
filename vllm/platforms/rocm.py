@@ -15,7 +15,13 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import (
+    DeviceCapability,
+    Platform,
+    PlatformEnum,
+    _get_wsl_kernel_version,
+    in_wsl,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -847,6 +853,25 @@ class RocmPlatform(Platform):
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        if in_wsl():
+            # Gate on kernel >= 4.19.121, the first WSL2 kernel with
+            # limited pinned memory support.
+            version = _get_wsl_kernel_version()
+            if version is None or version < (4, 19, 121):
+                # warning_once() causes a circular import on WSL, see #48397.
+                logger.warning(
+                    "Using 'pin_memory=False' as WSL is detected and the "
+                    "WSL2 kernel version is below 4.19.121. This may slow "
+                    "down performance. Please run `wsl --update`."
+                )
+                return False
+            # On compatible WSL2 kernels, pinned memory is disabled by
+            # default. Enable it via VLLM_WSL2_ENABLE_PIN_MEMORY=1.
+            return envs.VLLM_WSL2_ENABLE_PIN_MEMORY
+        return True
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:

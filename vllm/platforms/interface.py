@@ -64,6 +64,21 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(platform.uname()).lower()
 
 
+@functools.cache
+def _get_wsl_kernel_version() -> tuple[int, ...] | None:
+    """Return the WSL2 kernel version as a tuple, or None on parse failure.
+
+    platform.uname().release on WSL2 looks like
+    "5.15.167.4-microsoft-standard-WSL2"; we take the numeric prefix.
+    """
+    try:
+        release = platform.uname().release
+        parts = release.split("-")[0].split(".")
+        return tuple(int(x) for x in parts[:3])
+    except Exception:
+        return None
+
+
 class PlatformEnum(enum.Enum):
     """Enumeration of supported hardware platforms."""
 

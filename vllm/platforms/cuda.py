@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import platform
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
@@ -29,7 +28,13 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+from .interface import (
+    DeviceCapability,
+    Platform,
+    PlatformEnum,
+    _get_wsl_kernel_version,
+    in_wsl,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -188,21 +193,6 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
             pynvml.nvmlShutdown()
 
     return wrapper
-
-
-@cache
-def _get_wsl_kernel_version() -> tuple[int, ...] | None:
-    """Return the WSL2 kernel version as a tuple, or None on parse failure.
-
-    platform.uname().release on WSL2 looks like
-    "5.15.167.4-microsoft-standard-WSL2"; we take the numeric prefix.
-    """
-    try:
-        release = platform.uname().release
-        parts = release.split("-")[0].split(".")
-        return tuple(int(x) for x in parts[:3])
-    except Exception:
-        return None
 
 
 class CudaPlatformBase(Platform):
