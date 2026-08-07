@@ -1217,15 +1217,17 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if (
-            self.profiler_config.profiler == "proton"
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            raise ValueError(
-                "The Proton profiler requires CUDA graphs to be disabled. "
-                "Use --enforce-eager or set "
-                "--compilation-config.cudagraph_mode=none."
-            )
+        if self.profiler_config.profiler == "proton":
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "The Proton profiler currently supports NVIDIA CUDA only"
+                )
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise ValueError(
+                    "The Proton profiler requires CUDA graphs to be disabled. "
+                    "Use --enforce-eager or set "
+                    "--compilation-config.cudagraph_mode=none."
+                )
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(

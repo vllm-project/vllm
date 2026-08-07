@@ -431,6 +431,18 @@ class TestProtonConfig:
 
         assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
 
+    def test_rejects_proton_on_non_cuda_platforms(self, tmp_path):
+        with (
+            patch("vllm.platforms.current_platform.is_cuda", return_value=False),
+            pytest.raises(ValueError, match="supports NVIDIA CUDA only"),
+        ):
+            VllmConfig(
+                profiler_config=ProfilerConfig(
+                    profiler="proton", proton_profiler_dir=str(tmp_path)
+                ),
+                compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
+            )
+
     def test_rejects_proton_when_cuda_graphs_are_enabled(self, tmp_path):
         with pytest.raises(ValueError, match="requires CUDA graphs to be disabled"):
             VllmConfig(

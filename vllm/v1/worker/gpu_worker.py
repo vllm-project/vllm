@@ -172,14 +172,6 @@ class Worker(WorkerBase):
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
 
-        # Only validate profiler config is valid, don't instantiate yet
-        if self.profiler_config.profiler not in ("torch", "cuda", "proton", None):
-            raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
-        if self.profiler_config.profiler == "proton" and not current_platform.is_cuda():
-            raise ValueError(
-                "The Proton profiler currently supports NVIDIA CUDA workers only"
-            )
-
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
