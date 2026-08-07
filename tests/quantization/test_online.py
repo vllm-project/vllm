@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
 from vllm.model_executor.layers.quantization.online.base import (
-    ComposedQuantizationConfig,
+    compose_quantization_config,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
@@ -125,7 +125,7 @@ def test_online_prequantized_compatibility(
     default_vllm_config.model_config = ModelConfig()
     checkpoint_config = checkpoint_config_factory()
 
-    config = ComposedQuantizationConfig(
+    config = compose_quantization_config(
         checkpoint_config,
         QuantizationConfigArgs(linear="mxfp8"),
     )

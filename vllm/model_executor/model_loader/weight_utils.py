@@ -249,7 +249,7 @@ def get_quant_config(
     ) -> QuantizationConfig:
         from vllm.config.quantization import QuantizationConfigArgs
         from vllm.model_executor.layers.quantization.online.base import (
-            ComposedQuantizationConfig,
+            compose_quantization_config,
         )
 
         args = model_config.quantization_config
@@ -269,7 +269,7 @@ def get_quant_config(
         ):
             return checkpoint_config
 
-        return ComposedQuantizationConfig(checkpoint_config, args)
+        return compose_quantization_config(checkpoint_config, args)
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)

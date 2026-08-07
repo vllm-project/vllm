@@ -203,10 +203,11 @@ class ComposedQuantizationConfig(QuantizationConfig):
         online_dtypes = self.online_config.get_supported_act_dtypes()
         return [dtype for dtype in checkpoint_dtypes if dtype in online_dtypes]
 
-    def get_min_capability(self) -> int:
-        return max(
-            self.checkpoint_config.get_min_capability(),
-            self.online_config.get_min_capability(),
+    @classmethod
+    def get_min_capability(cls) -> int:
+        raise NotImplementedError(
+            "ComposedQuantizationConfig must be created with "
+            "compose_quantization_config()."
         )
 
     @classmethod
@@ -219,8 +220,12 @@ class ComposedQuantizationConfig(QuantizationConfig):
             "ComposedQuantizationConfig is not checkpoint-backed."
         )
 
-    def get_cache_scale_mapper(self):
-        return self.checkpoint_config.get_cache_scale_mapper()
+    @staticmethod
+    def get_cache_scale_mapper():
+        raise NotImplementedError(
+            "ComposedQuantizationConfig must be created with "
+            "compose_quantization_config()."
+        )
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper) -> None:
         self.checkpoint_config.apply_vllm_mapper(hf_to_vllm_mapper)
@@ -256,3 +261,26 @@ class ComposedQuantizationConfig(QuantizationConfig):
             f"layer {prefix!r} unquantized, but {type(checkpoint_method).__name__} "
             f"was selected by {type(self.checkpoint_config).__name__}."
         )
+
+
+def compose_quantization_config(
+    checkpoint_config: QuantizationConfig,
+    online_args: QuantizationConfigArgs,
+) -> ComposedQuantizationConfig:
+    """Create a checkpoint config composed with online quantization."""
+    min_capability = max(
+        checkpoint_config.get_min_capability(),
+        OnlineQuantizationConfig.get_min_capability(),
+    )
+    checkpoint_cache_scale_mapper = checkpoint_config.get_cache_scale_mapper
+
+    class _ComposedQuantizationConfig(ComposedQuantizationConfig):
+        @classmethod
+        def get_min_capability(cls) -> int:
+            return min_capability
+
+        @staticmethod
+        def get_cache_scale_mapper():
+            return checkpoint_cache_scale_mapper()
+
+    return _ComposedQuantizationConfig(checkpoint_config, online_args)
