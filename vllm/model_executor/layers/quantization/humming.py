@@ -217,8 +217,17 @@ class HummingConfig(QuantizationConfig):
         if hasattr(self, "hf_to_vllm_mapper"):
             ignored_layers = self.hf_to_vllm_mapper.apply_list(ignored_layers)
 
-        if any(module_name in prefix for module_name in ignored_layers):
-            return True
+        for module_name in ignored_layers:
+            # compressed-tensors style entries may be regex patterns prefixed
+            # with "re:" (e.g. "re:vision_tower.*"). These must be regex-matched;
+            # plain substring matching never matches the literal "re:..." string,
+            # so ignored layers get silently quantized. Non-"re:" entries keep the
+            # existing substring behavior (e.g. bitsandbytes modules_to_not_convert).
+            if module_name.startswith("re:"):
+                if re.match(module_name[3:], prefix):
+                    return True
+            elif module_name in prefix:
+                return True
         if "lm_head" in prefix:
             return True
 
@@ -719,10 +728,10 @@ class HummingMoEMethod(FusedMoEMethodBase):
         # The weight names of sublayer start with the prefix "{sublayer_name}_"
         layer.sublayer_configs = {
             "w13": {
-                "shape_n": intermediate_size_per_partition * 2,
+                "shape_n": intermediate_size_per_partition * self.moe.w13_num_shards,
                 "shape_k": hidden_size,
                 "tensors_attrs": self.weight_schema.get_padded_tensors_attrs(
-                    shape_n=intermediate_size_per_partition * 2,
+                    shape_n=intermediate_size_per_partition * self.moe.w13_num_shards,
                     shape_k=hidden_size,
                     num_experts=num_experts,
                     param_dtype=params_dtype,

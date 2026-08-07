@@ -379,8 +379,14 @@ def select_fp8_moe_backend(
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
-        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
+        skip_aiter_moe = (
+            not envs.VLLM_ROCM_USE_AITER
+            or not envs.VLLM_ROCM_USE_AITER_MOE
+            or rocm_aiter_ops.is_rdna_aiter_enabled()
+        )
+        if skip_aiter_moe:
+            if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:
             backend = Fp8MoeBackend.AITER
             return _return_or_raise(
@@ -477,10 +483,14 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+        w13.is_shuffled = True
+        w2.is_shuffled = True
     elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
         w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
             w13, w2, w13_scale, w2_scale
         )
+        w13.is_shuffled = True
+        w2.is_shuffled = True
     elif fp8_backend == Fp8MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             convert_to_humming_moe_kernel_format,
@@ -618,6 +628,17 @@ def make_fp8_moe_quant_config(
         and block_shape is None
     ):
         assert a1_scale is not None and a2_scale is not None
+        g1_alphas = w1_scale * a1_scale
+        g2_alphas = w2_scale * a2_scale
+        if layer is not None:
+            layer.register_parameter(
+                "g1_alphas", torch.nn.Parameter(g1_alphas, requires_grad=False)
+            )
+            layer.register_parameter(
+                "g2_alphas", torch.nn.Parameter(g2_alphas, requires_grad=False)
+            )
+            g1_alphas = layer.g1_alphas
+            g2_alphas = layer.g2_alphas
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -627,8 +648,8 @@ def make_fp8_moe_quant_config(
             a2_scale=a2_scale,
             a1_gscale=(1.0 / a1_scale),
             a2_gscale=(1.0 / a2_scale),
-            g1_alphas=(w1_scale * a1_scale).squeeze(),
-            g2_alphas=(w2_scale * a2_scale).squeeze(),
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
             gemm1_clamp_limit=swiglu_limit,
         )
     # MXFP8 (block [1, 32]) dispatches to the mxfp8 activation quant. Scales are

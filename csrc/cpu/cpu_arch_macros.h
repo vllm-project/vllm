@@ -172,4 +172,26 @@
 
 #endif  // __riscv_v
 
+// Power VSX
+#ifdef __powerpc__
+  // FP32Vec16::exp() in cpu_types_vsx.hpp delegates to FP32Vec8::exp(), which
+  // implements a vectorised 5-term minimax polynomial using VSX intrinsics.
+  #define DEFINE_FAST_EXP                                                     \
+    auto fast_exp = [&](const vec_op::FP32Vec16& vec)                         \
+                        __attribute__((always_inline)) { return vec.exp(); }; \
+    auto fast_exp_f16 = fast_exp;
+
+#endif  // __powerpc__
+
+// IBM Z (s390x) VXE
+#ifdef __s390x__
+  // FP32Vec16::exp() in cpu_types_vxe.hpp delegates to FP32Vec8::exp(), which
+  // implements a vectorised 5-term minimax polynomial using VXE intrinsics.
+  #define DEFINE_FAST_EXP                                                     \
+    auto fast_exp = [&](const vec_op::FP32Vec16& vec)                         \
+                        __attribute__((always_inline)) { return vec.exp(); }; \
+    auto fast_exp_f16 = fast_exp;
+
+#endif  // __s390x__
+
 #endif

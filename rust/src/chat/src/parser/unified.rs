@@ -5,7 +5,9 @@
 
 use std::sync::LazyLock;
 
-pub use vllm_parser::unified::{Gemma4UnifiedParser, UnifiedParser};
+pub use vllm_parser::unified::{
+    Gemma4UnifiedParser, InklingUnifiedParser, KimiK3UnifiedParser, UnifiedParser,
+};
 use vllm_tokenizer::DynTokenizer;
 
 use crate::parser::ParserFactory;
@@ -14,6 +16,8 @@ use crate::request::ChatTool;
 /// Canonical public names for registered unified parsers.
 pub mod names {
     pub const GEMMA4: &str = "gemma4";
+    pub const INKLING: &str = "inkling";
+    pub const KIMI_K3: &str = "kimi_k3";
 }
 
 /// Constructor signature for one registered unified parser implementation.
@@ -37,10 +41,15 @@ impl UnifiedParserFactory {
         let mut factory = Self::default();
 
         factory.register_parser::<Gemma4UnifiedParser>(names::GEMMA4);
+        factory.register_parser::<InklingUnifiedParser>(names::INKLING);
+        factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)
-            .register_pattern("gemma4", names::GEMMA4);
+            .register_pattern("gemma4", names::GEMMA4)
+            .register_pattern("inkling", names::INKLING)
+            .register_pattern("kimi-k3", names::KIMI_K3)
+            .register_pattern("kimi_k3", names::KIMI_K3);
 
         factory
     }
@@ -88,6 +97,13 @@ mod tests {
             .with_regular_token("<channel|>", 257)
     }
 
+    fn inkling_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<|message_model|>", 200001)
+            .with_regular_token("<|content_text|>", 200004)
+            .with_regular_token("<|content_thinking|>", 200008)
+    }
+
     #[test]
     fn factory_registers_gemma4() {
         let factory = UnifiedParserFactory::new();
@@ -98,5 +114,33 @@ mod tests {
             Some(names::GEMMA4)
         );
         factory.create(names::GEMMA4, &[], Arc::new(tokenizer())).unwrap();
+    }
+
+    #[test]
+    fn factory_registers_inkling() {
+        let factory = UnifiedParserFactory::new();
+
+        assert!(factory.contains(names::INKLING));
+        assert_eq!(
+            factory.resolve_name_for_model("thinkingmachines/Inkling"),
+            Some(names::INKLING)
+        );
+        factory.create(names::INKLING, &[], Arc::new(inkling_tokenizer())).unwrap();
+    }
+
+    #[test]
+    fn factory_registers_kimi_k3() {
+        let factory = UnifiedParserFactory::new();
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<|open|>", 1001)
+            .with_regular_token("<|close|>", 1002)
+            .with_regular_token("<|sep|>", 1003);
+
+        assert!(factory.contains(names::KIMI_K3));
+        assert_eq!(
+            factory.resolve_name_for_model("moonshotai/Kimi-K3"),
+            Some(names::KIMI_K3)
+        );
+        factory.create(names::KIMI_K3, &[], Arc::new(tokenizer)).unwrap();
     }
 }
