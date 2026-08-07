@@ -398,8 +398,8 @@ class ModelConfig:
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
-    paged_shm_size: InitVar[int | str | None] = None
-    paged_shm_block_size: InitVar[int | str | None] = None
+    paged_shm_size: InitVar[int | None] = None
+    paged_shm_block_size: InitVar[int | None] = None
 
     def compute_hash(self) -> str:
         """
