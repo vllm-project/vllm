@@ -739,10 +739,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
         is_gfx1250 = False
-        if (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-            and current_platform.is_rocm()
-        ):
+        if current_platform.is_rocm():
             from vllm.platforms.rocm import on_gfx1250
 
             is_gfx1250 = on_gfx1250()
@@ -837,10 +834,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
         is_gfx1250 = False
-        if (
-            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-            and current_platform.is_rocm()
-        ):
+        if current_platform.is_rocm():
             from vllm.platforms.rocm import on_gfx1250
 
             is_gfx1250 = on_gfx1250()
