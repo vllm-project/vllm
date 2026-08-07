@@ -132,6 +132,35 @@ def _make_addresses() -> EngineZmqAddresses:
     )
 
 
+def test_non_moe_dp_launches_coordination_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-MoE DP still initializes the DP world group and needs a held port."""
+
+    class FakeManager:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    vllm_config = _make_vllm_config_ray_dp_multinode()
+    parallel_config = vllm_config.parallel_config
+    parallel_config.data_parallel_backend = "mp"
+    parallel_config._coord_store_port = 0
+    monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineProcManager", FakeManager)
+    monkeypatch.setattr(
+        "vllm.v1.engine.utils.wait_for_engine_startup", lambda *args: None
+    )
+
+    with launch_core_engines(
+        vllm_config,
+        executor_class=_DummyExecutor,
+        log_stats=False,
+        addresses=_make_addresses(),
+    ) as (manager, _, _, _):
+        assert parallel_config._coord_store_port
+        assert manager is not None
+        assert manager._coord_store is not None
+
+
 def _make_cpu_placement_group():
     pg = ray.util.placement_group(
         [{"CPU": 0.001}, {"CPU": 1.0}],
