@@ -113,6 +113,18 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
 
+- label: LM Eval Large Models (4xB200)
+  key: lm-eval-large-models-4xb200
+  timeout_in_minutes: 120
+  device: b200-k8s
+  optional: true
+  num_devices: 4
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-large.txt
+
 - label: LM Eval Qwen3.5 Models (2xB200)
   key: lm-eval-qwen3-5-models-2xb200
   timeout_in_minutes: 45
