@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import (
     copy_and_expand_dflash_inputs_kernel,
@@ -292,6 +293,20 @@ class DFlashProposer(SpecDecodeBaseProposer):
         )
 
     @override
+    def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
+        """DFlash drafters may mix sliding and full attention layers, which
+        land in different KV cache groups, so skip the base class single-group
+        assertion."""
+
+    def initialize_attn_backend(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+    ) -> None:
+        """One AttentionGroup per KV cache spec, so a drafter that mixes
+        sliding and full attention gets a metadata builder per variant."""
+        self._initialize_multi_group_attn_backend(kv_cache_config, kernel_block_sizes)
+
     def build_per_group_and_layer_attn_metadata(
         self, cad: CommonAttentionMetadata, draft_index: int = 0
     ) -> tuple[list[object], dict[str, object]]:

@@ -14,8 +14,11 @@ processes, so anything derived from iteration order must not leak into
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 import vllm.v1.spec_decode.llm_base_proposer as llm_base_proposer
+from vllm.v1.kv_cache_interface import SlidingWindowSpec, UniformTypeKVCacheSpecs
+from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 SCHEDULER_BLOCK_SIZE = 256
@@ -110,3 +113,108 @@ def test_draft_layer_iteration_is_deterministic(monkeypatch: pytest.MonkeyPatch)
         assert len(proposer.draft_attn_groups) == 1
         assert proposer.draft_attn_groups[0].layer_names == expected_order
         assert proposer.block_size == KERNEL_BLOCK_SIZE
+
+
+SLIDING_LAYER = "draft.0.self_attn.attn"
+FULL_LAYER = "draft.5.self_attn.attn"
+
+
+def _make_hybrid_kv_cache_config() -> SimpleNamespace:
+    """Two KV cache groups, as a drafter mixing sliding and full attention
+    produces: separate specs with different head dimensions."""
+    sliding_spec = SimpleNamespace(block_size=SCHEDULER_BLOCK_SIZE, head_size=128)
+    full_spec = SimpleNamespace(block_size=SCHEDULER_BLOCK_SIZE, head_size=256)
+    return SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=[SLIDING_LAYER], kv_cache_spec=sliding_spec),
+            SimpleNamespace(layer_names=[FULL_LAYER], kv_cache_spec=full_spec),
+        ]
+    )
+
+
+def _make_dflash_proposer(
+    monkeypatch: pytest.MonkeyPatch, layer_names: set[str]
+) -> DFlashProposer:
+    proposer = _make_proposer(monkeypatch, layer_names)
+    proposer.__class__ = DFlashProposer
+    return proposer
+
+
+def test_dflash_hybrid_drafter_gets_one_group_per_spec(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A DFlash drafter mixing sliding and full attention spans two KV cache
+    groups (issue #50710).
+
+    Sharing one AttentionGroup across both would hand every draft layer the
+    same AttentionMetadata, which is only valid for one of the head
+    dimensions; the other reaches the kernel malformed.
+    """
+    layer_names = {SLIDING_LAYER, FULL_LAYER}
+    proposer = _make_dflash_proposer(monkeypatch, layer_names)
+
+    proposer.initialize_attn_backend(
+        _make_hybrid_kv_cache_config(), kernel_block_sizes=[KERNEL_BLOCK_SIZE] * 2
+    )
+
+    assert len(proposer.draft_attn_groups) == 2
+    grouped = {g.layer_names[0]: g for g in proposer.draft_attn_groups}
+    assert grouped[SLIDING_LAYER].kv_cache_spec.head_size == 128
+    assert grouped[FULL_LAYER].kv_cache_spec.head_size == 256
+    # Each group must carry its own KV cache group id for slot-mapping math.
+    assert grouped[SLIDING_LAYER].kv_cache_group_id == 0
+    assert grouped[FULL_LAYER].kv_cache_group_id == 1
+
+
+def test_dflash_single_group_drafter_is_unchanged(monkeypatch: pytest.MonkeyPatch):
+    """The common case — one KV cache group — must still yield one group."""
+    layer_names = {SLIDING_LAYER}
+    proposer = _make_dflash_proposer(monkeypatch, layer_names)
+
+    proposer.initialize_attn_backend(
+        _make_kv_cache_config(layer_names), kernel_block_sizes=[KERNEL_BLOCK_SIZE]
+    )
+
+    assert len(proposer.draft_attn_groups) == 1
+    assert proposer.block_size == KERNEL_BLOCK_SIZE
+
+
+def _make_sliding_spec() -> SlidingWindowSpec:
+    """A fresh spec object, as each layer's get_kv_cache_spec() builds."""
+    return SlidingWindowSpec(
+        block_size=SCHEDULER_BLOCK_SIZE,
+        num_kv_heads=8,
+        head_size=128,
+        head_size_v=128,
+        dtype=torch.float16,
+        sliding_window=512,
+    )
+
+
+def test_layers_with_equal_specs_share_one_group(monkeypatch: pytest.MonkeyPatch):
+    """Layers are grouped by spec value, not by spec object identity.
+
+    Each layer builds its own spec object, so grouping on identity would give
+    a drafter with many identical sliding layers one AttentionGroup — and one
+    metadata builder — per layer instead of one for all of them.
+    """
+    layer_names = {f"draft.{i}.self_attn.attn" for i in range(4)}
+    proposer = _make_dflash_proposer(monkeypatch, layer_names)
+
+    per_layer = {name: _make_sliding_spec() for name in sorted(layer_names)}
+    assert len({id(spec) for spec in per_layer.values()}) == len(per_layer)
+    assert len(set(per_layer.values())) == 1, "specs must be equal but distinct"
+
+    group = SimpleNamespace(
+        layer_names=sorted(layer_names),
+        kv_cache_spec=UniformTypeKVCacheSpecs(
+            block_size=SCHEDULER_BLOCK_SIZE, kv_cache_specs=per_layer
+        ),
+    )
+    proposer.initialize_attn_backend(
+        SimpleNamespace(kv_cache_groups=[group]),
+        kernel_block_sizes=[KERNEL_BLOCK_SIZE],
+    )
+
+    assert len(proposer.draft_attn_groups) == 1
+    assert proposer.draft_attn_groups[0].layer_names == sorted(layer_names)
