@@ -424,6 +424,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes <= self.decode_cudagraph_max_bs
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
+            # The slices below are taken over batch_size, which may exceed
+            # num_spec_decodes when zero-length padded requests are present.
+            assert batch_size <= self.decode_cudagraph_max_bs
             assert spec_sequence_masks is not None
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor, non_blocking=True
@@ -469,6 +472,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
+            # In a pure decode batch, batch_size == num_decodes, so the guard
+            # above also bounds the [:batch_size] slices below.
+            assert batch_size <= self.decode_cudagraph_max_bs
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor, non_blocking=True
             )
