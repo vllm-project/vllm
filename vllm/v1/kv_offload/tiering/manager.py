@@ -46,6 +46,10 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.tiering.backpressure import (
+    BackpressurePolicy,
+    DropStorePolicy,
+)
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
@@ -179,6 +183,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
+        policy: BackpressurePolicy | None = None,
     ):
         """
         Initialize the TieringOffloadingManager.
@@ -187,6 +192,7 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
+            policy: Backpressure remediation policy.
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
@@ -220,6 +226,12 @@ class TieringOffloadingManager(OffloadingManager):
             tier: _SecondaryTierFacingParent(self, tier)
             for tier in self.secondary_tiers
         }
+
+        self._tier_index: dict[SecondaryTierManager, int] = {
+            tier: i for i, tier in enumerate(self.secondary_tiers)
+        }
+
+        self._bp_policy: BackpressurePolicy = policy or DropStorePolicy()
 
         # Buffers manager-level observations (e.g. lookup delay) between
         # get_stats() calls; merged in and reset each time get_stats() runs.
@@ -307,6 +319,37 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         job_metadata.keys, job_metadata.req_context
                     )
+                    self._update_backpressure(tier, job_metadata)
+
+    def _should_store_to_tier(
+        self, tier: SecondaryTierManager, num_blocks: int
+    ) -> bool:
+        detector = tier.bp_detector
+        if detector is None:
+            return True
+        if not self._bp_policy.should_store(tier, detector):
+            self._bp_policy.on_store_skipped(tier, num_blocks)
+            return False
+        return True
+
+    def _update_backpressure(
+        self, tier: SecondaryTierManager, job_metadata: JobMetadata
+    ) -> None:
+        detector = tier.bp_detector
+        if detector is None:
+            return
+        was_under_pressure = detector.is_under_pressure()
+        num_bytes = len(job_metadata.keys) * tier.block_size_bytes
+        detector.update(job_metadata.submit_time, num_bytes)
+        if detector.is_under_pressure() != was_under_pressure:
+            tier_idx = self._tier_index[tier]
+            logger.info(
+                "Tier #%d (%s) back-pressure %s (stats=%s)",
+                tier_idx,
+                tier.tier_type,
+                "activated" if detector.is_under_pressure() else "cleared",
+                detector.stats,
+            )
 
     @override
     def lookup(
@@ -610,6 +653,8 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier in request_level_tiers:
+            if not self._should_store_to_tier(tier, len(ready_keys)):
+                continue
             job_metadata = self.create_store_job(ready_keys, req_context)
             tier.submit_store(job_metadata)
 
@@ -648,6 +693,8 @@ class TieringOffloadingManager(OffloadingManager):
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
             for tier in self.secondary_tiers:
+                if not self._should_store_to_tier(tier, len(keys)):
+                    continue
                 job_metadata = self.create_store_job(keys, req_context)
                 tier.submit_store(job_metadata)
 
@@ -848,6 +895,11 @@ class TieringOffloadingManager(OffloadingManager):
             del self._req_state[req_id]
         self._processed_jobs_this_step = False
 
+        for tier in self.secondary_tiers:
+            if tier.bp_detector is not None:
+                tier.bp_detector.reset()
+        self._bp_policy.reset()
+
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self.primary_tier.get_stats()
@@ -863,6 +915,32 @@ class TieringOffloadingManager(OffloadingManager):
                 stats = tier_stats
             else:
                 stats.aggregate(tier_stats)
+
+        for tier in self.secondary_tiers:
+            detector = tier.bp_detector
+            if detector is None:
+                continue
+            label = (f"{self._tier_index[tier] + 1}:{tier.tier_type}",)
+            ema = detector.stats.get("store_latency_ema")
+            if ema is not None:
+                self._stats.set_gauge(
+                    TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA,
+                    ema,
+                    labelvalues=label,
+                )
+            stores_dropped, blocks_dropped = self._bp_policy.pop_stores_dropped(tier)
+            if stores_dropped > 0:
+                self._stats.increase_counter(
+                    TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED,
+                    stores_dropped,
+                    labelvalues=label,
+                )
+            if blocks_dropped > 0:
+                self._stats.increase_counter(
+                    TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED,
+                    blocks_dropped,
+                    labelvalues=label,
+                )
 
         if not self._stats.is_empty():
             if stats is None:

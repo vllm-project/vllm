@@ -4,9 +4,10 @@
 Abstract interfaces and data types for the secondary tiering layer.
 """
 
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -21,6 +22,10 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+)
+from vllm.v1.kv_offload.tiering.backpressure import (
+    BackpressureDetector,
+    EMABackpressureDetector,
 )
 
 if TYPE_CHECKING:
@@ -39,6 +44,11 @@ class TieringOffloadingMetrics:
 
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
+    BACKPRESSURE_STORE_LATENCY_EMA = (
+        "vllm:kv_offload_tiering_backpressure_store_latency_ema"
+    )
+    BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
+    BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
 
 
 @dataclass
@@ -50,6 +60,7 @@ class JobMetadata:
     block_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
+    submit_time: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -123,6 +134,8 @@ class SecondaryTierManager(ABC):
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
+        backpressure: dict[str, Any] | None = None,
+        backpressure_cls: Callable[..., BackpressureDetector] = EMABackpressureDetector,
     ) -> None:
         """
         Args:
@@ -130,11 +143,29 @@ class SecondaryTierManager(ABC):
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory
                 from the registered tier type.
+            backpressure: Optional backpressure detector configuration.
+            backpressure_cls: Factory or class used to create the detector
+                from ``backpressure`` kwargs.  Defaults to
+                ``EMABackpressureDetector``.
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
+        shape = primary_kv_view.shape
+        self._block_size_bytes: int = shape[1] if shape and len(shape) > 1 else 1
         self.tier_type = tier_type
         self.locality: Locality | None = None
+        self.backpressure_config: dict[str, Any] | None = backpressure
+        self._bp_detector: BackpressureDetector | None = None
+        if backpressure is not None:
+            self._bp_detector = backpressure_cls(**backpressure)
+
+    @property
+    def block_size_bytes(self) -> int:
+        return self._block_size_bytes
+
+    @property
+    def bp_detector(self) -> BackpressureDetector | None:
+        return self._bp_detector
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
