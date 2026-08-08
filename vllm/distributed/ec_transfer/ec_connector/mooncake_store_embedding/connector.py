@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -69,6 +69,8 @@ class MooncakeStoreECConnector(ECConnectorBase):
             extra_config.get("soft_pin_video_embedding", False)
         )
         self.lookup_async = bool(extra_config.get("lookup_async", True))
+        self._model_config = vllm_config.model_config
+        self._metadata_fields_cache: dict[str, set[str]] = {}
 
         if role == ECConnectorRole.SCHEDULER:
             if self.is_consumer:
@@ -259,6 +261,50 @@ class MooncakeStoreECConnector(ECConnectorBase):
             self.load_specs.pop(identifier, None)
             if self.lookup_client is not None:
                 self.lookup_client.discard(identifier)
+
+    def _placeholder_metadata_fields(self, modality: str) -> set[str]:
+        if modality in self._metadata_fields_cache:
+            return self._metadata_fields_cache[modality]
+
+        fields: set[str] = set()
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
+            fields = info.data_parser.placeholder_metadata_fields(modality)
+        except Exception:
+            logger.warning(
+                "Could not determine the placeholder metadata fields for "
+                "modality %s; the consumer will preprocess the media itself.",
+                modality,
+                exc_info=True,
+            )
+
+        self._metadata_fields_cache[modality] = fields
+        return fields
+
+    def request_finished(
+        self,
+        request: Request,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        if not self.is_producer:
+            return False, None
+
+        items = []
+        for feature in request.mm_features:
+            metadata = {}
+            if feature.data is not None:
+                wanted = self._placeholder_metadata_fields(feature.modality)
+                metadata = {
+                    key: value.tolist()
+                    for key, value in feature.data.get_data().items()
+                    if key in wanted and isinstance(value, torch.Tensor)
+                }
+            items.append({"mm_hash": feature.identifier, **metadata})
+
+        if not items:
+            return False, None
+        return False, {"ec_items": items}
 
     def start_load_caches(
         self,

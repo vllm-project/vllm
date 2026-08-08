@@ -54,6 +54,8 @@ def make_connector(*, soft_pin_video_embedding: bool = False):
     connector._is_consumer = False
     connector.lookup_client = None
     connector.lookup_async = True
+    connector._model_config = SimpleNamespace()
+    connector._metadata_fields_cache = {}
     connector.worker = FakeWorker()
     connector._connector_metadata = None
     connector.soft_pin_video_embedding = soft_pin_video_embedding
@@ -66,6 +68,50 @@ def make_connector(*, soft_pin_video_embedding: bool = False):
     connector._load_modalities = {}
     connector._save_modalities = {}
     return connector
+
+
+def test_request_finished_reports_embedding_key_and_placeholder_metadata(monkeypatch):
+    connector = make_connector()
+    monkeypatch.setattr(
+        connector,
+        "_placeholder_metadata_fields",
+        lambda modality: {"image_grid_thw"},
+    )
+    feature_data = SimpleNamespace(
+        get_data=lambda: {
+            "image_grid_thw": torch.tensor([[1, 24, 32]]),
+            "pixel_values": torch.zeros((2, 3)),
+        }
+    )
+    request = SimpleNamespace(
+        mm_features=[
+            SimpleNamespace(
+                identifier="image-hash",
+                modality="image",
+                data=feature_data,
+            )
+        ]
+    )
+
+    assert connector.request_finished(request) == (
+        False,
+        {
+            "ec_items": [
+                {
+                    "mm_hash": "image-hash",
+                    "image_grid_thw": [[1, 24, 32]],
+                }
+            ]
+        },
+    )
+
+
+def test_request_finished_is_noop_for_consumer():
+    connector = make_connector()
+    connector._is_producer = False
+    connector._is_consumer = True
+
+    assert connector.request_finished(SimpleNamespace()) == (False, None)
 
 
 class FakeLookupClient:
