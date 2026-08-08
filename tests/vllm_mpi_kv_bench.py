@@ -25,7 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-tokens", type=int, default=1)
     parser.add_argument("--distractors", type=int, default=8)
     parser.add_argument("--kv-cache-mib", type=int, default=32)
+    parser.add_argument("--block-size", type=int, default=128)
     parser.add_argument("--offload-mib", type=int, default=255)
+    parser.add_argument(
+        "--offload-policy", choices=("lazy", "eager"), default="lazy"
+    )
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--require-amx", action="store_true")
     return parser.parse_args()
@@ -96,7 +100,7 @@ def main() -> None:
                 # Offload completed prefix blocks as they approach eviction.
                 # This matches an inference-service workload where prefixes
                 # survive request completion and are reused by later calls.
-                "lazy_offload": True,
+                "lazy_offload": args.offload_policy == "lazy",
                 "kv_offload_backend": "cpu" if args.mode == "dram" else "legomem",
                 "legomem_library_path": "/home/ubuntu/legomem/lib/liblegomem_kv.so",
                 "legomem_host": "127.0.0.1",
@@ -115,6 +119,7 @@ def main() -> None:
         max_num_batched_tokens=args.input_tokens + args.output_tokens,
         max_num_seqs=1,
         kv_cache_memory_bytes=args.kv_cache_mib * MIB,
+        block_size=args.block_size,
         enable_prefix_caching=True,
         kv_transfer_config=connector,
         enforce_eager=True,
@@ -153,7 +158,9 @@ def main() -> None:
         "output_tokens": args.output_tokens,
         "distractors": args.distractors,
         "kv_cache_mib_per_rank": args.kv_cache_mib,
+        "block_size": args.block_size,
         "offload_mib_per_rank": 0 if args.mode == "baseline" else args.offload_mib,
+        "offload_policy": args.offload_policy if args.mode != "baseline" else "none",
         "cold_seconds": cold_seconds,
         "cold_cached_tokens": cold_cached_tokens,
         "eviction_seconds": eviction_seconds,
