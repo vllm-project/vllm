@@ -36,14 +36,27 @@ def is_last_ubatch_empty(
 
 
 def check_ubatch_thresholds(
-    config: ParallelConfig, num_tokens: int, uniform_decode: bool
+    config: ParallelConfig,
+    num_tokens: int,
+    uniform_decode: bool,
+    max_prompt_len: int = 0,
+    num_reqs: int = 0,
 ) -> bool:
     if not config.use_ubatching:
         return False
     if uniform_decode:
         return num_tokens >= config.dbo_decode_token_threshold
-    else:
-        return num_tokens >= config.dbo_prefill_token_threshold
+    # Prefill: skip DBO on single-request batches (mid-request split path
+    # does not benefit) and below the seq-len floor.
+    if num_reqs > 0 and num_reqs < 2:
+        return False
+    if (
+        config.dbo_prefill_min_seq_len > 0
+        and max_prompt_len > 0
+        and max_prompt_len < config.dbo_prefill_min_seq_len
+    ):
+        return False
+    return num_tokens >= config.dbo_prefill_token_threshold
 
 
 # This pads the last ubatch slice out to the total number of tokens
