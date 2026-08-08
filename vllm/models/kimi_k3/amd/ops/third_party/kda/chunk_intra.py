@@ -401,11 +401,26 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     p_Akk00 = tl.make_block_ptr(
         Akk, (T, BT), (HV * BT, 1), (i_tc0, 0), (BC, BC), (1, 0)
     )
+    p_Akk01 = tl.make_block_ptr(
+        Akk, (T, BT), (HV * BT, 1), (i_tc0, BC), (BC, BC), (1, 0)
+    )
+    p_Akk02 = tl.make_block_ptr(
+        Akk, (T, BT), (HV * BT, 1), (i_tc0, 2 * BC), (BC, BC), (1, 0)
+    )
+    p_Akk03 = tl.make_block_ptr(
+        Akk, (T, BT), (HV * BT, 1), (i_tc0, 3 * BC), (BC, BC), (1, 0)
+    )
     p_Akk10 = tl.make_block_ptr(
         Akk, (T, BT), (HV * BT, 1), (i_tc1, 0), (BC, BC), (1, 0)
     )
     p_Akk11 = tl.make_block_ptr(
         Akk, (T, BT), (HV * BT, 1), (i_tc1, BC), (BC, BC), (1, 0)
+    )
+    p_Akk12 = tl.make_block_ptr(
+        Akk, (T, BT), (HV * BT, 1), (i_tc1, 2 * BC), (BC, BC), (1, 0)
+    )
+    p_Akk13 = tl.make_block_ptr(
+        Akk, (T, BT), (HV * BT, 1), (i_tc1, 3 * BC), (BC, BC), (1, 0)
     )
     p_Akk20 = tl.make_block_ptr(
         Akk, (T, BT), (HV * BT, 1), (i_tc2, 0), (BC, BC), (1, 0)
@@ -415,6 +430,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     )
     p_Akk22 = tl.make_block_ptr(
         Akk, (T, BT), (HV * BT, 1), (i_tc2, 2 * BC), (BC, BC), (1, 0)
+    )
+    p_Akk23 = tl.make_block_ptr(
+        Akk, (T, BT), (HV * BT, 1), (i_tc2, 3 * BC), (BC, BC), (1, 0)
     )
     p_Akk30 = tl.make_block_ptr(
         Akk, (T, BT), (HV * BT, 1), (i_tc3, 0), (BC, BC), (1, 0)
@@ -429,12 +447,19 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         Akk, (T, BT), (HV * BT, 1), (i_tc3, 3 * BC), (BC, BC), (1, 0)
     )
 
+    b_zero = tl.zeros([BC, BC], dtype=tl.float32)
     tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk01, b_zero.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk02, b_zero.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk03, b_zero.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk12, b_zero.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk13, b_zero.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk20, b_Ai20.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk21, b_Ai21.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk22, b_Ai22.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk23, b_zero.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk30, b_Ai30.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk31, b_Ai31.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk32, b_Ai32.to(Akk.dtype.element_ty), boundary_check=(0, 1))
@@ -590,8 +615,9 @@ def chunk_kda_fwd_intra(
     NC = triton.cdiv(BT, BC)
 
     Aqk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    # Akk must be zero-initialized - kernel only writes lower triangular
-    Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    # The fused inter/solve kernel writes both the solved lower triangle and
+    # zeros the upper triangle, so avoid a separate full-buffer memset.
+    Akk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
     # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
     Akkd = torch.empty(B, T, HV, BC, device=k.device, dtype=torch.float32)
 
