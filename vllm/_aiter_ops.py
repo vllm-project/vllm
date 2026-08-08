@@ -1943,11 +1943,6 @@ class rocm_aiter_ops:
 
     @staticmethod
     def register_ops_once() -> None:
-        if not (
-            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
-        ):
-            return
-
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
             # register all the custom ops here
