@@ -26,7 +26,6 @@ If you only need to use the distributed environment without model/pipeline
 import contextlib
 import gc
 import pickle
-import socket
 import weakref
 from collections import namedtuple
 from collections.abc import Callable
@@ -1634,31 +1633,38 @@ def init_distributed_environment(
                 parallel_config._coord_store_port
                 and not torch.distributed.is_initialized()
             ):
-                # Group rank 0 picks the port at bind time, holds the
-                # listening socket, and publishes the port via the
+                # Group rank 0 lets the world-group TCPStore bind port 0
+                # and publishes the kernel-assigned port via the
                 # coordination store. Pre-allocated ports can be taken by
                 # other processes before the group is initialized.
                 coord_store = get_cached_tcp_store_client(
                     ip, parallel_config._coord_store_port
                 )
-                listen_socket = None
                 if rank == 0:
-                    listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    listen_socket.bind((ip, 0))
-                    listen_socket.listen()
-                    port = listen_socket.getsockname()[1]
+                    # wait_for_workers=False: workers can only connect
+                    # once the port is published below; PG init
+                    # synchronizes through store keys as usual.
+                    world_pg_store = create_tcp_store(
+                        ip,
+                        0,
+                        world_size=world_size,
+                        is_master=True,
+                        wait_for_workers=False,
+                        timeout=timeout or default_pg_timeout,
+                        multi_tenant=True,
+                    )
+                    port = world_pg_store.port
                     coord_store.set("world_pg_port", str(port).encode())
                 else:
                     port = int(coord_store.get("world_pg_port").decode())
-                world_pg_store = create_tcp_store(
-                    ip,
-                    port,
-                    listen_socket=listen_socket,
-                    world_size=world_size,
-                    is_master=rank == 0,
-                    timeout=timeout or default_pg_timeout,
-                    multi_tenant=True,
-                )
+                    world_pg_store = create_tcp_store(
+                        ip,
+                        port,
+                        world_size=world_size,
+                        is_master=False,
+                        timeout=timeout or default_pg_timeout,
+                        multi_tenant=True,
+                    )
             else:
                 port = parallel_config.get_next_dp_init_port()
             distributed_init_method = get_distributed_init_method(ip, port)
