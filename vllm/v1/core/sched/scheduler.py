@@ -1864,11 +1864,7 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
-                if self.spec_decode_stats_level != "none":
-                    if request.spec_decode_stats is None:
-                        request.spec_decode_stats = RequestSpecDecodeStats.new(
-                            self.num_spec_tokens
-                        )
+                if request.spec_decode_stats is not None:
                     # Exclude grammar-invalidated drafts from the proposed
                     # count, mirroring make_spec_decoding_stats; the accepted
                     # bucket (j) is unaffected.
@@ -2351,6 +2347,10 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if self.spec_decode_stats_level != "none":
+                request.spec_decode_stats = RequestSpecDecodeStats.new(
+                    self.num_spec_tokens
+                )
             if self.connector is not None:
                 self.connector.on_new_request(request)
             if self.log_stats:

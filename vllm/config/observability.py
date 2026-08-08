@@ -53,7 +53,8 @@ class ObservabilityConfig:
     per-step accepted/proposed arrays (one entry per verify step). No effect
     unless speculative decoding is enabled. Independent of `--disable-log-stats`.
     This is the per-request response-body counterpart of the aggregate
-    `vllm:spec_decode_*` Prometheus metrics."""
+    `vllm:spec_decode_*` Prometheus metrics. The response field is experimental
+    and its shape may change in a future release."""
 
     kv_cache_metrics: bool = False
     """Enable KV cache residency metrics (lifetime, idle time, reuse gaps).

@@ -6,6 +6,11 @@ mean acceptance length and the accepted-draft-length distribution for an
 individual request, as a complement to the server-aggregated spec-decode
 metrics exposed at `/metrics`.
 
+!!! warning "Experimental"
+    The `speculative_decoding_stats` response field is experimental and its
+    shape (naming and nesting) may change in a future release. Pin to a vLLM
+    version if you depend on it.
+
 ## Enabling
 
 Start the server with `--per-request-spec-decode-stats` set to `summary` or
@@ -70,8 +75,9 @@ With `detailed`, two ordered arrays are added, one entry per verification step:
 | `per_step_accepted` | Accepted draft count at each step. |
 | `per_step_drafted` | Proposed draft count at each step. This records the effective proposal length per step, so variable-length drafting (e.g. adaptive speculation) is represented without a schema change. |
 
-All choices carry `speculative_decoding_stats: null` when the request did not go
-through speculative decoding, or when the flag is `none`.
+When the flag is `summary` or `detailed`, every generation choice carries a
+`speculative_decoding_stats` object — with an empty histogram and zero counts if
+the request happened to draft nothing. It is `null` only when the flag is `none`.
 
 ## Streaming
 
