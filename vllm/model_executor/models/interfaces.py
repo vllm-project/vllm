@@ -42,6 +42,7 @@ if TYPE_CHECKING:
         VllmConfig,
     )
     from vllm.config.multimodal import VideoPruningMethod
+    from vllm.distributed.eplb.weight_utils import EplbLayerWeights
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
@@ -916,7 +917,7 @@ class MixtureOfExperts(Protocol):
     Check if the model is a mixture of experts (MoE) model.
     """
 
-    expert_weights: MutableSequence[Sequence[Tensor]]
+    expert_weights: MutableSequence["EplbLayerWeights"]
     """
     Expert weights saved in this rank.
 

@@ -8,6 +8,7 @@ import torch
 import torch.distributed
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.cuda_platform_backend import CudaEplbDeviceRuntime
 from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
     has_nixl,
@@ -371,8 +372,9 @@ def _test_async_transfer_layer_without_mtp_worker(
                 expert_weights_buffer=expert_buffer,
                 ep_group=ep_group,
                 communicator=communicator,
-                cuda_stream=cuda_stream,
+                transfer_stream=cuda_stream,
                 layer_idx=layer_idx,
+                device_runtime=CudaEplbDeviceRuntime(),
             )
             cuda_stream.synchronize()
             move_from_buffer(

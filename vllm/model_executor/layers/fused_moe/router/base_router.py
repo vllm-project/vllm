@@ -2,158 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Callable
+from typing import cast
 
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.eplb.platform_backend import (
+    EplbMapAndRecord,
+    EplbMapToPhysical,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
-
-if current_platform.is_cuda_alike():
-
-    @triton.jit
-    def _eplb_map_and_record_i32_kernel(
-        topk_ids_ptr,
-        logical_replica_count_ptr,
-        logical_to_physical_ptr,
-        out_ids_ptr,
-        out_ptr,
-        record_enabled_ptr,
-        num_unpadded_tokens_ptr,
-        num_logical_experts,
-        map_slots,
-        out_size,
-        numel,
-        num_active_experts,
-        HAS_NUM_UNPADDED: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < numel
-
-        expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
-        valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
-        safe_expert_id = tl.where(valid_expert, expert_id, 0)
-
-        # 1. Convert the logical expert ids to physical expert ids
-        replica_count = tl.load(
-            logical_replica_count_ptr + safe_expert_id,
-            mask=mask & valid_expert,
-            other=1,
-        )
-        # Avoid invalid modulo/div by forcing at least 1.
-        replica_count = tl.maximum(replica_count, 1)
-        # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
-        KNUTH_MULTIPLIER = 2654435769
-        token_idx = (offs // num_active_experts).to(tl.int64)
-        hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
-        replica_idx = hashed % replica_count
-        map_index = safe_expert_id * map_slots + replica_idx
-        physical_id = tl.load(
-            logical_to_physical_ptr + map_index,
-            mask=mask & valid_expert,
-            other=-1,
-        )
-        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
-
-        # 2. Record expert load metrics.
-
-        # TODO(bowen): When using `FusedMoEModularKernel`, this
-        # can be done in a more unified way, since
-        # `FusedMoEPrepareAndFinalize` will return the expert
-        # token count, in some cases directly from the kernel.
-        # However, now there are many code paths not using
-        # the modular kernel, e.g. calling `fused_experts`,
-        # so we decide to keep the logic here.
-        #
-        # If later refactor moved all the MoE kernel calls
-        # to the modular kernel, we can move this logic there
-        # to achieve better efficiency.
-
-        record_enabled = tl.load(record_enabled_ptr) != 0
-        # Skip padded tokens when recording.
-        if HAS_NUM_UNPADDED:
-            num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
-            is_unpadded = offs < num_unpadded_tokens * num_active_experts
-        else:
-            is_unpadded = True
-        valid = (
-            mask
-            & record_enabled
-            & is_unpadded
-            & (physical_id >= 0)
-            & (physical_id < out_size)
-        )
-        safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
-        tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
-
-    def _eplb_map_and_record_triton(
-        topk_ids: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-        expert_load_view: torch.Tensor,
-        record_enabled: torch.Tensor,
-        num_unpadded_tokens: torch.Tensor | None,
-    ) -> torch.Tensor:
-        topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
-        numel = topk_ids_in.numel()
-        if numel == 0:
-            return topk_ids
-        num_active_experts = topk_ids_in.shape[-1]
-        out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
-        grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
-        assert expert_load_view.is_contiguous()
-        _eplb_map_and_record_i32_kernel[grid](
-            topk_ids_in,
-            logical_replica_count.contiguous(),
-            logical_to_physical_map.contiguous(),
-            out_flat,
-            expert_load_view,
-            record_enabled,
-            num_unpadded_tokens,
-            logical_replica_count.shape[0],
-            logical_to_physical_map.shape[1],
-            expert_load_view.shape[0],
-            numel,
-            num_active_experts,
-            HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
-            BLOCK_SIZE=256,
-        )
-        return out_flat.reshape(topk_ids.shape)
-
-    def eplb_map_to_physical_and_record(
-        topk_ids: torch.Tensor,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-        record_enabled: torch.Tensor,
-        num_unpadded_tokens: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # Fused triton implementation: mapping + optional recording in one kernel.
-        return _eplb_map_and_record_triton(
-            topk_ids=topk_ids,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-            expert_load_view=expert_load_view,
-            record_enabled=record_enabled,
-            num_unpadded_tokens=num_unpadded_tokens,
-        )
-else:
-
-    def eplb_map_to_physical_and_record(
-        topk_ids: torch.Tensor,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-        record_enabled: torch.Tensor,
-        num_unpadded_tokens: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return topk_ids
 
 
 class BaseRouter(FusedMoERouter):
@@ -190,35 +51,50 @@ class BaseRouter(FusedMoERouter):
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
         if self.eplb_state is not None:
             eplb_state = self.eplb_state
-            if eplb_state.expert_load_view is None:
-                raise ValueError("EPLB requires expert_load_view != None")
             if eplb_state.logical_to_physical_map is None:
                 raise ValueError("EPLB requires logical_to_physical_map != None")
             if eplb_state.logical_replica_count is None:
                 raise ValueError("EPLB requires logical_replica_count != None")
-            if eplb_state.should_record_tensor is None:
-                raise ValueError("EPLB requires should_record_tensor != None")
-            if eplb_state.num_unpadded_tokens_tensors is None:
-                raise ValueError("EPLB requires num_unpadded_tokens_tensors != None")
+            if eplb_state.load_recording_mode not in ("router", "post_moe"):
+                raise ValueError("EPLB requires a valid load_recording_mode")
+            if eplb_state.routing_callable is None:
+                raise ValueError("EPLB requires routing_callable != None")
+            if eplb_state.load_recording_mode == "router":
+                if eplb_state.expert_load_view is None:
+                    raise ValueError("EPLB requires expert_load_view != None")
+                if eplb_state.should_record_tensor is None:
+                    raise ValueError("EPLB requires should_record_tensor != None")
+                if eplb_state.num_unpadded_tokens_tensors is None:
+                    raise ValueError(
+                        "EPLB requires num_unpadded_tokens_tensors != None"
+                    )
 
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
         if self.eplb_state is not None:
             eplb_state = self.eplb_state
-            assert eplb_state.expert_load_view is not None
             assert eplb_state.logical_to_physical_map is not None
             assert eplb_state.logical_replica_count is not None
-            assert eplb_state.should_record_tensor is not None
-            assert eplb_state.num_unpadded_tokens_tensors is not None
-            return eplb_map_to_physical_and_record(
-                topk_ids=topk_ids,
-                logical_to_physical_map=eplb_state.logical_to_physical_map,
-                logical_replica_count=eplb_state.logical_replica_count,
-                expert_load_view=eplb_state.expert_load_view,
-                record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ],
+            assert eplb_state.routing_callable is not None
+            if eplb_state.load_recording_mode == "router":
+                assert eplb_state.expert_load_view is not None
+                assert eplb_state.should_record_tensor is not None
+                assert eplb_state.num_unpadded_tokens_tensors is not None
+                map_and_record = cast(EplbMapAndRecord, eplb_state.routing_callable)
+                return map_and_record(
+                    topk_ids,
+                    eplb_state.logical_to_physical_map,
+                    eplb_state.logical_replica_count,
+                    eplb_state.expert_load_view,
+                    eplb_state.should_record_tensor,
+                    eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()],
+                )
+            assert eplb_state.load_recording_mode == "post_moe"
+            map_to_physical = cast(EplbMapToPhysical, eplb_state.routing_callable)
+            return map_to_physical(
+                topk_ids,
+                eplb_state.logical_to_physical_map,
+                eplb_state.logical_replica_count,
             )
         return topk_ids
 

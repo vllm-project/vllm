@@ -6,11 +6,15 @@ import time
 
 import torch
 
-from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.eplb_utils import CrossThreadDeviceEvent
+
+
+def create_event() -> CrossThreadDeviceEvent:
+    return CrossThreadDeviceEvent(lambda: torch.cuda.Event())
 
 
 def test_wait_blocks_until_record():
-    event = CpuGpuEvent()
+    event = create_event()
     record_stream = torch.cuda.Stream()
     wait_stream = torch.cuda.Stream()
     wait_returned = threading.Event()
@@ -32,7 +36,7 @@ def test_wait_blocks_until_record():
 
 
 def test_reuse_across_multiple_cycles():
-    wrapper = CpuGpuEvent()
+    wrapper = create_event()
     record_stream = torch.cuda.Stream()
     wait_stream = torch.cuda.Stream()
     NUM_CYCLES = 8
@@ -58,8 +62,8 @@ def test_reuse_across_multiple_cycles():
 
 def test_producer_consumer():
     """
-    This test uses the CpuGpuEvent to synchronize reads and writes to/from a shared GPU
-    tensor on multiple CPU threads.
+    This test uses CrossThreadDeviceEvent to synchronize reads and writes to
+    and from a shared GPU tensor on multiple CPU threads.
     """
     worker_stream = torch.cuda.Stream()
     # Create a single element counter that will be shared between two threads
@@ -67,7 +71,7 @@ def test_producer_consumer():
     NUM_ROUNDS = 5
 
     ready_cpu = [threading.Event() for _ in range(NUM_ROUNDS)]
-    events = [CpuGpuEvent() for _ in range(NUM_ROUNDS)]
+    events = [create_event() for _ in range(NUM_ROUNDS)]
     errors: list[str] = []
 
     # For each round, the worker thread (writer) sets the counter in buf and waits for

@@ -17,6 +17,10 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.eplb.platform_backend import (
+    EplbMapAndRecord,
+    EplbMapToPhysical,
+)
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
@@ -29,9 +33,6 @@ from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClam
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.fused_moe.router.base_router import (
-    eplb_map_to_physical_and_record,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -467,23 +468,36 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         # EPLB: map logical expert IDs to physical replicas and record load.
         eplb_state = self.eplb_state
         if eplb_state.logical_to_physical_map is not None:
-            assert eplb_state.expert_load_view is not None
             assert eplb_state.logical_replica_count is not None
-            assert eplb_state.should_record_tensor is not None
+            assert eplb_state.routing_callable is not None
             if is_padding is not None:
                 topk_ids = torch.where(is_padding.unsqueeze(1), -1, topk_ids)
-            topk_ids = eplb_map_to_physical_and_record(
-                topk_ids=topk_ids,
-                expert_load_view=eplb_state.expert_load_view,
-                logical_to_physical_map=eplb_state.logical_to_physical_map,
-                logical_replica_count=eplb_state.logical_replica_count,
-                record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ]
-                if eplb_state.num_unpadded_tokens_tensors is not None
-                else None,
-            )
+            if eplb_state.load_recording_mode == "router":
+                assert eplb_state.expert_load_view is not None
+                assert eplb_state.should_record_tensor is not None
+                map_and_record = typing.cast(
+                    EplbMapAndRecord, eplb_state.routing_callable
+                )
+                topk_ids = map_and_record(
+                    topk_ids,
+                    eplb_state.logical_to_physical_map,
+                    eplb_state.logical_replica_count,
+                    eplb_state.expert_load_view,
+                    eplb_state.should_record_tensor,
+                    eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+                    if eplb_state.num_unpadded_tokens_tensors is not None
+                    else None,
+                )
+            else:
+                assert eplb_state.load_recording_mode == "post_moe"
+                map_to_physical = typing.cast(
+                    EplbMapToPhysical, eplb_state.routing_callable
+                )
+                topk_ids = map_to_physical(
+                    topk_ids,
+                    eplb_state.logical_to_physical_map,
+                    eplb_state.logical_replica_count,
+                )
 
         prepare_megamoe_inputs(
             hidden_states,
