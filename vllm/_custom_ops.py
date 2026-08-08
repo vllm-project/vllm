@@ -2412,6 +2412,18 @@ def topk_sigmoid(
     routed_scaling_factor: float = 1.0,
     is_padding: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        # TODO: Remove after vllm-xpu-kernels supports is_padding.
+        torch.ops._moe_C.topk_sigmoid(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            routed_scaling_factor,
+        )
+        return
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
         topk_ids,
