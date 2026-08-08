@@ -134,7 +134,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             mm_kwargs=mm_kwargs,
         )
 
-        return num_patches
+        return max(num_patches, 1)
 
     def _get_image_token(self, processor: Idefics3Processor) -> tuple[str, str, str]:
         image_token = processor.image_token
