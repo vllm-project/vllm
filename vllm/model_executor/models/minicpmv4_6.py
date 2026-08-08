@@ -649,14 +649,6 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_stacked={
-            ".q_proj": (".qkv_proj", "q"),
-            ".k_proj": (".qkv_proj", "k"),
-            ".v_proj": (".qkv_proj", "v"),
-        }
-    )
-
     def __init__(
         self,
         config,
@@ -703,10 +695,6 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
         attn_out = self.attn(q, k, v)
         out, _ = self.out_proj(attn_out)
         return out
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
@@ -946,6 +934,11 @@ class MiniCPMV4_6ForConditionalGeneration(
     supports_encoder_tp_data = True
 
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
         orig_to_new_prefix={
             # transformers v5.7+ uses `vision_tower` and nests `vit_merger`
             # inside it. Order matters: more specific prefix must come first.
@@ -956,7 +949,7 @@ class MiniCPMV4_6ForConditionalGeneration(
             "model.merger.": "merger.",
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
-        }
+        },
     )
 
     packed_modules_mapping = {
