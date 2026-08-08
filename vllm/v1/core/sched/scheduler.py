@@ -1171,21 +1171,10 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        # Producer partial-tail hand-off for external KV connectors. Drained
-        # before the CoW retentions are released below, so the pin lands while
-        # the cow block still holds a retention ref. Without a producer-side
-        # connector nothing consumes the hand-off, so skip the drain (and its
-        # pin); the manager drops stale entries when the request's blocks are
-        # popped for free.
-        pending_partial_tail_offloads = None
-        if (
-            self.connector is not None
-            and self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_producer
-        ):
-            pending_partial_tail_offloads = (
-                self.kv_cache_manager.take_partial_tail_offloads() or None
-            )
+        # Mamba "align" boundary states must be handed off with exact block ids;
+        # they cannot be reconstructed from a connector's append-only block
+        # table. Drained every step so stale offers cannot accumulate.
+        boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
 
         kv_cache_block_copies, cow_retained_blocks = (
             self.kv_cache_manager.take_kv_cache_block_copies()
@@ -1232,7 +1221,9 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
-            partial_tail_offloads=pending_partial_tail_offloads,
+            boundary_state_offloads=(
+                boundary_state_offloads if self.connector is not None else None
+            ),
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
@@ -1251,6 +1242,9 @@ class Scheduler(SchedulerInterface):
                 scheduler_output
             )
             scheduler_output.ec_connector_metadata = ec_meta
+
+        # Boundary-state offers are scheduler-local.
+        scheduler_output.boundary_state_offloads = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).

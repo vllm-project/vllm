@@ -34,7 +34,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -103,7 +104,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         lambda keys, req_context: generate_store_output(keys)
     )
 
-    output = SimpleNamespace(partial_tail_offloads={"req": [(1, 99, 28)]})
+    output = SimpleNamespace(boundary_state_offloads={"req": [(1, 99, 28)]})
     jobs = scheduler._build_partial_tail_store_jobs(output)
 
     assert len(jobs) == 1
@@ -117,6 +118,77 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         12: {job_id},
         99: {job_id},
     }
+
+
+def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11, 12]
+    req_status.group_states[1].block_ids[:] = [0, 21]
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]}
+    )
+    jobs = scheduler._build_partial_tail_store_jobs(output)
+
+    assert len(jobs) == 2
+    src_spec = next(
+        job.src_spec for job in jobs.values() if len(job.src_spec.block_ids) == 1
+    )
+    assert isinstance(src_spec, GPULoadStoreSpec)
+    assert src_spec.block_ids.tolist() == [98]
+    assert src_spec.group_sizes == [0, 1]
+    assert src_spec.block_indices == [0, 0]
+
+
+def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
+    scheduler = _make_partial_tail_scheduler()
+    _make_partial_tail_request(scheduler)
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    output = SchedulerOutput.make_empty()
+    output.boundary_state_offloads = {"req": [(1, 99, 16)]}
+    meta = scheduler.build_connector_meta(output)
+    [job_id] = meta.store_jobs
+
+    output = SchedulerOutput.make_empty()
+    output.kv_cache_block_copies = [KVCacheBlockCopy(98, 99)]
+    meta = scheduler.build_connector_meta(output)
+
+    assert meta.jobs_to_flush == {job_id}
+
+
+def test_normal_store_excludes_align_mode_mamba_sources():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.num_computed_tokens = 0
+    request.status = RequestStatus.RUNNING
+    req_status = scheduler._req_status["req"]
+    req_status.group_states[0].block_ids[:] = [11]
+    req_status.group_states[1].block_ids[:] = [99]
+    req_status.update_offload_keys()
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    output = SimpleNamespace(
+        num_scheduled_tokens={"req": 16},
+        finished_req_ids=set(),
+    )
+    jobs = scheduler._build_store_jobs(output)
+
+    assert len(jobs) == 1
+    [job] = jobs.values()
+    src_spec = job.src_spec
+    assert isinstance(src_spec, GPULoadStoreSpec)
+    assert src_spec.block_ids.tolist() == [11]
+    assert src_spec.group_sizes == [1, 0]
 
 
 def test_partial_lookup_returns_exact_boundary_and_group_load_keys():

@@ -14,6 +14,7 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -366,11 +367,14 @@ class ReqMeta:
 
     token_ids: list[int] | None = None
     num_prompt_tokens: int | None = None
-    # Core-provided per-mamba-group
-    # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
-    # Present only on the producer's CoW step; drives the connector's offload
-    # (the FA group's block is derived from block_ids and boundary_tokens).
-    partial_tail_offloads: list[tuple[int, int, int]] | None = None
+    # Connector-pinned (handoff_id, group_id, block_id, boundary_tokens) mamba
+    # "align" boundary states for this request. An entry
+    # whose boundary is block-aligned for its group is a committed boundary-state
+    # snapshot; a non-aligned one is the sub-block CoW partial tail (whose other
+    # groups' blocks are derived from block_ids and boundary_tokens). Either way
+    # the mamba block must be read via the provided block_id, never resolved
+    # positionally. The pin is held until the worker acknowledges handoff_id.
+    boundary_state_offloads: list[tuple[int, int, int, int]] | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -448,3 +452,26 @@ class MooncakeStoreConnectorMetadata(KVConnectorMetadata):
 
     def add_request(self, req_meta: ReqMeta) -> None:
         self.requests.append(req_meta)
+
+
+@dataclass
+class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
+    """Metadata passed back from worker to scheduler.
+
+    ``boundary_handoff_watermark`` is the highest connector hand-off id for which
+    this rank has finished *every* hand-off it received up to and including
+    that id — its single send thread makes the outcome per-id exact. Ranks
+    receive identical hand-off sets, so aggregating with ``min`` yields the
+    watermark that holds on every rank; the scheduler releases the connector's
+    BlockPool refs up to it.
+    """
+
+    boundary_handoff_watermark: int
+
+    def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
+        assert isinstance(other, MooncakeStoreWorkerMetadata)
+        return MooncakeStoreWorkerMetadata(
+            boundary_handoff_watermark=min(
+                self.boundary_handoff_watermark, other.boundary_handoff_watermark
+            )
+        )

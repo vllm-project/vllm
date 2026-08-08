@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
 from types import SimpleNamespace
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
@@ -13,8 +14,24 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 )
 
 
+class _FakeBlockPool:
+    def __init__(self, num_blocks: int = 32):
+        self.blocks = [SimpleNamespace(block_id=i) for i in range(num_blocks)]
+        self.touched: list[SimpleNamespace] = []
+        self.freed: list[SimpleNamespace] = []
+
+    def touch(self, blocks):
+        self.touched.extend(blocks)
+
+    def free_blocks(self, blocks):
+        self.freed.extend(blocks)
+
+
 def _make_bare_scheduler(
-    *, hash_block_size: int = 16, enable_partial_hash_hits: bool = False
+    *,
+    hash_block_size: int = 16,
+    enable_partial_hash_hits: bool = False,
+    max_inflight_handoffs: int = 8,
 ) -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = "kv_both"
@@ -27,6 +44,10 @@ def _make_bare_scheduler(
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
+    scheduler._gpu_block_pool = _FakeBlockPool()
+    scheduler._boundary_handoff_ids = itertools.count(1)
+    scheduler._inflight_handoffs = {}
+    scheduler._max_inflight_handoffs = max_inflight_handoffs
     return scheduler
 
 
@@ -661,9 +682,9 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
     assert scheduler.load_specs == {}
 
 
-def test_pending_partial_tail_emits_offload_only_reqmeta():
-    # A sub-block prompt never produces a block-aligned save, so the partial-
-    # tail offload arriving this step is emitted as an offload-only ReqMeta
+def test_pending_boundary_state_emits_offload_only_reqmeta():
+    # A sub-block prompt never produces a block-aligned save, so the boundary-
+    # state offload arriving this step is emitted as an offload-only ReqMeta
     # (can_save=True so it takes the normal enqueue path, token_len_chunk=0 so
     # the worker skips the normal save). Pending-offload state delays the free
     # without advancing the normal-save watermark before the put succeeds.
@@ -696,7 +717,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
-        partial_tail_offloads={"req-0": [(1, 7, 12)]},
+        boundary_state_offloads={"req-0": [(1, 7, 12)]},
     )
 
     meta = scheduler.build_connector_meta(out)
@@ -706,14 +727,186 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.req_id == "req-0"
     assert req_meta.can_save is True
     assert req_meta.token_len_chunk == 0
-    assert req_meta.partial_tail_offloads == [(1, 7, 12)]
+    assert req_meta.boundary_state_offloads == [(1, 1, 7, 12)]
     assert req_meta.num_prompt_tokens == 12
     assert req_meta.block_ids == ([0],)
+    assert [block.block_id for block in scheduler._gpu_block_pool.touched] == [7]
+    assert set(scheduler._inflight_handoffs) == {1}
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
     assert tracker.has_pending_offload is True
     request = SimpleNamespace(request_id="req-0")
     assert scheduler.request_finished(request, ([0],)) == (True, None)
+
+
+def test_decode_boundary_state_offload_dropped_unclaimed():
+    # A hand-off past the prefill end can never complete a joint hybrid hit
+    # (every other group stops saving there), so it is neither transferred nor
+    # claimed — leaving the core free to release the block immediately.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    request = SimpleNamespace(
+        all_token_ids=list(range(24)),
+        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"],
+        num_output_placeholders=0,
+        num_prompt_tokens=12,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=12,
+        allocated_block_ids=([0],),
+        num_saved_tokens=12,
+        token_ids=list(range(12)),
+        prefill_end_tokens=12,
+    )
+
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        # Boundary 16 is a decode boundary for a 12-token prefill.
+        boundary_state_offloads={"req-0": [(1, 7, 16)]},
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert meta.requests == []
+    assert scheduler._gpu_block_pool.touched == []
+    assert scheduler._request_trackers["req-0"].has_pending_offload is False
+
+
+def _register_offload_request(scheduler, *, prefill_end_tokens, num_prompt_tokens):
+    request = SimpleNamespace(
+        all_token_ids=list(range(64)),
+        block_hashes=[bytes([i]) for i in range(16)],
+        num_output_placeholders=0,
+        num_prompt_tokens=num_prompt_tokens,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=prefill_end_tokens,
+        allocated_block_ids=([0],),
+        num_saved_tokens=prefill_end_tokens,
+        token_ids=list(range(prefill_end_tokens)),
+        prefill_end_tokens=prefill_end_tokens,
+    )
+
+
+def _make_offload_only_output(entries):
+    return SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        boundary_state_offloads={"req-0": entries},
+    )
+
+
+def test_resumed_prefill_claims_boundaries_past_prompt_length():
+    # A resumed request re-prefills its previously generated tokens, so its
+    # save window (`prefill_end_tokens`) extends past `num_prompt_tokens`.
+    # Boundaries in that range must still be claimed, or the mamba key would be
+    # missing for boundaries full attention does store and no joint hit could
+    # complete there.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=20, num_prompt_tokens=12)
+    out = _make_offload_only_output([(1, 7, 16), (1, 9, 20), (1, 11, 24)])
+
+    meta = scheduler.build_connector_meta(out)
+
+    # 16 and 20 are inside the resumed prefill; 24 is past it.
+    assert meta.requests[0].boundary_state_offloads == [(1, 1, 7, 16), (2, 1, 9, 20)]
+    assert [block.block_id for block in scheduler._gpu_block_pool.touched] == [7, 9]
+    assert set(scheduler._inflight_handoffs) == {1, 2}
+
+
+def test_boundary_state_claims_stop_at_inflight_limit():
+    # Each claim pins a mamba state block, so past the cap the remaining
+    # hand-offs are simply not claimed: a lost cache-save opportunity, never an
+    # early release of a block whose transfer is still queued.
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4, enable_partial_hash_hits=True, max_inflight_handoffs=2
+    )
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    out = _make_offload_only_output([(1, 7, 16), (1, 8, 32), (1, 9, 48)])
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert meta.requests[0].boundary_state_offloads == [(1, 1, 7, 16), (2, 1, 8, 32)]
+    assert [block.block_id for block in scheduler._gpu_block_pool.touched] == [7, 8]
+    assert set(scheduler._inflight_handoffs) == {1, 2}
+
+    # Still saturated on the next step, so nothing new is claimed...
+    out = _make_offload_only_output([(1, 10, 48)])
+    assert scheduler.build_connector_meta(out).requests == []
+    assert [block.block_id for block in scheduler._gpu_block_pool.touched] == [7, 8]
+
+    # ...until the worker reports both sends done, which releases both pins.
+    scheduler.update_boundary_handoff_watermark(2)
+    assert [block.block_id for block in scheduler._gpu_block_pool.freed] == [7, 8]
+    out = _make_offload_only_output([(1, 10, 48)])
+    meta = scheduler.build_connector_meta(out)
+    assert meta.requests[0].boundary_state_offloads == [(3, 1, 10, 48)]
+    assert set(scheduler._inflight_handoffs) == {3}
+
+
+def test_boundary_state_release_is_per_entry():
+    # The watermark releases exactly the entries the worker has finished with;
+    # a later, still-queued hand-off keeps its pin.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16), (1, 8, 32)]))
+
+    scheduler.update_boundary_handoff_watermark(1)
+    assert [block.block_id for block in scheduler._gpu_block_pool.freed] == [7]
+    assert set(scheduler._inflight_handoffs) == {2}
+
+
+def test_preemption_and_request_id_reuse_do_not_release_inflight_pin():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
+
+    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    assert scheduler._gpu_block_pool.freed == []
+    assert set(scheduler._inflight_handoffs) == {1}
+
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    meta = scheduler.build_connector_meta(_make_offload_only_output([(1, 8, 32)]))
+    assert meta.requests[0].boundary_state_offloads == [(2, 1, 8, 32)]
+
+    scheduler.update_boundary_handoff_watermark(1)
+    assert [block.block_id for block in scheduler._gpu_block_pool.freed] == [7]
+    assert set(scheduler._inflight_handoffs) == {2}
+
+
+def test_boundary_state_never_claimed_without_a_send_thread():
+    # kv_consumer has no send thread to acknowledge a hand-off, so claiming one
+    # would pin a state block until the request's blocks are freed.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler.kv_role = "kv_consumer"
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    out = _make_offload_only_output([(1, 7, 16)])
+
+    assert scheduler.build_connector_meta(out).requests == []
+    assert scheduler._gpu_block_pool.touched == []
+    assert scheduler._inflight_handoffs == {}
 
 
 def test_resumed_partial_tail_uses_handoff_boundary():
@@ -747,13 +940,13 @@ def test_resumed_partial_tail_uses_handoff_boundary():
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
-        partial_tail_offloads={"req-0": [(1, 7, 12)]},
+        boundary_state_offloads={"req-0": [(1, 7, 12)]},
     )
 
     meta = scheduler.build_connector_meta(out)
 
     assert len(meta.requests) == 1
-    assert meta.requests[0].partial_tail_offloads == [(1, 7, 12)]
+    assert meta.requests[0].boundary_state_offloads == [(1, 1, 7, 12)]
     # Ordinary metadata retains the full resumed prefill range.
     assert meta.requests[0].num_prompt_tokens == 20
     tracker = scheduler._request_trackers["req-0"]
@@ -779,13 +972,13 @@ def test_resumed_partial_tail_attached_to_save_keeps_handoff_boundary():
         prefill_end_tokens=48,
     )
     out = _make_scheduler_output(scheduled_spec_tokens=None)
-    out.partial_tail_offloads = {"req-0": [(0, 7, 36)]}
+    out.boundary_state_offloads = {"req-0": [(0, 7, 36)]}
 
     meta = scheduler.build_connector_meta(out)
 
     assert len(meta.requests) == 1
     assert meta.requests[0].can_save is True
-    assert meta.requests[0].partial_tail_offloads == [(0, 7, 36)]
+    assert meta.requests[0].boundary_state_offloads == [(1, 0, 7, 36)]
     assert meta.requests[0].num_prompt_tokens == 48
     # Ordinary saving still covers the full resumed prefill range.
     tracker = scheduler._request_trackers["req-0"]

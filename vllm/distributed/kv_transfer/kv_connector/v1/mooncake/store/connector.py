@@ -37,13 +37,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .data import MooncakeStoreConnectorMetadata
+from .data import MooncakeStoreConnectorMetadata, MooncakeStoreWorkerMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
@@ -180,6 +181,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ============================================================
 
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
+
     def get_num_new_matched_tokens(
         self,
         request: Request,
@@ -241,6 +246,13 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return None
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
+        worker_meta = connector_output.kv_connector_worker_meta
+        if isinstance(worker_meta, MooncakeStoreWorkerMetadata):
+            assert self.connector_scheduler is not None
+            self.connector_scheduler.update_boundary_handoff_watermark(
+                worker_meta.boundary_handoff_watermark
+            )
+
         kv_cache_events = connector_output.kv_cache_events
         if not kv_cache_events or not isinstance(
             kv_cache_events, MooncakeStoreKVEvents
@@ -313,6 +325,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
+
+    def build_connector_worker_meta(self) -> MooncakeStoreWorkerMetadata | None:
+        assert self.connector_worker is not None
+        return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_kv_cache_events(
         self,
