@@ -1,5 +1,5 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
-ARG TRITON_BRANCH="0263a6a" # release/internal/3.7.x as of 08/02
+ARG TRITON_BRANCH="89002410dee054a1207a3d88cfbe1748dacfd819" # AITER v0.1.19 ROCm 7.2 wheel
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="6bbd260" # release/2.12 as of 08/02
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
@@ -113,7 +113,8 @@ ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
+    && git fetch --depth=1 origin ${TRITON_BRANCH} \
+    && git checkout --detach FETCH_HEAD \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
