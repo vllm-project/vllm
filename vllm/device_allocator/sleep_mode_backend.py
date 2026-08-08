@@ -119,23 +119,27 @@ class CuMemBackend(SleepModeBackend):
 
     def suspend(self, level: int = 1) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
+        from vllm.distributed.parallel_state import suspend_device_comms
 
         self._state = "SUSPENDED"
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        suspend_device_comms()
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
+        from vllm.distributed.parallel_state import resume_device_comms
 
         self._state = "RESUMING"
         allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
+        resume_device_comms()
         self._state = "RUNNING"
 
     @classmethod
     def preserves_communicators(cls) -> bool:
-        # Communicator buffers (e.g. NCCL) live outside CuMemAllocator's pool, so
-        # an allocator-level sleep leaves them intact (no reinit needed on resume).
+        # Communicator identity and topology survive memory suspension, so no
+        # reinitialization is needed on resume.
         return True
 
 

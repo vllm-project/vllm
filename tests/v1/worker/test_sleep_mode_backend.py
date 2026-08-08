@@ -23,9 +23,9 @@ def test_cumem_is_the_default_registered_backend():
 
 
 def test_cumem_capability_flags():
-    # cumem leaves communicators untouched but does not preserve compiled
-    # artifacts, graphs, or durable state - these flags are what the executor and
-    # /health introspect to decide reinit / persistence behavior.
+    # cumem preserves communicator identity but does not preserve compiled
+    # artifacts, graphs, or durable state. These flags are what the executor and
+    # /health introspect to decide reinit and persistence behavior.
     assert CuMemBackend.is_supported() is True
     assert CuMemBackend.preserves_communicators() is True
     assert CuMemBackend.preserves_compiled_artifacts() is False
@@ -36,6 +36,38 @@ def test_cumem_capability_flags():
 def test_new_backend_starts_in_running_state():
     # Constructing a backend must not touch the GPU; only suspend/resume do.
     assert CuMemBackend().state() == "RUNNING"
+
+
+def test_cumem_wraps_allocator_with_communicator_memory_lifecycle(monkeypatch):
+    calls = []
+
+    class Allocator:
+        def sleep(self, *, offload_tags):
+            calls.append(("allocator.sleep", offload_tags))
+
+        def wake_up(self, tags):
+            calls.append(("allocator.wake_up", tags))
+
+    monkeypatch.setattr("vllm.device_allocator.get_mem_allocator_instance", Allocator)
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.suspend_device_comms",
+        lambda: calls.append(("comms.suspend", None)),
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.resume_device_comms",
+        lambda: calls.append(("comms.resume", None)),
+    )
+
+    backend = CuMemBackend()
+    backend.suspend(level=1)
+    backend.resume(tags=["weights"])
+
+    assert calls == [
+        ("allocator.sleep", ("weights",)),
+        ("comms.suspend", None),
+        ("allocator.wake_up", ["weights"]),
+        ("comms.resume", None),
+    ]
 
 
 def test_unknown_backend_raises():
