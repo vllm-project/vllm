@@ -302,7 +302,17 @@ class cmake_build_ext(build_ext):
             cmake_args += [
                 "-DCMAKE_JOB_POOL_COMPILE:STRING=compile",
                 "-DCMAKE_JOB_POOLS:STRING=compile={}".format(num_jobs),
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
             ]
+            try:
+                build_temp = ROOT_DIR / self.build_temp
+                src = build_temp / "compile_commands.json"
+                dst = build_temp.parent / src.name
+                if dst.is_symlink() or dst.exists():
+                    dst.unlink()
+                dst.symlink_to(src.resolve())
+            except Exception as e:
+                logger.warning("Failed to symlink compile_commands.json: %s", e)
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
