@@ -3,6 +3,11 @@
 We provide a [docker/Dockerfile](../../../docker/Dockerfile) to construct the image for running an OpenAI compatible server with vLLM.
 More information about deploying with Docker can be found [here](../../deployment/docker.md).
 
+When `INSTALL_KV_CONNECTORS=true`, the Docker build resolves
+`requirements/kv_connectors.txt` against the image CUDA major version and
+installs `nixl-cu12` or `nixl-cu13` directly instead of relying on the `nixl`
+meta package.
+
 Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
 
 - All build stages
