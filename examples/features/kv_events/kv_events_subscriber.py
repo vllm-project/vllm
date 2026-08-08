@@ -52,6 +52,8 @@ class BlockRemoved(KVCacheEvent):
     medium: str | None
     group_idx: int | None = None
     locality: str | None = None
+    remaining_copy_counts: list[int] | None = None
+    """Copies remaining for each hash after removal; None means unavailable."""
 
 
 class AllBlocksCleared(KVCacheEvent):

@@ -107,10 +107,17 @@ class BlockHashToBlockMap:
         """
         Checks if block_hash exists and pop block_id from the cache
         """
+        block, _ = self.pop_with_remaining_count(key, block_id)
+        return block
+
+    def pop_with_remaining_count(
+        self, key: BlockHashWithGroupId, block_id: int
+    ) -> tuple[KVCacheBlock | None, int]:
+        """Pop a block and return how many physical blocks remain for the key."""
         blocks = self._cache.pop(key, None)
         if blocks is None:
             # block_hash not found in the cache
-            return None
+            return None, 0
         # TODO(Jialin): If key is found, block_id should always present
         # in blocks. We currently keep the original behaviour for safety.
         #
@@ -118,20 +125,21 @@ class BlockHashToBlockMap:
         # use del blocks[block_id] instead as followup.
         if isinstance(blocks, KVCacheBlock):
             if blocks.block_id == block_id:
-                return blocks
+                return blocks, 0
             # If the single block ID doesn't match, we should put the
             # block back (it should happen rarely)
             self._cache[key] = blocks
-            return None
+            return None, 1
         if isinstance(blocks, dict):
             # Try to pop block_id from the block dict, and if dict still
             # contain blocks, put back to the cache.
             block = blocks.pop(block_id, None)
-            if len(blocks) > 0:
+            remaining_count = len(blocks)
+            if remaining_count > 0:
                 self._cache[key] = blocks
-            return block
+            return block, remaining_count
         self._unexpected_blocks_type(blocks)
-        return None
+        return None, 0
 
     def __len__(self) -> int:
         return len(self._cache)
@@ -571,7 +579,7 @@ class BlockPool:
     def _remove_cached_block_hashes(
         self,
         block: KVCacheBlock,
-    ) -> list[BlockHashWithGroupId]:
+    ) -> list[tuple[BlockHashWithGroupId, int]]:
         block_hashes: list[BlockHashWithGroupId] = []
         if block.block_hash is not None:
             block_hashes.append(block.block_hash)
@@ -579,28 +587,31 @@ class BlockPool:
         if not block_hashes:
             return []
 
-        removed_hashes: list[BlockHashWithGroupId] = []
+        removed_hashes: list[tuple[BlockHashWithGroupId, int]] = []
         for block_hash in block_hashes:
-            if (
-                self.cached_block_hash_to_block.pop(block_hash, block.block_id)
-                is not None
-            ):
-                removed_hashes.append(block_hash)
+            removed_block, remaining_count = (
+                self.cached_block_hash_to_block.pop_with_remaining_count(
+                    block_hash, block.block_id
+                )
+            )
+            if removed_block is not None:
+                removed_hashes.append((block_hash, remaining_count))
         block.reset_hash()
         return removed_hashes
 
     def _emit_block_removed_events(
         self,
-        block_hashes: list[BlockHashWithGroupId],
+        block_hashes: list[tuple[BlockHashWithGroupId, int]],
     ) -> None:
         if not self.enable_kv_cache_events:
             return
-        for block_hash in block_hashes:
+        for block_hash, remaining_count in block_hashes:
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
                     medium=MEDIUM_GPU,
                     group_idx=get_group_id(block_hash),
+                    remaining_copy_counts=[remaining_count],
                 )
             )
 
@@ -640,7 +651,7 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
-        for block_hash in self._remove_cached_block_hashes(src_block):
+        for block_hash, _ in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
 
