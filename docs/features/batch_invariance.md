@@ -17,7 +17,29 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance requires NVIDIA GPUs with compute capability 8.0 or higher.
+Batch invariance is supported on the following platforms:
+
+- NVIDIA GPUs with compute capability 8.0 or higher.
+- Intel XPUs with Triton support.
+
+### Attention Backend Selection for XPU
+
+On XPU, Triton Attention backend is required for batch invariance.
+Select this backend using Qwen/Qwen3-1.7B model as an example:
+
+```python
+llm = LLM(
+    model="Qwen/Qwen3-1.7B",
+    attention_config={"backend": "TRITON_ATTN"},
+)
+```
+
+Or via the CLI:
+
+```bash
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-1.7B \
+    --attention-config '{"backend": "TRITON_ATTN"}'
+```
 
 ## Enabling Batch Invariance
 

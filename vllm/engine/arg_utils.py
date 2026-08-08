@@ -2377,6 +2377,19 @@ class EngineArgs:
                 self.attention_backend
             )
 
+        # Batch-invariant mode requires deterministic attention behavior.
+        # If no backend is explicitly requested, prefer Triton Attention.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and attention_config.backend is None
+            and current_platform.is_xpu()
+        ):
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "VLLM_BATCH_INVARIANT is enabled and no attention backend was "
+                "specified; defaulting to TRITON_ATTN."
+            )
+
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
         if resolved_cache_dtype.startswith("turboquant_") and (
