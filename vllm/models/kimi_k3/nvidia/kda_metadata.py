@@ -400,6 +400,21 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
 
                 num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
+            # A row can report 0 accepted tokens when its sampled tokens were
+            # discarded (stale async-scheduling step) while its drafts were
+            # still scheduled. Such a row has no valid spec state to resume
+            # from, and its recurrent state must not advance this step: null
+            # its state slots so the kernels skip both the initial-state read
+            # and the final-state write, and clamp the count so the slot
+            # index (num_accepted_tokens - 1) stays in bounds. This is done
+            # out-of-place because the packed-decode branch above slices
+            # block_table_tensor, which can be a view of the runner's
+            # persistent block table.
+            spec_state_indices_tensor = spec_state_indices_tensor.masked_fill(
+                (num_accepted_tokens == 0).unsqueeze(-1), NULL_BLOCK_ID
+            )
+            num_accepted_tokens = num_accepted_tokens.clamp(min=1)
+
         # Unlike the shared GDN layer, Kimi-K3's prefill KDA wrapper prepares
         # its own chunk indices. Only causal-convolution metadata is needed here.
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
