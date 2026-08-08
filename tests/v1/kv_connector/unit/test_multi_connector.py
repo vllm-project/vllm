@@ -879,6 +879,23 @@ def test_multi_connector_prefer_cross_layer_blocks(mc):
     assert mc.prefer_cross_layer_blocks is True
 
 
+def test_multi_connector_aggregates_config_info(mc):
+    """Nested connectors' startup config info is merged flat (metric_name ->
+    labels), so a wrapped connector still emits it at startup."""
+    mc._connectors[0].get_config_info = lambda: None
+    mc._connectors[1].get_config_info = lambda: None
+    assert mc.get_config_info() is None
+
+    mc._connectors[0].get_config_info = lambda: {"vllm:first_info": {"a": "1"}}
+    assert mc.get_config_info() == {"vllm:first_info": {"a": "1"}}
+
+    mc._connectors[1].get_config_info = lambda: {"vllm:second_info": {"b": "2"}}
+    assert mc.get_config_info() == {
+        "vllm:first_info": {"a": "1"},
+        "vllm:second_info": {"b": "2"},
+    }
+
+
 def test_multi_connector_worker_metadata(mc):
     class MockConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         def __init__(self, data: set[str]):

@@ -588,3 +588,65 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     metrics = spec_cls.build_metric_definitions(extra_config)
 
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
+
+
+def test_cpu_config_info_wiring_matches_declared_labels():
+    """The config info the spec hands the manager must line up exactly with the
+    declared CPU_CONFIG_INFO labels.
+
+    Guards two things record_config_info() relies on but the manager-level test
+    cannot see: the keys equal the label set (a drift would KeyError at emit
+    time) and the values reflect the spec's computed static config.
+    """
+    from vllm.v1.kv_offload.cpu.common import (
+        CPU_CONFIG_INFO_LABELS,
+        CPUOffloadingMetrics,
+    )
+
+    config = _make_offloading_config()
+    spec = OffloadingSpecFactory.create_spec(config)
+    config_info = spec.get_manager().get_config_info()
+
+    assert config_info is not None
+    labels = config_info[CPUOffloadingMetrics.CPU_CONFIG_INFO]
+    assert set(labels) == set(CPU_CONFIG_INFO_LABELS)
+    assert labels == {
+        "num_blocks": str(spec.num_blocks),
+        "blocks_per_chunk": str(spec.blocks_per_chunk),
+        "kv_bytes_per_chunk": str(spec.kv_bytes_per_chunk),
+        "cpu_page_size_per_worker": str(spec.cpu_page_size_per_worker),
+        "eviction_policy": spec.eviction_policy,
+    }
+
+    metrics = type(spec).build_metric_definitions(config.extra_config)
+    assert (
+        tuple(metrics[CPUOffloadingMetrics.CPU_CONFIG_INFO].labelnames)
+        == CPU_CONFIG_INFO_LABELS
+    )
+
+
+def test_cpu_config_info_reflects_world_size_sizing():
+    """The emitted labels carry the world-size-folded sizing (and the mmap
+    padding), not the single-rank numbers -- same geometry as
+    test_cpu_spec_sizes_normalized_worker_layout."""
+    from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
+
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 3,
+        worker_kv_bytes_per_block=16,
+        blocks_per_chunk=2,
+        world_size=6,
+        tp_size=3,
+        pp_size=2,
+    )
+
+    assert spec.get_manager().get_config_info() == {
+        CPUOffloadingMetrics.CPU_CONFIG_INFO: {
+            "num_blocks": "3",
+            "blocks_per_chunk": "2",
+            "kv_bytes_per_chunk": str(alignment),
+            "cpu_page_size_per_worker": "32",
+            "eviction_policy": "lru",
+        }
+    }

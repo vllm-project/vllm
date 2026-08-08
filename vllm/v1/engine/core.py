@@ -1613,6 +1613,7 @@ class EngineCoreProc(EngineCore):
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
+        connector = self.scheduler.get_kv_connector()
         return EngineCoreReadyResponse(
             max_model_len=self.vllm_config.model_config.max_model_len,
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
@@ -1634,6 +1635,9 @@ class EngineCoreProc(EngineCore):
             max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
             instance_id=self.vllm_config.instance_id,
             kv_events_config=self.scheduler.get_kv_event_publisher_config(),
+            kv_connector_config_info=(
+                connector.get_config_info() if connector is not None else None
+            ),
         )
 
     def process_input_sockets(

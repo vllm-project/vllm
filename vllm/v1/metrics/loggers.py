@@ -1280,6 +1280,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
+        # Emit per-connector static config as Info-style metrics at startup,
+        # so they are visible on /metrics before any request (mirrors
+        # cache_config_info). Values arrive via the engine-core handshake.
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_connector_config_info is not None
+        ):
+            for engine_index in self.engine_indexes:
+                self.kv_connector_prom.record_config_info(
+                    kv_transfer_config.kv_connector_config_info, engine_index
+                )
+
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
     """

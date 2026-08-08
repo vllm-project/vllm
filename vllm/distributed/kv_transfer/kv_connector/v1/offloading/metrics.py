@@ -395,6 +395,9 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             metric_cls = self._counter_cls
         elif isinstance(metadata, OffloadingGaugeMetadata):
             metric_cls = self._gauge_cls
+            # Counters and histograms are per-process cumulative and must stay
+            # summed; only gauges collapse (see OffloadingGaugeMetadata).
+            kwargs["multiprocess_mode"] = metadata.multiprocess_mode
         elif isinstance(metadata, OffloadingHistogramMetadata):
             metric_cls = self._histogram_cls
             if metadata.buckets is not None:
@@ -502,3 +505,15 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
                     raise AssertionError(
                         f"Unknown metric type '{type_str}' for key: {key}"
                     )
+
+    def record_config_info(
+        self, config_info: dict[str, dict[str, str]], engine_idx: int = 0
+    ):
+        """Emit each config-info metric once as a gauge pinned to 1, with the
+        static config carried in the labels (cache_config_info-style)."""
+        for metric_name, labels in config_info.items():
+            metadata = self._offloading_metric_metadata.get(metric_name)
+            if metadata is None:
+                continue
+            labelvalues = tuple(labels[name] for name in metadata.labelnames)
+            self._set_gauge(metric_name, 1, labelvalues, engine_idx)

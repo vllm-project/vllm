@@ -71,6 +71,13 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
+    kv_connector_config_info: dict[str, dict[str, str]] | None = field(
+        default=None, init=False
+    )
+    """Runtime-populated (not a CLI arg): static per-connector config, mapping
+    metric_name -> {label: value}, propagated from the engine-core handshake so
+    it can be emitted as Info-style metrics at startup."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

@@ -24,8 +24,13 @@ from vllm.v1.kv_offload.base import (
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
 )
+from vllm.v1.kv_offload.cpu.common import (
+    CPU_CONFIG_INFO_LABELS,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
+CPU_CONFIG_INFO = CPUOffloadingMetrics.CPU_CONFIG_INFO
 LOAD_BYTES = _TransferMetricName.LOAD_BYTES
 LOAD_TIME = _TransferMetricName.LOAD_TIME
 LOAD_SIZE = _TransferMetricName.LOAD_SIZE
@@ -591,6 +596,70 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
     assert histogram.observed == [0.2, 0.4]
     histogram_def = prom_metrics._offloading_metric_defs[LOOKUP_LATENCY]
     assert histogram_def.kwargs["buckets"] == (0.1, 1.0)
+
+
+def test_prom_metrics_gauges_collapse_multiprocess_fanout():
+    """Gauges must not fan out per pid: they are point-in-time values for one
+    engine that every API-server process reports. Counters and histograms are
+    per-process cumulative and stay summed."""
+    metric_definitions = {
+        PENDING_STORES: OffloadingGaugeMetadata(documentation="pending stores"),
+        STORES_SKIPPED: OffloadingCounterMetadata(documentation="stores skipped"),
+        LOOKUP_LATENCY: OffloadingHistogramMetadata(documentation="lookup latency"),
+    }
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_spec_cls_with_metric_definitions(metric_definitions),
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    metric_defs = prom_metrics._offloading_metric_defs
+    assert metric_defs[PENDING_STORES].kwargs["multiprocess_mode"] == "mostrecent"
+    assert "multiprocess_mode" not in metric_defs[STORES_SKIPPED].kwargs
+    assert "multiprocess_mode" not in metric_defs[LOOKUP_LATENCY].kwargs
+
+
+def test_prom_metrics_record_config_info():
+    """Static config is emitted at startup as a gauge pinned to 1, carrying the
+    config in its labels (cache_config_info-style), with no stats/observe."""
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    labels = {
+        "num_blocks": "4",
+        "blocks_per_chunk": "8",
+        "kv_bytes_per_chunk": "1024",
+        "cpu_page_size_per_worker": "512",
+        "eviction_policy": "lru",
+    }
+    # Metrics this prom does not own are skipped, so MultiConnector can fan the
+    # merged config info out to every child prom.
+    prom_metrics.record_config_info(
+        {CPU_CONFIG_INFO: labels, "vllm:someone_elses_config_info": {}}
+    )
+
+    labelvalues = tuple(labels[name] for name in CPU_CONFIG_INFO_LABELS)
+    gauge = prom_metrics.offloading_metrics[(0, CPU_CONFIG_INFO, labelvalues)]
+    assert gauge.set_values == [1]
+    assert gauge.labelvalues == ("model", "0", *labelvalues)
 
 
 def test_prom_metrics_lazily_observes_labeled_metric():
