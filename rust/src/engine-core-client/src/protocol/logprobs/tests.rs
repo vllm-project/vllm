@@ -8,6 +8,7 @@ use rmpv::Value;
 
 use super::{Logprobs, PositionLogprobs, TokenLogprob};
 use crate::protocol::output::{EngineCoreFinishReason, decode_engine_core_outputs};
+use crate::protocol::tensor::WireArrayData;
 
 fn encode_value(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -221,6 +222,19 @@ fn decodes_multipart_new_logprobs() {
 
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
+}
+
+#[test]
+fn resolves_aux_frame_without_copying() {
+    let aux_frame = Bytes::from_static(&[1, 2, 3, 4]);
+    let expected_ptr = aux_frame.as_ptr();
+    let frames = vec![Bytes::new(), aux_frame];
+
+    let resolved =
+        super::array::resolve_array_bytes(WireArrayData::AuxIndex(1), "logprobs", &frames).unwrap();
+
+    assert_eq!(resolved.as_ref(), [1, 2, 3, 4]);
+    assert_eq!(resolved.as_ref().as_ptr(), expected_ptr);
 }
 
 #[test]
