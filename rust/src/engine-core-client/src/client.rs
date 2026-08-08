@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{join_all, try_join_all};
 use itertools::Itertools;
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
@@ -681,6 +683,77 @@ impl EngineCoreClient {
                 other => vec![other],
             })
             .collect())
+    }
+
+    /// Initialize the configured RL weight-transfer backend.
+    pub async fn init_weight_transfer_engine(&self, init_info: JsonValue) -> Result<()> {
+        self.collective_rpc(
+            "init_weight_transfer_engine",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::from([("init_info".to_string(), init_info)]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Start a weight update for the base model.
+    pub async fn start_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "start_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Start a weight update for the speculative draft model.
+    pub async fn start_draft_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "start_draft_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Apply one backend-specific weight metadata chunk.
+    pub async fn update_weights(&self, update_info: JsonValue) -> Result<()> {
+        self.collective_rpc(
+            "update_weights",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::from([("update_info".to_string(), update_info)]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Finish the current weight update.
+    pub async fn finish_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "finish_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Set the committed weight version on every connected engine.
+    pub async fn set_weight_version(&self, weight_version: &str) -> Result<()> {
+        self.call_utility::<(), _>("set_weight_version", (weight_version,)).await?;
+        Ok(())
+    }
+
+    /// Return the committed weight version agreed on by every connected engine.
+    pub async fn get_weight_version(&self) -> Result<String> {
+        self.call_utility_consensus("get_weight_version", ()).await
     }
 
     /// Return whether the engine is currently sleeping at any level.

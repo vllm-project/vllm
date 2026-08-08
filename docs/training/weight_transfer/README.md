@@ -63,6 +63,8 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 !!! note
     The HTTP weight transfer endpoints require `VLLM_SERVER_DEV_MODE=1` to be set.
 
+The Rust frontend's optional gRPC `Control` service exposes the same pause, sleep, weight-transfer, and weight-version lifecycle for trusted sidecars. The `ServerInfo.rl_capabilities` response reports whether weight transfer and sleep mode were configured. Backend-specific `init_info` and `update_info` remain JSON metadata; model tensors continue to move over the configured NCCL, IPC, or sparse-NCCL transport.
+
 ## Trainer-Side API
 
 Both backends provide static methods that the trainer calls to send weights. The general pattern is:
