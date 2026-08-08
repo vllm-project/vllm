@@ -246,6 +246,8 @@ validate_native_workspace() {
 }
 
 prepare_native_workspace() {
+  local test_commands="${1:-}"
+
   if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
     echo "Native CI requires VLLM_CI_USE_ARTIFACTS=1"
     return 1
@@ -266,6 +268,8 @@ prepare_native_workspace() {
   local recorded_base=""
   local recorded_commit=""
   local recorded_wheel=""
+  local checkout=""
+  local checkout_commit=""
   local workspace_dir="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
   local wheel_dir=""
   local attempt=0
@@ -378,6 +382,53 @@ prepare_native_workspace() {
   if [[ ! -d "${workspace_dir}/tests" ]]; then
     echo "Failed to stage the native test workspace" >&2
     return 1
+  fi
+
+  # The ROCm artifact intentionally contains only the installed wheel and the
+  # test workspace. The Python-only compilation job also needs setup.py and the
+  # vllm source tree, so overlay the matching Buildkite checkout for that job.
+  if [[ "${test_commands}" == *python_only_compile.sh* ]]; then
+    checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+    if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
+      echo "Python-only native CI requires BUILDKITE_BUILD_CHECKOUT_PATH" >&2
+      return 1
+    fi
+    if ! git -c "safe.directory=${checkout}" -C "${checkout}" \
+      rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo "Buildkite checkout is not a Git worktree: ${checkout}" >&2
+      return 1
+    fi
+    checkout_commit=$(
+      git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse HEAD
+    ) || return 1
+    if [[ "${checkout_commit}" != "${recorded_commit}" ]]; then
+      echo "Buildkite checkout ${checkout_commit} does not match ROCm artifact ${recorded_commit}" >&2
+      return 1
+    fi
+
+    # setup.py normally derives this from .git via setuptools-scm. The native
+    # source overlay deliberately excludes Git metadata, so preserve the exact
+    # version from the already installed, artifact-matched wheel.
+    VLLM_VERSION_OVERRIDE=$(
+      python3 -c 'import importlib.metadata as m; print(m.version("vllm"))'
+    ) || return 1
+    export VLLM_VERSION_OVERRIDE
+    VLLM_PRECOMPILED_WHEEL_LOCATION="${wheels[0]}"
+    export VLLM_PRECOMPILED_WHEEL_LOCATION
+    echo "INFO: native Python-only wheel=${VLLM_PRECOMPILED_WHEEL_LOCATION}"
+
+    echo "--- Overlaying full source checkout for Python-only compilation"
+    # Archive the verified commit instead of copying the worktree so dirty or
+    # untracked agent files cannot contaminate the artifact-matched workspace.
+    git -c "safe.directory=${checkout}" -C "${checkout}" \
+      archive --format=tar "${recorded_commit}" \
+      | tar --no-same-owner -C "${workspace_dir}" -xf - || return 1
+    for required_source in setup.py pyproject.toml vllm; do
+      if [[ ! -e "${workspace_dir}/${required_source}" ]]; then
+        echo "Full source checkout is missing ${required_source}" >&2
+        return 1
+      fi
+    done
   fi
 
   return 0
@@ -699,7 +750,13 @@ if is_native_runtime; then
     echo "Failed to initialize the native test environment"
     exit 1
   fi
-  if ! prepare_native_workspace; then
+  if [[ "${commands}" == *python_only_compile.sh* ]]; then
+    # This no-GPU job validates the ROCm precompiled/editable install path,
+    # rather than CPU runtime platform selection.
+    VLLM_TARGET_DEVICE=rocm
+    export VLLM_TARGET_DEVICE
+  fi
+  if ! prepare_native_workspace "${commands}"; then
     echo "Failed to prepare native test workspace"
     exit 1
   fi
@@ -815,28 +872,6 @@ else
 fi
 
 echo "Final commands: $commands"
-
-standalone_merge_base_env=()
-if [[ "$commands" == *python_only_compile.sh* ]]; then
-  # The ROCm test image often ships /vllm-workspace without .git. Resolve the
-  # wheels.vllm.ai commit from the agent checkout for this test only.
-  vllm_standalone_merge_base=""
-  checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
-  if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
-    checkout="."
-  fi
-  # Pass safe.directory per-command because Buildkite uses mixed user IDs.
-  if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    vllm_standalone_merge_base="$(
-      git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
-    )"
-  fi
-  if [[ -z "${vllm_standalone_merge_base}" ]]; then
-    vllm_standalone_merge_base="${BUILDKITE_COMMIT:-}"
-  fi
-  echo "INFO: passing CI_STANDALONE_MERGE_BASE into container: ${vllm_standalone_merge_base}"
-  standalone_merge_base_env=(-e "CI_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}")
-fi
 
 MYPYTHONPATH="/vllm-workspace"
 
@@ -968,7 +1003,6 @@ else
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
-    "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
