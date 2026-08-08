@@ -62,7 +62,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
@@ -480,9 +480,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # When using DCP, each request's KV cache is sharded among different ranks.
             # As a result, one block on the current rank covers `block_size * cp_size`
             # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(
-                block_table_max_model_len, spec.block_size * self.dcp_size
-            )
+            dcp_size = self.dcp_size if isinstance(spec, AttentionSpec) else 1
+            max_num_blocks = cdiv(block_table_max_model_len, spec.block_size * dcp_size)
+            # Align to a multiple of (128 / block_size) as required by some attention
+            # backends such as TRTLLM (#39324)
+            if spec.block_size <= 128:
+                alignment = 128 // spec.block_size
+                max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
+
             # For Mamba/Hybrid Model, KVCaches need extra blocks for speculative tokens
             if isinstance(spec, MambaSpec):
                 max_num_blocks = (

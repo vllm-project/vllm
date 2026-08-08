@@ -114,10 +114,17 @@ class BlockTables:
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
             block_ids = new_block_ids[i]
             bpk = self.blocks_per_kv_block[i]
+            end = start + len(block_ids) * bpk
+            capacity = self.block_tables[i].gpu.shape[1]
+            if end > capacity:
+                raise RuntimeError(
+                    f"Block table write for request {req_index}, group {i} "
+                    f"exceeds row capacity ({end} > {capacity})"
+                )
             if bpk > 1:
                 block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
             self.block_tables[i].stage_write(req_index, start, block_ids)
-            self.num_blocks.np[i, req_index] = start + len(block_ids)
+            self.num_blocks.np[i, req_index] = end
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:
