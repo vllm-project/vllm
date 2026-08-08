@@ -32,6 +32,9 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import Transcription
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
+from vllm.entrypoints.speech_to_text.translation.serving import (
+    OpenAIServingTranslation,
+)
 from vllm.model_executor.models.interfaces import (
     StreamingTranscriptionPostProcessor,
     SupportsTranscription,
@@ -178,21 +181,25 @@ def _request_output(text: str, finish_reason: str | None = "stop") -> RequestOut
     )
 
 
-def _sse_delta_contents(sse_body: str) -> list[str]:
-    """Extract ``choices[0].delta.content`` from each ``data:`` line (streaming API)."""
-    contents: list[str] = []
+def _sse_events(sse_body: str) -> list[dict]:
+    """Extract JSON payloads from an SSE response."""
+    events: list[dict] = []
     for line in sse_body.splitlines():
         if not line.startswith("data: "):
             continue
         payload = line.removeprefix("data: ").strip()
         if payload == "[DONE]":
             continue
-        obj = json.loads(payload)
-        for choice in obj.get("choices") or []:
-            delta = choice.get("delta") or {}
-            if "content" in delta:
-                contents.append(delta["content"])
-    return contents
+        events.append(json.loads(payload))
+    return events
+
+
+def _sse_delta_contents(sse_body: str) -> list[str]:
+    return [
+        event["delta"]
+        for event in _sse_events(sse_body)
+        if event["type"] == "transcript.text.delta"
+    ]
 
 
 @pytest.mark.asyncio
@@ -227,7 +234,7 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
         result_generator=[gen_hello(), gen_world()],
         request_id="test-req",
         request_metadata=RequestResponseMetadata(request_id="test-req"),
-        audio_duration_s=1.0,
+        audio_duration_s=1.1,
         separator=sep,
     )
     async for line in agen:
@@ -235,6 +242,24 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
     sse = "".join(out_lines)
     combined = "".join(_sse_delta_contents(sse))
     assert combined.strip() == "hello world"
+    events = _sse_events(sse)
+    assert [event["type"] for event in events] == [
+        "transcript.text.delta",
+        "transcript.text.delta",
+        "transcript.text.done",
+    ]
+    assert all("choices" not in event for event in events)
+    assert events[-1] == {
+        "type": "transcript.text.done",
+        "text": "hello world",
+        "usage": {
+            "type": "tokens",
+            "input_tokens": 0,
+            "output_tokens": 6,
+            "total_tokens": 6,
+        },
+    }
+    assert sse.endswith("data: [DONE]\n\n")
 
 
 @pytest.mark.asyncio
@@ -274,6 +299,42 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
         out_lines.append(line)
     combined = "".join(_sse_delta_contents("".join(out_lines)))
     assert combined == "你好世界"
+
+
+@pytest.mark.asyncio
+async def test_translation_stream_generator_preserves_chat_completion_events():
+    async def gen_hello() -> AsyncGenerator[RequestOutput, None]:
+        yield _request_output("hello")
+
+    serving = OpenAIServingTranslation.__new__(OpenAIServingTranslation)
+    serving.enable_force_include_usage = False
+    serving.model_cls = _StubTranscriptionModel
+    serving.streaming_post_processor_cls = (
+        _StubTranscriptionModel.get_streaming_post_processor_cls()
+    )
+    serving.task_type = "translate"
+    request = SimpleNamespace(
+        model="stub-model",
+        stream_include_usage=False,
+        stream_continuous_usage_stats=False,
+    )
+
+    events = []
+    agen = OpenAIServingTranslation.translation_stream_generator(
+        serving,
+        request=request,
+        result_generator=[gen_hello()],
+        request_id="test-req",
+        request_metadata=RequestResponseMetadata(request_id="test-req"),
+        audio_duration_s=1.0,
+        separator=" ",
+    )
+    async for line in agen:
+        if line != "data: [DONE]\n\n":
+            events.append(json.loads(line.removeprefix("data: ")))
+
+    assert events[0]["object"] == "translation.chunk"
+    assert events[0]["choices"][0]["delta"]["content"] == "hello"
 
 
 @pytest.mark.asyncio

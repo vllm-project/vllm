@@ -108,9 +108,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     stream: bool | None = False
-    """When set, it will enable output to be streamed in a similar fashion
-    as the Chat Completion endpoint.
-    """
+    """When set, stream transcription events as server-sent events."""
     # --8<-- [start:transcription-extra-params]
     # Flattened stream option to simplify form data.
     stream_include_usage: bool | None = False
@@ -322,6 +320,28 @@ class TranscriptionRequest(OpenAIBaseModel):
 class TranscriptionUsageAudio(OpenAIBaseModel):
     type: Literal["duration"] = "duration"
     seconds: int
+
+
+class TranscriptionUsageTokens(OpenAIBaseModel):
+    type: Literal["tokens"] = "tokens"
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+class TranscriptionTextDeltaEvent(OpenAIBaseModel):
+    """A text delta emitted by a streaming transcription."""
+
+    type: Literal["transcript.text.delta"] = "transcript.text.delta"
+    delta: str
+
+
+class TranscriptionTextDoneEvent(OpenAIBaseModel):
+    """The final event emitted by a streaming transcription."""
+
+    type: Literal["transcript.text.done"] = "transcript.text.done"
+    text: str
+    usage: TranscriptionUsageTokens
 
 
 class TranscriptionResponse(OpenAIBaseModel):
