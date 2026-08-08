@@ -190,7 +190,13 @@ def structured_outputs_from_response_format(
     elif response_format.type == "json_schema":
         json_schema = response_format.json_schema
         assert json_schema is not None
-        overrides = {"json": json_schema.json_schema}
+        # strict=false means prompt-instruction-only: no grammar constraint
+        # is applied, but the schema may still be rendered into the prompt by
+        # chat templates that consume response_format. Default (None) and
+        # true keep full guided decoding.
+        overrides = (
+            {"json": json_schema.json_schema} if json_schema.strict is not False else {}
+        )
     else:
         assert isinstance(
             response_format,
@@ -202,6 +208,9 @@ def structured_outputs_from_response_format(
         overrides = {
             "structural_tag": json.dumps(response_format.model_dump(by_alias=True))
         }
+
+    if not overrides:
+        return structured_outputs
 
     if structured_outputs is None:
         return StructuredOutputsParams(**overrides)

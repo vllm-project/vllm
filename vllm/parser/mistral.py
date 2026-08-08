@@ -394,10 +394,12 @@ class MistralParser(ParserEngine):
             if request.response_format.type == "json_object":
                 json_schema = _DEFAULT_JSON_SCHEMA
             elif request.response_format.type == "json_schema":
-                if request.response_format.json_schema is not None:
-                    json_schema = request.response_format.json_schema.json_schema
-                else:
+                rf_json_schema = request.response_format.json_schema
+                if rf_json_schema is None:
                     json_schema = _DEFAULT_JSON_SCHEMA
+                elif rf_json_schema.strict is not False:
+                    json_schema = rf_json_schema.json_schema
+                # strict=false: prompt-instruction-only, no grammar constraint
             else:
                 raise ValueError(
                     "MistralParser only accepts `text`, `json_object` or "
