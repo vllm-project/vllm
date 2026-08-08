@@ -461,13 +461,10 @@ class TestTakeEvents:
             lora_name=None,
         )
 
-        # All 3 workers report common_event
+        # All 3 workers report common_event, but only one reports uncommon_event
+        kv_events.add_events([common_event, uncommon_event])
         kv_events.add_events([common_event])
         kv_events.add_events([common_event])
-        kv_events.add_events([common_event])
-
-        # Only 1 worker reports uncommon_event
-        kv_events.add_events([uncommon_event])
 
         mock_connector._kv_cache_events = kv_events
 
