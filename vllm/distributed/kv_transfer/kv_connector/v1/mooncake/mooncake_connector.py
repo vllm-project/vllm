@@ -1155,14 +1155,21 @@ class MooncakeConnectorWorker:
 
         try:
             while True:
-                identity, metadata_bytes = await sock.recv_multipart()
+                frames = await sock.recv_multipart()
+                if len(frames) != 2:
+                    logger.warning(
+                        "Dropped malformed ZMQ envelope with %d frame(s) "
+                        "(expected 2). Possible malicious peer.",
+                        len(frames),
+                    )
+                    continue
+                identity, metadata_bytes = frames
                 await self.sender_worker_queue.put((identity, metadata_bytes))
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake sender thread.")
         except Exception as e:
             logger.error("Error in Mooncake sender thread: %s. Exiting thread.", str(e))
         finally:
-            # Clean up worker tasks
             for task in sender_tasks:
                 task.cancel()
             await asyncio.gather(*sender_tasks, return_exceptions=True)
