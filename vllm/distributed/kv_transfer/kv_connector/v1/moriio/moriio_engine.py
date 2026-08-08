@@ -810,6 +810,12 @@ class MoRIIOWrapper:
                 f"Invalid consumer_tp_size in release message: {consumer_tp_size}"
             )
         with self.lock:
+            if self._is_transfer_terminal_locked(transfer_id):
+                logger.debug(
+                    "Ignoring release for terminal transfer %s",
+                    transfer_id,
+                )
+                return
             self.done_req_ids.append(MoRIIOTransferAck(transfer_id, consumer_tp_size))
             self.done_remote_allocate_req_dict.pop(transfer_id, None)
             self._mark_transfer_terminal_locked(transfer_id)
