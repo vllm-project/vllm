@@ -154,10 +154,25 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: Hybrid Mamba prefix cache correctness (4xH200)
+- label: ":nvidia: (B200) Hybrid Mamba Prefix Cache Correctness"
+  key: v1-e2e-hybrid-mamba-prefix-cache-1gpu
+  # Qwen3.6-27B-FP8 at tp=1. Measured ~130s; the budget covers weight download.
+  timeout_in_minutes: 45
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+    - vllm/v1/core/
+    - vllm/v1/worker/gpu_model_runner.py
+    - vllm/v1/engine/llm_engine.py
+    - tests/v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py
+  commands:
+    - pytest -v -s -rA v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py -k qwen
+
+- label: ":nvidia: (H200) Hybrid Mamba Prefix Cache Correctness (120B TP4)"
   key: v1-e2e-hybrid-mamba-prefix-cache-4xh200
   # 120B BF16 TP4 (~240 GB weights) needs H200-class capacity per GPU.
-  timeout_in_minutes: 240
+  # Measured ~330s; the budget covers weight download.
+  timeout_in_minutes: 90
   device: h200
   num_devices: 4
   optional: true
@@ -167,4 +182,4 @@ steps:
     - vllm/v1/engine/llm_engine.py
     - tests/v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py
   commands:
-    - pytest -v -s -rA v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py
+    - pytest -v -s -rA v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py -k nemotron
