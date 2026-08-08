@@ -668,9 +668,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = DFlashQwen3Model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),

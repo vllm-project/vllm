@@ -1017,6 +1017,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     }
 
+    # Local aux taps are sent directly to the last PP rank for EAGLE3 drafting.
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1148,9 +1151,20 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
+        # Earlier stages' taps arrive only on the last rank. Received after the
+        # shard above so the buffers match the shape the local taps will have.
+        remote_aux: list[torch.Tensor] = []
+        if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
+            remote_aux = self.recv_remote_aux_from_producers(
+                hidden_states, intermediate_tensors
+            )
+
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
+        if (
+            get_pp_group().is_first_rank
+            and self.start_layer in self.aux_hidden_state_layers
+        ):
             if self.use_attn_res or residual is None:
                 aux_hidden_states.append(hidden_states)
             else:
@@ -1197,9 +1211,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            tensors.update(self.pack_local_aux_for_last(aux_hidden_states))
+            return IntermediateTensors(tensors)
 
         if self.use_attn_res:
             assert prefix_sum is not None
@@ -1235,6 +1249,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
+        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

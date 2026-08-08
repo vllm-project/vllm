@@ -30,6 +30,8 @@ class PendingRecv:
     # Snapshot of slot generation counters at receive time, used to
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
+    # Draft proposals for the step this slot feeds, when spec decoding is on.
+    draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -43,8 +45,12 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     assert max_seq_len is not None  # always populated under PP
     # Exclude non-final prefill chunks (they don't produce a sample).
     produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
-    # Exclude requests that we know are finished.
-    not_finishing = np.maximum(old_computed, prefill_len) + 1 < max_seq_len
+    # Discount drafts: scheduler advances num_computed by full width before
+    # PP peers consume the sample broadcast.
+    finish_computed = old_computed
+    if input_batch.num_draft_tokens_per_req is not None:
+        finish_computed = old_computed - input_batch.num_draft_tokens_per_req
+    not_finishing = np.maximum(finish_computed, prefill_len) + 1 < max_seq_len
     need_sampled_mask = produces_sample & not_finishing
     return need_sampled_mask if need_sampled_mask.any() else None
 
@@ -65,6 +71,7 @@ class PPHandler:
         self.is_last_rank = get_pp_group().is_last_rank
         self.last_rank = get_pp_group().last_rank
         self.max_sample_len = num_speculative_steps + 1
+        self.num_speculative_steps = num_speculative_steps
         self.device = device
         self.main_stream = torch.cuda.current_stream(device)
         self.broadcast_stream = torch.cuda.Stream(device)
@@ -90,7 +97,9 @@ class PPHandler:
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
 
-    def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
+    def get_prev_sampled_outputs(
+        self,
+    ) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,
         then filter out entries whose request was freed since `receive`.
         """
@@ -116,12 +125,67 @@ class PPHandler:
             idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         self.main_stream.wait_event(slot.event)
-        return dict(
+        outputs = dict(
             sampled_tokens=slot.sampled_tokens,
             num_sampled=slot.num_sampled,
             num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
         )
+        if slot.draft_tokens is not None:
+            # Drop freed/excluded rows: -1 sentinels would alias the last row
+            # under advanced indexing, and unfiltered writes can hit a reused
+            # req index after add_requests zeroed it.
+            if exclude_mask.any():
+                keep = ~exclude_mask
+                keep_t = torch.as_tensor(keep, device=self.device)
+                draft_idx_np = slot.idx_mapping_np[keep]
+                outputs["draft_update"] = (
+                    slot.draft_tokens[keep_t],
+                    async_copy_to_gpu(draft_idx_np, device=self.device),
+                )
+            else:
+                outputs["draft_update"] = (slot.draft_tokens, slot.idx_mapping)
+        return outputs
+
+    def broadcast_drafts(
+        self, draft_tokens: torch.Tensor, input_batch: InputBatch
+    ) -> None:
+        """Broadcast draft proposals so non-last ranks can embed real token ids."""
+        assert self.is_last_rank
+        if compute_need_sampled_mask(input_batch) is None:
+            return
+        with torch.cuda.stream(self.broadcast_stream):
+            self.broadcast_stream.wait_stream(self.main_stream)
+            send = draft_tokens.contiguous()
+            torch.distributed.broadcast(
+                send, src=self.last_rank, group=self.broadcast_group
+            )
+            send.record_stream(self.broadcast_stream)
+
+    def receive_drafts(self, input_batch: InputBatch) -> None:
+        """Recv draft proposals onto the same deferred slot as sampled tokens."""
+        assert not self.is_last_rank
+        if compute_need_sampled_mask(input_batch) is None:
+            return
+        num_reqs = input_batch.num_reqs
+        with torch.cuda.stream(self.broadcast_stream):
+            self.broadcast_stream.wait_stream(self.main_stream)
+            draft_tokens = torch.empty(
+                num_reqs,
+                self.num_speculative_steps,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            torch.distributed.broadcast(
+                draft_tokens, src=self.last_rank, group=self.broadcast_group
+            )
+            # Replace the slot event so one wait covers sampled + draft recv.
+            event = self.broadcast_stream.record_event()
+            draft_tokens.record_stream(self.main_stream)
+        slot = self.queue[-1]
+        if slot is not None:
+            slot.draft_tokens = draft_tokens
+            slot.event = event
 
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
@@ -186,8 +250,17 @@ class PPHandler:
 
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
+            # Pad to max_sample_len so send width matches receive().
+            send_tokens = sampled_token_ids
+            width = send_tokens.shape[-1]
+            if width < self.max_sample_len:
+                padded = send_tokens.new_zeros(
+                    send_tokens.shape[0], self.max_sample_len
+                )
+                padded[:, :width] = send_tokens
+                send_tokens = padded
             torch.distributed.broadcast(
-                sampled_token_ids.contiguous(),
+                send_tokens.contiguous(),
                 src=self.last_rank,
                 group=self.broadcast_group,
             )
