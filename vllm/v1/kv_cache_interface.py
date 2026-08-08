@@ -944,6 +944,16 @@ def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
     return KVCacheSpecKind.UNKNOWN
 
 
+def is_kv_cache_spec_dcp_sharded(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether the KV cache of this spec is sharded across DCP ranks."""
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return all(
+            is_kv_cache_spec_dcp_sharded(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        )
+    return isinstance(kv_cache_spec, AttentionSpec)
+
+
 def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         inner_windows = {

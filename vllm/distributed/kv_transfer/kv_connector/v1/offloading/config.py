@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     FullAttentionSpec,
     MLAAttentionSpec,
+    is_kv_cache_spec_dcp_sharded,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -46,7 +46,7 @@ def build_offloading_config(
                 group.kv_cache_spec.block_size
                 * (
                     parallel_config.decode_context_parallel_size
-                    if isinstance(group.kv_cache_spec, AttentionSpec)
+                    if is_kv_cache_spec_dcp_sharded(group.kv_cache_spec)
                     else 1
                 )
             ),
