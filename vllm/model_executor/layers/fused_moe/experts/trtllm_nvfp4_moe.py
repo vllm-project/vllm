@@ -20,17 +20,17 @@ from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
     trtllm_moe_pack_topk_ids_weights,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_int,
-    has_flashinfer_situ_activation,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    activation_to_flashinfer_int,
+    has_flashinfer_situ_activation,
+    has_flashinfer_trtllm_fused_moe,
+)
 
 logger = init_logger(__name__)
 

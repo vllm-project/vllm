@@ -27,9 +27,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    swap_w13_to_w31,
-)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
@@ -44,6 +41,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    swap_w13_to_w31,
+)
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
 

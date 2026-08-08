@@ -18,17 +18,17 @@ from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
     trtllm_moe_pack_topk_ids_weights,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_int,
-    has_flashinfer_situ_activation,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
     kMxfp8Dynamic,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import (
+    activation_to_flashinfer_int,
+    has_flashinfer,
+    has_flashinfer_situ_activation,
+)
 
 
 class TrtLlmMxfp4ExpertsBase:

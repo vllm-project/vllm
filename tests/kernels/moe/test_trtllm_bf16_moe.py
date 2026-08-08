@@ -28,11 +28,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
     TrtLlmBf16ExpertsModular,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    convert_moe_weights_to_flashinfer_trtllm_block_layout,
-)
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    has_flashinfer_trtllm_fused_moe,
+)
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 

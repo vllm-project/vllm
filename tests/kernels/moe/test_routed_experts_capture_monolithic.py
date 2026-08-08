@@ -498,7 +498,7 @@ def _make_fp8_block_scale_monolithic_experts(
     Weights are shuffled into the BlockMajorK layout the kernel expects
     (same helper the vLLM weight loader uses for DeepSeek-FP8 models).
     """
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    from vllm.utils.flashinfer import (
         _shuffle_deepseek_fp8_moe_weights,
     )
 
