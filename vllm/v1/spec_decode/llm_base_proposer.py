@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
 from vllm.distributed.eplb.eplb_state import EplbState
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -1422,6 +1422,20 @@ class SpecDecodeBaseProposer:
             else:
                 self.parallel_drafting_hidden_state_tensor.copy_(flat_mask)
 
+    @staticmethod
+    def _all_tp_ranks_agree(local_decision: bool) -> bool:
+        tp_group = get_tp_group()
+        if tp_group.world_size == 1:
+            return local_decision
+
+        decision = torch.tensor(local_decision, dtype=torch.int32, device="cpu")
+        torch.distributed.all_reduce(
+            decision,
+            op=torch.distributed.ReduceOp.MIN,
+            group=tp_group.cpu_group,
+        )
+        return bool(decision.item())
+
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
         Some draft models may not have their own embedding layers, and some may
@@ -1445,14 +1459,7 @@ class SpecDecodeBaseProposer:
             share_embeddings = False
             if hasattr(self.model, "has_own_embed_tokens"):
                 # EAGLE model
-                if not self.model.has_own_embed_tokens:
-                    share_embeddings = True
-                    logger.info(
-                        "Detected EAGLE model without its own embed_tokens in the"
-                        " checkpoint. Sharing target model embedding weights with the"
-                        " draft model."
-                    )
-                elif (
+                if not self.model.has_own_embed_tokens or (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
                     # TODO: Offload to CPU for comparison to avoid extra GPU memory
@@ -1463,11 +1470,21 @@ class SpecDecodeBaseProposer:
                     )
                 ):
                     share_embeddings = True
-                    logger.info(
-                        "Detected EAGLE model with embed_tokens identical to the target"
-                        " model. Sharing target model embedding weights with the draft"
-                        " model."
-                    )
+
+                share_embeddings = self._all_tp_ranks_agree(share_embeddings)
+                if share_embeddings:
+                    if self.model.has_own_embed_tokens:
+                        logger.info(
+                            "Detected EAGLE model with embed_tokens identical to the"
+                            " target model. Sharing target model embedding weights"
+                            " with the draft model."
+                        )
+                    else:
+                        logger.info(
+                            "Detected EAGLE model without its own embed_tokens in the"
+                            " checkpoint. Sharing target model embedding weights with"
+                            " the draft model."
+                        )
                 else:
                     logger.info(
                         "Detected EAGLE model with distinct embed_tokens weights. "
@@ -1524,13 +1541,7 @@ class SpecDecodeBaseProposer:
         share_lm_head = False
         if hasattr(self.model, "has_own_lm_head"):
             # EAGLE model
-            if not self.model.has_own_lm_head:
-                share_lm_head = True
-                logger.info(
-                    "Detected EAGLE model without its own lm_head in the checkpoint. "
-                    "Sharing target model lm_head weights with the draft model."
-                )
-            elif (
+            if not self.model.has_own_lm_head or (
                 hasattr(target_language_model, "lm_head")
                 and hasattr(target_language_model.lm_head, "weight")
                 and hasattr(self.model.lm_head, "weight")
@@ -1544,10 +1555,21 @@ class SpecDecodeBaseProposer:
                 )
             ):
                 share_lm_head = True
-                logger.info(
-                    "Detected EAGLE model with lm_head identical to the target model. "
-                    "Sharing target model lm_head weights with the draft model."
-                )
+
+            share_lm_head = self._all_tp_ranks_agree(share_lm_head)
+            if share_lm_head:
+                if self.model.has_own_lm_head:
+                    logger.info(
+                        "Detected EAGLE model with lm_head identical to the target"
+                        " model. Sharing target model lm_head weights with the draft"
+                        " model."
+                    )
+                else:
+                    logger.info(
+                        "Detected EAGLE model without its own lm_head in the"
+                        " checkpoint. Sharing target model lm_head weights with the"
+                        " draft model."
+                    )
             else:
                 logger.info(
                     "Detected EAGLE model with distinct lm_head weights. "
