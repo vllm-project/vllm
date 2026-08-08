@@ -5,6 +5,7 @@ import ipaddress
 import os
 import socket
 import sys
+import tempfile
 import warnings
 from collections.abc import (
     Iterator,
@@ -129,6 +130,10 @@ def join_host_port(host: str, port: int) -> str:
 
 def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
+
+
+def get_file_store_init_method() -> str:
+    return f"file://{tempfile.gettempdir()}/vllm_dist_{uuid4().hex}"
 
 
 def get_tcp_uri(ip: str, port: int) -> str:
