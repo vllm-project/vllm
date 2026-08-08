@@ -23,7 +23,6 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
-    get_open_port,
     get_open_zmq_ipc_path,
     get_tcp_uri,
     zmq_socket_ctx,
