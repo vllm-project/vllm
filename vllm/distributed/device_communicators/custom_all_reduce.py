@@ -45,6 +45,24 @@ def _can_p2p(rank: int, world_size: int) -> bool:
                 current_platform.logical_device_id_to_visible_device_id(rank),
                 current_platform.logical_device_id_to_visible_device_id(i),
             )
+        # On compute capability 12.x (consumer Blackwell), the
+        # gpu_p2p_access_check subprocess probe is expensive and has not
+        # been observed to succeed without NVLink. Use the fast
+        # driver-level can_device_access_peer query instead.
+        if (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+        ):
+            logger.debug(
+                "Using fast driver P2P check for compute capability 12.x"
+                " instead of the subprocess probe."
+            )
+            if not torch.cuda.can_device_access_peer(
+                current_platform.logical_device_id_to_visible_device_id(rank),
+                current_platform.logical_device_id_to_visible_device_id(i),
+            ):
+                return False
+            continue
         if not gpu_p2p_access_check(rank, i):
             return False
     return True
