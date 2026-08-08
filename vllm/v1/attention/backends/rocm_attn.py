@@ -187,6 +187,24 @@ class RocmAttentionBackend(AttentionBackend):
         # non-standard models (like qwen3-next with block_size 544, or qwen3_5
         # with 784 and 1056) are dynamically routed to our optimized Triton kernel
         # in `do_kv_cache_update`.
+        #
+        # For hybrid models (Mamba+Attention), we require block_size to be a
+        # multiple of 32 (the Triton decode kernel's TRITON_BLOCK_SIZE) so that
+        # PHYSICAL_BLOCK_SIZE is always evenly divisible by the tile size.
+        # Otherwise, cross-physical-block tile reads in the Triton paged
+        # attention kernel can access stale/NaN data written during CUDAGraph
+        # capture, causing 0*NaN=NaN corruption that cascades through Mamba
+        # in-place state updates and produces garbage output.
+        from vllm.config import get_current_vllm_config_or_none
+
+        config = get_current_vllm_config_or_none()
+        if (
+            config is not None
+            and config.model_config is not None
+            and config.model_config.is_hybrid
+        ):
+            return [MultipleOf(32)]
+
         return [MultipleOf(16)]
 
     @classmethod
