@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
@@ -1573,9 +1574,24 @@ def scaled_fp4_quant(
     if use_8x4_sf_layout and padded_n is not None and padded_n != n:
         # TODO: support this case
         raise ValueError("padded_n is not supported with TRTLLM 8x4 scale layout.")
+
+    use_scalesweep = (
+        "scalesweep" in backend
+        or os.environ.get("VLLM_NVFP4_QUANT_METHOD") == "scalesweep"
+    )
     if use_8x4_sf_layout:
         output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
             input, input_global_scale
+        )
+    elif use_scalesweep:
+        from vllm.model_executor.kernels.scalesweep_fp4 import (
+            scalesweep_nvfp4_quant,
+        )
+        output, output_scale = scalesweep_nvfp4_quant(
+            input,
+            input_global_scale,
+            is_sf_swizzled_layout=is_sf_swizzled_layout,
+            padded_n=padded_n,
         )
     else:
         # Pre-allocate and call .out variant (same behavior as old in-place API)
