@@ -3,16 +3,15 @@
 """Speculative-decode correctness for the Mamba2 ReplaySSM kernels.
 
 A spec/verify step takes the checkpoint state ``S_0`` + the committed ring buffer
-+ a window of ``max_spec_len = 1 + num_speculative_tokens`` draft tokens, and
++ a window of ``spec_query_len = 1 + num_speculative_tokens`` draft tokens, and
 computes the recurrence OUTPUT at each window position (causal: draft ``s`` reads
 the buffer up to its own position). It does NOT write the state per draft -- only
 a flush step folds the *committed* history into the checkpoint, so unaccepted
 drafts can be rolled back.
 
-The history window is ``L = B + max_spec_len`` (block ``B`` = ``buffer_len``): the
-physical circular buffer is ``next_pow2(L)`` and ``max_cache_len`` passed to the
-kernel is the logical ``L``. Verify launches the non-flush kernel; flush launches
-the reconstruct kernel; both run every step with device-side row routing.
+The circular history window is ``L = B + spec_query_len`` (block ``B`` =
+``buffer_len``). Verify launches the non-flush kernel; flush launches the
+reconstruct kernel; both run every step with device-side row routing.
 
 Oracle (no separate spec reference needed): the already-verified ReplaySSM
 STANDARD decode kernel (``selective_state_update_replayssm_output_only``) stepped
@@ -22,9 +21,9 @@ Its per-position output must equal the spec kernel's. For the multi-step rollbac
 the ground truth is the baseline ``selective_state_update`` decode of the accepted
 token stream (it writes the full state every step).
 
-Three checks per (precision, geometry, base_block, max_spec_len):
+Three checks per (precision, geometry, base_block, spec_query_len):
   * single spec step output == standard-decode-of-window, swept over the buffer
-    fill level up to the max non-flush fill C = B - max_spec_len,
+    fill level up to the max non-flush fill C = B - spec_query_len,
   * a 40-step rollback with a random accepted count k per step: accepted-position
     outputs track the baseline decode, and the committed checkpoint at each flush
     matches the baseline state at the matching folded-token count,
@@ -56,11 +55,10 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 DEV = "cuda"
 
 
-def _lbt(base_block: int, max_spec_len: int) -> tuple[int, int]:
-    """Logical flush threshold L = B + max_spec_len and physical pow2 buffer."""
-    L = base_block + max_spec_len
-    buf = 1 << (L - 1).bit_length()
-    return L, buf
+def _lbt(base_block: int, spec_query_len: int) -> tuple[int, int]:
+    """Return the logical threshold and equal-sized physical ring."""
+    L = base_block + spec_query_len
+    return L, L
 
 
 def _tolerances(both_fp32: bool) -> tuple[float, float]:
@@ -79,48 +77,20 @@ def _tied_A(nheads: int, headdim: int, dstate: int) -> torch.Tensor:
     return A.view(nheads, 1, 1).expand(nheads, headdim, dstate)
 
 
-def _scatter_packed_history(
-    post_conv_cache: torch.Tensor,
+def _scatter_history(
+    x_cache: torch.Tensor,
     dt_cache: torch.Tensor,
+    B_cache: torch.Tensor,
     slot: int,
     x_hist: torch.Tensor,  # (wp, H, P)
     B_hist: torch.Tensor,  # (wp, G, N)
     dt_hist_raw: torch.Tensor,  # (wp, H) raw dt
-    d_inner: int,
-    ngroups: int,
-    dstate: int,
 ) -> None:
-    """Fill the committed history [0, wp) into the packed circular caches at
-    post_origin=0 (so logical pos == physical pos). Channel map matches the
-    kernel's x_view/B_view: x[h,d]->h*P+d, B[g,n]->d_inner+g*N+n (C is not
-    cached; the kernel reads it fresh from conv_out). dt_cache stores RAW dt
-    (the kernel applies bias+softplus on read)."""
-    wp, H, P = x_hist.shape
-    G, N = ngroups, dstate
-    for p in range(wp):
-        post_conv_cache[slot, p, :d_inner] = x_hist[p].reshape(d_inner)
-        post_conv_cache[slot, p, d_inner : d_inner + G * N] = B_hist[p].reshape(G * N)
-        # C not cached; only x|B seeded.
-        dt_cache[slot, :, p] = dt_hist_raw[p].float()
-
-
-def _pack_window_conv_out(
-    x_w: torch.Tensor,  # (S, H, P)
-    B_w: torch.Tensor,  # (S, G, N)
-    C_w: torch.Tensor,  # (S, G, N)
-    d_inner: int,
-    ngroups: int,
-    dstate: int,
-    act_dtype: torch.dtype,
-) -> torch.Tensor:
-    S = x_w.shape[0]
-    G, N = ngroups, dstate
-    conv_dim = d_inner + 2 * G * N
-    conv_out = torch.zeros(S, conv_dim, device=DEV, dtype=act_dtype)
-    conv_out[:, :d_inner] = x_w.reshape(S, d_inner)
-    conv_out[:, d_inner : d_inner + G * N] = B_w.reshape(S, G * N)
-    conv_out[:, d_inner + G * N :] = C_w.reshape(S, G * N)
-    return conv_out
+    """Fill committed head-major history with an origin of zero."""
+    wp = x_hist.shape[0]
+    x_cache[slot, :, :wp] = x_hist.transpose(0, 1)
+    dt_cache[slot, :, :wp] = dt_hist_raw.float().transpose(0, 1)
+    B_cache[slot, :, :wp] = B_hist.transpose(0, 1)
 
 
 def _standard_window_oracle(
@@ -188,7 +158,7 @@ def _run_single_step(
     dstate,
     ngroups,
     buffer_len,  # history block B
-    max_spec_len,
+    spec_query_len,
     wp,
     has_z,
     dt_softplus=True,
@@ -197,9 +167,8 @@ def _run_single_step(
 ):
     set_random_seed(seed)
     H, P, N, G = nheads, headdim, dstate, ngroups
-    d_inner = H * P
-    spec_len = max_spec_len
-    L, buf = _lbt(buffer_len, max_spec_len)
+    spec_len = spec_query_len
+    L, buf = _lbt(buffer_len, spec_query_len)
     both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
     rtol, atol = _tolerances(both_fp32)
 
@@ -234,21 +203,16 @@ def _run_single_step(
         act_dtype=act_dtype,
     )
 
-    # spec path: prefill packed history, one verify call (non-flush).
+    # Spec path: prefill head-major history, one verify call (non-flush).
     state_spec = S0.clone()
-    cache_conv_dim = d_inner + G * N  # x|B only (no C)
-    post_conv_cache = torch.zeros(
-        num_blocks, buf, cache_conv_dim, device=DEV, dtype=act_dtype
-    )
+    x_cache = torch.zeros(num_blocks, H, buf, P, device=DEV, dtype=act_dtype)
     dt_cache = torch.zeros(num_blocks, H, buf, device=DEV, dtype=torch.float32)
-    _scatter_packed_history(
-        post_conv_cache, dt_cache, 1, x[:wp], B[:wp], dt[:wp], d_inner, G, N
-    )
+    B_cache = torch.zeros(num_blocks, G, buf, N, device=DEV, dtype=act_dtype)
+    _scatter_history(x_cache, dt_cache, B_cache, 1, x[:wp], B[:wp], dt[:wp])
     if perturb:
         # teeth: corrupt one history slot -> outputs must diverge from the oracle.
-        post_conv_cache[1, max(0, wp - 1), 0] += 5.0
+        x_cache[1, 0, max(0, wp - 1), 0] += 5.0
 
-    conv_out = _pack_window_conv_out(x[wp:], B[wp:], C[wp:], d_inner, G, N, act_dtype)
     dt_spec = dt[wp:].float()
     z_spec = z[wp:] if z is not None else None
     write_pos = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
@@ -260,10 +224,13 @@ def _run_single_step(
     out_spec = torch.empty(spec_len, H, P, device=DEV, dtype=act_dtype)
     selective_state_update_replayssm_spec(
         state_spec,
-        post_conv_cache,
+        x_cache,
         dt_cache,
-        conv_out,
+        B_cache,
+        x[wp:],
         dt_spec,
+        B[wp:],
+        C[wp:],
         A,
         write_pos=write_pos,
         post_conv_state_pos=post_origin,
@@ -271,10 +238,7 @@ def _run_single_step(
         query_start_loc=qsl,
         state_batch_indices=sbi,
         max_cache_len=L,
-        max_spec_len=max_spec_len,
-        d_inner=d_inner,
-        ngroups=G,
-        dstate=N,
+        spec_query_len=spec_query_len,
         D=D,
         z=z_spec,
         dt_bias=dt_bias,
@@ -287,10 +251,10 @@ def _run_single_step(
     torch.testing.assert_close(state_spec, S0, rtol=0, atol=0)
 
 
-def _wp_set(base_block: int, max_spec_len: int) -> list[int]:
+def _wp_set(base_block: int, spec_query_len: int) -> list[int]:
     # Verify-path fills: 0 (empty buffer = pure checkpoint readout), the max
-    # non-flush fill C = B - max_spec_len (the tightest edge), and a midpoint.
-    C = base_block - max_spec_len
+    # non-flush fill C = B - spec_query_len (the tightest edge), and a midpoint.
+    C = base_block - spec_query_len
     return sorted({0, max(0, C // 2), max(0, C)})
 
 
@@ -299,7 +263,7 @@ _PRECISIONS = [
     pytest.param((torch.float32, torch.bfloat16), id="s32_a16"),
     pytest.param((torch.bfloat16, torch.bfloat16), id="s16_a16"),
 ]
-# (nheads, headdim, dstate, ngroups). The full precision x block x max_spec_len
+# (nheads, headdim, dstate, ngroups). The full precision x block x spec_query_len
 # sweep runs on the small shapes (cheap compiles); the production Nemotron-3
 # Mamba2 shapes are exercised by test_spec_step_real_geometry.
 _SMALL = pytest.param((8, 64, 64, 4), id="small")
@@ -310,22 +274,22 @@ _REAL_GEOMETRIES = [
     pytest.param((256, 64, 128, 8), id="ultra550b"),
 ]
 _BASE_BLOCKS = [16, 32]  # history block B (replayssm_buffer_len)
-_MAX_SPEC_LENS = [2, 4, 6, 8]
+_SPEC_QUERY_LENS = [2, 4, 6, 8]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
 @pytest.mark.parametrize("precision", _PRECISIONS)
 @pytest.mark.parametrize("geometry", [_SMALL, _TINY])
 @pytest.mark.parametrize("base_block", _BASE_BLOCKS)
-@pytest.mark.parametrize("max_spec_len", _MAX_SPEC_LENS)
+@pytest.mark.parametrize("spec_query_len", _SPEC_QUERY_LENS)
 @pytest.mark.parametrize("has_z", [False, True])
 def test_spec_step_matches_standard_decode(
-    precision, geometry, base_block, max_spec_len, has_z
+    precision, geometry, base_block, spec_query_len, has_z
 ):
-    # base_block >= max_spec_len always holds here. Sweep the non-flush fill level.
+    # base_block >= spec_query_len always holds here. Sweep the non-flush fill level.
     state_dtype, act_dtype = precision
     nheads, headdim, dstate, ngroups = geometry
-    for wp in _wp_set(base_block, max_spec_len):
+    for wp in _wp_set(base_block, spec_query_len):
         _run_single_step(
             state_dtype=state_dtype,
             act_dtype=act_dtype,
@@ -334,7 +298,7 @@ def test_spec_step_matches_standard_decode(
             dstate=dstate,
             ngroups=ngroups,
             buffer_len=base_block,
-            max_spec_len=max_spec_len,
+            spec_query_len=spec_query_len,
             wp=wp,
             has_z=has_z,
         )
@@ -343,13 +307,13 @@ def test_spec_step_matches_standard_decode(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
 @pytest.mark.parametrize("precision", _PRECISIONS)
 @pytest.mark.parametrize("geometry", _REAL_GEOMETRIES)
-@pytest.mark.parametrize("max_spec_len", [2, 8])
-def test_spec_step_real_geometry(precision, geometry, max_spec_len):
+@pytest.mark.parametrize("spec_query_len", [2, 8])
+def test_spec_step_real_geometry(precision, geometry, spec_query_len):
     # Production Nemotron-3 Mamba2 shapes (Nano-4B / Super-120B / Ultra-550B) at
-    # the deployable block B=16, both ends of the max_spec_len range.
+    # the deployable block B=16, both ends of the spec_query_len range.
     state_dtype, act_dtype = precision
     nheads, headdim, dstate, ngroups = geometry
-    for wp in _wp_set(16, max_spec_len):
+    for wp in _wp_set(16, spec_query_len):
         _run_single_step(
             state_dtype=state_dtype,
             act_dtype=act_dtype,
@@ -358,7 +322,7 @@ def test_spec_step_real_geometry(precision, geometry, max_spec_len):
             dstate=dstate,
             ngroups=ngroups,
             buffer_len=16,
-            max_spec_len=max_spec_len,
+            spec_query_len=spec_query_len,
             wp=wp,
             has_z=True,
         )
@@ -376,7 +340,7 @@ def test_spec_step_teeth():
         dstate=64,
         ngroups=4,
         buffer_len=16,
-        max_spec_len=4,
+        spec_query_len=4,
         wp=5,
         has_z=True,
     )
@@ -389,7 +353,7 @@ def test_spec_step_teeth():
             dstate=64,
             ngroups=4,
             buffer_len=16,
-            max_spec_len=4,
+            spec_query_len=4,
             wp=5,
             has_z=True,
             perturb=True,
@@ -405,7 +369,7 @@ def _run_rollback(
     dstate,
     ngroups,
     buffer_len,  # history block B
-    max_spec_len,
+    spec_query_len,
     num_steps=40,
     has_z=True,
     seed=0,
@@ -416,8 +380,7 @@ def _run_rollback(
     the baseline state at the matching folded-token count (n_folded bookkeeping)."""
     set_random_seed(seed)
     H, P, N, G = nheads, headdim, dstate, ngroups
-    d_inner = H * P
-    L, buf = _lbt(buffer_len, max_spec_len)
+    L, buf = _lbt(buffer_len, spec_query_len)
     both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
     rtol, atol = _tolerances(both_fp32)
 
@@ -430,11 +393,9 @@ def _run_rollback(
     state_spec = S0.clone()
     state_base = S0.clone()  # full pool; row in slot 1
 
-    cache_conv_dim = d_inner + G * N  # x|B only (no C)
-    post_conv_cache = torch.zeros(
-        num_blocks, buf, cache_conv_dim, device=DEV, dtype=act_dtype
-    )
+    x_cache = torch.zeros(num_blocks, H, buf, P, device=DEV, dtype=act_dtype)
     dt_cache = torch.zeros(num_blocks, H, buf, device=DEV, dtype=torch.float32)
+    B_cache = torch.zeros(num_blocks, G, buf, N, device=DEV, dtype=act_dtype)
     write_pos = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
     post_origin = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
     is_flush = torch.zeros(num_blocks, dtype=torch.int8, device=DEV)
@@ -446,7 +407,7 @@ def _run_rollback(
         torch.ones(1, dtype=torch.int8, device=DEV),
         sbi,
         L,
-        max_spec_len,
+        spec_query_len,
     )
 
     n_folded = 0
@@ -455,14 +416,13 @@ def _run_rollback(
     g = torch.Generator(device="cpu").manual_seed(seed + 1)
 
     for _ in range(num_steps):
-        spec_len = max_spec_len
+        spec_len = spec_query_len
         x = torch.randn(spec_len, H, P, device=DEV, dtype=act_dtype)
         dt = torch.randn(spec_len, H, device=DEV, dtype=act_dtype)
         Bw = torch.randn(spec_len, G, N, device=DEV, dtype=act_dtype)
         Cw = torch.randn(spec_len, G, N, device=DEV, dtype=act_dtype)
         zw = torch.randn(spec_len, H, P, device=DEV, dtype=act_dtype) if has_z else None
 
-        conv_out = _pack_window_conv_out(x, Bw, Cw, d_inner, G, N, act_dtype)
         dt_spec = dt.float()
         qsl = torch.tensor([0, spec_len], device=DEV, dtype=torch.int32)
         out_spec = torch.empty(spec_len, H, P, device=DEV, dtype=act_dtype)
@@ -471,10 +431,13 @@ def _run_rollback(
         flush_before = int(is_flush[1].item())
         selective_state_update_replayssm_spec(
             state_spec,
-            post_conv_cache,
+            x_cache,
             dt_cache,
-            conv_out,
+            B_cache,
+            x,
             dt_spec,
+            Bw,
+            Cw,
             A,
             write_pos=write_pos,
             post_conv_state_pos=post_origin,
@@ -482,10 +445,7 @@ def _run_rollback(
             query_start_loc=qsl,
             state_batch_indices=sbi,
             max_cache_len=L,
-            max_spec_len=max_spec_len,
-            d_inner=d_inner,
-            ngroups=G,
-            dstate=N,
+            spec_query_len=spec_query_len,
             D=D,
             z=zw,
             dt_bias=dt_bias,
@@ -530,7 +490,7 @@ def _run_rollback(
             torch.tensor([k], device=DEV, dtype=torch.int32),
             sbi,
             L,
-            max_spec_len,
+            spec_query_len,
         )
 
         # (b) committed checkpoint == baseline state at the folded-token count.
@@ -547,8 +507,8 @@ def _run_rollback(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
 @pytest.mark.parametrize("precision", _PRECISIONS)
 @pytest.mark.parametrize("base_block", _BASE_BLOCKS)
-@pytest.mark.parametrize("max_spec_len", _MAX_SPEC_LENS)
-def test_spec_rollback_tracks_baseline(precision, base_block, max_spec_len):
+@pytest.mark.parametrize("spec_query_len", _SPEC_QUERY_LENS)
+def test_spec_rollback_tracks_baseline(precision, base_block, spec_query_len):
     state_dtype, act_dtype = precision
     _run_rollback(
         state_dtype=state_dtype,
@@ -558,7 +518,7 @@ def test_spec_rollback_tracks_baseline(precision, base_block, max_spec_len):
         dstate=64,
         ngroups=4,
         buffer_len=base_block,
-        max_spec_len=max_spec_len,
+        spec_query_len=spec_query_len,
     )
 
 
@@ -573,12 +533,10 @@ def test_spec_continuous_batching(precision, with_padding):
     state_dtype, act_dtype = precision
     set_random_seed(0)
     H, P, N, G = 4, 64, 16, 2
-    d_inner = H * P
-    conv_dim = d_inner + 2 * G * N
     base_block = 16
-    max_spec_len = 4
-    spec_len = max_spec_len
-    L, buf = _lbt(base_block, max_spec_len)
+    spec_query_len = 4
+    spec_len = spec_query_len
+    L, buf = _lbt(base_block, spec_query_len)
     both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
     rtol, atol = _tolerances(both_fp32)
 
@@ -586,7 +544,7 @@ def test_spec_continuous_batching(precision, with_padding):
     padding = 2 if with_padding else 0
     padded_batch = batch + padding
     total_slots = 12
-    C = base_block - max_spec_len
+    C = base_block - spec_query_len
     wps = [0, C // 2, C]  # staggered non-flush fills incl. the tight edge
 
     A = _tied_A(H, P, N)
@@ -607,20 +565,19 @@ def test_spec_continuous_batching(precision, with_padding):
 
     S0 = torch.randn(total_slots, H, P, N, device=DEV, dtype=state_dtype) * 0.1
     state_spec = S0.clone()
-    post_conv_cache = torch.zeros(
-        total_slots, buf, d_inner + G * N, device=DEV, dtype=act_dtype
-    )
+    x_cache = torch.zeros(total_slots, H, buf, P, device=DEV, dtype=act_dtype)
     dt_cache = torch.zeros(total_slots, H, buf, device=DEV, dtype=torch.float32)
+    B_cache = torch.zeros(total_slots, G, buf, N, device=DEV, dtype=act_dtype)
     write_pos = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
     post_origin = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
     is_flush = torch.zeros(total_slots, dtype=torch.int8, device=DEV)
 
     # per-row raw inputs (history + window); build the per-row oracle.
     oracles = []
-    conv_out = torch.zeros(
-        padded_batch * spec_len, conv_dim, device=DEV, dtype=act_dtype
-    )
+    x_pack = torch.zeros(padded_batch * spec_len, H, P, device=DEV, dtype=act_dtype)
     dt_spec = torch.zeros(padded_batch * spec_len, H, device=DEV, dtype=torch.float32)
+    B_pack = torch.zeros(padded_batch * spec_len, G, N, device=DEV, dtype=act_dtype)
+    C_pack = torch.zeros_like(B_pack)
     z_pack = torch.zeros(padded_batch * spec_len, H, P, device=DEV, dtype=act_dtype)
     for r in range(batch):
         wp = wps[r]
@@ -649,23 +606,21 @@ def test_spec_continuous_batching(precision, with_padding):
                 act_dtype=act_dtype,
             )
         )
-        _scatter_packed_history(
-            post_conv_cache,
+        _scatter_history(
+            x_cache,
             dt_cache,
+            B_cache,
             slot,
             x[:wp],
             Bv[:wp],
             dt[:wp],
-            d_inner,
-            G,
-            N,
         )
         write_pos[slot] = wp
         seg = slice(r * spec_len, (r + 1) * spec_len)
-        conv_out[seg] = _pack_window_conv_out(
-            x[wp:], Bv[wp:], Cv[wp:], d_inner, G, N, act_dtype
-        )
+        x_pack[seg] = x[wp:]
         dt_spec[seg] = dt[wp:].float()
+        B_pack[seg] = Bv[wp:]
+        C_pack[seg] = Cv[wp:]
         z_pack[seg] = zv[wp:]
 
     qsl = torch.arange(
@@ -676,10 +631,13 @@ def test_spec_continuous_batching(precision, with_padding):
     )
     selective_state_update_replayssm_spec(
         state_spec,
-        post_conv_cache,
+        x_cache,
         dt_cache,
-        conv_out,
+        B_cache,
+        x_pack,
         dt_spec,
+        B_pack,
+        C_pack,
         A,
         write_pos=write_pos,
         post_conv_state_pos=post_origin,
@@ -687,10 +645,7 @@ def test_spec_continuous_batching(precision, with_padding):
         query_start_loc=qsl,
         state_batch_indices=sbi,
         max_cache_len=L,
-        max_spec_len=max_spec_len,
-        d_inner=d_inner,
-        ngroups=G,
-        dstate=N,
+        spec_query_len=spec_query_len,
         D=D,
         z=z_pack,
         dt_bias=dt_bias,
@@ -732,17 +687,16 @@ def test_spec_external_bc_pre_builder_shape(precision, geometry):
     state_dtype, act_dtype = precision
     set_random_seed(0)
     H, P, N, G = geometry
-    d_inner = H * P
     base_block = 16
-    max_spec_len = 4
-    spec_len = max_spec_len
-    L, buf = _lbt(base_block, max_spec_len)
+    spec_query_len = 4
+    spec_len = spec_query_len
+    L, buf = _lbt(base_block, spec_query_len)
     both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
     rtol, atol = _tolerances(both_fp32)
 
     batch = 3
     total_slots = 8
-    C = base_block - max_spec_len
+    C = base_block - spec_query_len
     wps = [C, C // 2, C]  # per-row non-flush fills incl. the tight edge
 
     A = _tied_A(H, P, N)
@@ -752,18 +706,18 @@ def test_spec_external_bc_pre_builder_shape(precision, geometry):
 
     S0 = torch.randn(total_slots, H, P, N, device=DEV, dtype=state_dtype) * 0.1
     state_spec = S0.clone()
-    post_conv_cache = torch.zeros(
-        total_slots, buf, d_inner + G * N, device=DEV, dtype=act_dtype
-    )
+    x_cache = torch.zeros(total_slots, H, buf, P, device=DEV, dtype=act_dtype)
     dt_cache = torch.zeros(total_slots, H, buf, device=DEV, dtype=torch.float32)
+    B_cache = torch.zeros(total_slots, G, buf, N, device=DEV, dtype=act_dtype)
     write_pos = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
     post_origin = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
     is_flush = torch.zeros(total_slots, dtype=torch.int8, device=DEV)
 
     oracles = []
-    conv_dim = d_inner + 2 * G * N
-    conv_out = torch.zeros(batch * spec_len, conv_dim, device=DEV, dtype=act_dtype)
+    x_pack = torch.zeros(batch * spec_len, H, P, device=DEV, dtype=act_dtype)
     dt_spec = torch.zeros(batch * spec_len, H, device=DEV, dtype=torch.float32)
+    B_pack = torch.zeros(batch * spec_len, G, N, device=DEV, dtype=act_dtype)
+    C_pack = torch.zeros_like(B_pack)
     for r in range(batch):
         wp = wps[r]
         slot = int(sbi[r].item())
@@ -790,19 +744,17 @@ def test_spec_external_bc_pre_builder_shape(precision, geometry):
                 act_dtype=act_dtype,
             )
         )
-        _scatter_packed_history(
-            post_conv_cache, dt_cache, slot, x[:wp], Bv[:wp], dt[:wp], d_inner, G, N
-        )
+        _scatter_history(x_cache, dt_cache, B_cache, slot, x[:wp], Bv[:wp], dt[:wp])
         write_pos[slot] = wp
         seg = slice(r * spec_len, (r + 1) * spec_len)
-        conv_out[seg] = _pack_window_conv_out(
-            x[wp:], Bv[wp:], Cv[wp:], d_inner, G, N, act_dtype
-        )
+        x_pack[seg] = x[wp:]
         dt_spec[seg] = dt[wp:].float()
+        B_pack[seg] = Bv[wp:]
+        C_pack[seg] = Cv[wp:]
 
     # Engine-style external scratch: fp32, oversized batch dim sliced to the
     # batch, NaN-filled so an unwritten-but-read cell fails loudly.
-    block_spec = 1 << (max_spec_len - 1).bit_length()
+    block_spec = 1 << (spec_query_len - 1).bit_length()
     scratch = torch.full(
         (batch + 5, G, buf, block_spec),
         float("nan"),
@@ -816,10 +768,13 @@ def test_spec_external_bc_pre_builder_shape(precision, geometry):
     out_spec = torch.empty(batch * spec_len, H, P, device=DEV, dtype=act_dtype)
     selective_state_update_replayssm_spec(
         state_spec,
-        post_conv_cache,
+        x_cache,
         dt_cache,
-        conv_out,
+        B_cache,
+        x_pack,
         dt_spec,
+        B_pack,
+        C_pack,
         A,
         write_pos=write_pos,
         post_conv_state_pos=post_origin,
@@ -827,10 +782,7 @@ def test_spec_external_bc_pre_builder_shape(precision, geometry):
         query_start_loc=qsl,
         state_batch_indices=sbi,
         max_cache_len=L,
-        max_spec_len=max_spec_len,
-        d_inner=d_inner,
-        ngroups=G,
-        dstate=N,
+        spec_query_len=spec_query_len,
         D=D,
         z=None,
         dt_bias=dt_bias,
@@ -843,3 +795,95 @@ def test_spec_external_bc_pre_builder_shape(precision, geometry):
         seg = slice(r * spec_len, (r + 1) * spec_len)
         torch.testing.assert_close(out_spec[seg], oracles[r], rtol=rtol, atol=atol)
     torch.testing.assert_close(state_spec, S0, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+def test_forced_flush_persists_single_token_before_next_reset():
+    """A certain prompt token must survive the following first-decode reset."""
+    set_random_seed(0)
+    H, P, N, G = 4, 64, 16, 2
+    spec_query_len = 4
+    L = 16 + spec_query_len
+    state = torch.randn(2, H, P, N, device=DEV) * 0.1
+    baseline = state.clone()
+    x = torch.randn(1, H, P, device=DEV)
+    dt = torch.randn(1, H, device=DEV)
+    B = torch.randn(1, G, N, device=DEV)
+    C = torch.randn(1, G, N, device=DEV)
+    A = _tied_A(H, P, N)
+    dt_bias = torch.rand(H, device=DEV) - 4.0
+    D = torch.randn(H, P, device=DEV)
+    sbi = torch.tensor([1], device=DEV, dtype=torch.int32)
+
+    expected_out = torch.empty_like(x)
+    selective_state_update(
+        baseline,
+        x,
+        dt[:, :, None].expand_as(x),
+        A,
+        B,
+        C,
+        D=D,
+        dt_bias=dt_bias[:, None].expand(H, P),
+        dt_softplus=True,
+        state_batch_indices=sbi,
+        out=expected_out,
+    )
+
+    x_cache = torch.zeros(2, H, L, P, device=DEV)
+    dt_cache = torch.zeros(2, H, L, device=DEV)
+    B_cache = torch.zeros(2, G, L, N, device=DEV)
+    write_pos = torch.zeros(2, dtype=torch.int32, device=DEV)
+    post_origin = torch.zeros_like(write_pos)
+    is_flush = torch.zeros(2, dtype=torch.int8, device=DEV)
+    first = torch.ones(1, dtype=torch.int8, device=DEV)
+    reset_replayssm_spec_cursors(
+        write_pos,
+        post_origin,
+        is_flush,
+        first,
+        sbi,
+        L,
+        spec_query_len,
+        force_flush_mask=first,
+    )
+    assert is_flush[1].item() == 2
+
+    out = torch.empty_like(x)
+    selective_state_update_replayssm_spec(
+        state,
+        x_cache,
+        dt_cache,
+        B_cache,
+        x,
+        dt,
+        B,
+        C,
+        A,
+        write_pos=write_pos,
+        post_conv_state_pos=post_origin,
+        is_flush=is_flush,
+        query_start_loc=torch.tensor([0, 1], device=DEV, dtype=torch.int32),
+        state_batch_indices=sbi,
+        max_cache_len=L,
+        spec_query_len=spec_query_len,
+        D=D,
+        dt_bias=dt_bias,
+        out=out,
+    )
+    torch.testing.assert_close(out, expected_out, rtol=1e-4, atol=1e-3)
+    torch.testing.assert_close(state[1], baseline[1], rtol=1e-4, atol=1e-3)
+
+    commit_replayssm_spec(
+        write_pos,
+        post_origin,
+        is_flush,
+        torch.ones(1, dtype=torch.int32, device=DEV),
+        sbi,
+        L,
+        spec_query_len,
+    )
+    reset_replayssm_spec_cursors(
+        write_pos, post_origin, is_flush, first, sbi, L, spec_query_len
+    )
+    torch.testing.assert_close(state[1], baseline[1], rtol=0, atol=0)

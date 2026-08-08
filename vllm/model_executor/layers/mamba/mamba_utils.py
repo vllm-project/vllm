@@ -93,19 +93,6 @@ class MambaStateDtypeCalculator:
         return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
 
     @classmethod
-    def append_replayssm_spec_ring(
-        cls,
-        base_dtypes: tuple[torch.dtype, ...],
-        model_dtype: ModelDType | torch.dtype,
-    ) -> tuple[torch.dtype, ...]:
-        """Append the ReplaySSM spec ring dtypes to a base ``(conv, ssm)`` tuple:
-        ``(post_conv_cache, dt_cache)`` = ``(activation, fp32)``. ``dt`` drives
-        the cumulative decay replay and stays fp32 regardless of state dtype.
-        """
-        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, activation_dtype, torch.float32)
-
-    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -235,40 +222,8 @@ class MambaStateShapeCalculator:
 
     @classmethod
     def replayssm_spec_ring_len(cls, replayssm_buffer_len: int, num_spec: int) -> int:
-        """Physical ring length: next_pow2 of the L = B + 1 + num_spec window,
-        so wraparound indexing is a bit-mask instead of a modulo.
-        """
-        return 1 << (replayssm_buffer_len + num_spec).bit_length()
-
-    @classmethod
-    def append_replayssm_spec_ring(
-        cls,
-        base_shapes: tuple[tuple[int, ...], ...],
-        intermediate_size: int,
-        n_groups: int,
-        tp_world_size: int,
-        replayssm_buffer_len: int,
-        num_spec: int,
-    ) -> tuple[tuple[int, ...], ...]:
-        """Append the ReplaySSM spec ring shapes (post_conv_cache, dt_cache) to a
-        base ``(conv, ssm)`` tuple. ``post_conv_cache`` holds x|B only; C is read
-        fresh from conv_out, so its width excludes one n_groups * state_size
-        block of the conv width. ``base_shapes`` must already carry the spec conv
-        window (``mamba2_state_shape(..., num_spec=num_spec)``).
-        """
-        local_nheads, _head_dim, state_size = base_shapes[1]
-        n_groups_ext = n_groups + cls.extra_groups_for_head_shards(
-            n_groups, tp_world_size
-        )
-        conv_dim_local = divide(
-            intermediate_size + n_groups_ext * state_size, tp_world_size
-        )
-        ring_len = cls.replayssm_spec_ring_len(replayssm_buffer_len, num_spec)
-        return (
-            *base_shapes,
-            (ring_len, conv_dim_local),
-            (local_nheads, ring_len),
-        )
+        """Physical ring length L = B + 1 + num_spec."""
+        return replayssm_buffer_len + 1 + num_spec
 
     @classmethod
     def short_conv_state_shape(

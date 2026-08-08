@@ -2312,21 +2312,40 @@ class VllmConfig:
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
             return self
-        # ReplaySSM adds a 3-tensor ring to the mamba state; only models that
-        # opt in (supports_replayssm) build a consistent shape on both the layer
-        # and config paths. Reject others so the mamba page size cannot desync.
+        self.cache_config.use_replayssm_spec = self.num_speculative_tokens > 0
+        if self.cache_config.use_replayssm_spec:
+            self.cache_config.use_replayssm = False
+
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
-                "--use-replayssm is only supported for Nemotron-H models "
-                f"(got architecture {self.model_config.architecture!r})"
+                "--use-replayssm is not supported for architecture "
+                f"{self.model_config.architecture!r}"
             )
-        if self.cache_config.mamba_cache_mode == "all":
+        if self.cache_config.use_replayssm_spec:
+            if self.mamba_config.enable_stochastic_rounding:
+                raise ValueError(
+                    "ReplaySSM speculative decoding supports bfloat16/float32 "
+                    "SSM state caches, not --enable-mamba-cache-stochastic-"
+                    "rounding, which requires an explicit float16 cache"
+                )
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "ReplaySSM speculative decoding does not support prefix "
+                    "caching; pass --mamba-cache-mode none"
+                )
+            spec_query_len = 1 + self.num_speculative_tokens
+            if self.cache_config.replayssm_buffer_len < spec_query_len:
+                raise ValueError(
+                    "ReplaySSM speculative decoding requires "
+                    "--replayssm-buffer-len >= 1 + num_speculative_tokens "
+                    f"({spec_query_len}); got "
+                    f"{self.cache_config.replayssm_buffer_len}"
+                )
+        elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
                 "--use-replayssm supports prefix caching only in align mode; "
                 "pass --mamba-cache-mode align"
             )
-        if self.num_speculative_tokens > 0:
-            raise ValueError("--use-replayssm does not support speculative decoding")
         if self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError("--use-replayssm requires --mamba-backend triton")
         if (
@@ -2336,56 +2355,6 @@ class VllmConfig:
             raise ValueError(
                 "--use-replayssm is incompatible with KV connectors "
                 "(P/D disaggregation, KV cache offload)"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_mamba_cached_spec_kernel(self) -> "VllmConfig":
-        if not self.cache_config.use_replayssm_spec:
-            return self
-        if self.cache_config.use_replayssm:
-            raise ValueError(
-                "--use-replayssm-spec is mutually exclusive with --use-replayssm "
-                "(different page shapes and decode paths)"
-            )
-        if self.model_config is not None and not self.model_config.supports_replayssm:
-            raise ValueError(
-                "--use-replayssm-spec is only supported for Nemotron-H models "
-                f"(got architecture {self.model_config.architecture!r})"
-            )
-        # Inverted against --use-replayssm, which forbids speculative decoding.
-        if self.num_speculative_tokens <= 0:
-            raise ValueError(
-                "--use-replayssm-spec requires speculative decoding "
-                "(num_speculative_tokens > 0)"
-            )
-        if self.cache_config.mamba_cache_mode != "none":
-            raise ValueError(
-                "--use-replayssm-spec does not support prefix caching; "
-                "pass --mamba-cache-mode none"
-            )
-        if self.mamba_config.backend != MambaBackendEnum.TRITON:
-            raise ValueError("--use-replayssm-spec requires --mamba-backend triton")
-        if self.mamba_config.enable_stochastic_rounding:
-            raise ValueError(
-                "--use-replayssm-spec does not support Mamba cache stochastic rounding"
-            )
-        if (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.is_kv_transfer_instance
-        ):
-            raise ValueError(
-                "--use-replayssm-spec is incompatible with KV connectors "
-                "(P/D disaggregation, KV cache offload)"
-            )
-        # The ring holds L = B + max_spec_len slots and flushes once the next
-        # window would not fit, so B below max_spec_len can never seat a window.
-        max_spec_len = 1 + self.num_speculative_tokens
-        if self.cache_config.replayssm_buffer_len < max_spec_len:
-            raise ValueError(
-                "--use-replayssm-spec requires --replayssm-buffer-len >= "
-                f"1 + num_speculative_tokens ({max_spec_len}); got "
-                f"{self.cache_config.replayssm_buffer_len}"
             )
         return self
 

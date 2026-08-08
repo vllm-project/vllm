@@ -24,14 +24,14 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 NUM_SPEC = 3
-MAX_SPEC_LEN = 1 + NUM_SPEC
+SPEC_QUERY_LEN = 1 + NUM_SPEC
 BUFFER_LEN = 8
-# L = B + max_spec_len; physical ring is next_pow2(B + num_spec).
-FLUSH_THRESHOLD = BUFFER_LEN + MAX_SPEC_LEN
-RING_LEN = 16
+# L = B + spec_query_len is both the logical threshold and physical ring.
+FLUSH_THRESHOLD = BUFFER_LEN + SPEC_QUERY_LEN
+RING_LEN = FLUSH_THRESHOLD
 
 NHEADS, HEAD_DIM, DSTATE, NGROUPS = 2, 4, 8, 1
-CONV_DIM = NHEADS * HEAD_DIM + NGROUPS * DSTATE
+CONV_DIM = NHEADS * HEAD_DIM + 2 * NGROUPS * DSTATE
 DEVICE = torch.device("cuda")
 
 pytestmark = pytest.mark.skipif(
@@ -40,14 +40,15 @@ pytestmark = pytest.mark.skipif(
 
 
 def _make_spec_mamba_spec() -> MambaSpec:
-    # Four-tensor spec page: (conv, ssm, post_conv_cache, dt_cache).
+    # Standard and speculative ReplaySSM share the head-major x/dt/B layout.
     return MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=(
             (CONV_DIM, 3),
             (NHEADS, HEAD_DIM, DSTATE),
-            (RING_LEN, CONV_DIM),
+            (NHEADS, RING_LEN, HEAD_DIM),
             (NHEADS, RING_LEN),
+            (NGROUPS, RING_LEN, DSTATE),
         ),
         dtypes=(torch.float32,),
     )
@@ -67,8 +68,7 @@ def _create_spec_builder(
     )
     if full_cuda_graph:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
-    # Set after construction so validate_mamba_cached_spec_kernel (Triton only)
-    # does not run against the mock model.
+    # Set after construction so ReplaySSM validation does not run on the mock.
     vllm_config.cache_config.use_replayssm_spec = True
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
     return MockMambaBuilder(_make_spec_mamba_spec(), ["layer0"], vllm_config, DEVICE)
@@ -80,7 +80,7 @@ def _make_common(
     query_lens: list[int] | None = None,
 ):
     n = len(seq_lens)
-    query_lens = query_lens if query_lens is not None else [MAX_SPEC_LEN] * n
+    query_lens = query_lens if query_lens is not None else [SPEC_QUERY_LEN] * n
     batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     return create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
         is_prefilling=torch.tensor([False] * n, dtype=torch.bool),
@@ -163,7 +163,7 @@ def test_flush_advances_origin_and_restarts_write_pos():
 
 
 def test_early_flush_keeps_room_for_a_full_window():
-    """is_flush is set one window early: write_pos + 2 * max_spec_len > L."""
+    """is_flush is set one window early: write_pos + 2 * spec_query_len > L."""
     builder = _create_spec_builder()
     common = _make_common([120], [100])
     blocks = _prime(builder, common)
@@ -234,7 +234,17 @@ def test_leftover_prompt_chunk_resets_and_forces_a_flush():
 
     write_pos, post_origin, is_flush = _cursors(builder, blocks)
     assert (write_pos, post_origin) == ([0], [0])
-    assert is_flush == [1]
+    assert is_flush == [2]
+
+
+def test_forced_checkpoint_rejects_a_multi_token_query():
+    """The forced checkpoint consumes the current token, so it is only valid
+    for the single-token prompt tail it was introduced to handle."""
+    builder = _create_spec_builder()
+    common = _make_common([100], [100], query_lens=[SPEC_QUERY_LEN])
+
+    with pytest.raises(ValueError, match="single-token query"):
+        _build(builder, common, [1])
 
 
 def test_mixed_batch_resets_only_the_entering_rows():
@@ -294,10 +304,10 @@ def test_cudagraph_scratch_widens_to_the_padded_batch():
 def test_ring_geometry_matches_the_page():
     builder = _create_spec_builder()
 
-    assert builder.max_spec_len == MAX_SPEC_LEN
+    assert builder.spec_query_len == SPEC_QUERY_LEN
     assert builder.spec_flush_threshold == FLUSH_THRESHOLD
     assert builder.spec_ring_len == RING_LEN
-    # ngroups is recovered from the page width: (conv_dim - d_inner) / dstate.
+    # ngroups comes directly from the shared head-major B cache.
     assert builder.decode_spec_bc_pre.shape[1] == NGROUPS
     assert builder.decode_spec_bc_pre.shape[2] == RING_LEN
 
@@ -310,11 +320,11 @@ def test_spec_page_shape_is_validated():
         method="ngram", num_speculative_tokens=NUM_SPEC
     )
     vllm_config.cache_config.use_replayssm_spec = True
-    # Five-tensor standard page instead of the four-tensor spec page.
+    # Missing the shared B cache tensor.
     bad_spec = MambaSpec(
         block_size=BLOCK_SIZE,
-        shapes=((1, 1), (1, 1, 1), (1, 8, 1), (1, 8), (1, 8, 1)),
+        shapes=((1, 1), (1, 1, 1), (1, 8, 1), (1, 8)),
         dtypes=(torch.float32,),
     )
-    with pytest.raises(ValueError, match="4-tensor Mamba2 page"):
+    with pytest.raises(ValueError, match="5-tensor Mamba2 page"):
         MockMambaBuilder(bad_spec, ["layer0"], vllm_config, DEVICE)

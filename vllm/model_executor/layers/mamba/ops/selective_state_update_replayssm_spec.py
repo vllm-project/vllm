@@ -13,20 +13,22 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 # ======================================================================
 # Fused scatter + precompute  (grid: (batch, ngroups))
 #
-# Scatters all conv_dim channels (x|B|C, partitioned by group) + dt of the
-# fresh spec tokens into the circular post-conv / dt caches at
-# ``(origin + write_pos + s) % buf``, and computes ``bc[k, s] = B_full[k] . C[s]``
-# over the window (history B from the cache + fresh spec B, no read-back).
+# Scatters fresh x/dt/B into the head-major circular caches at
+# ``(origin + write_pos + s) % buf`` and computes
+# ``bc[k, s] = B_full[k] . C[s]`` over the history + query window.
 # ======================================================================
 @triton.heuristics(
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])}
 )
 @triton.jit
 def _fused_scatter_precompute_kernel(
-    conv_out_ptr,  # (total_tokens, conv_dim) packed channel-last conv output
+    x_spec_ptr,  # (total_tokens, nheads, dim)
     dt_spec_ptr,  # (total_tokens, nheads) packed raw dt
-    post_conv_cache_ptr,  # (num_blocks, buf, conv_dim) circular paged
+    B_spec_ptr,  # (total_tokens, ngroups, dstate)
+    C_spec_ptr,  # (total_tokens, ngroups, dstate)
+    x_cache_ptr,  # (num_blocks, nheads, buf, dim) circular paged
     dt_cache_ptr,  # (num_blocks, nheads, buf) circular paged
+    B_cache_ptr,  # (num_blocks, ngroups, buf, dstate) circular paged
     write_pos_ptr,  # (num_state_slots,) block-keyed
     post_origin_ptr,  # (num_state_slots,) block-keyed
     bc_pre_ptr,  # (max_bs, ngroups, max_cache_len, block_spec) dense per-row scratch
@@ -36,20 +38,31 @@ def _fused_scatter_precompute_kernel(
     batch,
     ngroups,
     nheads,
+    dim,
     dstate,
-    d_inner,
-    conv_dim,
     max_cache_len,
-    stride_conv_out_tok,
-    stride_conv_out_c,
+    stride_x_spec_tok,
+    stride_x_spec_h,
+    stride_x_spec_dim,
     stride_dt_spec_tok,
     stride_dt_spec_h,
-    stride_post_conv_cache_b,
-    stride_post_conv_cache_pos,
-    stride_post_conv_cache_c,
+    stride_B_spec_tok,
+    stride_B_spec_group,
+    stride_B_spec_dstate,
+    stride_C_spec_tok,
+    stride_C_spec_group,
+    stride_C_spec_dstate,
+    stride_x_cache_b,
+    stride_x_cache_h,
+    stride_x_cache_pos,
+    stride_x_cache_dim,
     stride_dt_cache_b,
     stride_dt_cache_h,
     stride_dt_cache_pos,
+    stride_B_cache_b,
+    stride_B_cache_group,
+    stride_B_cache_pos,
+    stride_B_cache_dstate,
     stride_bc_pre_batch,
     stride_bc_pre_group,
     stride_bc_pre_pos,
@@ -82,54 +95,57 @@ def _fused_scatter_precompute_kernel(
     offs_n = tl.arange(0, BLOCK_SIZE_DSTATE)
     spec_valid = offs_s < spec_len
     nmask = offs_n < dstate
-    phys_spec = (post_origin + write_pos + offs_s) & (CACHE_BUF_LEN - 1)
+    phys_spec = (post_origin + write_pos + offs_s) % CACHE_BUF_LEN
 
-    b_c0 = d_inner + pid_g * dstate
-    c_c0 = d_inner + ngroups * dstate + pid_g * dstate
-
-    src_base = conv_out_ptr + bos * stride_conv_out_tok
+    B_src_base = B_spec_ptr + bos * stride_B_spec_tok + pid_g * stride_B_spec_group
+    C_src_base = C_spec_ptr + bos * stride_C_spec_tok + pid_g * stride_C_spec_group
     # fresh spec B / C  [S, N]
     B_spec = tl.load(
-        src_base
-        + (b_c0 + offs_n[None, :]) * stride_conv_out_c
-        + offs_s[:, None] * stride_conv_out_tok,
+        B_src_base
+        + offs_s[:, None] * stride_B_spec_tok
+        + offs_n[None, :] * stride_B_spec_dstate,
         mask=spec_valid[:, None] & nmask[None, :],
         other=0.0,
     )
     C_spec = tl.load(
-        src_base
-        + (c_c0 + offs_n[None, :]) * stride_conv_out_c
-        + offs_s[:, None] * stride_conv_out_tok,
+        C_src_base
+        + offs_s[:, None] * stride_C_spec_tok
+        + offs_n[None, :] * stride_C_spec_dstate,
         mask=spec_valid[:, None] & nmask[None, :],
         other=0.0,
     )
-    cache_base = post_conv_cache_ptr + state_batch_idx * stride_post_conv_cache_b
-    # scatter B (C is not cached; read fresh from conv_out)
+    B_cache_base = (
+        B_cache_ptr + state_batch_idx * stride_B_cache_b + pid_g * stride_B_cache_group
+    )
     tl.store(
-        cache_base
-        + phys_spec[:, None] * stride_post_conv_cache_pos
-        + (b_c0 + offs_n[None, :]) * stride_post_conv_cache_c,
+        B_cache_base
+        + phys_spec[:, None] * stride_B_cache_pos
+        + offs_n[None, :] * stride_B_cache_dstate,
         B_spec,
         mask=spec_valid[:, None] & nmask[None, :],
     )
 
-    # scatter x channels owned by this group: [g*RATIO_P, (g+1)*RATIO_P)
-    gx0 = pid_g * RATIO_P
+    # Reorder the token-major convolution output into a head-major x cache.
+    x_src_base = x_spec_ptr + bos * stride_x_spec_tok
+    x_cache_base = x_cache_ptr + state_batch_idx * stride_x_cache_b
     for i in tl.static_range(NCX):
         offs_cx = i * BLOCK_CX + tl.arange(0, BLOCK_CX)
         cxm = offs_cx < RATIO_P
-        gx = gx0 + offs_cx
+        gh = pid_g * RATIO + offs_cx // dim
+        offs_m = offs_cx % dim
         xv = tl.load(
-            src_base
-            + gx[None, :] * stride_conv_out_c
-            + offs_s[:, None] * stride_conv_out_tok,
+            x_src_base
+            + offs_s[:, None] * stride_x_spec_tok
+            + gh[None, :] * stride_x_spec_h
+            + offs_m[None, :] * stride_x_spec_dim,
             mask=spec_valid[:, None] & cxm[None, :],
             other=0.0,
         )
         tl.store(
-            cache_base
-            + phys_spec[:, None] * stride_post_conv_cache_pos
-            + gx[None, :] * stride_post_conv_cache_c,
+            x_cache_base
+            + gh[None, :] * stride_x_cache_h
+            + phys_spec[:, None] * stride_x_cache_pos
+            + offs_m[None, :] * stride_x_cache_dim,
             xv,
             mask=spec_valid[:, None] & cxm[None, :],
         )
@@ -159,28 +175,28 @@ def _fused_scatter_precompute_kernel(
     cache_valid = (offs_k < max_cache_len) & (offs_k < (write_pos + spec_len))
     spec_tok = (offs_k >= write_pos) & (offs_k < (write_pos + spec_len))
     spec_off = offs_k - write_pos
-    phys_k = (post_origin + offs_k) & (CACHE_BUF_LEN - 1)
+    phys_k = (post_origin + offs_k) % CACHE_BUF_LEN
     B_hist = tl.load(
-        cache_base
-        + phys_k[:, None] * stride_post_conv_cache_pos
-        + (b_c0 + offs_n[None, :]) * stride_post_conv_cache_c,
+        B_cache_base
+        + phys_k[:, None] * stride_B_cache_pos
+        + offs_n[None, :] * stride_B_cache_dstate,
         mask=hist_mask[:, None] & nmask[None, :],
         other=0.0,
     )
     B_specrows = tl.load(
-        src_base
-        + (b_c0 + offs_n[None, :]) * stride_conv_out_c
-        + spec_off[:, None] * stride_conv_out_tok,
+        B_src_base
+        + spec_off[:, None] * stride_B_spec_tok
+        + offs_n[None, :] * stride_B_spec_dstate,
         mask=spec_tok[:, None] & nmask[None, :],
         other=0.0,
     )
     B_full = tl.where(spec_tok[:, None], B_specrows, B_hist)
     B_full = tl.where(cache_valid[:, None], B_full.to(tl.float32), 0.0).to(
-        conv_out_ptr.dtype.element_ty
+        x_spec_ptr.dtype.element_ty
     )
     bc = tl.dot(
         B_full,
-        tl.trans(C_spec.to(conv_out_ptr.dtype.element_ty)),
+        tl.trans(C_spec.to(x_spec_ptr.dtype.element_ty)),
         input_precision="tf32x3",
     ).to(tl.float32)
     bc_ptrs = (
@@ -306,8 +322,8 @@ def _replayssm_spec_nf_kernel(
         & spec_token_mask[None, :]
         & (offs_k[None, :] <= spec_cache_pos[:, None])
     )
-    phys_k = (post_origin + offs_k) & (CACHE_BUF_LEN - 1)
-    phys_spec = (post_origin + spec_cache_pos) & (CACHE_BUF_LEN - 1)
+    phys_k = (post_origin + offs_k) % CACHE_BUF_LEN
+    phys_spec = (post_origin + spec_cache_pos) % CACHE_BUF_LEN
 
     state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
     x_cache_ptr += state_batch_idx * stride_x_cache_batch + pid_h * stride_x_cache_head
@@ -529,8 +545,15 @@ def _replayssm_spec_fl_kernel(
     ).to(tl.int64)
     if state_batch_idx == null_block_id:
         return
-    if tl.load(is_flush_flags_ptr + state_batch_idx) == 0:
+    # is_flush is 0 for verify, 1 for a regular flush of committed history,
+    # and 2 for the final single-token prompt chunk. Kind 2 additionally folds
+    # that certain current token into the checkpoint before the next cursor
+    # reset. It performs exactly one recurrence and is not valid for a
+    # multi-token query; the metadata builder enforces that constraint.
+    flush_kind = tl.load(is_flush_flags_ptr + state_batch_idx).to(tl.int32)
+    if flush_kind == 0:
         return
+    force_checkpoint = flush_kind > 1
     bos = tl.load(query_start_loc_ptr + pid_b).to(tl.int64)
     eos = tl.load(query_start_loc_ptr + pid_b + 1).to(tl.int64)
     spec_len = (eos - bos).to(tl.int32)
@@ -543,9 +566,10 @@ def _replayssm_spec_fl_kernel(
     offs_nt = tl.arange(0, DSTATE_TILE)
     spec_valid_mask = offs_s < spec_len
     spec_cache_pos = write_pos + offs_s
-    phys_spec = (post_origin + spec_cache_pos) & (CACHE_BUF_LEN - 1)
+    phys_spec = (post_origin + spec_cache_pos) % CACHE_BUF_LEN
     hist_mask = offs_k < write_pos
-    phys_h = (post_origin + offs_k) & (CACHE_BUF_LEN - 1)
+    phys_h = (post_origin + offs_k) % CACHE_BUF_LEN
+    force_pos = (post_origin + write_pos) % CACHE_BUF_LEN
 
     state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
     x_cache_ptr += state_batch_idx * stride_x_cache_batch + pid_h * stride_x_cache_head
@@ -612,6 +636,17 @@ def _replayssm_spec_fl_kernel(
         other=0.0,
     )
     x_hist_ty = x_hist.to(x_cache_ptr.dtype.element_ty)
+    x_force = tl.load(
+        x_cache_ptr + force_pos * stride_x_cache_pos + offs_m * stride_x_cache_dim,
+        mask=offs_m < dim,
+        other=0.0,
+    ).to(tl.float32)
+    dt_force = tl.load(dt_cache_ptr + force_pos * stride_dt_cache_pos).to(tl.float32)
+    if HAS_DT_BIAS:
+        dt_force += dt_bias_val
+    if DT_SOFTPLUS:
+        dt_force = tl.where(dt_force <= 20.0, softplus(dt_force), dt_force)
+    force_decay = tl.exp(tl.minimum(A_val * dt_force, 0.0))
 
     # Reconstruct S_1 = S_0 * hist_decay + (x_hist @ scaled B_hist), store it, and
     # accumulate the checkpoint readout S_1 @ C. dstate-tiled.
@@ -640,9 +675,22 @@ def _replayssm_spec_fl_kernel(
         )
         st = tl.load(st_ptrs, mask=(offs_m[:, None] < dim) & nmask[None, :], other=0.0)
         S1 = st.to(tl.float32) * hist_decay + delta
-        if write_pos > 0:
+        B_force = tl.load(
+            B_cache_ptr
+            + force_pos * stride_B_cache_pos
+            + offs_n * stride_B_cache_dstate,
+            mask=nmask,
+            other=0.0,
+        ).to(tl.float32)
+        forced_state = S1 * force_decay + x_force[:, None] * (
+            dt_force * B_force[None, :]
+        )
+        checkpoint_state = tl.where(force_checkpoint, forced_state, S1)
+        if write_pos > 0 or force_checkpoint:
             tl.store(
-                st_ptrs, S1.to(st.dtype), mask=(offs_m[:, None] < dim) & nmask[None, :]
+                st_ptrs,
+                checkpoint_state.to(st.dtype),
+                mask=(offs_m[:, None] < dim) & nmask[None, :],
             )
         c_mask = spec_valid_mask[:, None] & nmask[None, :]
         c_chunk = tl.load(
@@ -654,13 +702,14 @@ def _replayssm_spec_fl_kernel(
         ).to(tl.float32)
         if x_cache_ptr.dtype.element_ty == tl.float32:
             checkpoint_out += tl.dot(
-                S1, tl.trans(c_chunk), input_precision="tf32x3"
+                checkpoint_state, tl.trans(c_chunk), input_precision="tf32x3"
             ).to(tl.float32)
         else:
-            checkpoint_out += tl.dot(S1, tl.trans(c_chunk), input_precision="tf32").to(
-                tl.float32
-            )
-    checkpoint_out *= spec_decay[None, :]
+            checkpoint_out += tl.dot(
+                checkpoint_state, tl.trans(c_chunk), input_precision="tf32"
+            ).to(tl.float32)
+    checkpoint_scale = tl.where(force_checkpoint, 1.0, spec_decay)
+    checkpoint_out *= checkpoint_scale[None, :]
 
     # Intra-spec window contribution: intra = x_spec @ factor_intra (causal T x T).
     bc_spec = tl.load(
@@ -672,8 +721,7 @@ def _replayssm_spec_fl_kernel(
     ).to(tl.float32)
     dt_k = tl.load(
         dt_cache_ptr
-        + ((post_origin + write_pos + offs_k) & (CACHE_BUF_LEN - 1))
-        * stride_dt_cache_pos,
+        + ((post_origin + write_pos + offs_k) % CACHE_BUF_LEN) * stride_dt_cache_pos,
         mask=offs_k < spec_len,
         other=0.0,
     ).to(tl.float32)
@@ -689,12 +737,13 @@ def _replayssm_spec_fl_kernel(
         (offs_k[:, None] < spec_len)
         & spec_valid_mask[None, :]
         & (offs_k[:, None] <= offs_s[None, :])
+        & (force_checkpoint == 0)
     )
     decay_ks = tl.exp(tl.minimum(A_val * (spec_cum[None, :] - speccum_k[:, None]), 0.0))
     factor_intra = tl.where(causal, bc_spec * dt_k[:, None] * decay_ks, 0.0)
     x_src = tl.load(
         x_cache_ptr
-        + ((post_origin + write_pos + offs_k)[None, :] & (CACHE_BUF_LEN - 1))
+        + ((post_origin + write_pos + offs_k)[None, :] % CACHE_BUF_LEN)
         * stride_x_cache_pos
         + offs_m[:, None] * stride_x_cache_dim,
         mask=(offs_m[:, None] < dim) & (offs_k[None, :] < spec_len),
@@ -743,7 +792,7 @@ def _advance_write_pos_origin_kernel(
     batch,
     stride_state_indices_batch,
     MAX_CACHE_LEN: tl.constexpr,
-    MAX_SPEC_LEN: tl.constexpr,
+    SPEC_QUERY_LEN: tl.constexpr,
     CACHE_BUF_LEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -768,7 +817,7 @@ def _advance_write_pos_origin_kernel(
     total_commit = tl.where(valid, num_accepted, 0).to(tl.int32)
     flush_now = (total_commit > 0) & (is_flush_cur != 0)
     new_origin = tl.where(
-        flush_now, (post_origin + write_pos) & (CACHE_BUF_LEN - 1), post_origin
+        flush_now, (post_origin + write_pos) % CACHE_BUF_LEN, post_origin
     ).to(tl.int32)
     new_wp = tl.where(
         total_commit <= 0,
@@ -777,7 +826,7 @@ def _advance_write_pos_origin_kernel(
     ).to(tl.int32)
     # Early-flush one window early so every verify step satisfies
     # write_pos + spec_len <= max_cache_len (the spec window never overflows).
-    next_is_flush = ((new_wp + 2 * MAX_SPEC_LEN) > MAX_CACHE_LEN).to(tl.int8)
+    next_is_flush = ((new_wp + 2 * SPEC_QUERY_LEN) > MAX_CACHE_LEN).to(tl.int8)
     tl.store(post_origin_ptr + state_batch_idx, new_origin, mask=valid)
     tl.store(write_pos_ptr + state_batch_idx, new_wp, mask=valid)
     tl.store(is_flush_ptr + state_batch_idx, next_is_flush, mask=valid)
@@ -817,34 +866,33 @@ def _reset_replayssm_spec_cursors_kernel(
         tl.zeros_like(state_batch_idx).to(tl.int32),
         mask=do_reset,
     )
-    # A leftover single-token prompt chunk must flush this step: it appends one
-    # token to a freshly emptied ring, and without the flush the checkpoint never
-    # advances past it, so the next step's reset would drop that token.
+    # Value 2 tells the flush kernel to fold a single-token prompt chunk
+    # into the checkpoint before the next first-decode reset drops the ring.
     init_flag = tl.zeros_like(state_batch_idx).to(tl.int32) + INIT_IS_FLUSH
     tl.store(
         is_flush_ptr + state_batch_idx,
-        tl.where(force_flush != 0, 1, init_flag).to(tl.int8),
+        tl.where(force_flush != 0, 2, init_flag).to(tl.int8),
         mask=do_reset,
     )
 
 
 def selective_state_update_replayssm_spec(
     state_checkpoint: torch.Tensor,  # (num_blocks, H, P, N) checkpoint (flush updates in place)
-    post_conv_cache: torch.Tensor,  # (num_blocks, cache_buf_len, conv_dim) circular
+    x_cache: torch.Tensor,  # (num_blocks, H, cache_buf_len, P) circular
     dt_cache: torch.Tensor,  # (num_blocks, H, cache_buf_len) circular
-    conv_out: torch.Tensor,  # (total_tokens, conv_dim) packed channel-last post-conv
+    B_cache: torch.Tensor,  # (num_blocks, G, cache_buf_len, N) circular
+    x_spec: torch.Tensor,  # (total_tokens, H, P) packed post-conv x
     dt_spec: torch.Tensor,  # (total_tokens, H) packed raw dt
+    B_spec: torch.Tensor,  # (total_tokens, G, N) packed post-conv B
+    C_spec: torch.Tensor,  # (total_tokens, G, N) packed post-conv C
     A: torch.Tensor,  # (H, P, N) TIE_HDIM (A.stride(-1)==A.stride(-2)==0)
     write_pos: torch.Tensor,  # (num_state_slots,) int32 block-keyed cursor
     post_conv_state_pos: torch.Tensor,  # (num_state_slots,) int32 circular origin
     is_flush: torch.Tensor,  # (num_state_slots,) int8 block-keyed flag
     query_start_loc: torch.Tensor,  # (batch + 1,) int32 packed offsets
     state_batch_indices: torch.Tensor,  # (batch,) int32 physical block per row
-    max_cache_len: int,  # logical flush threshold L = B + max_spec_len
-    max_spec_len: int,
-    d_inner: int,
-    ngroups: int,
-    dstate: int,
+    max_cache_len: int,  # ring length L = B + spec_query_len
+    spec_query_len: int,
     D: torch.Tensor | None = None,
     z: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
@@ -853,45 +901,42 @@ def selective_state_update_replayssm_spec(
     bc_pre: torch.Tensor | None = None,
     null_block_id: int = NULL_BLOCK_ID,
 ) -> torch.Tensor:
-    """One Mamba2 speculative verify step on the paged CIRCULAR post-conv cache.
+    """Run one Mamba2 speculative verify step from a checkpoint and input ring.
 
-    Hybrid conv variant: ``conv_out`` is the post-conv output of vLLM's
-    ``causal_conv1d_update`` (packed channel-last ``[total_tokens, conv_dim]``).
-    ``max_cache_len`` is the logical flush threshold L = B + max_spec_len; the
-    physical pow2 buffer (= ``post_conv_cache.shape[1]`` = ``next_pow2(L)``) wraps
-    the ring, while the history/cache tile is ``next_pow2(L - max_spec_len)``.
-    Fuses scatter + bc-precompute in one ``(batch, ngroups)`` launch, then runs
-    two dedicated launches (verify + flush) with device-side row routing. Cursors
-    are block-keyed and advanced once per step by ``commit_replayssm_spec``.
+    A flush can fold only committed history because acceptance is known after
+    sampling. Its accepted query tail therefore survives in the ring. Advancing
+    ``post_conv_state_pos`` carries that tail in O(1) instead of copying it to
+    position zero or rereading the full state to fold it immediately.
     """
     num_blocks, nheads, dim, n_state = state_checkpoint.shape
+    total_tokens = x_spec.shape[0]
+    ngroups = B_spec.shape[1]
+    dstate = B_spec.shape[2]
+    cache_buf_len = x_cache.shape[2]
     assert n_state == dstate
-    total_tokens, conv_dim = conv_out.shape
-    buf = post_conv_cache.shape[1]
-    cache_buf_len = buf
-    assert cache_buf_len & (cache_buf_len - 1) == 0, (
-        "cache_buf_len must be a power of two"
-    )
-    assert d_inner == nheads * dim
-    cache_conv_dim = d_inner + ngroups * dstate  # x|B only (no C)
-    assert post_conv_cache.shape == (num_blocks, buf, cache_conv_dim)
-    assert dt_cache.shape == (num_blocks, nheads, buf)
+    assert cache_buf_len == max_cache_len
+    assert x_cache.shape == (num_blocks, nheads, cache_buf_len, dim)
+    assert dt_cache.shape == (num_blocks, nheads, cache_buf_len)
+    assert B_cache.shape == (num_blocks, ngroups, cache_buf_len, dstate)
+    assert x_spec.shape == (total_tokens, nheads, dim)
     assert dt_spec.shape == (total_tokens, nheads)
+    assert B_spec.shape == C_spec.shape == (total_tokens, ngroups, dstate)
+    assert nheads % ngroups == 0
     assert A.shape == (nheads, dim, dstate) and A.stride(-1) == 0 and A.stride(-2) == 0
     batch = state_batch_indices.shape[0]
     assert query_start_loc.shape[0] == batch + 1
 
     if out is None:
         out = torch.empty(
-            total_tokens, nheads, dim, device=conv_out.device, dtype=conv_out.dtype
+            total_tokens, nheads, dim, device=x_spec.device, dtype=x_spec.dtype
         )
     if total_tokens == 0:
         return out
 
     L = max_cache_len
-    base_block = max(1, L - max_spec_len)
+    base_block = max(1, L - spec_query_len)
     main_block = max(16, triton.next_power_of_2(base_block))  # history/cache tile
-    block_spec = max(1, triton.next_power_of_2(max_spec_len))
+    block_spec = max(1, triton.next_power_of_2(spec_query_len))
     pre_block = max(16, triton.next_power_of_2(L))  # precompute window tile
     block_dstate = triton.next_power_of_2(dstate)
 
@@ -910,10 +955,10 @@ def selective_state_update_replayssm_spec(
         bc_pre = torch.empty(
             batch,
             ngroups,
-            buf,
+            L,
             block_spec,
-            device=conv_out.device,
-            dtype=conv_out.dtype,
+            device=x_spec.device,
+            dtype=torch.float32,
         )
     else:
         # The kernels index bc_pre with its raw strides on a (batch, ngroups)
@@ -935,12 +980,15 @@ def selective_state_update_replayssm_spec(
     BLOCK_CX = 256
     NCX = triton.cdiv(ratio_p, BLOCK_CX)
     block_hl = max(1, triton.next_power_of_2(ratio))
-    with torch.accelerator.device_index(conv_out.device.index):
+    with torch.accelerator.device_index(x_spec.device.index):
         _fused_scatter_precompute_kernel[(batch, ngroups)](
-            conv_out,
+            x_spec,
             dt_spec,
-            post_conv_cache,
+            B_spec,
+            C_spec,
+            x_cache,
             dt_cache,
+            B_cache,
             write_pos,
             post_conv_state_pos,
             bc_pre,
@@ -950,20 +998,31 @@ def selective_state_update_replayssm_spec(
             batch,
             ngroups,
             nheads,
+            dim,
             dstate,
-            d_inner,
-            conv_dim,
             L,
-            conv_out.stride(0),
-            conv_out.stride(1),
+            x_spec.stride(0),
+            x_spec.stride(1),
+            x_spec.stride(2),
             dt_spec.stride(0),
             dt_spec.stride(1),
-            post_conv_cache.stride(0),
-            post_conv_cache.stride(1),
-            post_conv_cache.stride(2),
+            B_spec.stride(0),
+            B_spec.stride(1),
+            B_spec.stride(2),
+            C_spec.stride(0),
+            C_spec.stride(1),
+            C_spec.stride(2),
+            x_cache.stride(0),
+            x_cache.stride(1),
+            x_cache.stride(2),
+            x_cache.stride(3),
             dt_cache.stride(0),
             dt_cache.stride(1),
             dt_cache.stride(2),
+            B_cache.stride(0),
+            B_cache.stride(1),
+            B_cache.stride(2),
+            B_cache.stride(3),
             bc_pre.stride(0),
             bc_pre.stride(1),
             bc_pre.stride(2),
@@ -980,29 +1039,16 @@ def selective_state_update_replayssm_spec(
             num_warps=4,
         )
 
-    # views into the paged circular post-conv cache: x | B | C on the channel axis
-    x_view = (
-        post_conv_cache[:, :, :d_inner]
-        .view(num_blocks, buf, nheads, dim)
-        .permute(0, 2, 1, 3)
-    )
-    B_view = (
-        post_conv_cache[:, :, d_inner : d_inner + ngroups * dstate]
-        .view(num_blocks, buf, ngroups, dstate)
-        .permute(0, 2, 1, 3)
-    )
-    # C is not cached; the kernels read it fresh from this conv_out slice.
-    C_src = conv_out[:, d_inner + ngroups * dstate :]
     z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
 
     def _args(bsm):
         grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), batch, nheads)
         return grid, (
             state_checkpoint,
-            x_view,
+            x_cache,
             dt_cache,
-            B_view,
-            C_src,
+            B_cache,
+            C_spec,
             bc_pre,
             D,
             z,
@@ -1025,19 +1071,19 @@ def selective_state_update_replayssm_spec(
             state_checkpoint.stride(1),
             state_checkpoint.stride(2),
             state_checkpoint.stride(3),
-            x_view.stride(0),
-            x_view.stride(1),
-            x_view.stride(3),
-            x_view.stride(2),
+            x_cache.stride(0),
+            x_cache.stride(1),
+            x_cache.stride(3),
+            x_cache.stride(2),
             dt_cache.stride(0),
             dt_cache.stride(1),
             dt_cache.stride(2),
-            B_view.stride(0),
-            B_view.stride(1),
-            B_view.stride(3),
-            B_view.stride(2),
-            C_src.stride(0),
-            C_src.stride(1),
+            B_cache.stride(0),
+            B_cache.stride(1),
+            B_cache.stride(3),
+            B_cache.stride(2),
+            C_spec.stride(0),
+            C_spec.stride(2),
             bc_pre.stride(0),
             bc_pre.stride(1),
             bc_pre.stride(2),
@@ -1090,8 +1136,8 @@ def commit_replayssm_spec(
     num_accepted_tokens: torch.Tensor,  # (batch,) int32, INCLUDES bonus (min 1)
     state_batch_indices: torch.Tensor,  # (batch,) int32
     max_cache_len: int,  # logical flush threshold L
-    max_spec_len: int,
-    cache_buf_len: int | None = None,  # physical pow2 buffer next_pow2(L)
+    spec_query_len: int,
+    cache_buf_len: int | None = None,
     null_block_id: int = NULL_BLOCK_ID,
 ) -> None:
     """CUDA-graph-safe block-keyed commit. Advances ``write_pos`` and the circular
@@ -1099,7 +1145,7 @@ def commit_replayssm_spec(
     ``is_flush``. Maps vLLM ``num_accepted_tokens`` (incl. bonus) to the commit."""
     batch = state_batch_indices.shape[0]
     if cache_buf_len is None:
-        cache_buf_len = max(1, triton.next_power_of_2(max_cache_len))
+        cache_buf_len = max_cache_len
     BLOCK = max(1, triton.next_power_of_2(batch))
     with torch.accelerator.device_index(write_pos.device.index):
         _advance_write_pos_origin_kernel[(1,)](
@@ -1112,7 +1158,7 @@ def commit_replayssm_spec(
             batch,
             state_batch_indices.stride(0),
             MAX_CACHE_LEN=max_cache_len,
-            MAX_SPEC_LEN=max_spec_len,
+            SPEC_QUERY_LEN=spec_query_len,
             CACHE_BUF_LEN=cache_buf_len,
             BLOCK_SIZE=BLOCK,
             num_warps=1,
@@ -1126,16 +1172,16 @@ def reset_replayssm_spec_cursors(
     first_decode_mask: torch.Tensor,  # (batch,) int8
     state_batch_indices: torch.Tensor,  # (batch,) int32
     max_cache_len: int,  # logical flush threshold L
-    max_spec_len: int,
+    spec_query_len: int,
     force_flush_mask: torch.Tensor | None = None,  # (batch,) int8, subset of first
     null_block_id: int = NULL_BLOCK_ID,
 ) -> None:
     """Prefill->decode reset for first-decode rows (block-keyed). Seeds the
-    initial ``is_flush`` to match the steady-state early-flush cadence, or to 1
+    initial ``is_flush`` to match the steady-state early-flush cadence, or to 2
     for rows in ``force_flush_mask``."""
     batch = state_batch_indices.shape[0]
     BLOCK = max(1, triton.next_power_of_2(batch))
-    init_is_flush = 1 if 2 * max_spec_len > max_cache_len else 0
+    init_is_flush = 1 if 2 * spec_query_len > max_cache_len else 0
     if force_flush_mask is None:
         force_flush_mask = torch.zeros_like(first_decode_mask)
     with torch.accelerator.device_index(write_pos.device.index):

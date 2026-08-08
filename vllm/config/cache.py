@@ -148,23 +148,20 @@ class CacheConfig:
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM history buffer length B: with use_replayssm, standard decode
     caches recent SSM inputs in a size-B ring buffer and flushes the checkpoint
-    state to HBM every B steps. With use_replayssm_spec, B is the maximum history
-    the ring carries into a verify step, so the flush rule is
+    state to HBM every B steps. With speculative decoding, B is the maximum
+    history the ring carries into a verify step, so the flush rule is
     history + 1 + num_speculative_tokens > B. Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
     Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    mamba backend; standard (non-speculative) decode only. In align mode flushes
-    are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
-    but this is not required."""
-    use_replayssm_spec: bool = False
-    """Use the ReplaySSM Mamba2 speculative-decode kernel: verify a whole draft
-    window against one checkpoint plus a circular input ring, so rollback is a
-    cursor move instead of a per-draft state snapshot. Requires speculative
-    decoding, mamba_cache_mode 'none' and the Triton mamba backend; mutually
-    exclusive with use_replayssm. replayssm_buffer_len must be at least
-    1 + num_speculative_tokens."""
+    mamba backend. Speculative decoding selects the cached verify kernel
+    automatically and requires mamba_cache_mode 'none'. In align mode, standard
+    decode flushes are most efficient when mamba_block_size is a multiple of
+    replayssm_buffer_len, but this is not required."""
+    use_replayssm_spec: bool = field(default=False, init=False)
+    """Whether ReplaySSM uses its speculative-decode path. Derived from
+    use_replayssm and the speculative configuration by VllmConfig."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

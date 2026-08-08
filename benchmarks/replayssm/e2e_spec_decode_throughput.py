@@ -9,7 +9,7 @@ the ReplaySSM-spec speedup over both baselines.
 
   standard : no speculative decoding
   spec     : vLLM native spec decoding (one recurrent state per draft token)
-  cache    : ReplaySSM cached spec decoding (use_replayssm_spec)
+  cache    : ReplaySSM cached spec decoding (use_replayssm + speculative config)
 
 Each mode runs in its own subprocess for a clean CUDA context.
 
@@ -51,7 +51,7 @@ def parse_args():
         "--buffer-len",
         type=int,
         default=16,
-        help="ReplaySSM buffer length (power of two, >= 1 + num_spec).",
+        help="ReplaySSM buffer length (>= 1 + num_spec).",
     )
     p.add_argument("--max-tokens", type=int, default=256)
     p.add_argument("--max-model-len", type=int, default=2048)
@@ -184,7 +184,7 @@ def run_worker(args):
             spec_cfg["moe_backend"] = args.moe_backend
         llm_kwargs["speculative_config"] = spec_cfg
     if mode == "cache":
-        llm_kwargs["use_replayssm_spec"] = True
+        llm_kwargs["use_replayssm"] = True
         llm_kwargs["replayssm_buffer_len"] = args.buffer_len
 
     llm = LLM(**llm_kwargs)
