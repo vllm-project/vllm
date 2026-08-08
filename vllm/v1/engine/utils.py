@@ -4,6 +4,7 @@
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -1228,6 +1229,7 @@ def wait_for_engine_startup(
     conn_pending, start_pending = [local_count, remote_count], [0, 0]
     poller = zmq.Poller()
     poller.register(handshake_socket, zmq.POLLIN)
+    deadline = time.monotonic() + envs.VLLM_ENGINE_READY_TIMEOUT_S
 
     remote_should_be_headless = (
         not parallel_config.data_parallel_hybrid_lb
@@ -1250,7 +1252,16 @@ def wait_for_engine_startup(
         poller.register(fd, zmq.POLLIN)
 
     while any(conn_pending) or any(start_pending):
-        events = poller.poll(STARTUP_POLL_PERIOD_MS)
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            raise TimeoutError(
+                f"Timed out after {envs.VLLM_ENGINE_READY_TIMEOUT_S}s waiting "
+                f"for engine core process(es) to start. This may be due "
+                f"to slow model loading or first-time kernel compilation "
+                f"on new hardware. To increase the timeout, set the "
+                f"environment variable: VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
+            )
+        events = poller.poll(min(STARTUP_POLL_PERIOD_MS, remaining_s * 1000))
         if not events:
             if any(conn_pending):
                 logger.debug(
