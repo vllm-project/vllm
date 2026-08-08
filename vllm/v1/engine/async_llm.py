@@ -748,6 +748,8 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
+    _MAX_KV_TRANSFER_TP_SIZE = 4096
+
     async def notify_kv_transfer_request_rejected(
         self,
         request_id: str,
@@ -758,6 +760,19 @@ class AsyncLLM(EngineClient):
         """Submit a pre-aborted request so the connector's request_finished
         hook runs to free any pre-admission KV-transfer resources (e.g. NIXL
         prefill blocks pinned on the P node)."""
+        tp_size = kv_transfer_params.get("tp_size", 1)
+        if (
+            not isinstance(tp_size, int)
+            or tp_size < 1
+            or tp_size > self._MAX_KV_TRANSFER_TP_SIZE
+        ):
+            logger.warning(
+                "Skipping KV transfer rejection cleanup for request %s: "
+                "invalid tp_size %r",
+                request_id,
+                tp_size,
+            )
+            return
         request = EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=[0],

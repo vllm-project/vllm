@@ -3325,3 +3325,123 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
         )
+
+
+class TestTransferTopologyBounds:
+    """Validate that tp_ratio rejects out-of-range remote_tp_size values."""
+
+    def _make_topo(self, tp_size: int = 1) -> TransferTopology:
+        vllm_config = create_vllm_config()
+        with set_current_vllm_config(vllm_config):
+            attn_backend = get_current_attn_backend()
+        return TransferTopology(
+            tp_rank=0,
+            tp_size=tp_size,
+            block_size=16,
+            engine_id="test-engine",
+            is_mla=False,
+            is_mamba=False,
+            total_num_kv_heads=1,
+            attn_backends=[attn_backend],
+        )
+
+    def test_tp_ratio_rejects_zero(self):
+        topo = self._make_topo()
+        with pytest.raises(ValueError, match="must be >= 1"):
+            topo.tp_ratio(0)
+
+    def test_tp_ratio_rejects_negative(self):
+        topo = self._make_topo()
+        with pytest.raises(ValueError, match="must be >= 1"):
+            topo.tp_ratio(-1)
+
+    def test_tp_ratio_rejects_huge_value(self):
+        topo = self._make_topo()
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            topo.tp_ratio(20_000_000)
+
+    def test_tp_ratio_accepts_valid(self):
+        topo = self._make_topo(tp_size=4)
+        assert topo.tp_ratio(4) == 1
+        assert topo.tp_ratio(2) == 2
+        assert topo.tp_ratio(1) == 4
+
+    def test_handshake_target_ranks_bounded(self):
+        topo = self._make_topo()
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            topo.handshake_target_ranks(20_000_000)
+
+    def test_handshake_target_ranks_valid(self):
+        topo = self._make_topo()
+        ranks = topo.handshake_target_ranks(1)
+        assert ranks == [0]
+
+
+class TestNixlMetadataValidation:
+    """Validate that NixlConnectorMetadata rejects invalid tp/pp_size."""
+
+    def test_add_new_req_rejects_huge_tp_size(self):
+        meta = NixlConnectorMetadata()
+        with pytest.raises(ValueError, match="Invalid tp_size"):
+            meta.add_new_req_to_recv(
+                request_id="test-req",
+                local_block_ids=[0, 1],
+                kv_transfer_params=dict(
+                    tp_size=20_000_000,
+                    remote_block_ids=[[0]],
+                    remote_engine_id="e",
+                    remote_request_id="r",
+                    remote_host="127.0.0.1",
+                    remote_port=1234,
+                ),
+            )
+
+    def test_add_new_req_rejects_zero_tp_size(self):
+        meta = NixlConnectorMetadata()
+        with pytest.raises(ValueError, match="Invalid tp_size"):
+            meta.add_new_req_to_recv(
+                request_id="test-req",
+                local_block_ids=[0, 1],
+                kv_transfer_params=dict(
+                    tp_size=0,
+                    remote_block_ids=[[0]],
+                    remote_engine_id="e",
+                    remote_request_id="r",
+                    remote_host="127.0.0.1",
+                    remote_port=1234,
+                ),
+            )
+
+    def test_add_new_req_rejects_huge_pp_size(self):
+        meta = NixlConnectorMetadata()
+        with pytest.raises(ValueError, match="Invalid pp_size"):
+            meta.add_new_req_to_recv(
+                request_id="test-req",
+                local_block_ids=[0, 1],
+                kv_transfer_params=dict(
+                    tp_size=1,
+                    pp_size=10_000,
+                    remote_block_ids=[[0]],
+                    remote_engine_id="e",
+                    remote_request_id="r",
+                    remote_host="127.0.0.1",
+                    remote_port=1234,
+                ),
+            )
+
+    def test_add_new_req_accepts_valid_params(self):
+        meta = NixlConnectorMetadata()
+        meta.add_new_req_to_recv(
+            request_id="test-req",
+            local_block_ids=[0, 1],
+            kv_transfer_params=dict(
+                tp_size=4,
+                pp_size=2,
+                remote_block_ids=[[0]],
+                remote_engine_id="e",
+                remote_request_id="r",
+                remote_host="127.0.0.1",
+                remote_port=1234,
+            ),
+        )
+        assert "test-req" in meta.reqs_to_recv
