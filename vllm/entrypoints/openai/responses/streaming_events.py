@@ -1023,10 +1023,11 @@ def emit_simple_tool_call_open(
     name: str,
     index: int | None,
     namespace: str | None = None,
+    call_id: str | None = None,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.TOOL_CALL
     state.current_item_id = random_uuid()
-    state.tool_call_id = f"call_{random_uuid()}"
+    state.tool_call_id = call_id or f"call_{random_uuid()}"
     state.tool_call_name = name
     state.tool_call_namespace = namespace
     state.tool_call_index = index
@@ -1249,6 +1250,7 @@ class SimpleStreamingEventProcessor:
                 call_name.name,
                 tool_call.index,
                 call_name.namespace,
+                tool_call.id,
             )
         return handlers.open_fn(self.state)
 
