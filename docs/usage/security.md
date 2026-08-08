@@ -165,6 +165,7 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/messages` - Anthropic-compatible messages API
 - `/v1/messages/count_tokens` - Count tokens for Anthropic messages
 - `/v1/responses` - Create a response
+- `/v1/responses/render` - Render a self-contained response request
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
