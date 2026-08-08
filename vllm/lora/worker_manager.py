@@ -135,6 +135,8 @@ class WorkerLoRAManager:
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
             if hf_to_vllm_mapper is not None:
                 hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
+                # Shared MM/CondGen text-LoRA fallback (see WeightsMapper).
+                hf_to_vllm_mapper = hf_to_vllm_mapper.with_mm_text_lora_fallback()
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
