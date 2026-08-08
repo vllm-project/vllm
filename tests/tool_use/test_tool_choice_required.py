@@ -9,6 +9,8 @@ from openai.types.responses import FunctionTool, WebSearchTool
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
@@ -68,11 +70,18 @@ EXAMPLE_TOOLS = [
 
 
 def _compile_and_check(
-    tools: list[ChatCompletionToolsParam], sample_output, should_match: bool
+    tools: list[ChatCompletionToolsParam],
+    sample_output,
+    should_match: bool,
+    parallel_tool_calls: bool | None = None,
 ):
     # self = MagicMock(tool_choice="required", tools=tools)
     # schema = ChatCompletionRequest._get_json_schema_from_tool(self)
-    schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+    schema = get_json_schema_from_tools(
+        tools=tools,
+        tool_choice="required",
+        parallel_tool_calls=parallel_tool_calls,
+    )
     assert isinstance(schema, dict)
 
     # use build_regex_from_schema used in JSONLogitsProcessor to create Guide
@@ -394,3 +403,57 @@ class TestNonFunctionToolsSkipped:
         any_of = schema["items"]["anyOf"]
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
+
+
+class TestParallelToolCallsConstraint:
+    """`parallel_tool_calls=false` must be enforced by the decoding grammar.
+
+    Without a `maxItems` bound the model is free to emit an unbounded run of
+    tool calls that are only discarded afterwards, wasting the token budget and
+    risking truncation of the one call the client actually receives."""
+
+    TOOLS = TypeAdapter(list[ChatCompletionToolsParam]).validate_python(EXAMPLE_TOOLS)
+    ONE_CALL = [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}]
+    TWO_CALLS = [
+        {"name": "get_current_weather", "parameters": {"city": "Vienna"}},
+        {"name": "get_current_weather", "parameters": {"city": "Berlin"}},
+    ]
+
+    def test_disabled_rejects_a_second_tool_call(self):
+        _compile_and_check(self.TOOLS, self.ONE_CALL, True, parallel_tool_calls=False)
+        _compile_and_check(self.TOOLS, self.TWO_CALLS, False, parallel_tool_calls=False)
+
+    @pytest.mark.parametrize("parallel_tool_calls", [True, None])
+    def test_enabled_or_unset_still_allows_multiple(self, parallel_tool_calls):
+        _compile_and_check(
+            self.TOOLS,
+            self.TWO_CALLS,
+            True,
+            parallel_tool_calls=parallel_tool_calls,
+        )
+
+    @pytest.mark.parametrize(
+        "parallel_tool_calls,expected",
+        [(False, 1), (True, None), (None, None)],
+    )
+    def test_max_items_bound(self, parallel_tool_calls, expected):
+        schema = get_json_schema_from_tools(
+            tools=self.TOOLS,
+            tool_choice="required",
+            parallel_tool_calls=parallel_tool_calls,
+        )
+        assert isinstance(schema, dict)
+        assert schema["minItems"] == 1
+        assert schema.get("maxItems") == expected
+
+    def test_forced_named_tool_is_unaffected(self):
+        # Named tool choice yields a bare parameters object, never an array.
+        schema = get_json_schema_from_tools(
+            tools=self.TOOLS,
+            tool_choice=ChatCompletionNamedToolChoiceParam(
+                function=ChatCompletionNamedFunction(name="get_current_weather")
+            ),
+            parallel_tool_calls=False,
+        )
+        assert isinstance(schema, dict)
+        assert "maxItems" not in schema
