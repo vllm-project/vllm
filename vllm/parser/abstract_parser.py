@@ -540,9 +540,14 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
+        reasoning_enabled = self._reasoning_parser is not None
+        ctk = getattr(request, "chat_template_kwargs", None) or {}
+        if "enable_thinking" in ctk:
+            reasoning_enabled = bool(ctk["enable_thinking"])
+
         structure_tag = self._tool_parser.get_structural_tag(
             request,
-            reasoning=False,
+            reasoning=reasoning_enabled,
         )
         if structure_tag is None:
             return request
