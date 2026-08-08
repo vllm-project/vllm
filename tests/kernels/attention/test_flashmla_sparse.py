@@ -824,7 +824,8 @@ def test_sparse_mla_offload_operator_path_eager_writer_and_follower():
             )
         )
         assert torch.equal(
-            follower.buffers["resident_main_kv"][request, 34:], expected_payload
+            follower.buffers["resident_main_kv"][request, 34:].cpu(),
+            expected_payload,
         )
     torch.testing.assert_close(
         follower.output, follower_reference, rtol=2e-2, atol=2e-2
@@ -835,7 +836,9 @@ def test_sparse_mla_offload_operator_path_eager_writer_and_follower():
     torch.accelerator.synchronize()
     writer_reference = _full_sparse_mla_reference(writer, 2)
     for request, physical_block in enumerate((1, 3)):
-        assert torch.equal(writer.host[physical_block, 63], writer.current[request])
+        assert torch.equal(
+            writer.host[physical_block, 63], writer.current[request].cpu()
+        )
     for name in (
         "resident_main_kv",
         "resident_logical_ids",
@@ -964,7 +967,7 @@ def test_sparse_mla_offload_operator_path_eager_writer_and_follower():
     torch.accelerator.synchronize()
     for request, physical_block in enumerate((1, 3)):
         assert torch.equal(
-            all_padding.host[physical_block, 63], all_padding.current[request]
+            all_padding.host[physical_block, 63], all_padding.current[request].cpu()
         )
 
     mismatched = _make_sparse_mla_offload_case(64, writer=True)
