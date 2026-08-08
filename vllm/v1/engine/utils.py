@@ -1132,7 +1132,6 @@ def launch_core_engines(
         and dp_rank == 0
         and local_engine_count > 0
         and not parallel_config.enable_elastic_ep
-        and not parallel_config._coord_store_port
     ):
         from vllm.distributed.utils import create_tcp_store
 
