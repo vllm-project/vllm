@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from typing import Any
 
-import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -27,11 +27,39 @@ GetHandlerFn = Callable[[Request], BaseServing | None]
 EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
 
 
+def _snapshot_handler_levels() -> list[tuple[logging.Handler, int]]:
+    """Snapshot handler levels for loggers that may be affected by third-party
+    logging configuration side effects (e.g. model_hosting_container_standards
+    calling configure_root_logger() at import time)."""
+    loggers = [logging.getLogger(), logging.getLogger("vllm")]
+    seen: set[int] = set()
+    snapshot: list[tuple[logging.Handler, int]] = []
+    for logger in loggers:
+        for handler in logger.handlers:
+            if id(handler) not in seen:
+                seen.add(id(handler))
+                snapshot.append((handler, handler.level))
+    return snapshot
+
+
+def _restore_handler_levels(
+    snapshot: list[tuple[logging.Handler, int]],
+) -> None:
+    """Restore handler levels from a snapshot."""
+    for handler, level in snapshot:
+        handler.setLevel(level)
+
+
 def attach_router(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
+    snapshot = _snapshot_handler_levels()
+    import model_hosting_container_standards.sagemaker as sagemaker_standards
+
+    _restore_handler_levels(snapshot)
+
     router = APIRouter()
 
     # NOTE: Construct the TypeAdapters only once
@@ -99,4 +127,9 @@ def attach_router(
 
 
 def sagemaker_standards_bootstrap(app: FastAPI) -> FastAPI:
+    snapshot = _snapshot_handler_levels()
+    import model_hosting_container_standards.sagemaker as sagemaker_standards
+
+    _restore_handler_levels(snapshot)
+
     return sagemaker_standards.bootstrap(app)
