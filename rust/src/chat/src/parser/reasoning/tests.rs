@@ -16,12 +16,14 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
     assert!(factory.contains(names::GEMMA4));
+    assert!(factory.contains(names::HOLO2));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
     assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
     assert!(factory.list().contains(&names::GEMMA4.to_string()));
+    assert!(factory.list().contains(&names::HOLO2.to_string()));
 }
 
 #[test]
@@ -34,6 +36,15 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
     assert_eq!(
         factory.resolve_name_for_model("deepseek_v4"),
         Some(names::DEEPSEEK_V4)
+    );
+}
+
+#[test]
+fn factory_resolves_holo2() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("HCompany/Holo2-4B"),
+        Some(names::HOLO2)
     );
 }
 

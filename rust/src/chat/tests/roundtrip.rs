@@ -293,6 +293,19 @@ impl RoundtripCase {
             sort_json_keys: true,
         }
     }
+
+    /// Holo2 with `<think>` / `</think>` reasoning tags.
+    fn holo2() -> Self {
+        Self {
+            model_id: "HCompany/Holo2-4B",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: spaced_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
@@ -333,6 +346,7 @@ roundtrip_tests! {
     kimi_k3 => [tool_call_mix],
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
+    holo2 => [reasoning_and_content],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
