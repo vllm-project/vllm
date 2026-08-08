@@ -564,7 +564,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Activation ops
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
-      "y_q, Tensor! y_s, bool use_ue8m0) -> ()");
+      "y_q, Tensor! y_s, bool use_ue8m0, float situ_beta, "
+      "float situ_linear_beta) -> ()");
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
 
   // Activation function used in SwiGLU.

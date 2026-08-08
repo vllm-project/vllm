@@ -137,10 +137,16 @@ def persistent_masked_m_silu_mul_quant(
     num_parallel_tokens=16,
     group_size: int = 128,
     quant_scale_fmt: DeepGemmQuantScaleFMT = DeepGemmQuantScaleFMT.FLOAT32,
+    situ_beta: float = 0.0,
+    situ_linear_beta: float = -1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
+    """Quantize act(y[..., :H]) * y[..., H:] to FP8 with group per-token scales.
+
+    When situ_beta > 0, uses SiTU activation instead of SiLU.
+
     y has shape (E, T, 2*H). The first half of the last dimension is
-    silu-activated, multiplied by the second half, then quantized into FP8.
+    activated (SiLU or SiTU), multiplied by the second half, then
+    quantized into FP8.
     We launch a fixed grid of threads to accommodate CUDA graphs. Let `P2`
     be a parallelization factor for persistent_masked_m_silu_mul_quant over the
     hidden dimension.
@@ -217,7 +223,7 @@ def persistent_masked_m_silu_mul_quant(
 
     if current_platform.is_cuda() and cuda_arch >= 80:
         torch.ops._C.persistent_masked_m_silu_mul_quant(
-            y, tokens_per_expert, y_q, y_s, ceil_ue8m0
+            y, tokens_per_expert, y_q, y_s, ceil_ue8m0, situ_beta, situ_linear_beta
         )
     else:
         # Triton fallback for ROCm -- the C++ kernel is guarded by
@@ -311,7 +317,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.SITU)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -432,10 +438,14 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         )
 
         quant_scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
+        situ_beta = self.moe_config.activation_situ_beta or 0.0
+        situ_linear_beta = self.moe_config.activation_situ_linear_beta or -1.0
         a2q, a2q_scale = persistent_masked_m_silu_mul_quant(
             workspace1,
             expert_num_tokens,
             quant_scale_fmt=quant_scale_fmt,
+            situ_beta=situ_beta if activation == MoEActivation.SITU else 0.0,
+            situ_linear_beta=situ_linear_beta,
         )
 
         fp8_m_grouped_gemm_nt_masked(

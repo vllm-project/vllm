@@ -272,7 +272,7 @@ __device__ __forceinline__ void token_bounds(int32_t n_tokens,
 
 template <int BLOCK_COUNT, int SMEM_SIZE_BYTES_Y, typename fp8_type,
           typename scale_t, int THREADS, typename Idx_t, bool CEIL_UE8M0,
-          int GROUP_SIZE = 128, int NUM_STAGES = 3>
+          bool USE_SITU = false, int GROUP_SIZE = 128, int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
     scale_t* __restrict__ _y_s, const int32_t* __restrict__ tokens_per_expert,
@@ -281,7 +281,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
-    Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e) {
+    Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e,
+    float situ_beta, float situ_linear_beta) {
 #ifndef USE_ROCM
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
 
@@ -351,6 +352,15 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   int32_t compute_pipeline_offset_64 = 0;
   int32_t load_stage_offset{};
   const __nv_bfloat16 one_bf16 = __float2bfloat16_rn(1.f);
+
+  // SiTU activation constants (only used when USE_SITU == true).
+  float inv_situ_beta{}, inv_situ_linear_beta{};
+  bool situ_clamp_up{};
+  if constexpr (USE_SITU) {
+    inv_situ_beta = 1.0f / situ_beta;
+    situ_clamp_up = situ_linear_beta > 0.0f;
+    inv_situ_linear_beta = situ_clamp_up ? 1.0f / situ_linear_beta : 0.0f;
+  }
 
   __int64_t* smem_compute_ptr = reinterpret_cast<__int64_t*>(smem_128) +
                                 warp_id * (2 * (GROUP_SIZE / 4) * NUM_STAGES) +
@@ -504,8 +514,25 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   #pragma unroll
       for (int32_t k = 0; k < 2; ++k) {
-        __nv_bfloat162 gate = silu2_v2(__bfloat1622float2(s_gate_comp[k]));
-        res[k] = __hmul2(gate, s_up_comp[k]);
+        if constexpr (!USE_SITU) {
+          __nv_bfloat162 gate = silu2_v2(__bfloat1622float2(s_gate_comp[k]));
+          res[k] = __hmul2(gate, s_up_comp[k]);
+        } else {
+          float2 g = __bfloat1622float2(s_gate_comp[k]);
+          float2 u = __bfloat1622float2(s_up_comp[k]);
+          float g0 =
+              situ_beta * tanhf(g.x * inv_situ_beta) / (1.f + expf(-g.x));
+          float g1 =
+              situ_beta * tanhf(g.y * inv_situ_beta) / (1.f + expf(-g.y));
+          float u0 = situ_clamp_up
+                         ? situ_linear_beta * tanhf(u.x * inv_situ_linear_beta)
+                         : u.x;
+          float u1 = situ_clamp_up
+                         ? situ_linear_beta * tanhf(u.y * inv_situ_linear_beta)
+                         : u.y;
+          res[k] = make_bfloat162(__float2bfloat16_rn(g0 * u0),
+                                  __float2bfloat16_rn(g1 * u1));
+        }
       }
 
       auto _y_max2 = __hmax2(__habs2(res[0]), __habs2(res[1]));
@@ -600,7 +627,7 @@ void persistent_masked_m_silu_mul_quant(
     const torch::stable::Tensor& tokens_per_expert,  // (E)
     torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
     torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
-    bool cast_scale_ue8m0) {
+    bool cast_scale_ue8m0, double situ_beta, double situ_linear_beta) {
 #ifndef USE_ROCM
 
   // This kernel currently only supports H % 128 == 0 and assumes a
@@ -642,7 +669,7 @@ void persistent_masked_m_silu_mul_quant(
   static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
 
   #define KERNEL(BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,  \
-                 STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, STAGES)                \
+                 STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT, STAGES)       \
     static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                 \
     int sms = SILU_V2_BLOCK_COUNT;                                             \
     static constexpr int max_shared_mem_bytes =                                \
@@ -654,7 +681,7 @@ void persistent_masked_m_silu_mul_quant(
         y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
           vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \
               BLOCK_COUNT, max_shared_mem_bytes, fp8_t, scale_t, THREAD_COUNT, \
-              Idx_t, CEIL_UE8M0, GROUP_SIZE, STAGES>                           \
+              Idx_t, CEIL_UE8M0, IS_SITU, GROUP_SIZE, STAGES>                  \
               <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
                   reinterpret_cast<const __nv_bfloat16*>(                      \
                       input.const_data_ptr()),                                 \
@@ -664,39 +691,54 @@ void persistent_masked_m_silu_mul_quant(
                       tokens_per_expert.const_data_ptr()),                     \
                   E, T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,    \
                   stride_yq_t, stride_yq_h, STRIDE_YS_E, STRIDE_YS_T,          \
-                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e);                  \
+                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e, sb, slb);         \
         });
 
   #define LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,         \
-                      STRIDE_YS_P, CEIL_UE8M0)                                \
+                      STRIDE_YS_P, CEIL_UE8M0, IS_SITU)                       \
     if (H >= 4096 && (NUM_GROUPS % 8) == 0) {                                 \
       /* 8 warp config */                                                     \
       static constexpr int NUM_STAGES = 4;                                    \
       static constexpr int THREAD_COUNT = 256;                                \
       KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,          \
-             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, NUM_STAGES); \
+             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT,     \
+             NUM_STAGES);                                                     \
     } else {                                                                  \
       /* 1 warp config */                                                     \
       static constexpr int THREAD_COUNT = 32;                                 \
       KERNEL(SILU_V2_BLOCK_COUNT, scale_t, STRIDE_YS_E, STRIDE_YS_T,          \
-             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, THREAD_COUNT, 2);          \
+             STRIDE_YS_G, STRIDE_YS_P, CEIL_UE8M0, IS_SITU, THREAD_COUNT, 2); \
     }
 
   Idx_t stride_ys_e = y_s.stride(0);
   Idx_t stride_ys_t = y_s.stride(1);
   Idx_t stride_ys_g = y_s.stride(2);
   Idx_t stride_ys_p = 0;
+  bool const use_situ = situ_beta > 0.0;
+  float const sb = static_cast<float>(situ_beta);
+  float const slb = static_cast<float>(situ_linear_beta);
+
   if (!cast_scale_ue8m0) {
     STD_TORCH_CHECK(!is_packed_ue8m0);
-    LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
-                false);
+    if (use_situ) {
+      LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                  false, true);
+    } else {
+      LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                  false, false);
+    }
     return;
   }
 
   if (!is_packed_ue8m0) {
     // UE8M0 but not packed
-    LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
-                true);
+    if (use_situ) {
+      LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                  true, true);
+    } else {
+      LAUNCH_ON_H(float, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                  true, false);
+    }
     return;
   }
 
@@ -733,8 +775,13 @@ void persistent_masked_m_silu_mul_quant(
   stride_ys_t = sizeof(int32_t);
   stride_ys_g = 1;
 
-  LAUNCH_ON_H(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
-              true);
+  if (use_situ) {
+    LAUNCH_ON_H(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                true, true);
+  } else {
+    LAUNCH_ON_H(uint8_t, stride_ys_e, stride_ys_t, stride_ys_g, stride_ys_p,
+                true, false);
+  }
 
 #endif
 }
