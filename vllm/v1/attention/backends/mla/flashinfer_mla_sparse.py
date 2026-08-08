@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -261,6 +262,9 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     block_size: int = 64
     topk_tokens: int = 2048
     cp_kv_cache_interleave_size: int = 1
+    physical_topk_indices: torch.Tensor | None = None
+    physical_topk_valid_counts: torch.Tensor | None = None
+    physical_topk_is_valid: bool = False
 
 
 class FlashInferMLASparseMetadataBuilder(
@@ -280,6 +284,18 @@ class FlashInferMLASparseMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.physical_topk_indices = torch.empty(
+            (max_num_tokens, self.topk_tokens),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.physical_topk_valid_counts = torch.empty(
+            max_num_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
+
         num_q_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
@@ -291,6 +307,17 @@ class FlashInferMLASparseMetadataBuilder(
             supports_spec_as_decode=True,
             supports_dcp_with_varlen=True,
         )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: "CommonAttentionMetadata",
+        fast_build: bool = False,
+    ) -> FlashInferMLASparseMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        metadata.physical_topk_indices = self.physical_topk_indices
+        metadata.physical_topk_valid_counts = self.physical_topk_valid_counts
+        return metadata
 
 
 # Global workspace buffer (lazily initialized)
@@ -405,14 +432,34 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 return_valid_counts=True,
             )
         else:
-            topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
-                attn_metadata.req_id_per_token[:num_actual_toks],
-                attn_metadata.block_table,
-                topk_indices,
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-                return_valid_counts=True,
-            )
+            assert attn_metadata.physical_topk_indices is not None
+            assert attn_metadata.physical_topk_valid_counts is not None
+            physical_topk_indices = attn_metadata.physical_topk_indices[
+                :num_actual_toks
+            ]
+            physical_topk_valid_counts = attn_metadata.physical_topk_valid_counts[
+                :num_actual_toks
+            ]
+            wrote_fresh_topk = getattr(
+                layer, "indexer", None
+            ) is not None and not getattr(layer, "skip_topk", False)
+            if wrote_fresh_topk or not attn_metadata.physical_topk_is_valid:
+                topk_indices_physical, seq_lens = (
+                    triton_convert_req_index_to_global_index(
+                        attn_metadata.req_id_per_token[:num_actual_toks],
+                        attn_metadata.block_table,
+                        topk_indices,
+                        BLOCK_SIZE=attn_metadata.block_size,
+                        NUM_TOPK_TOKENS=topk_indices.shape[1],
+                        return_valid_counts=True,
+                        output=physical_topk_indices,
+                        valid_counts_out=physical_topk_valid_counts,
+                    )
+                )
+                attn_metadata.physical_topk_is_valid = True
+            else:
+                topk_indices_physical = physical_topk_indices
+                seq_lens = physical_topk_valid_counts
 
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(q.device)
