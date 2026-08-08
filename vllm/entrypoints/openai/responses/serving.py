@@ -30,6 +30,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    get_tool_call_id_type,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
@@ -191,6 +192,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -625,6 +627,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             request_input=request.input,
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
+            tool_call_id_type=self.tool_call_id_type,
         )
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
         _, engine_inputs = await self.online_renderer.preprocess_chat(
@@ -649,6 +652,7 @@ class OpenAIServingResponses(GenerateBaseServing):
     ):
         new_messages = construct_input_messages(
             request_input=messages,
+            tool_call_id_type=self.tool_call_id_type,
         )
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
         _, engine_inputs = await self.online_renderer.preprocess_chat(

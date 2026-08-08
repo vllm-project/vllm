@@ -16,12 +16,14 @@ from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
     should_continue_final_message,
 )
+from vllm.parser.utils import count_response_history_tool_calls
 
 
 def _single_chat_message(item):
@@ -900,3 +902,128 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+def _tool_call_ids(messages):
+    return [
+        tool_call["id"]
+        for message in messages
+        for tool_call in message.get("tool_calls") or ()
+    ]
+
+
+class TestNativeToolCallIds:
+    """Regression tests for #50768.
+
+    Kimi's chat template renders a tool-call ID verbatim -- as the
+    ``<|tool_call_begin|>`` header and as the ``## Return of {id}`` tool-result
+    header -- and renders the function name nowhere else. The Responses API
+    hands clients ``call_<uuid>`` IDs, so history echoed back by the client must
+    be restored to ``functions.{name}:{idx}`` before it reaches the template.
+    """
+
+    def test_call_ids_rewritten_and_paired(self):
+        items = [
+            make_function_call(call_id="call_a", name="exec_command"),
+            make_function_call(call_id="call_b", name="read_file"),
+            make_function_call_output(call_id="call_a", output="ok"),
+            make_function_call_output(call_id="call_b", output="data"),
+        ]
+        assistant, first_result, second_result = construct_chat_messages_with_tool_call(
+            items, tool_call_id_type="kimi_k2"
+        )
+
+        assert _tool_call_ids([assistant]) == [
+            "functions.exec_command:0",
+            "functions.read_file:1",
+        ]
+        assert first_result["tool_call_id"] == "functions.exec_command:0"
+        assert second_result["tool_call_id"] == "functions.read_file:1"
+
+    def test_indices_run_across_assistant_turns(self):
+        """Numbering is a single counter over the whole input, matching
+        ``count_response_history_tool_calls`` -- which is what the parser uses
+        to number the *next* tool call, so history must not collide with it."""
+        items = [
+            make_function_call(call_id="call_a", name="exec_command"),
+            make_function_call_output(call_id="call_a", output="ok"),
+            make_function_call(call_id="call_b", name="exec_command"),
+            make_function_call_output(call_id="call_b", output="ok"),
+        ]
+        messages = construct_chat_messages_with_tool_call(
+            items, tool_call_id_type="kimi_k2"
+        )
+
+        assert _tool_call_ids(messages) == [
+            "functions.exec_command:0",
+            "functions.exec_command:1",
+        ]
+        next_id = make_tool_call_id(
+            id_type="kimi_k2",
+            func_name="exec_command",
+            idx=count_response_history_tool_calls(items),
+        )
+        assert next_id not in _tool_call_ids(messages)
+
+    def test_native_ids_pass_through(self):
+        items = [
+            make_function_call(call_id="functions.exec_command:0", name="exec_command"),
+            make_function_call_output(call_id="functions.exec_command:0", output="ok"),
+        ]
+        assistant, result = construct_chat_messages_with_tool_call(
+            items, tool_call_id_type="kimi_k2"
+        )
+
+        assert _tool_call_ids([assistant]) == ["functions.exec_command:0"]
+        assert result["tool_call_id"] == "functions.exec_command:0"
+
+    def test_dict_function_call_output_rewritten(self):
+        items = [
+            make_function_call(call_id="call_a", name="exec_command"),
+            {"type": "function_call_output", "call_id": "call_a", "output": "ok"},
+        ]
+        _, result = construct_chat_messages_with_tool_call(
+            items, tool_call_id_type="kimi_k2"
+        )
+
+        assert result["tool_call_id"] == "functions.exec_command:0"
+
+    def test_namespaced_tool_uses_flat_name(self):
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id="fc_1",
+            call_id="call_a",
+            name="exec",
+            namespace="shell",
+            arguments="{}",
+        )
+        messages = construct_chat_messages_with_tool_call(
+            [item], tool_call_id_type="kimi_k2"
+        )
+
+        assert _tool_call_ids(messages) == ["functions.shell__exec:0"]
+
+    def test_non_kimi_models_keep_call_ids(self):
+        items = [
+            make_function_call(call_id="call_a", name="exec_command"),
+            make_function_call_output(call_id="call_a", output="ok"),
+            {"type": "function_call_output", "call_id": "call_a", "output": "ok"},
+        ]
+
+        assert construct_chat_messages_with_tool_call(
+            items
+        ) == construct_chat_messages_with_tool_call(items, tool_call_id_type="random")
+        assistant, typed_result, dict_result = construct_chat_messages_with_tool_call(
+            items
+        )
+        assert _tool_call_ids([assistant]) == ["call_a"]
+        assert typed_result["tool_call_id"] == "call_a"
+        assert dict_result["tool_call_id"] == "call_a"
+
+    def test_construct_input_messages_threads_id_type(self):
+        msgs = construct_input_messages(
+            request_input=[make_function_call(call_id="call_a", name="exec_command")],
+            tool_call_id_type="kimi_k2",
+        )
+
+        assert _tool_call_ids(msgs) == ["functions.exec_command:0"]

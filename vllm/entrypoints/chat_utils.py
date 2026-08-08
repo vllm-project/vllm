@@ -25,6 +25,7 @@ from typing import (
     get_origin,
 )
 
+import regex as re
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
@@ -2055,3 +2056,20 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
     else:
         # by default return random
         return f"chatcmpl-tool-{random_uuid()}"
+
+
+# Mirrors ``KimiK2Parser._TOOL_ID_RE`` so that "already native" here means
+# exactly "the parser can recover a function name from this id".
+_NATIVE_TOOL_CALL_ID_RE = re.compile(r".+:\d+")
+
+
+def has_native_tool_call_ids(id_type: str) -> bool:
+    """Whether `id_type` encodes the function name inside the tool-call ID."""
+    return id_type == "kimi_k2"
+
+
+def is_native_tool_call_id(tool_call_id: str | None, id_type: str) -> bool:
+    """Whether `tool_call_id` is already in `id_type`'s native format."""
+    if not tool_call_id or not has_native_tool_call_ids(id_type):
+        return False
+    return _NATIVE_TOOL_CALL_ID_RE.match(tool_call_id) is not None
