@@ -5,11 +5,9 @@ import os
 import pickle
 import queue
 import signal
-import tempfile
 import threading
 import time
 import traceback
-import uuid
 import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -48,6 +46,7 @@ from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
+    get_file_store_init_method,
     get_ip,
 )
 from vllm.utils.ompmultiprocessing import OMPProcessManager
@@ -128,9 +127,7 @@ class MultiprocExecutor(Executor):
 
         set_multiprocessing_worker_envs(self.local_world_size)
 
-        distributed_init_method = (
-            f"file://{tempfile.gettempdir()}/vllm_dist_{uuid.uuid4().hex}"
-        )
+        distributed_init_method = get_file_store_init_method()
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
