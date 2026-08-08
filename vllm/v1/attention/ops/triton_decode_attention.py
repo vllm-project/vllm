@@ -530,6 +530,10 @@ def _decode_grouped_att_m_fwd(
         # like non-MLA D_QK=576, BLOCK_DMODEL=1024, BLOCK_H=16
         # exceeds 101376 bytes limit
         num_stages = 1
+    elif not is_hip_ and is_mla and BLOCK_DMODEL >= 512 and BLOCK_DPE > 0:
+        # Avoid shared memory overflow on NVIDIA for MLA decode attention
+        # with large latent rank, e.g. Lk=576, Lv=512, BLOCK_H=16.
+        num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
         q,
