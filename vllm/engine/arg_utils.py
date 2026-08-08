@@ -599,6 +599,7 @@ class EngineArgs:
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
+    mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -1099,7 +1100,8 @@ class EngineArgs:
             "--data-parallel-rpc-port",
             "-dpp",
             type=int,
-            help="Port for data parallel RPC communication.",
+            help="Fixed port for data parallel RPC communication. All nodes "
+            "must use the same port.",
         )
         parallel_group.add_argument(
             "--data-parallel-backend",
@@ -1382,6 +1384,13 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-ipc-gpu-memory-gb",
             **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-device-do-normalize",
+            **{
+                **multimodal_kwargs["mm_device_do_normalize"],
+                "default": None,
+            },
         )
 
         # LoRA related configs
@@ -1769,6 +1778,7 @@ class EngineArgs:
             video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
+            mm_device_do_normalize=self.mm_device_do_normalize,
             mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,

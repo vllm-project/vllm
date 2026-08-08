@@ -22,6 +22,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/llm
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -43,6 +44,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/serve
   - tests/entrypoints/scale_out
   commands:
@@ -65,6 +67,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
@@ -85,6 +88,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
@@ -107,6 +111,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/tool_use
   - tests/entrypoints/tool_parsers
   - tests/entrypoints/anthropic
@@ -131,6 +136,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
@@ -142,6 +148,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/speech_to_text
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -154,6 +161,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/multimodal
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -166,6 +174,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/pooling
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
