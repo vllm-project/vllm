@@ -24,9 +24,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     invoke_fused_moe_wna16_triton_kernel,
     try_get_optimal_moe_config,
 )
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -683,8 +680,19 @@ class TritonWNA16Experts(TritonExperts):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            _prepare_expert_assignment(
+                topk_ids,
+                config,
+                num_tokens,
+                top_k_num,
+                global_num_experts,
+                expert_map,
+                use_int8_w8a16=self.quant_config.use_int8_w8a16,
+                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                block_shape=self.block_shape,
+                allow_quantized_naive_block_assignment=current_platform.is_rocm(),
+            )
         )
 
         invoke_fused_moe_wna16_triton_kernel(

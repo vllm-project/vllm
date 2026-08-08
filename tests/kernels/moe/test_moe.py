@@ -41,6 +41,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    _prepare_expert_assignment,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_use_td_hw_supported,
 )
@@ -220,6 +223,31 @@ FUSED_MOE_WN16_MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig()
+
+
+@pytest.mark.parametrize(
+    ("use_int4_w4a16", "use_int8_w8a16"),
+    [(True, False), (False, True)],
+)
+def test_quantized_naive_block_assignment(use_int4_w4a16, use_int8_w8a16):
+    topk_ids = torch.tensor([[3, 7]], dtype=torch.int64)
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = _prepare_expert_assignment(
+        topk_ids,
+        {"BLOCK_SIZE_M": 16},
+        num_tokens=1,
+        top_k_num=2,
+        global_num_experts=64,
+        expert_map=None,
+        use_int4_w4a16=use_int4_w4a16,
+        use_int8_w8a16=use_int8_w8a16,
+        block_shape=[0, 64],
+        allow_quantized_naive_block_assignment=True,
+    )
+
+    assert sorted_token_ids is None
+    assert torch.equal(expert_ids, topk_ids.view(-1))
+    assert num_tokens_post_padded.item() == 32
 
 
 def run_moe_test(
