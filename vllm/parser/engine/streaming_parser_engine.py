@@ -319,16 +319,13 @@ class StreamingParserEngine:
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
-            if self.state == ParserState.MESSAGE_HEADER:
-                self.state = ParserState.CONTENT
+            # A tool terminal that implicitly ends reasoning must emit
+            # REASONING_END from *any* state, MESSAGE_HEADER included —
+            # otherwise the reasoning pass never confirms the end and the
+            # whole tool block is handed back as content.
+            leaving_header = self.state == ParserState.MESSAGE_HEADER
+            if leaving_header:
                 self._message_header_buffer = ""
-                return [
-                    SemanticEvent(
-                        EventType.TEXT_CHUNK,
-                        value=value,
-                        tool_index=self.tool_index,
-                    )
-                ]
             if EventType.REASONING_END in transition.events:
                 self.state = ParserState.CONTENT
                 return [
@@ -342,6 +339,15 @@ class StreamingParserEngine:
                         value=value,
                         tool_index=self.tool_index,
                     ),
+                ]
+            if leaving_header:
+                self.state = ParserState.CONTENT
+                return [
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=value,
+                        tool_index=self.tool_index,
+                    )
                 ]
             content_type = self.config.content_events.get(self.state)
             if content_type is not None:

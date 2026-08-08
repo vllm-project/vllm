@@ -197,9 +197,14 @@ def inkling_config() -> ParserEngineConfig:
             ParserState.REASONING,
             (EventType.REASONING_START,),
         ),
+        # A tool block implicitly ends reasoning even when this turn never
+        # opened a thinking block, so REASONING_END rides along on every
+        # TOOL_START (as it does for Qwen3/Mistral). Without it the
+        # reasoning pass never confirms the end and the tool pass is never
+        # handed the block.
         (ParserState.CONTENT, "TOOL_START"): Transition(
             ParserState.TOOL_ARGS,
-            (EventType.TOOL_CALL_START,),
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
         # Raw / error tool blocks render as visible text.
         (ParserState.CONTENT, "TOOL_TEXT"): Transition(
@@ -226,7 +231,7 @@ def inkling_config() -> ParserEngineConfig:
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_START"): Transition(
             ParserState.TOOL_ARGS,
-            (EventType.TOOL_CALL_START,),
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_TEXT"): Transition(
             ParserState.CONTENT,
