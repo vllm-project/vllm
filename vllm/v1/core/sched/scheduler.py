@@ -532,6 +532,14 @@ class Scheduler(SchedulerInterface):
                 - self.num_sampled_tokens_per_step,
             )
 
+            # num_computed_tokens >= max_model_len (reachable via the optimistic
+            # spec-token advance under async scheduling on a disagg decode worker)
+            # makes the cap above negative. Clamp to 0 so it takes the intended
+            # "reached max_model_len" num_new_tokens == 0 path below (finished by
+            # the stop-check), instead of a negative num_scheduled_tokens crashing
+            # np.repeat(arange, -N) downstream in the model runner.
+            num_new_tokens = max(num_new_tokens, 0)
+
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             external_load_encoder_input: list[int] = []
