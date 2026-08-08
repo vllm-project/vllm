@@ -330,12 +330,15 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         self.num_free_slots = cache_size
         self.allocated: list[str] = []
         self.to_free: list[str] = []
+        # request_id => set of input_ids currently holding slots
+        self.request_cached_ids: dict[str, set[int]] = {}
 
     def reset(self) -> None:
         """Reset the encoder cache to its initial state."""
         self.num_free_slots = self.cache_size
         self.allocated.clear()
         self.to_free.clear()
+        self.request_cached_ids.clear()
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         return False
@@ -362,13 +365,7 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
 
         mm_hash = request.mm_features[input_id].identifier
         self.allocated.append(mm_hash)
-
-    def free(self, request: Request) -> None:
-        for input_id in range(len(request.mm_features)):
-            self.free_encoder_input(request, input_id)
-
-    def get_cached_input_ids(self, request: Request) -> set[int]:
-        return set(range(len(request.mm_features)))
+        self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
 
     def get_freed_mm_hashes(self) -> list[str]:
         # As encoder cache is not used for enc-dec models, we can free the entries here
@@ -381,5 +378,18 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         return to_free
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
-        num_encoder_embeds = request.get_num_encoder_embeds(input_id)
-        self.num_free_slots += num_encoder_embeds
+        """Release the slots held by `input_id`, at most once per allocation.
+
+        The scheduler calls this on every step once the request has produced a
+        token, so a non-idempotent release grows `num_free_slots` past
+        `cache_size` and `can_allocate` stops enforcing the cache budget.
+        """
+        req_id = request.request_id
+        cached_ids = self.request_cached_ids.get(req_id)
+        if cached_ids is None or input_id not in cached_ids:
+            return
+
+        cached_ids.discard(input_id)
+        if not cached_ids:
+            del self.request_cached_ids[req_id]
+        self.num_free_slots += request.get_num_encoder_embeds(input_id)

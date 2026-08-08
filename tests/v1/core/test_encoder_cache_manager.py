@@ -365,3 +365,35 @@ def test_encoder_decoder_cache_manager_reset_allows_fresh_allocations():
 
     assert manager.num_free_slots == 2
     assert "img2" in manager.allocated
+
+
+def test_encoder_decoder_repeated_free_releases_slots_once():
+    """The scheduler frees encoder inputs on every decode step, so releasing
+    the same input repeatedly must not credit `num_free_slots` more than once.
+    """
+    manager = EncoderDecoderCacheManager(cache_size=20)
+
+    req = MockRequest("req1", ["img1"], [5])
+    manager.allocate(req, 0)
+    assert manager.num_free_slots == 15
+
+    for _ in range(5):
+        manager.free_encoder_input(req, 0)
+        assert manager.num_free_slots == 20
+
+
+def test_encoder_decoder_free_ignores_unallocated_inputs():
+    """`free` is also called for requests whose encoder inputs were never
+    allocated (aborted or preempted while waiting), which must be a no-op.
+    """
+    manager = EncoderDecoderCacheManager(cache_size=20)
+
+    never_allocated = MockRequest("req1", ["img1"], [5])
+    manager.free(never_allocated)
+    assert manager.num_free_slots == 20
+
+    allocated = MockRequest("req2", ["img2"], [5])
+    manager.allocate(allocated, 0)
+    manager.free(allocated)
+    manager.free(allocated)
+    assert manager.num_free_slots == 20
