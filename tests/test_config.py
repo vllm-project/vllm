@@ -3,9 +3,11 @@
 
 import logging
 import os
+import pickle
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from unittest.mock import call as mock_call
 
 import pydantic
 import pytest
@@ -32,6 +34,7 @@ from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
+from vllm.transformers_utils.runai_utils import ObjectStorageModel
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
@@ -889,7 +892,8 @@ class MockConfig:
     def __init__(self, model: str, tokenizer: str):
         self.model = model
         self.tokenizer = tokenizer
-        self.model_weights = None
+        self.model_weights: str | None = None
+        self.tokenizer_weights: str | None = None
 
 
 @pytest.mark.parametrize(
@@ -1015,6 +1019,688 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
     assert mock_pull_files.call_args_list[0][0][0] == model_url
     # Second call: tokenizer URI with ignore_pattern
     assert mock_pull_files.call_args_list[1][0][0] == tokenizer_url
+
+
+# Tests for maybe_pull_model_files_for_runai_worker (worker-side repair pull).
+
+RUNAI_WORKER_S3_URL = "s3://example-bucket/model/"
+RUNAI_WORKER_TOKENIZER_S3_URL = "s3://example-bucket/tokenizer/"
+# Spelled out rather than imported, so a change to the source is a failure.
+RUNAI_NON_WEIGHT_IGNORE_PATTERN = [
+    "*.pt",
+    "*.safetensors",
+    "*.bin",
+    "*.tensors",
+    "*.pth",
+]
+
+
+@pytest.fixture
+def runai_assets_cache(tmp_path, monkeypatch):
+    """Keep the Object Storage cache directory inside the test's tmp_path."""
+    monkeypatch.setenv("VLLM_ASSETS_CACHE", str(tmp_path))
+    return tmp_path
+
+
+@pytest.fixture
+def mock_get_lock():
+    """Stub out the file lock guarding concurrent pulls on the same node."""
+    # weight_utils is imported lazily by the method under test, so make sure
+    # the module exists before patching a name inside it.
+    import vllm.model_executor.model_loader.weight_utils  # noqa: F401
+
+    with patch(
+        "vllm.model_executor.model_loader.weight_utils.get_lock"
+    ) as mock_get_lock:
+        yield mock_get_lock
+
+
+def _worker_config(model_dir: str, model_weights: str) -> MockConfig:
+    """A config as a worker receives it: local dirs plus the original URI."""
+    config = MockConfig(model=model_dir, tokenizer=model_dir)
+    config.model_weights = model_weights
+    return config
+
+
+def _separate_tokenizer_worker_config(
+    model: str, model_weights: str, tokenizer_dir: str
+) -> MockConfig:
+    """A worker config whose tokenizer came from a URI of its own."""
+    config = MockConfig(model=model, tokenizer=tokenizer_dir)
+    config.model_weights = model_weights
+    config.tokenizer_weights = RUNAI_WORKER_TOKENIZER_S3_URL
+    return config
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_pulls_files_when_node_local_dir_is_empty(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """A peer node must pull the non-tensor files it never received."""
+    mock_pull_files.return_value = None
+
+    # ObjectStorageModel resolves (and creates) the deterministic local
+    # directory. Leaving it empty reproduces the peer node's state.
+    local_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    assert os.listdir(local_dir) == []
+
+    config = _worker_config(local_dir, RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    assert mock_pull_files.call_count == 2
+    # The weights URI is pulled, never the already-rewritten local path.
+    assert mock_pull_files.call_args_list[0][0][0] == RUNAI_WORKER_S3_URL
+    assert mock_pull_files.call_args_list[0][1]["allow_pattern"] == [
+        "*.model",
+        "*.py",
+        "*.json",
+    ]
+    # The pull is serialized against the other ranks on this node, keyed on
+    # the resolved directory being written rather than on the remote URI.
+    mock_get_lock.assert_called_once_with(os.path.realpath(local_dir))
+    # Weights themselves are streamed, not pulled.
+    assert config.model_weights == RUNAI_WORKER_S3_URL
+    # The successful pull leaves the cache directory in place.
+    assert os.path.exists(local_dir)
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_pull_matches_driver_pull(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """The worker must reproduce the driver's pull calls verbatim."""
+    mock_pull_files.return_value = None
+
+    driver_config = MockConfig(model=RUNAI_WORKER_S3_URL, tokenizer=RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(
+        driver_config, RUNAI_WORKER_S3_URL, RUNAI_WORKER_S3_URL
+    )
+    driver_calls = mock_pull_files.call_args_list[:]
+    assert driver_calls, "driver is expected to pull files"
+    mock_pull_files.reset_mock()
+
+    # pull_files is mocked, so the directory the driver resolved is still
+    # empty - exactly what a worker on a peer node finds.
+    worker_config = _worker_config(driver_config.model, RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_files_for_runai_worker(worker_config)
+
+    assert mock_pull_files.call_args_list == driver_calls
+    assert worker_config.model == driver_config.model
+    assert worker_config.tokenizer == driver_config.tokenizer
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_does_not_disturb_an_unrepairable_tokenizer(
+    mock_pull_files, mock_get_lock, runai_assets_cache, tmp_path
+):
+    """A tokenizer pulled from its own URI is left untouched, not repointed."""
+    mock_pull_files.return_value = None
+
+    local_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    tokenizer_dir = str(tmp_path / "separate-tokenizer")
+
+    config = MockConfig(model=local_dir, tokenizer=tokenizer_dir)
+    config.model_weights = RUNAI_WORKER_S3_URL
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    # Mirrors the driver: a separate tokenizer means only the allow-pattern
+    # pull for the model directory.
+    assert mock_pull_files.call_count == 1
+    assert mock_pull_files.call_args_list[0][0][0] == RUNAI_WORKER_S3_URL
+    assert mock_pull_files.call_args_list[0][1]["allow_pattern"] == [
+        "*.model",
+        "*.py",
+        "*.json",
+    ]
+    assert config.tokenizer == tokenizer_dir
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_pull_matches_driver_pull_with_separate_tokenizer(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """With a separate tokenizer, the worker must still mirror the driver's
+    pulls for the model URI: the allow-pattern pull only."""
+    mock_pull_files.return_value = None
+
+    tokenizer_url = "s3://example-bucket/tokenizer/"
+    driver_config = MockConfig(model=RUNAI_WORKER_S3_URL, tokenizer=tokenizer_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(
+        driver_config, RUNAI_WORKER_S3_URL, tokenizer_url
+    )
+    driver_model_calls = [
+        call
+        for call in mock_pull_files.call_args_list
+        if call[0][0] == RUNAI_WORKER_S3_URL
+    ]
+    assert len(driver_model_calls) == 1
+    mock_pull_files.reset_mock()
+
+    worker_config = _worker_config(driver_config.model, RUNAI_WORKER_S3_URL)
+    worker_config.tokenizer = driver_config.tokenizer
+    ModelConfig.maybe_pull_model_files_for_runai_worker(worker_config)
+
+    assert mock_pull_files.call_args_list == driver_model_calls
+
+
+@patch("vllm.config.model.ObjectStorageModel")
+def test_runai_worker_guard_accepts_a_symlinked_cache_directory(
+    mock_object_storage_model, mock_get_lock, runai_assets_cache, tmp_path
+):
+    """Paths resolving to the same physical directory must not be rejected."""
+    real_dir = tmp_path / "real-cache"
+    real_dir.mkdir()
+    link_dir = tmp_path / "alias-cache"
+    os.symlink(real_dir, link_dir, target_is_directory=True)
+
+    mock_object_storage_model.return_value.dir = str(real_dir)
+    config = _worker_config(str(link_dir), RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    assert mock_object_storage_model.return_value.pull_files.call_count == 2
+    # The lock is keyed on the canonical path, not on the alias spelling.
+    mock_get_lock.assert_called_once_with(os.path.realpath(str(link_dir)))
+
+
+@patch("vllm.config.model.ObjectStorageModel")
+def test_runai_worker_waits_for_lock_before_trusting_existing_files(
+    mock_object_storage_model, mock_get_lock, runai_assets_cache
+):
+    """Even a populated directory is only trusted after taking the lock."""
+    local_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    with open(os.path.join(local_dir, "config.json"), "w") as f:
+        f.write("{}")
+
+    config = _worker_config(local_dir, RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    # A non-empty directory may be a pull still in progress on another rank.
+    mock_get_lock.assert_called_once_with(os.path.realpath(local_dir))
+    mock_object_storage_model.assert_not_called()
+    assert config.model == local_dir
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_rechecks_after_acquiring_the_lock(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """A rank that waited for the lock must not repeat the winner's pull."""
+    mock_pull_files.return_value = None
+
+    local_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+
+    def win_race_while_blocked(*args, **kwargs):
+        # Simulates the rank holding the lock finishing its pull.
+        with open(os.path.join(local_dir, "config.json"), "w") as f:
+            f.write("{}")
+
+    lock = MagicMock()
+    lock.__enter__.side_effect = win_race_while_blocked
+    mock_get_lock.return_value = lock
+
+    config = _worker_config(local_dir, RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    mock_get_lock.assert_called_once()
+    mock_pull_files.assert_not_called()
+
+
+def _fail_after_writing_one_file(local_dir: str, exc_type: type = OSError):
+    """A pull that dies partway, leaving the directory half populated."""
+
+    def pull(*args, **kwargs):
+        os.makedirs(local_dir, exist_ok=True)
+        with open(os.path.join(local_dir, "config.json"), "w") as f:
+            f.write("{}")
+        raise exc_type("connection reset by peer")
+
+    return pull
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_clears_the_directory_when_the_pull_fails(
+    mock_pull_files, mock_get_lock, runai_assets_cache, failure
+):
+    """A failed or interrupted pull removes its leftovers and propagates."""
+    local_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    mock_pull_files.side_effect = _fail_after_writing_one_file(local_dir, failure)
+
+    config = _worker_config(local_dir, RUNAI_WORKER_S3_URL)
+    with pytest.raises(failure):
+        ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    assert not os.path.exists(local_dir)
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_retries_after_a_failed_pull(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """A transient failure must not poison the cache for the next start."""
+    local_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    mock_pull_files.side_effect = _fail_after_writing_one_file(local_dir)
+
+    config = _worker_config(local_dir, RUNAI_WORKER_S3_URL)
+    with pytest.raises(OSError):
+        ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    mock_pull_files.reset_mock()
+    mock_pull_files.side_effect = None
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    assert mock_pull_files.call_count == 2
+    # The successful retry leaves the cache directory in place.
+    assert os.path.exists(local_dir)
+
+
+@patch("vllm.config.model.ObjectStorageModel")
+def test_runai_worker_fails_fast_on_a_cache_directory_mismatch(
+    mock_object_storage_model, mock_get_lock, runai_assets_cache, tmp_path
+):
+    """A node deriving a different cache directory fails fast, without pulling."""
+    mock_object_storage_model.return_value.dir = str(tmp_path / "worker-side-dir")
+
+    config = _worker_config(str(tmp_path / "driver-side-dir"), RUNAI_WORKER_S3_URL)
+    with (
+        patch("vllm.config.model.shutil.rmtree") as mock_rmtree,
+        pytest.raises(RuntimeError, match="VLLM_ASSETS_CACHE"),
+    ):
+        ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    mock_object_storage_model.return_value.pull_files.assert_not_called()
+    mock_rmtree.assert_not_called()
+
+
+@patch("vllm.config.model.ObjectStorageModel")
+def test_runai_worker_opts_out_of_signal_handlers(
+    mock_object_storage_model, mock_get_lock, runai_assets_cache, tmp_path
+):
+    """The worker-side pull must not install process-global signal handlers."""
+    local_dir = str(tmp_path / "node-local-dir")
+    mock_object_storage_model.return_value.dir = local_dir
+
+    config = _worker_config(local_dir, RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    mock_object_storage_model.assert_called_once_with(
+        url=RUNAI_WORKER_S3_URL, install_signal_handlers=False
+    )
+
+
+def test_runai_object_storage_model_signal_handler_opt_out(monkeypatch, tmp_path):
+    """`install_signal_handlers=False` skips registration; the default keeps it."""
+    monkeypatch.setenv("VLLM_ASSETS_CACHE_MODEL_CLEAN", "1")
+    monkeypatch.setenv("VLLM_ASSETS_CACHE", str(tmp_path))
+
+    with patch("vllm.transformers_utils.runai_utils.signal.signal") as mock_signal:
+        ObjectStorageModel(url=RUNAI_WORKER_S3_URL, install_signal_handlers=False)
+        mock_signal.assert_not_called()
+
+        ObjectStorageModel(url=RUNAI_WORKER_S3_URL)
+        assert mock_signal.call_count == 2  # SIGINT + SIGTERM
+
+
+@pytest.mark.parametrize(
+    "model_weights",
+    [None, "", "/local/path/to/model", "facebook/opt-125m"],
+)
+@patch("vllm.config.model.ObjectStorageModel")
+def test_runai_worker_noop_without_object_storage_weights(
+    mock_object_storage_model, mock_get_lock, model_weights
+):
+    """Models that never came from Object Storage must not be touched."""
+    config = MockConfig(model="/local/path/to/model", tokenizer="/local/tokenizer")
+    config.model_weights = model_weights
+
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    mock_get_lock.assert_not_called()
+    mock_object_storage_model.assert_not_called()
+    assert config.model == "/local/path/to/model"
+    assert config.tokenizer == "/local/tokenizer"
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_not_short_circuited_by_driver_guard(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """The driver's method silently no-ops on a worker; the new one must pull."""
+    mock_pull_files.return_value = None
+
+    local_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    config = _worker_config(local_dir, RUNAI_WORKER_S3_URL)
+
+    # The driver's method no-ops on a worker...
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(
+        config, config.model, config.tokenizer
+    )
+    mock_pull_files.assert_not_called()
+
+    # ...while the worker's method pulls.
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+    assert mock_pull_files.call_count > 0
+
+
+# Tests for the separate-tokenizer half of the worker-side repair pull.
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_pulls_a_separate_tokenizer_when_its_dir_is_empty(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """A tokenizer with a URI of its own is repaired from that URI."""
+    mock_pull_files.return_value = None
+
+    model_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    tokenizer_dir = ObjectStorageModel(url=RUNAI_WORKER_TOKENIZER_S3_URL).dir
+    assert os.listdir(tokenizer_dir) == []
+
+    config = _separate_tokenizer_worker_config(
+        model_dir, RUNAI_WORKER_S3_URL, tokenizer_dir
+    )
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    # The model directory keeps its single allow-pattern pull; the tokenizer
+    # adds the ignore-pattern pull the driver would have made for it.
+    assert mock_pull_files.call_count == 2
+    assert mock_pull_files.call_args_list[0][0][0] == RUNAI_WORKER_S3_URL
+    assert mock_pull_files.call_args_list[0][1]["allow_pattern"] == [
+        "*.model",
+        "*.py",
+        "*.json",
+    ]
+    # The URI is pulled, never the already-rewritten local path.
+    assert mock_pull_files.call_args_list[1][0][0] == RUNAI_WORKER_TOKENIZER_S3_URL
+    assert (
+        mock_pull_files.call_args_list[1][1]["ignore_pattern"]
+        == RUNAI_NON_WEIGHT_IGNORE_PATTERN
+    )
+    assert config.tokenizer == tokenizer_dir
+    assert os.path.exists(tokenizer_dir)
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_tokenizer_pull_matches_driver_pull(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """The worker must reproduce the driver's tokenizer pull verbatim."""
+    mock_pull_files.return_value = None
+
+    driver_config = MockConfig(
+        model=RUNAI_WORKER_S3_URL, tokenizer=RUNAI_WORKER_TOKENIZER_S3_URL
+    )
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(
+        driver_config, RUNAI_WORKER_S3_URL, RUNAI_WORKER_TOKENIZER_S3_URL
+    )
+    driver_tokenizer_calls = [
+        call
+        for call in mock_pull_files.call_args_list
+        if call[0][0] == RUNAI_WORKER_TOKENIZER_S3_URL
+    ]
+    assert len(driver_tokenizer_calls) == 1
+    # The URI the worker needs is the one the driver recorded.
+    assert driver_config.model_weights == RUNAI_WORKER_S3_URL
+    assert driver_config.tokenizer_weights == RUNAI_WORKER_TOKENIZER_S3_URL
+    mock_pull_files.reset_mock()
+
+    worker_config = _separate_tokenizer_worker_config(
+        driver_config.model, RUNAI_WORKER_S3_URL, driver_config.tokenizer
+    )
+    ModelConfig.maybe_pull_model_files_for_runai_worker(worker_config)
+
+    worker_tokenizer_calls = [
+        call
+        for call in mock_pull_files.call_args_list
+        if call[0][0] == RUNAI_WORKER_TOKENIZER_S3_URL
+    ]
+    assert worker_tokenizer_calls == driver_tokenizer_calls
+    assert worker_config.tokenizer == driver_config.tokenizer
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_shared_tokenizer_records_no_tokenizer_uri(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """A tokenizer read from the model directory needs no URI of its own."""
+    mock_pull_files.return_value = None
+
+    driver_config = MockConfig(model=RUNAI_WORKER_S3_URL, tokenizer=RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(
+        driver_config, RUNAI_WORKER_S3_URL, RUNAI_WORKER_S3_URL
+    )
+    assert driver_config.model_weights == RUNAI_WORKER_S3_URL
+    assert not driver_config.tokenizer_weights
+    assert driver_config.tokenizer == driver_config.model
+    mock_pull_files.reset_mock()
+
+    worker_config = _worker_config(driver_config.model, RUNAI_WORKER_S3_URL)
+    ModelConfig.maybe_pull_model_files_for_runai_worker(worker_config)
+
+    # Unchanged by the tokenizer repair: two pulls of the model URI into the
+    # one directory, taken under one lock.
+    assert [call[0][0] for call in mock_pull_files.call_args_list] == [
+        RUNAI_WORKER_S3_URL,
+        RUNAI_WORKER_S3_URL,
+    ]
+    assert mock_pull_files.call_args_list[0][1]["allow_pattern"] == [
+        "*.model",
+        "*.py",
+        "*.json",
+    ]
+    assert (
+        mock_pull_files.call_args_list[1][1]["ignore_pattern"]
+        == RUNAI_NON_WEIGHT_IGNORE_PATTERN
+    )
+    mock_get_lock.assert_called_once_with(os.path.realpath(driver_config.model))
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_repairs_the_tokenizer_of_a_hugging_face_model(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """An ordinary model id leaves `model_weights` unset; repair the tokenizer
+    from its own URI regardless."""
+    mock_pull_files.return_value = None
+
+    hf_model = "facebook/opt-125m"
+    driver_config = MockConfig(model=hf_model, tokenizer=RUNAI_WORKER_TOKENIZER_S3_URL)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(
+        driver_config, hf_model, RUNAI_WORKER_TOKENIZER_S3_URL
+    )
+    assert not driver_config.model_weights
+    assert driver_config.tokenizer_weights == RUNAI_WORKER_TOKENIZER_S3_URL
+    tokenizer_dir = driver_config.tokenizer
+    mock_pull_files.reset_mock()
+
+    worker_config = _separate_tokenizer_worker_config(hf_model, "", tokenizer_dir)
+    ModelConfig.maybe_pull_model_files_for_runai_worker(worker_config)
+
+    assert mock_pull_files.call_count == 1
+    assert mock_pull_files.call_args_list[0][0][0] == RUNAI_WORKER_TOKENIZER_S3_URL
+    assert (
+        mock_pull_files.call_args_list[0][1]["ignore_pattern"]
+        == RUNAI_NON_WEIGHT_IGNORE_PATTERN
+    )
+    mock_get_lock.assert_called_once_with(os.path.realpath(tokenizer_dir))
+    assert worker_config.model == hf_model
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_repairs_the_tokenizer_beside_a_populated_model_dir(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """Each directory is checked on its own: a model another rank already
+    pulled must not skip the tokenizer."""
+    mock_pull_files.return_value = None
+
+    model_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    with open(os.path.join(model_dir, "config.json"), "w") as f:
+        f.write("{}")
+    tokenizer_dir = ObjectStorageModel(url=RUNAI_WORKER_TOKENIZER_S3_URL).dir
+
+    config = _separate_tokenizer_worker_config(
+        model_dir, RUNAI_WORKER_S3_URL, tokenizer_dir
+    )
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    assert mock_pull_files.call_count == 1
+    assert mock_pull_files.call_args_list[0][0][0] == RUNAI_WORKER_TOKENIZER_S3_URL
+    # The model directory was still locked and inspected, just left alone.
+    assert mock_get_lock.call_count == 2
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_locks_the_model_and_tokenizer_directories_separately(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """One lock per directory, each keyed on the canonical path it writes."""
+    mock_pull_files.return_value = None
+
+    model_dir = ObjectStorageModel(url=RUNAI_WORKER_S3_URL).dir
+    tokenizer_dir = ObjectStorageModel(url=RUNAI_WORKER_TOKENIZER_S3_URL).dir
+
+    config = _separate_tokenizer_worker_config(
+        model_dir, RUNAI_WORKER_S3_URL, tokenizer_dir
+    )
+    ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    assert mock_get_lock.call_args_list == [
+        mock_call(os.path.realpath(model_dir)),
+        mock_call(os.path.realpath(tokenizer_dir)),
+    ]
+
+
+@patch("vllm.config.model.ObjectStorageModel")
+def test_runai_worker_fails_fast_on_a_tokenizer_directory_mismatch(
+    mock_object_storage_model, mock_get_lock, runai_assets_cache, tmp_path
+):
+    """A node deriving a different tokenizer directory fails fast, without
+    pulling."""
+    mock_object_storage_model.return_value.dir = str(tmp_path / "worker-side-dir")
+
+    config = _separate_tokenizer_worker_config(
+        "facebook/opt-125m", "", str(tmp_path / "driver-side-dir")
+    )
+    with (
+        patch("vllm.config.model.shutil.rmtree") as mock_rmtree,
+        pytest.raises(RuntimeError, match="VLLM_ASSETS_CACHE"),
+    ):
+        ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    mock_object_storage_model.return_value.pull_files.assert_not_called()
+    mock_rmtree.assert_not_called()
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_worker_clears_the_tokenizer_directory_when_the_pull_fails(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """A failed tokenizer pull removes its leftovers and propagates."""
+    tokenizer_dir = ObjectStorageModel(url=RUNAI_WORKER_TOKENIZER_S3_URL).dir
+    mock_pull_files.side_effect = _fail_after_writing_one_file(tokenizer_dir)
+
+    config = _separate_tokenizer_worker_config("facebook/opt-125m", "", tokenizer_dir)
+    with pytest.raises(OSError):
+        ModelConfig.maybe_pull_model_files_for_runai_worker(config)
+
+    assert not os.path.exists(tokenizer_dir)
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_runai_separate_tokenizer_uri_reaches_a_worker(
+    mock_pull_files, mock_get_lock, runai_assets_cache
+):
+    """The real config, not the mock, must carry the URI across the wire."""
+    mock_pull_files.return_value = None
+
+    driver_config = ModelConfig(
+        model="Qwen/Qwen3-0.6B", tokenizer=RUNAI_WORKER_TOKENIZER_S3_URL
+    )
+    assert driver_config.tokenizer_weights == RUNAI_WORKER_TOKENIZER_S3_URL
+    assert driver_config.tokenizer != RUNAI_WORKER_TOKENIZER_S3_URL
+    mock_pull_files.reset_mock()
+
+    # Workers receive the config pickled, so the field has to survive that.
+    worker_config = pickle.loads(pickle.dumps(driver_config))
+    assert worker_config.tokenizer_weights == RUNAI_WORKER_TOKENIZER_S3_URL
+    worker_config.maybe_pull_model_files_for_runai_worker()
+
+    assert mock_pull_files.call_count == 1
+    assert mock_pull_files.call_args_list[0][0][0] == RUNAI_WORKER_TOKENIZER_S3_URL
+
+
+def _init_worker_config(calls: list[str]) -> MagicMock:
+    """A VllmConfig that records when its model files would be pulled."""
+    vllm_config = MagicMock()
+    vllm_config.parallel_config.worker_cls = "fake.module.FakeWorker"
+    vllm_config.parallel_config.worker_extension_cls = None
+    vllm_config.speculative_config = None
+    vllm_config.model_config.maybe_pull_model_files_for_runai_worker.side_effect = (
+        lambda: calls.append("pull_runai_files")
+    )
+    return vllm_config
+
+
+def _run_init_worker(vllm_config: MagicMock, calls: list[str]) -> None:
+    """Drive init_worker with the worker class and mm registry stubbed out."""
+    from vllm.v1.worker import worker_base
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            calls.append("construct_worker")
+
+    with (
+        patch.object(worker_base, "resolve_obj_by_qualname", return_value=FakeWorker),
+        patch.object(worker_base, "MULTIMODAL_REGISTRY") as mm_registry,
+    ):
+        mm_registry.worker_receiver_cache_from_config.side_effect = (
+            lambda *args, **kwargs: calls.append("create_mm_receiver_cache")
+        )
+        worker_base.WorkerWrapperBase(rpc_rank=0).init_worker(
+            [{"vllm_config": vllm_config, "shared_worker_lock": MagicMock()}]
+        )
+
+
+def test_init_worker_pulls_runai_files_before_the_directory_is_read():
+    """The pull must run before the mm receiver cache reads the directory."""
+    calls: list[str] = []
+    _run_init_worker(_init_worker_config(calls), calls)
+
+    assert calls == [
+        "pull_runai_files",
+        "create_mm_receiver_cache",
+        "construct_worker",
+    ]
+
+
+def test_init_worker_pulls_runai_files_for_the_draft_model():
+    """A distinct speculative draft config must be pulled as well."""
+    calls: list[str] = []
+    vllm_config = _init_worker_config(calls)
+    draft_config = MagicMock()
+    draft_config.maybe_pull_model_files_for_runai_worker.side_effect = (
+        lambda: calls.append("pull_draft_runai_files")
+    )
+    vllm_config.speculative_config = MagicMock(draft_model_config=draft_config)
+
+    _run_init_worker(vllm_config, calls)
+
+    assert calls.count("pull_runai_files") == 1
+    assert calls.count("pull_draft_runai_files") == 1
+
+
+def test_init_worker_pulls_once_when_the_draft_reuses_the_target_config():
+    """`draft_model_config` is often the target config itself; pull it once."""
+    calls: list[str] = []
+    vllm_config = _init_worker_config(calls)
+    vllm_config.speculative_config = MagicMock(
+        draft_model_config=vllm_config.model_config
+    )
+
+    _run_init_worker(vllm_config, calls)
+
+    assert calls.count("pull_runai_files") == 1
 
 
 @pytest.mark.parametrize(
