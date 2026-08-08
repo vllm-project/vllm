@@ -280,6 +280,9 @@ class DerenderChatRequest(BaseModel):
     len(GenerateRequest.token_ids) from the render step.
     """
 
+    prompt_token_ids: list[int] | None = None
+    """Rendered prompt token IDs used to initialize stateful output parsers."""
+
     chat_request: ChatCompletionRequest | None = None
     """The original (post-adjust_request) ChatCompletionRequest from /render.
 

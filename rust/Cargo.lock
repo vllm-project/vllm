@@ -5825,6 +5825,7 @@ dependencies = [
  "serde_json",
  "thiserror-ext",
  "vllm-parser",
+ "vllm-tokenizer",
 ]
 
 [[package]]

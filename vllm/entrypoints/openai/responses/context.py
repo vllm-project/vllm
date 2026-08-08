@@ -352,6 +352,7 @@ class ParsableContext(ConversationContext):
                 self.request,
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=completion.token_ids,
+                prompt_token_ids=output.prompt_token_ids or (),
             )
             if not self.request.include_reasoning:
                 reasoning = None

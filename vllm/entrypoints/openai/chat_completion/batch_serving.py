@@ -273,6 +273,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         output.text,
                         request=request,  # type: ignore[arg-type]
                         model_output_token_ids=output.token_ids,
+                        prompt_token_ids=final_res.prompt_token_ids or (),
                     )
                     if not request.include_reasoning:
                         reasoning = None

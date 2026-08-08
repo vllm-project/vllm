@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
     ToolParserManager,
@@ -134,10 +136,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_m2_tool_parser",
         "MinimaxM2ToolParser",
     ),
-    "minimax_m3": (
-        "minimax_m3_tool_parser",
-        "MinimaxM3ToolParser",
-    ),
     "minicpm5": (
         "minicpm5xml_tool_parser",
         "MiniCPM5XMLToolParser",
@@ -182,10 +180,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "step3p5_tool_parser",
         "Step3p5ToolParser",
     ),
-    "inkling": (
-        "inkling_tool_parser",
-        "InklingEngineToolParser",
-    ),
     "xlam": (
         "xlam_tool_parser",
         "xLAMToolParser",
@@ -215,4 +209,23 @@ def register_lazy_tool_parsers():
         ToolParserManager.register_lazy_module(name, module_path, class_name)
 
 
+def register_rust_unified_tool_parsers():
+    try:
+        module = importlib.import_module("vllm._rust_tool_parser")
+        parser_names = module.list_unified_parsers()
+    except (ImportError, AttributeError):
+        return
+
+    from vllm.tool_parsers.rust_unified_tool_parser import (
+        make_rust_unified_tool_parser,
+    )
+
+    for name in parser_names:
+        ToolParserManager.register_module(
+            name=name,
+            module=make_rust_unified_tool_parser(name),
+        )
+
+
 register_lazy_tool_parsers()
+register_rust_unified_tool_parsers()

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
 
 __all__ = [
@@ -104,10 +106,6 @@ _REASONING_PARSERS_TO_REGISTER = {
         "minimax_m2_reasoning_parser",
         "MiniMaxM2AppendThinkReasoningParser",
     ),
-    "minimax_m3": (
-        "minimax_m3_reasoning_parser",
-        "MiniMaxM3ReasoningParser",
-    ),
     "mistral": (
         "mistral_reasoning_parser",
         "MistralParserReasoningAdapter",
@@ -136,10 +134,6 @@ _REASONING_PARSERS_TO_REGISTER = {
         "step3p5_reasoning_parser",
         "Step3p5ReasoningParser",
     ),
-    "inkling": (
-        "inkling_reasoning_parser",
-        "InklingParserReasoningAdapter",
-    ),
 }
 
 
@@ -149,4 +143,23 @@ def register_lazy_reasoning_parsers():
         ReasoningParserManager.register_lazy_module(name, module_path, class_name)
 
 
+def register_rust_unified_reasoning_parsers():
+    try:
+        module = importlib.import_module("vllm._rust_tool_parser")
+        parser_names = module.list_unified_parsers()
+    except (ImportError, AttributeError):
+        return
+
+    from vllm.reasoning.rust_unified_reasoning_parser import (
+        make_rust_unified_reasoning_parser,
+    )
+
+    for name in parser_names:
+        ReasoningParserManager.register_module(
+            name=name,
+            module=make_rust_unified_reasoning_parser(name),
+        )
+
+
 register_lazy_reasoning_parsers()
+register_rust_unified_reasoning_parsers()

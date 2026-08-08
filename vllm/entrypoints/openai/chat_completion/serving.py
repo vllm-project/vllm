@@ -337,7 +337,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     # `think?` rule that handles both reasoning and
                     # non-reasoning outputs.
                     reasoning_ended = True
-                elif parser is not None and parser.reasoning_parser is not None:
+                elif parser is not None and parser.reasoning_parser_cls is not None:
                     reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
                 else:
                     reasoning_ended = None
@@ -355,7 +355,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": chat_template_kwargs,
                     }
-                    if parser is not None and parser.reasoning_parser is not None
+                    if parser is not None and parser.reasoning_parser_cls is not None
                     else None,
                 )
 
@@ -906,6 +906,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     request,
                     enable_auto_tools=self.enable_auto_tools,
                     model_output_token_ids=token_ids,
+                    prompt_token_ids=final_res.prompt_token_ids or (),
                 )
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:

@@ -182,6 +182,7 @@ class HarmonyParser(DelegatingParser):
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
+        prompt_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         """Parse Harmony output from token IDs.
 
