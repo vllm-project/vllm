@@ -189,6 +189,12 @@ class AttentionSpec(KVCacheSpec):
     page_size_padded: int | None = None
     indexes_kv_by_block_stride: bool = False
 
+    def cache_dtype_for_shape(self, configured_cache_dtype: str) -> str:
+        """Return the cache dtype string used for backend layout calculation."""
+        if self.kv_quant_mode == KVQuantMode.NONE:
+            return "auto"
+        return configured_cache_dtype
+
     @property
     def unpadded_page_size_bytes(self) -> int:
         unpadded = self.real_page_size_bytes
@@ -369,6 +375,11 @@ class TQFullAttentionSpec(FullAttentionSpec):
     """
 
     tq_slot_size: int = 0
+
+    def cache_dtype_for_shape(self, configured_cache_dtype: str) -> str:
+        # Preserve the packed layout for manually constructed TQ specs whose
+        # kv_quant_mode retains the default value.
+        return configured_cache_dtype
 
     @property
     def real_page_size_bytes(self) -> int:
