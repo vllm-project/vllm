@@ -1446,6 +1446,81 @@ def test_reqs_to_send_deadline_rebased_to_worker_clock(default_vllm_config, dist
     assert req_id in worker._reqs_to_process
 
 
+def _worker_for_expiry_sweep(vllm_config):
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    return connector, connector.connector_worker
+
+
+def test_expiry_sweep_reclaims_lease_behind_a_renewed_one(
+    default_vllm_config, dist_init
+):
+    """A heartbeat leaves `_reqs_to_send` unordered, so the sweep must scan all.
+
+    The lease extension (~20s) is shorter than the initial lease (30s), so a
+    renewed deadline is not necessarily the latest one outstanding. If the
+    sweep stopped at the first unexpired entry, the renewed request would mask
+    every expired request behind it and P would hold those blocks — and their
+    request-plane slots — forever.
+    """
+    vllm_config = create_vllm_config()
+    _, worker = _worker_for_expiry_sweep(vllm_config)
+
+    now = time.perf_counter()
+    # "renewed" is heartbeated to ~now+20, still short of "long-lease".
+    worker._reqs_to_send = {"renewed": now - 1.0, "long-lease": now + 45.0}
+    worker._reqs_to_process.update(("renewed", "long-lease", "expired"))
+    worker._handle_heartbeat("renewed")
+    # The expired entry lands behind the renewed one, which is now unexpired.
+    worker._reqs_to_send["expired"] = now - 0.5
+
+    done_sending, _ = worker.get_finished()
+
+    assert done_sending == {"expired"}
+    assert set(worker._reqs_to_send) == {"renewed", "long-lease"}
+    assert "expired" not in worker._reqs_to_process
+
+
+def test_expiry_sweep_reclaims_short_lease_behind_a_longer_ttl(
+    default_vllm_config, dist_init
+):
+    """Two TTLs share `_reqs_to_send`, so insertion order is not expiry order.
+
+    In bidirectional mode the pull scheduler stamps `decoder_kv_blocks_ttl`
+    (480s) for D-cached blocks and `kv_lease_duration` (30s) for P-side
+    leases into the same map. A 480s entry arriving first would strand every
+    30s lease behind it — no heartbeat needed to break the ordering.
+    """
+    vllm_config = create_vllm_config()
+    connector, worker = _worker_for_expiry_sweep(vllm_config)
+
+    long_req, short_req = "req-turn2-ttl", "req-p-lease"
+    scheduler_clock = time.perf_counter()
+
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_in_batch = {long_req, short_req}
+    metadata.reqs_to_send = {
+        long_req: scheduler_clock + 480.0,
+        short_req: scheduler_clock - 30.0,
+    }
+    metadata.scheduler_clock = scheduler_clock
+    connector.bind_connector_metadata(metadata)
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+    assert list(worker._reqs_to_send) == [long_req, short_req]
+
+    done_sending, _ = worker.get_finished()
+
+    assert done_sending == {short_req}
+    assert long_req in worker._reqs_to_send
+
+
 def test_kv_connector_stats_aggregation():
     """
     Test KV transfer stats aggregation across TP ranks using

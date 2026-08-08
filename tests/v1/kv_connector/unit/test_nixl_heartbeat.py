@@ -163,3 +163,19 @@ def test_handle_heartbeat():
     assert w._reqs_to_send["req-b"] >= far_future
     # req-unknown: not added.
     assert "req-unknown" not in w._reqs_to_send
+
+
+def test_handle_heartbeat_never_shortens_a_lease():
+    """A heartbeat may only push a deadline forward, never pull it back.
+
+    The extension (~20s) is shorter than the initial lease (30s), so a
+    heartbeat arriving early in a request's life computes a deadline that is
+    *earlier* than the one already stored.
+    """
+    w = _worker_stub()
+    lease_end = time.perf_counter() + 29.0
+    w._reqs_to_send = {"req-a": lease_end}
+
+    w._handle_heartbeat("req-a")
+
+    assert w._reqs_to_send["req-a"] == lease_end

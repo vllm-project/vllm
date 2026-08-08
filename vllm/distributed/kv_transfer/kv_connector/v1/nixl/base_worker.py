@@ -2142,13 +2142,13 @@ class NixlBaseConnectorWorker:
 
         self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
 
-        # Handle timeout to avoid stranding blocks on remote.
+        # Handle timeout to avoid stranding blocks on remote. Deadlines come
+        # from several sources with different TTLs and are renewed by
+        # heartbeats, so this is not ordered by expiry: scan all of it.
         now = time.perf_counter()
-        while self._reqs_to_send:
-            req_id, expires = next(iter(self._reqs_to_send.items()))
-            # Sorted dict, oldest requests are put first so we can exit early.
+        for req_id, expires in list(self._reqs_to_send.items()):
             if now < expires:
-                break
+                continue
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
             self.xfer_stats.record_kv_expired_req()
             logger.warning(
@@ -2157,7 +2157,7 @@ class NixlBaseConnectorWorker:
                 req_id,
                 count,
             )
-            self._reqs_to_process.remove(req_id)
+            self._reqs_to_process.discard(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
