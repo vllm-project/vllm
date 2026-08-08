@@ -31,6 +31,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm import envs
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -42,6 +44,9 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.qk_norm_mrope_kvcache import (
+    fused_qk_norm_mrope_and_unified_kv_cache_update,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -59,6 +64,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import _encode_layer_name
 
 from .interfaces import (
     EagleModelMixin,
@@ -332,12 +338,44 @@ class Qwen3MoeAttention(nn.Module):
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.use_fused_mrope = bool(
+            envs.VLLM_Q3VL_FUSE_ATTN_PROLOGUE
+            and is_aiter_found_and_supported()
+            and getattr(self.rotary_emb, "mrope_section", None)
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if self.use_fused_mrope:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q_out = torch.empty(
+                qkv.shape[0],
+                self.num_heads * self.head_dim,
+                dtype=qkv.dtype,
+                device=qkv.device,
+            )
+            fused_qk_norm_mrope_and_unified_kv_cache_update(
+                qkv,
+                q_out,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.q_norm.variance_epsilon,
+                bool(getattr(self.rotary_emb, "is_neox_style", True)),
+                bool(self.rotary_emb.mrope_interleaved),
+                list(self.rotary_emb.mrope_section),
+                _encode_layer_name(self.attn.layer_name),
+            )
+            attn_output = self.attn(q_out, None, None)
+            output, _ = self.o_proj(attn_output)
+            return output
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
