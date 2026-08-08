@@ -58,7 +58,7 @@ def _mamba2_spec_verify(dstate, base_block, is_blackwell):
     return bsm, 2, _dstate_tile(dstate, 64), 2
 
 
-def _mamba2_spec_flush(dstate, base_block, is_blackwell):
+def _mamba2_spec_commit(dstate, base_block, is_blackwell):
     if base_block <= 16:
         return 32, 2, _dstate_tile(dstate, 64), 2
     if is_blackwell:
@@ -69,7 +69,7 @@ def _mamba2_spec_flush(dstate, base_block, is_blackwell):
 def get_replayssm_config(kernel: str, **shape) -> tuple:
     """Return the launch config for ``kernel`` (override > tuned default).
 
-    kernel: "mamba2_output_only", "mamba2_spec_verify" or "mamba2_spec_flush".
+    kernel: "mamba2_output_only", "mamba2_spec_verify" or "mamba2_spec_commit".
     ``shape`` carries the keying dims (dstate; ``L`` for the buffer length,
     default 16; ``base_block`` for spec); hardware is auto-detected.
     """
@@ -80,6 +80,6 @@ def get_replayssm_config(kernel: str, **shape) -> tuple:
         return _mamba2_output_only(shape["dstate"], shape.get("L", 16), bw)
     if kernel == "mamba2_spec_verify":
         return _mamba2_spec_verify(shape["dstate"], shape["base_block"], bw)
-    if kernel == "mamba2_spec_flush":
-        return _mamba2_spec_flush(shape["dstate"], shape["base_block"], bw)
+    if kernel == "mamba2_spec_commit":
+        return _mamba2_spec_commit(shape["dstate"], shape["base_block"], bw)
     raise ValueError(f"unknown ReplaySSM kernel config key: {kernel}")

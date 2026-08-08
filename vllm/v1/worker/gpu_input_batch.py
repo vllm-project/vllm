@@ -172,7 +172,7 @@ class InputBatch:
         self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
 
         # Mamba2 ReplaySSM decode ring origin (num_computed at each request's
-        # last full-state write); populated only when a ReplaySSM mode is on.
+        # last full-state write); consumed only by the standard-decode path.
         self.use_replayssm = use_replayssm
         self.replayssm_decode_base_cpu_tensor = torch.zeros(
             (max_num_reqs,),

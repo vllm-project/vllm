@@ -141,9 +141,9 @@ def test_replayssm_prefix_caching_matches_baseline_tp2(vllm_runner, model_name):
 def _check_replayssm_spec_parity(
     vllm_runner, model_name, *, num_spec_tokens=3, async_scheduling=False
 ):
-    # Compare the engine paths through enough decode steps to exercise cursor
-    # commits and a flush. Near-tie greedy choices may diverge; the comparison
-    # still requires each divergent token to appear in the other's top logprobs.
+    # Compare enough decode steps to exercise successive accepted-window folds.
+    # Near-tie greedy choices may diverge; the comparison still requires each
+    # divergent token to appear in the other's top logprobs.
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,

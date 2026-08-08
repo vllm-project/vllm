@@ -27,7 +27,6 @@ def mock_model_runner_with_input_batch():
     runner = Mock(spec=GPUModelRunner)
     runner.uses_mrope = False
     runner.requests = {}
-    runner._replayssm_spec_deferred_state = {}
     runner.max_num_reqs = 10
     runner.max_model_len = 1024
     runner.late_interaction_runner = Mock()
@@ -72,7 +71,6 @@ def test_e2e_streaming_request_update_basic_flow(mock_model_runner_with_input_ba
         output_token_ids=[10, 11],  # Generated 2 tokens
     )
     runner.requests[req_id] = initial_req_state
-    runner._replayssm_spec_deferred_state[req_id] = Mock()
 
     # Add request to InputBatch
     runner.input_batch.add_request(initial_req_state)
@@ -101,8 +99,6 @@ def test_e2e_streaming_request_update_basic_flow(mock_model_runner_with_input_ba
     updated_req_state = GPUModelRunner._update_streaming_request(
         runner, req_id, new_req_data
     )
-
-    assert req_id not in runner._replayssm_spec_deferred_state
 
     # Step 4: Verify the request state was updated correctly
     assert updated_req_state.prompt_token_ids == [1, 2, 3, 10, 4, 5]

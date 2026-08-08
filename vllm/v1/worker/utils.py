@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -262,6 +262,7 @@ class AttentionGroup:
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
     )
+    speculative_state_committer: Callable[[Any, torch.Tensor], None] | None = None
 
     def create_metadata_builders(
         self,
@@ -298,6 +299,20 @@ class AttentionGroup:
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+    def initialize_speculative_state_committer(
+        self,
+        forward_context: dict[str, Any],
+        vllm_config: VllmConfig,
+    ) -> None:
+        layers = [
+            forward_context[layer_name]
+            for layer_name in self.layer_names
+            if layer_name in forward_context
+        ]
+        self.speculative_state_committer = (
+            self.backend.make_speculative_state_committer(layers, vllm_config)
+        )
 
 
 def select_common_block_size(

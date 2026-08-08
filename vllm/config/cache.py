@@ -144,19 +144,16 @@ class CacheConfig:
       caching is enabled.
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM history buffer length B: with use_replayssm, standard decode
-    caches recent SSM inputs in a size-B ring buffer and flushes the checkpoint
-    state to HBM every B steps. With speculative decoding, B is the maximum
-    history the ring carries into a verify step, so the flush rule is
-    history + 1 + num_speculative_tokens > B. Default 16."""
+    """ReplaySSM history buffer length B for standard decode. The speculative
+    path folds every accepted window into its checkpoint and does not use B.
+    Default 16."""
     use_replayssm: bool = False
-    """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
-    the per-step full-state store, writing the checkpoint back only on flush.
-    Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    mamba backend. Speculative decoding selects the cached verify kernel
-    automatically and requires mamba_cache_mode 'none'. In align mode, standard
-    decode flushes are most efficient when mamba_block_size is a multiple of
-    replayssm_buffer_len, but this is not required."""
+    """Use the ReplaySSM Mamba2 decode kernels. Standard decode caches recent
+    SSM inputs and skips the per-step full-state store, while speculative decode
+    folds every accepted window into its checkpoint. Requires the Triton Mamba
+    backend. Speculative decoding requires mamba_cache_mode 'none'. In align
+    mode, standard decode flushes are most efficient when mamba_block_size is a
+    multiple of replayssm_buffer_len, but this is not required."""
     use_replayssm_spec: bool = field(default=False, init=False)
     """Whether ReplaySSM uses its speculative-decode path. Derived from
     use_replayssm and the speculative configuration by VllmConfig."""

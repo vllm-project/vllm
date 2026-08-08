@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
@@ -399,6 +400,15 @@ class AttentionBackend(ABC):
     @classmethod
     def is_ssm(cls) -> bool:
         return False
+
+    @classmethod
+    def make_speculative_state_committer(
+        cls,
+        layers: Sequence[Any],
+        vllm_config: "VllmConfig",
+    ) -> Callable[[Any, torch.Tensor], None] | None:
+        """Create an optional group-level state commit callback."""
+        return None
 
 
 class AttentionMetadata:

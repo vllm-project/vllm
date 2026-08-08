@@ -1,889 +1,471 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Speculative-decode correctness for the Mamba2 ReplaySSM kernels.
-
-A spec/verify step takes the checkpoint state ``S_0`` + the committed ring buffer
-+ a window of ``spec_query_len = 1 + num_speculative_tokens`` draft tokens, and
-computes the recurrence OUTPUT at each window position (causal: draft ``s`` reads
-the buffer up to its own position). It does NOT write the state per draft -- only
-a flush step folds the *committed* history into the checkpoint, so unaccepted
-drafts can be rolled back.
-
-The circular history window is ``L = B + spec_query_len`` (block ``B`` =
-``buffer_len``). Verify launches the non-flush kernel; flush launches the
-reconstruct kernel; both run every step with device-side row routing.
-
-Oracle (no separate spec reference needed): the already-verified ReplaySSM
-STANDARD decode kernel (``selective_state_update_replayssm_output_only``) stepped
-one token at a time over the SAME window from the SAME checkpoint+buffer, with
-``is_flush=False`` so it reads the SAME fixed checkpoint at every window position.
-Its per-position output must equal the spec kernel's. For the multi-step rollback
-the ground truth is the baseline ``selective_state_update`` decode of the accepted
-token stream (it writes the full state every step).
-
-Three checks per (precision, geometry, base_block, spec_query_len):
-  * single spec step output == standard-decode-of-window, swept over the buffer
-    fill level up to the max non-flush fill C = B - spec_query_len,
-  * a 40-step rollback with a random accepted count k per step: accepted-position
-    outputs track the baseline decode, and the committed checkpoint at each flush
-    matches the baseline state at the matching folded-token count,
-  * continuous-batching realism: sparse state slots via state_batch_indices with
-    NULL padding rows and per-row buffer fill levels.
-
-Precision: the checkpoint-readout dot is keyed on the activation dtype -- tf32x3
-(~fp32 parity, 3-pass) for fp32 activations, single-pass tf32 for bf16 -- and the
-cache GEMM uses tf32x3, so fp32 is near-exact (rel ~1e-6, tight tolerance). At bf16
-activations the bf16 ``C``/``x``/``B`` operands dominate (rel ~5e-3), a small
-EXPECTED gap that is bounded per step and non-accumulating across the decode.
-"""
+"""Correctness tests for fold-every-commit ReplaySSM speculative decode."""
 
 import pytest
 import torch
 
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_state_update
-from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
-    selective_state_update_replayssm_output_only,
-)
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
-    commit_replayssm_spec,
-    reset_replayssm_spec_cursors,
+    ReplaySSMSpecCommitContext,
     selective_state_update_replayssm_spec,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 DEV = "cuda"
+NUM_LAYERS = 3
+NUM_BLOCKS = 8
+BATCH = 3
+NHEADS = 4
+HEAD_DIM = 32
+DSTATE = 16
+NGROUPS = 2
+SPEC_QUERY_LEN = 4
+CONV_DIM = 48
+CONV_HISTORY_LEN = 3
+CONV_STATE_LEN = CONV_HISTORY_LEN + SPEC_QUERY_LEN - 1
+
+_PRECISIONS = [
+    (torch.float32, torch.float32),
+    (torch.float32, torch.bfloat16),
+    (torch.bfloat16, torch.bfloat16),
+]
 
 
-def _lbt(base_block: int, spec_query_len: int) -> tuple[int, int]:
-    """Return the logical threshold and equal-sized physical ring."""
-    L = base_block + spec_query_len
-    return L, L
-
-
-def _tolerances(both_fp32: bool) -> tuple[float, float]:
-    # fp32 activations use the tf32x3 checkpoint dot, matching the standard-decode
-    # oracle to ~1e-6; atol=1e-3 still flags a regression to single-pass tf32. bf16
-    # stays loose: the bf16 C/x/B operands dominate (rel ~5e-3), unaffected by the
-    # checkpoint dot's precision.
-    if both_fp32:
-        return 1e-4, 1e-3
+def _tolerances(
+    state_dtype: torch.dtype, activation_dtype: torch.dtype
+) -> tuple[float, float]:
+    if state_dtype == activation_dtype == torch.float32:
+        return 2e-4, 2e-3
     return 6e-2, 2e-1
 
 
-def _tied_A(nheads: int, headdim: int, dstate: int) -> torch.Tensor:
-    # TIE_HDIM: A is scalar per head (stride(-1)==stride(-2)==0).
-    A = -torch.rand(nheads, device=DEV) - 1.0
-    return A.view(nheads, 1, 1).expand(nheads, headdim, dstate)
-
-
-def _scatter_history(
-    x_cache: torch.Tensor,
-    dt_cache: torch.Tensor,
-    B_cache: torch.Tensor,
-    slot: int,
-    x_hist: torch.Tensor,  # (wp, H, P)
-    B_hist: torch.Tensor,  # (wp, G, N)
-    dt_hist_raw: torch.Tensor,  # (wp, H) raw dt
-) -> None:
-    """Fill committed head-major history with an origin of zero."""
-    wp = x_hist.shape[0]
-    x_cache[slot, :, :wp] = x_hist.transpose(0, 1)
-    dt_cache[slot, :, :wp] = dt_hist_raw.float().transpose(0, 1)
-    B_cache[slot, :, :wp] = B_hist.transpose(0, 1)
-
-
-def _standard_window_oracle(
-    *,
-    S0_slot: torch.Tensor,  # (H, P, N) checkpoint for the row
-    x_all,
-    dt_all,
-    B_all,
-    C_all,
-    z_all,  # (T_tot, ...) history+window raw inputs
-    A,
-    D,
-    dt_bias,
-    dt_softplus,
-    wp: int,
-    spec_len: int,
-    buffer_len: int,
-    act_dtype: torch.dtype,
-) -> torch.Tensor:
-    """Step the standard output_only decode over history+window (is_flush=False
-    throughout, so the checkpoint stays fixed). Return the window outputs
-    (spec_len, H, P)."""
-    H, P, N = S0_slot.shape
-    G = B_all.shape[1]
-    state = S0_slot[None].clone()  # (1, H, P, N)
-    x_cache = torch.zeros(1, H, buffer_len, P, device=DEV, dtype=act_dtype)
-    dt_cache = torch.zeros(1, H, buffer_len, device=DEV, dtype=torch.float32)
-    B_cache = torch.zeros(1, G, buffer_len, N, device=DEV, dtype=act_dtype)
-    bc_pre = torch.empty(1, G, buffer_len, device=DEV, dtype=torch.float32)
-    no_flush = torch.zeros(1, device=DEV, dtype=torch.int8)
-    win = []
-    for t in range(wp + spec_len):
-        out_t = torch.empty(1, H, P, device=DEV, dtype=act_dtype)
-        selective_state_update_replayssm_output_only(
-            state,
-            x_all[t : t + 1],
-            dt_all[t : t + 1, :, None].expand(1, H, P),
-            A,
-            B_all[t : t + 1],
-            C_all[t : t + 1],
-            D=D,
-            z=z_all[t : t + 1] if z_all is not None else None,
-            dt_bias=dt_bias[:, None].expand(H, P),
-            dt_softplus=dt_softplus,
-            x_cache=x_cache,
-            dt_cache=dt_cache,
-            B_cache=B_cache,
-            write_pos=torch.tensor([t], device=DEV, dtype=torch.int32),
-            is_flush=no_flush,
-            max_cache_len=buffer_len,
-            bc_pre=bc_pre,
-            out=out_t,
+def _padded_states(dtype: torch.dtype) -> list[torch.Tensor]:
+    natural_size = NHEADS * HEAD_DIM * DSTATE
+    states = []
+    for layer_idx in range(NUM_LAYERS):
+        storage = torch.randn(
+            NUM_BLOCKS,
+            natural_size + 8 * (layer_idx + 1),
+            device=DEV,
+            dtype=dtype,
         )
-        if t >= wp:
-            win.append(out_t.clone())
-    return torch.cat(win, dim=0)
+        states.append(
+            storage[:, :natural_size].view(NUM_BLOCKS, NHEADS, HEAD_DIM, DSTATE)
+        )
+    return states
 
 
-def _run_single_step(
-    *,
-    state_dtype,
-    act_dtype,
-    nheads,
-    headdim,
-    dstate,
-    ngroups,
-    buffer_len,  # history block B
-    spec_query_len,
-    wp,
-    has_z,
-    dt_softplus=True,
-    seed=0,
-    perturb=False,
-):
-    set_random_seed(seed)
-    H, P, N, G = nheads, headdim, dstate, ngroups
-    spec_len = spec_query_len
-    L, buf = _lbt(buffer_len, spec_query_len)
-    both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
-    rtol, atol = _tolerances(both_fp32)
+def _conv_states(dtype: torch.dtype) -> list[torch.Tensor]:
+    states = []
+    for layer_idx in range(NUM_LAYERS):
+        if layer_idx % 2 == 0:
+            state = torch.randn(
+                NUM_BLOCKS,
+                CONV_DIM,
+                CONV_STATE_LEN,
+                device=DEV,
+                dtype=dtype,
+            )
+        else:
+            state = torch.randn(
+                NUM_BLOCKS,
+                CONV_STATE_LEN,
+                CONV_DIM,
+                device=DEV,
+                dtype=dtype,
+            ).transpose(-1, -2)
+        states.append(state)
+    return states
 
-    A = _tied_A(H, P, N)
-    dt_bias = torch.rand(H, device=DEV) - 4.0
-    D = torch.randn(H, P, device=DEV)
 
-    T_tot = wp + spec_len
-    x = torch.randn(T_tot, H, P, device=DEV, dtype=act_dtype)
-    dt = torch.randn(T_tot, H, device=DEV, dtype=act_dtype)
-    B = torch.randn(T_tot, G, N, device=DEV, dtype=act_dtype)
-    C = torch.randn(T_tot, G, N, device=DEV, dtype=act_dtype)
-    z = torch.randn(T_tot, H, P, device=DEV, dtype=act_dtype) if has_z else None
+def _padded_caches(shape: tuple[int, ...], dtype: torch.dtype) -> list[torch.Tensor]:
+    natural_size = 1
+    for size in shape:
+        natural_size *= size
+    caches = []
+    for layer_idx in range(NUM_LAYERS):
+        storage = torch.empty(
+            NUM_BLOCKS,
+            natural_size + 8 * (layer_idx + 1),
+            device=DEV,
+            dtype=dtype,
+        )
+        caches.append(storage[:, :natural_size].view(NUM_BLOCKS, *shape))
+    return caches
 
-    num_blocks = 2
-    S0 = torch.randn(num_blocks, H, P, N, device=DEV, dtype=state_dtype) * 0.1
 
-    oracle = _standard_window_oracle(
-        S0_slot=S0[1],
-        x_all=x,
-        dt_all=dt,
-        B_all=B,
-        C_all=C,
-        z_all=z,
-        A=A,
-        D=D,
-        dt_bias=dt_bias,
-        dt_softplus=dt_softplus,
-        wp=wp,
-        spec_len=spec_len,
-        buffer_len=buf,
-        act_dtype=act_dtype,
-    )
-
-    # Spec path: prefill head-major history, one verify call (non-flush).
-    state_spec = S0.clone()
-    x_cache = torch.zeros(num_blocks, H, buf, P, device=DEV, dtype=act_dtype)
-    dt_cache = torch.zeros(num_blocks, H, buf, device=DEV, dtype=torch.float32)
-    B_cache = torch.zeros(num_blocks, G, buf, N, device=DEV, dtype=act_dtype)
-    _scatter_history(x_cache, dt_cache, B_cache, 1, x[:wp], B[:wp], dt[:wp])
-    if perturb:
-        # teeth: corrupt one history slot -> outputs must diverge from the oracle.
-        x_cache[1, 0, max(0, wp - 1), 0] += 5.0
-
-    dt_spec = dt[wp:].float()
-    z_spec = z[wp:] if z is not None else None
-    write_pos = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
-    write_pos[1] = wp
-    post_origin = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
-    is_flush = torch.zeros(num_blocks, dtype=torch.int8, device=DEV)
-    qsl = torch.tensor([0, spec_len], device=DEV, dtype=torch.int32)
-    sbi = torch.tensor([1], device=DEV, dtype=torch.int32)
-    out_spec = torch.empty(spec_len, H, P, device=DEV, dtype=act_dtype)
-    selective_state_update_replayssm_spec(
-        state_spec,
-        x_cache,
-        dt_cache,
-        B_cache,
-        x[wp:],
-        dt_spec,
-        B[wp:],
-        C[wp:],
+def _make_context(
+    state_dtype: torch.dtype,
+    activation_dtype: torch.dtype,
+) -> tuple[
+    ReplaySSMSpecCommitContext,
+    list[torch.Tensor],
+    list[torch.Tensor],
+]:
+    states = _padded_states(state_dtype)
+    conv_states = _conv_states(activation_dtype)
+    x_caches = _padded_caches((NHEADS, SPEC_QUERY_LEN, HEAD_DIM), activation_dtype)
+    dt_caches = _padded_caches((NHEADS, SPEC_QUERY_LEN), torch.float32)
+    B_caches = _padded_caches((NGROUPS, SPEC_QUERY_LEN, DSTATE), activation_dtype)
+    A = [
+        -torch.rand(NHEADS, device=DEV, dtype=torch.float32) - 1.0
+        for _ in range(NUM_LAYERS)
+    ]
+    dt_bias = [
+        torch.rand(NHEADS, device=DEV, dtype=torch.float32) - 4.0
+        for _ in range(NUM_LAYERS)
+    ]
+    context = ReplaySSMSpecCommitContext.create(
+        conv_states,
+        states,
+        x_caches,
+        dt_caches,
+        B_caches,
         A,
-        write_pos=write_pos,
-        post_conv_state_pos=post_origin,
-        is_flush=is_flush,
-        query_start_loc=qsl,
-        state_batch_indices=sbi,
-        max_cache_len=L,
-        spec_query_len=spec_query_len,
-        D=D,
-        z=z_spec,
-        dt_bias=dt_bias,
-        dt_softplus=dt_softplus,
-        out=out_spec,
+        dt_bias,
+        ngroups=NGROUPS,
+        spec_query_len=SPEC_QUERY_LEN,
     )
-
-    torch.testing.assert_close(out_spec, oracle, rtol=rtol, atol=atol)
-    # non-flush verify must not touch the checkpoint.
-    torch.testing.assert_close(state_spec, S0, rtol=0, atol=0)
+    return context, A, dt_bias
 
 
-def _wp_set(base_block: int, spec_query_len: int) -> list[int]:
-    # Verify-path fills: 0 (empty buffer = pure checkpoint readout), the max
-    # non-flush fill C = B - spec_query_len (the tightest edge), and a midpoint.
-    C = base_block - spec_query_len
-    return sorted({0, max(0, C // 2), max(0, C)})
+def _make_inputs(
+    query_lens: list[int], activation_dtype: torch.dtype
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    num_tokens = sum(query_lens)
+    return [
+        (
+            torch.randn(
+                num_tokens,
+                NHEADS,
+                HEAD_DIM,
+                device=DEV,
+                dtype=activation_dtype,
+            ),
+            torch.randn(num_tokens, NHEADS, device=DEV, dtype=activation_dtype),
+            torch.randn(
+                num_tokens,
+                NGROUPS,
+                DSTATE,
+                device=DEV,
+                dtype=activation_dtype,
+            ),
+            torch.randn(
+                num_tokens,
+                NGROUPS,
+                DSTATE,
+                device=DEV,
+                dtype=activation_dtype,
+            ),
+            torch.randn(NHEADS, HEAD_DIM, device=DEV, dtype=activation_dtype),
+        )
+        for _ in range(NUM_LAYERS)
+    ]
 
 
-_PRECISIONS = [
-    pytest.param((torch.float32, torch.float32), id="s32_a32"),
-    pytest.param((torch.float32, torch.bfloat16), id="s32_a16"),
-    pytest.param((torch.bfloat16, torch.bfloat16), id="s16_a16"),
-]
-# (nheads, headdim, dstate, ngroups). The full precision x block x spec_query_len
-# sweep runs on the small shapes (cheap compiles); the production Nemotron-3
-# Mamba2 shapes are exercised by test_spec_step_real_geometry.
-_SMALL = pytest.param((8, 64, 64, 4), id="small")
-_TINY = pytest.param((4, 64, 16, 1), id="tiny")
-_REAL_GEOMETRIES = [
-    pytest.param((96, 80, 128, 8), id="nano4b"),
-    pytest.param((128, 64, 128, 8), id="super120b"),
-    pytest.param((256, 64, 128, 8), id="ultra550b"),
-]
-_BASE_BLOCKS = [16, 32]  # history block B (replayssm_buffer_len)
-_SPEC_QUERY_LENS = [2, 4, 6, 8]
+def _run_baseline(
+    state: torch.Tensor,
+    inputs: tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ],
+    A: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state_indices: torch.Tensor,
+    query_lens: list[int],
+    run_lens: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x, dt, B, C, D = inputs
+    expected_state = state.clone()
+    expected_out = torch.full_like(x, torch.nan)
+    A_expanded = A[:, None, None].expand(NHEADS, HEAD_DIM, DSTATE)
+    dt_bias_expanded = dt_bias[:, None].expand(NHEADS, HEAD_DIM)
+    token_start = 0
+    for batch_idx, (query_len, run_len) in enumerate(zip(query_lens, run_lens)):
+        state_idx = int(state_indices[batch_idx].item())
+        if state_idx == NULL_BLOCK_ID:
+            token_start += query_len
+            continue
+        state_index = state_indices[batch_idx : batch_idx + 1]
+        for offset in range(run_len):
+            token_idx = token_start + offset
+            out = expected_out[token_idx : token_idx + 1]
+            selective_state_update(
+                expected_state,
+                x[token_idx : token_idx + 1],
+                dt[token_idx : token_idx + 1, :, None].expand(1, NHEADS, HEAD_DIM),
+                A_expanded,
+                B[token_idx : token_idx + 1],
+                C[token_idx : token_idx + 1],
+                D=D,
+                dt_bias=dt_bias_expanded,
+                dt_softplus=True,
+                state_batch_indices=state_index,
+                out=out,
+            )
+        token_start += query_len
+    return expected_state, expected_out
+
+
+def _query_start_loc(query_lens: list[int]) -> torch.Tensor:
+    starts = [0]
+    for query_len in query_lens:
+        starts.append(starts[-1] + query_len)
+    return torch.tensor(starts, device=DEV, dtype=torch.int32)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
-@pytest.mark.parametrize("precision", _PRECISIONS)
-@pytest.mark.parametrize("geometry", [_SMALL, _TINY])
-@pytest.mark.parametrize("base_block", _BASE_BLOCKS)
-@pytest.mark.parametrize("spec_query_len", _SPEC_QUERY_LENS)
-@pytest.mark.parametrize("has_z", [False, True])
-def test_spec_step_matches_standard_decode(
-    precision, geometry, base_block, spec_query_len, has_z
-):
-    # base_block >= spec_query_len always holds here. Sweep the non-flush fill level.
-    state_dtype, act_dtype = precision
-    nheads, headdim, dstate, ngroups = geometry
-    for wp in _wp_set(base_block, spec_query_len):
-        _run_single_step(
-            state_dtype=state_dtype,
-            act_dtype=act_dtype,
-            nheads=nheads,
-            headdim=headdim,
-            dstate=dstate,
-            ngroups=ngroups,
-            buffer_len=base_block,
-            spec_query_len=spec_query_len,
-            wp=wp,
-            has_z=has_z,
-        )
+@pytest.mark.parametrize("activation_dtype", [torch.float32, torch.bfloat16])
+def test_commit_compacts_conv_state_to_canonical_history(activation_dtype):
+    context, _, _ = _make_context(torch.float32, activation_dtype)
+    initial_states = [state.clone() for state in context.conv_states]
+    query_lens = [SPEC_QUERY_LEN, 2, SPEC_QUERY_LEN]
+    accepted = [3, 1, SPEC_QUERY_LEN]
+    state_indices = torch.tensor([6, 2, NULL_BLOCK_ID], device=DEV, dtype=torch.int32)
+
+    context.commit(
+        torch.tensor(accepted, device=DEV, dtype=torch.int32),
+        state_indices,
+        _query_start_loc(query_lens),
+    )
+
+    for actual, initial in zip(context.conv_states, initial_states):
+        for batch_idx, block_idx in enumerate(state_indices.tolist()):
+            if block_idx == NULL_BLOCK_ID:
+                continue
+            offset = accepted[batch_idx] - 1
+            torch.testing.assert_close(
+                actual[block_idx, :, :CONV_HISTORY_LEN],
+                initial[
+                    block_idx,
+                    :,
+                    offset : offset + CONV_HISTORY_LEN,
+                ],
+            )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
-@pytest.mark.parametrize("precision", _PRECISIONS)
-@pytest.mark.parametrize("geometry", _REAL_GEOMETRIES)
-@pytest.mark.parametrize("spec_query_len", [2, 8])
-def test_spec_step_real_geometry(precision, geometry, spec_query_len):
-    # Production Nemotron-3 Mamba2 shapes (Nano-4B / Super-120B / Ultra-550B) at
-    # the deployable block B=16, both ends of the spec_query_len range.
-    state_dtype, act_dtype = precision
-    nheads, headdim, dstate, ngroups = geometry
-    for wp in _wp_set(16, spec_query_len):
-        _run_single_step(
-            state_dtype=state_dtype,
-            act_dtype=act_dtype,
-            nheads=nheads,
-            headdim=headdim,
-            dstate=dstate,
-            ngroups=ngroups,
-            buffer_len=16,
-            spec_query_len=spec_query_len,
-            wp=wp,
-            has_z=True,
-        )
+def test_verify_rejects_window_larger_than_activation_capacity():
+    context, A, dt_bias = _make_context(torch.float32, torch.float32)
+    x, dt, B, C, D = _make_inputs([SPEC_QUERY_LEN + 1], torch.float32)[0]
 
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
-def test_spec_step_teeth():
-    # A correct run passes; corrupting one cached history value must break the
-    # output match (guards against a vacuous oracle).
-    _run_single_step(
-        state_dtype=torch.float32,
-        act_dtype=torch.float32,
-        nheads=8,
-        headdim=64,
-        dstate=64,
-        ngroups=4,
-        buffer_len=16,
-        spec_query_len=4,
-        wp=5,
-        has_z=True,
-    )
-    with pytest.raises(AssertionError):
-        _run_single_step(
-            state_dtype=torch.float32,
-            act_dtype=torch.float32,
-            nheads=8,
-            headdim=64,
-            dstate=64,
-            ngroups=4,
-            buffer_len=16,
-            spec_query_len=4,
-            wp=5,
-            has_z=True,
-            perturb=True,
-        )
-
-
-def _run_rollback(
-    *,
-    state_dtype,
-    act_dtype,
-    nheads,
-    headdim,
-    dstate,
-    ngroups,
-    buffer_len,  # history block B
-    spec_query_len,
-    num_steps=40,
-    has_z=True,
-    seed=0,
-):
-    """Drive the verify+commit loop from an empty buffer; accept a random k each
-    step. The baseline ``selective_state_update`` decode of the accepted stream is
-    the ground truth for outputs; the committed checkpoint at each flush must match
-    the baseline state at the matching folded-token count (n_folded bookkeeping)."""
-    set_random_seed(seed)
-    H, P, N, G = nheads, headdim, dstate, ngroups
-    L, buf = _lbt(buffer_len, spec_query_len)
-    both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
-    rtol, atol = _tolerances(both_fp32)
-
-    A = _tied_A(H, P, N)
-    dt_bias = torch.rand(H, device=DEV) - 4.0
-    D = torch.randn(H, P, device=DEV)
-
-    num_blocks = 2
-    S0 = torch.randn(num_blocks, H, P, N, device=DEV, dtype=state_dtype) * 0.1
-    state_spec = S0.clone()
-    state_base = S0.clone()  # full pool; row in slot 1
-
-    x_cache = torch.zeros(num_blocks, H, buf, P, device=DEV, dtype=act_dtype)
-    dt_cache = torch.zeros(num_blocks, H, buf, device=DEV, dtype=torch.float32)
-    B_cache = torch.zeros(num_blocks, G, buf, N, device=DEV, dtype=act_dtype)
-    write_pos = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
-    post_origin = torch.zeros(num_blocks, dtype=torch.int32, device=DEV)
-    is_flush = torch.zeros(num_blocks, dtype=torch.int8, device=DEV)
-    sbi = torch.tensor([1], device=DEV, dtype=torch.int32)
-    reset_replayssm_spec_cursors(
-        write_pos,
-        post_origin,
-        is_flush,
-        torch.ones(1, dtype=torch.int8, device=DEV),
-        sbi,
-        L,
-        spec_query_len,
-    )
-
-    n_folded = 0
-    snapshots = {0: state_base[1].clone()}
-    total_accepted = 0
-    g = torch.Generator(device="cpu").manual_seed(seed + 1)
-
-    for _ in range(num_steps):
-        spec_len = spec_query_len
-        x = torch.randn(spec_len, H, P, device=DEV, dtype=act_dtype)
-        dt = torch.randn(spec_len, H, device=DEV, dtype=act_dtype)
-        Bw = torch.randn(spec_len, G, N, device=DEV, dtype=act_dtype)
-        Cw = torch.randn(spec_len, G, N, device=DEV, dtype=act_dtype)
-        zw = torch.randn(spec_len, H, P, device=DEV, dtype=act_dtype) if has_z else None
-
-        dt_spec = dt.float()
-        qsl = torch.tensor([0, spec_len], device=DEV, dtype=torch.int32)
-        out_spec = torch.empty(spec_len, H, P, device=DEV, dtype=act_dtype)
-
-        wp_before = int(write_pos[1].item())
-        flush_before = int(is_flush[1].item())
+    with pytest.raises(ValueError, match="activation capacity"):
         selective_state_update_replayssm_spec(
-            state_spec,
+            context.state_checkpoints[0],
+            context.x_caches[0],
+            context.dt_caches[0],
+            context.B_caches[0],
+            x,
+            dt,
+            B,
+            C,
+            A[0][:, None, None].expand(NHEADS, HEAD_DIM, DSTATE),
+            query_start_loc=_query_start_loc([SPEC_QUERY_LEN + 1]),
+            state_batch_indices=torch.tensor([1], device=DEV, dtype=torch.int32),
+            spec_query_len=SPEC_QUERY_LEN,
+            D=D,
+            dt_bias=dt_bias[0],
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+@pytest.mark.parametrize("precision", _PRECISIONS)
+def test_group_verify_and_all_layer_commit_match_baseline(precision):
+    """One group launch commits every layer and only each accepted prefix."""
+    state_dtype, activation_dtype = precision
+    set_random_seed(0)
+    context, A, dt_bias = _make_context(state_dtype, activation_dtype)
+    initial_states = [state.clone() for state in context.state_checkpoints]
+    query_lens = [SPEC_QUERY_LEN, 2, SPEC_QUERY_LEN]
+    accepted = [2, 1, SPEC_QUERY_LEN]
+    state_indices = torch.tensor([6, 2, NULL_BLOCK_ID], device=DEV, dtype=torch.int32)
+    query_start_loc = _query_start_loc(query_lens)
+    inputs = _make_inputs(query_lens, activation_dtype)
+    rtol, atol = _tolerances(state_dtype, activation_dtype)
+    expected_committed_states = []
+
+    for layer_idx in range(NUM_LAYERS):
+        x, dt, B, C, D = inputs[layer_idx]
+        x_cache = context.x_caches[layer_idx]
+        dt_cache = context.dt_caches[layer_idx]
+        B_cache = context.B_caches[layer_idx]
+        out = torch.full_like(x, torch.nan)
+        selective_state_update_replayssm_spec(
+            context.state_checkpoints[layer_idx],
             x_cache,
             dt_cache,
             B_cache,
             x,
-            dt_spec,
-            Bw,
-            Cw,
-            A,
-            write_pos=write_pos,
-            post_conv_state_pos=post_origin,
-            is_flush=is_flush,
-            query_start_loc=qsl,
-            state_batch_indices=sbi,
-            max_cache_len=L,
-            spec_query_len=spec_query_len,
+            dt,
+            B,
+            C,
+            A[layer_idx][:, None, None].expand(NHEADS, HEAD_DIM, DSTATE),
+            query_start_loc=query_start_loc,
+            state_batch_indices=state_indices,
+            spec_query_len=SPEC_QUERY_LEN,
             D=D,
-            z=zw,
-            dt_bias=dt_bias,
-            dt_softplus=True,
-            out=out_spec,
+            dt_bias=dt_bias[layer_idx],
+            out=out,
         )
-        # a flush verify folds the committed history [0, wp_before) into S_0.
-        if flush_before and wp_before > 0:
-            n_folded += wp_before
-
-        k = int(torch.randint(1, spec_len + 1, (1,), generator=g).item())
-
-        base_out = []
-        for s in range(k):
-            out_t = torch.empty(1, H, P, device=DEV, dtype=act_dtype)
-            selective_state_update(
-                state_base,
-                x[s : s + 1],
-                dt[s : s + 1, :, None].expand(1, H, P),
-                A,
-                Bw[s : s + 1],
-                Cw[s : s + 1],
-                D=D,
-                z=zw[s : s + 1] if zw is not None else None,
-                dt_bias=dt_bias[:, None].expand(H, P),
-                dt_softplus=True,
-                state_batch_indices=sbi,
-                out=out_t,
-            )
-            base_out.append(out_t.clone())
-            total_accepted += 1
-            snapshots[total_accepted] = state_base[1].clone()
-        base_out = torch.cat(base_out, dim=0)
-
-        # (a) accepted-position outputs track the baseline decode.
-        torch.testing.assert_close(out_spec[:k], base_out, rtol=rtol, atol=atol)
-
-        commit_replayssm_spec(
-            write_pos,
-            post_origin,
-            is_flush,
-            torch.tensor([k], device=DEV, dtype=torch.int32),
-            sbi,
-            L,
-            spec_query_len,
-        )
-
-        # (b) committed checkpoint == baseline state at the folded-token count.
-        if n_folded in snapshots:
-            torch.testing.assert_close(
-                state_spec[1], snapshots[n_folded], rtol=rtol, atol=atol
-            )
-
-    # The buffer must have flushed at least once over 40 steps (else the state
-    # check above never ran) -- otherwise the test is vacuous.
-    assert n_folded > 0
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
-@pytest.mark.parametrize("precision", _PRECISIONS)
-@pytest.mark.parametrize("base_block", _BASE_BLOCKS)
-@pytest.mark.parametrize("spec_query_len", _SPEC_QUERY_LENS)
-def test_spec_rollback_tracks_baseline(precision, base_block, spec_query_len):
-    state_dtype, act_dtype = precision
-    _run_rollback(
-        state_dtype=state_dtype,
-        act_dtype=act_dtype,
-        nheads=8,
-        headdim=64,
-        dstate=64,
-        ngroups=4,
-        buffer_len=base_block,
-        spec_query_len=spec_query_len,
-    )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
-@pytest.mark.parametrize("precision", _PRECISIONS)
-@pytest.mark.parametrize("with_padding", [False, True])
-def test_spec_continuous_batching(precision, with_padding):
-    """Sparse state slots via state_batch_indices with NULL padding rows and a
-    DIFFERENT buffer fill level per row, in a single verify call. Each active
-    row is checked against its own standard-decode window oracle; padding-row
-    outputs and unused state slots are left untouched."""
-    state_dtype, act_dtype = precision
-    set_random_seed(0)
-    H, P, N, G = 4, 64, 16, 2
-    base_block = 16
-    spec_query_len = 4
-    spec_len = spec_query_len
-    L, buf = _lbt(base_block, spec_query_len)
-    both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
-    rtol, atol = _tolerances(both_fp32)
-
-    batch = 3
-    padding = 2 if with_padding else 0
-    padded_batch = batch + padding
-    total_slots = 12
-    C = base_block - spec_query_len
-    wps = [0, C // 2, C]  # staggered non-flush fills incl. the tight edge
-
-    A = _tied_A(H, P, N)
-    dt_bias = torch.rand(H, device=DEV) - 4.0
-    D = torch.randn(H, P, device=DEV)
-
-    state_indices = (torch.randperm(total_slots - 1, device=DEV)[:batch] + 1).to(
-        torch.int32
-    )
-    sbi = torch.cat(
-        [
+        _, expected_out = _run_baseline(
+            initial_states[layer_idx],
+            inputs[layer_idx],
+            A[layer_idx],
+            dt_bias[layer_idx],
             state_indices,
-            torch.full((padding,), NULL_BLOCK_ID, dtype=torch.int32, device=DEV),
+            query_lens,
+            query_lens,
+        )
+        for batch_idx in range(BATCH - 1):
+            start = int(query_start_loc[batch_idx].item())
+            end = int(query_start_loc[batch_idx + 1].item())
+            torch.testing.assert_close(
+                out[start:end], expected_out[start:end], rtol=rtol, atol=atol
+            )
+        assert torch.isnan(out[-SPEC_QUERY_LEN:]).all()
+        torch.testing.assert_close(
+            context.state_checkpoints[layer_idx],
+            initial_states[layer_idx],
+            rtol=0,
+            atol=0,
+        )
+        expected_state, _ = _run_baseline(
+            initial_states[layer_idx],
+            inputs[layer_idx],
+            A[layer_idx],
+            dt_bias[layer_idx],
+            state_indices,
+            query_lens,
+            accepted,
+        )
+        expected_committed_states.append(expected_state)
+
+    context.commit(
+        torch.tensor(accepted, device=DEV, dtype=torch.int32),
+        state_indices,
+        query_start_loc,
+    )
+
+    for actual, expected in zip(context.state_checkpoints, expected_committed_states):
+        torch.testing.assert_close(actual, expected, rtol=rtol, atol=atol)
+
+    assert all(cache.shape[0] == NUM_BLOCKS for cache in context.x_caches)
+    assert context.x_caches[0].stride(0) != context.x_caches[1].stride(0)
+    assert context.state_checkpoints[0].stride(0) != (
+        context.state_checkpoints[1].stride(0)
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+@pytest.mark.parametrize("precision", _PRECISIONS)
+def test_forced_single_prompt_token_is_committed(precision):
+    """A discarded one-token prompt tail still advances every checkpoint."""
+    state_dtype, activation_dtype = precision
+    set_random_seed(1)
+    context, A, dt_bias = _make_context(state_dtype, activation_dtype)
+    initial_states = [state.clone() for state in context.state_checkpoints]
+    query_lens = [1, SPEC_QUERY_LEN, SPEC_QUERY_LEN]
+    accepted = [0, 1, 0]
+    force_commit = [True, False, False]
+    commit_lens = [1, 1, 0]
+    state_indices = torch.tensor([7, 3, NULL_BLOCK_ID], device=DEV, dtype=torch.int32)
+    query_start_loc = _query_start_loc(query_lens)
+    inputs = _make_inputs(query_lens, activation_dtype)
+    expected_states = []
+    rtol, atol = _tolerances(state_dtype, activation_dtype)
+
+    for layer_idx in range(NUM_LAYERS):
+        x, dt, B, C, D = inputs[layer_idx]
+        selective_state_update_replayssm_spec(
+            context.state_checkpoints[layer_idx],
+            context.x_caches[layer_idx],
+            context.dt_caches[layer_idx],
+            context.B_caches[layer_idx],
+            x,
+            dt,
+            B,
+            C,
+            A[layer_idx][:, None, None].expand(NHEADS, HEAD_DIM, DSTATE),
+            query_start_loc=query_start_loc,
+            state_batch_indices=state_indices,
+            spec_query_len=SPEC_QUERY_LEN,
+            D=D,
+            dt_bias=dt_bias[layer_idx],
+        )
+        expected_state, _ = _run_baseline(
+            initial_states[layer_idx],
+            inputs[layer_idx],
+            A[layer_idx],
+            dt_bias[layer_idx],
+            state_indices,
+            query_lens,
+            commit_lens,
+        )
+        expected_states.append(expected_state)
+
+    context.commit(
+        torch.tensor(accepted, device=DEV, dtype=torch.int32),
+        state_indices,
+        query_start_loc,
+        force_commit=torch.tensor(force_commit, device=DEV, dtype=torch.bool),
+    )
+
+    for actual, expected in zip(context.state_checkpoints, expected_states):
+        torch.testing.assert_close(actual, expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+def test_fold_every_commit_reuses_current_window_buffers():
+    """Successive verify windows leave no pending cursor or acceptance state."""
+    set_random_seed(2)
+    context, A, dt_bias = _make_context(torch.float32, torch.float32)
+    expected_states = [state.clone() for state in context.state_checkpoints]
+    query_lens = [SPEC_QUERY_LEN] * BATCH
+    state_indices = torch.tensor([1, 4, 7], device=DEV, dtype=torch.int32)
+    query_start_loc = _query_start_loc(query_lens)
+
+    for step in range(5):
+        inputs = _make_inputs(query_lens, torch.float32)
+        accepted = [
+            1 + (step + batch_idx) % SPEC_QUERY_LEN for batch_idx in range(BATCH)
         ]
-    )
-    unused = torch.ones(total_slots, dtype=torch.bool, device=DEV)
-    unused[state_indices] = False
-
-    S0 = torch.randn(total_slots, H, P, N, device=DEV, dtype=state_dtype) * 0.1
-    state_spec = S0.clone()
-    x_cache = torch.zeros(total_slots, H, buf, P, device=DEV, dtype=act_dtype)
-    dt_cache = torch.zeros(total_slots, H, buf, device=DEV, dtype=torch.float32)
-    B_cache = torch.zeros(total_slots, G, buf, N, device=DEV, dtype=act_dtype)
-    write_pos = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
-    post_origin = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
-    is_flush = torch.zeros(total_slots, dtype=torch.int8, device=DEV)
-
-    # per-row raw inputs (history + window); build the per-row oracle.
-    oracles = []
-    x_pack = torch.zeros(padded_batch * spec_len, H, P, device=DEV, dtype=act_dtype)
-    dt_spec = torch.zeros(padded_batch * spec_len, H, device=DEV, dtype=torch.float32)
-    B_pack = torch.zeros(padded_batch * spec_len, G, N, device=DEV, dtype=act_dtype)
-    C_pack = torch.zeros_like(B_pack)
-    z_pack = torch.zeros(padded_batch * spec_len, H, P, device=DEV, dtype=act_dtype)
-    for r in range(batch):
-        wp = wps[r]
-        slot = int(state_indices[r].item())
-        T_tot = wp + spec_len
-        x = torch.randn(T_tot, H, P, device=DEV, dtype=act_dtype)
-        dt = torch.randn(T_tot, H, device=DEV, dtype=act_dtype)
-        Bv = torch.randn(T_tot, G, N, device=DEV, dtype=act_dtype)
-        Cv = torch.randn(T_tot, G, N, device=DEV, dtype=act_dtype)
-        zv = torch.randn(T_tot, H, P, device=DEV, dtype=act_dtype)
-        oracles.append(
-            _standard_window_oracle(
-                S0_slot=S0[slot],
-                x_all=x,
-                dt_all=dt,
-                B_all=Bv,
-                C_all=Cv,
-                z_all=zv,
-                A=A,
+        for layer_idx in range(NUM_LAYERS):
+            x, dt, B, C, D = inputs[layer_idx]
+            selective_state_update_replayssm_spec(
+                context.state_checkpoints[layer_idx],
+                context.x_caches[layer_idx],
+                context.dt_caches[layer_idx],
+                context.B_caches[layer_idx],
+                x,
+                dt,
+                B,
+                C,
+                A[layer_idx][:, None, None].expand(NHEADS, HEAD_DIM, DSTATE),
+                query_start_loc=query_start_loc,
+                state_batch_indices=state_indices,
+                spec_query_len=SPEC_QUERY_LEN,
                 D=D,
-                dt_bias=dt_bias,
-                dt_softplus=True,
-                wp=wp,
-                spec_len=spec_len,
-                buffer_len=buf,
-                act_dtype=act_dtype,
+                dt_bias=dt_bias[layer_idx],
             )
-        )
-        _scatter_history(
-            x_cache,
-            dt_cache,
-            B_cache,
-            slot,
-            x[:wp],
-            Bv[:wp],
-            dt[:wp],
-        )
-        write_pos[slot] = wp
-        seg = slice(r * spec_len, (r + 1) * spec_len)
-        x_pack[seg] = x[wp:]
-        dt_spec[seg] = dt[wp:].float()
-        B_pack[seg] = Bv[wp:]
-        C_pack[seg] = Cv[wp:]
-        z_pack[seg] = zv[wp:]
-
-    qsl = torch.arange(
-        0, (padded_batch + 1) * spec_len, spec_len, device=DEV, dtype=torch.int32
-    )
-    out_spec = torch.full(
-        (padded_batch * spec_len, H, P), 42.0, device=DEV, dtype=act_dtype
-    )
-    selective_state_update_replayssm_spec(
-        state_spec,
-        x_cache,
-        dt_cache,
-        B_cache,
-        x_pack,
-        dt_spec,
-        B_pack,
-        C_pack,
-        A,
-        write_pos=write_pos,
-        post_conv_state_pos=post_origin,
-        is_flush=is_flush,
-        query_start_loc=qsl,
-        state_batch_indices=sbi,
-        max_cache_len=L,
-        spec_query_len=spec_query_len,
-        D=D,
-        z=z_pack,
-        dt_bias=dt_bias,
-        dt_softplus=True,
-        out=out_spec,
-    )
-
-    for r in range(batch):
-        seg = slice(r * spec_len, (r + 1) * spec_len)
-        torch.testing.assert_close(out_spec[seg], oracles[r], rtol=rtol, atol=atol)
-    if with_padding:
-        pad = slice(batch * spec_len, padded_batch * spec_len)
-        assert torch.equal(out_spec[pad], torch.full_like(out_spec[pad], 42.0))
-    # non-flush verify leaves every state slot untouched.
-    assert torch.equal(state_spec[unused], S0[unused])
-    torch.testing.assert_close(state_spec, S0, rtol=0, atol=0)
-
-
-_TP_SHARD_GEOMETRIES = [
-    pytest.param((32, 64, 128, 2), id="super120b_tp4"),
-    pytest.param((16, 64, 128, 1), id="super120b_tp8"),
-]
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
-@pytest.mark.parametrize(
-    "precision",
-    [
-        pytest.param((torch.float32, torch.float32), id="s32_a32"),
-        pytest.param((torch.float32, torch.bfloat16), id="s32_a16"),
-    ],
-)
-@pytest.mark.parametrize("geometry", _TP_SHARD_GEOMETRIES)
-def test_spec_external_bc_pre_builder_shape(precision, geometry):
-    """Multi-row verify with an externally allocated bc_pre scratch, as the
-    engine provides it (fp32, oversized batch dim sliced to the batch), at
-    the TP4/TP8 per-rank shards of Super-120B. Each row's outputs must match
-    its standard-decode oracle; the checkpoint stays untouched."""
-    state_dtype, act_dtype = precision
-    set_random_seed(0)
-    H, P, N, G = geometry
-    base_block = 16
-    spec_query_len = 4
-    spec_len = spec_query_len
-    L, buf = _lbt(base_block, spec_query_len)
-    both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
-    rtol, atol = _tolerances(both_fp32)
-
-    batch = 3
-    total_slots = 8
-    C = base_block - spec_query_len
-    wps = [C, C // 2, C]  # per-row non-flush fills incl. the tight edge
-
-    A = _tied_A(H, P, N)
-    dt_bias = torch.rand(H, device=DEV) - 4.0
-    D = torch.randn(H, P, device=DEV)
-    sbi = torch.arange(1, 1 + batch, device=DEV, dtype=torch.int32)
-
-    S0 = torch.randn(total_slots, H, P, N, device=DEV, dtype=state_dtype) * 0.1
-    state_spec = S0.clone()
-    x_cache = torch.zeros(total_slots, H, buf, P, device=DEV, dtype=act_dtype)
-    dt_cache = torch.zeros(total_slots, H, buf, device=DEV, dtype=torch.float32)
-    B_cache = torch.zeros(total_slots, G, buf, N, device=DEV, dtype=act_dtype)
-    write_pos = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
-    post_origin = torch.zeros(total_slots, dtype=torch.int32, device=DEV)
-    is_flush = torch.zeros(total_slots, dtype=torch.int8, device=DEV)
-
-    oracles = []
-    x_pack = torch.zeros(batch * spec_len, H, P, device=DEV, dtype=act_dtype)
-    dt_spec = torch.zeros(batch * spec_len, H, device=DEV, dtype=torch.float32)
-    B_pack = torch.zeros(batch * spec_len, G, N, device=DEV, dtype=act_dtype)
-    C_pack = torch.zeros_like(B_pack)
-    for r in range(batch):
-        wp = wps[r]
-        slot = int(sbi[r].item())
-        T_tot = wp + spec_len
-        x = torch.randn(T_tot, H, P, device=DEV, dtype=act_dtype)
-        dt = torch.randn(T_tot, H, device=DEV, dtype=act_dtype)
-        Bv = torch.randn(T_tot, G, N, device=DEV, dtype=act_dtype)
-        Cv = torch.randn(T_tot, G, N, device=DEV, dtype=act_dtype)
-        oracles.append(
-            _standard_window_oracle(
-                S0_slot=S0[slot],
-                x_all=x,
-                dt_all=dt,
-                B_all=Bv,
-                C_all=Cv,
-                z_all=None,
-                A=A,
-                D=D,
-                dt_bias=dt_bias,
-                dt_softplus=True,
-                wp=wp,
-                spec_len=spec_len,
-                buffer_len=buf,
-                act_dtype=act_dtype,
+            expected_states[layer_idx], _ = _run_baseline(
+                expected_states[layer_idx],
+                inputs[layer_idx],
+                A[layer_idx],
+                dt_bias[layer_idx],
+                state_indices,
+                query_lens,
+                accepted,
             )
+        context.commit(
+            torch.tensor(accepted, device=DEV, dtype=torch.int32),
+            state_indices,
+            query_start_loc,
         )
-        _scatter_history(x_cache, dt_cache, B_cache, slot, x[:wp], Bv[:wp], dt[:wp])
-        write_pos[slot] = wp
-        seg = slice(r * spec_len, (r + 1) * spec_len)
-        x_pack[seg] = x[wp:]
-        dt_spec[seg] = dt[wp:].float()
-        B_pack[seg] = Bv[wp:]
-        C_pack[seg] = Cv[wp:]
 
-    # Engine-style external scratch: fp32, oversized batch dim sliced to the
-    # batch, NaN-filled so an unwritten-but-read cell fails loudly.
-    block_spec = 1 << (spec_query_len - 1).bit_length()
-    scratch = torch.full(
-        (batch + 5, G, buf, block_spec),
-        float("nan"),
-        device=DEV,
-        dtype=torch.float32,
-    )
-
-    qsl = torch.arange(
-        0, (batch + 1) * spec_len, spec_len, device=DEV, dtype=torch.int32
-    )
-    out_spec = torch.empty(batch * spec_len, H, P, device=DEV, dtype=act_dtype)
-    selective_state_update_replayssm_spec(
-        state_spec,
-        x_cache,
-        dt_cache,
-        B_cache,
-        x_pack,
-        dt_spec,
-        B_pack,
-        C_pack,
-        A,
-        write_pos=write_pos,
-        post_conv_state_pos=post_origin,
-        is_flush=is_flush,
-        query_start_loc=qsl,
-        state_batch_indices=sbi,
-        max_cache_len=L,
-        spec_query_len=spec_query_len,
-        D=D,
-        z=None,
-        dt_bias=dt_bias,
-        dt_softplus=True,
-        out=out_spec,
-        bc_pre=scratch[:batch],
-    )
-
-    for r in range(batch):
-        seg = slice(r * spec_len, (r + 1) * spec_len)
-        torch.testing.assert_close(out_spec[seg], oracles[r], rtol=rtol, atol=atol)
-    torch.testing.assert_close(state_spec, S0, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
-def test_forced_flush_persists_single_token_before_next_reset():
-    """A certain prompt token must survive the following first-decode reset."""
-    set_random_seed(0)
-    H, P, N, G = 4, 64, 16, 2
-    spec_query_len = 4
-    L = 16 + spec_query_len
-    state = torch.randn(2, H, P, N, device=DEV) * 0.1
-    baseline = state.clone()
-    x = torch.randn(1, H, P, device=DEV)
-    dt = torch.randn(1, H, device=DEV)
-    B = torch.randn(1, G, N, device=DEV)
-    C = torch.randn(1, G, N, device=DEV)
-    A = _tied_A(H, P, N)
-    dt_bias = torch.rand(H, device=DEV) - 4.0
-    D = torch.randn(H, P, device=DEV)
-    sbi = torch.tensor([1], device=DEV, dtype=torch.int32)
-
-    expected_out = torch.empty_like(x)
-    selective_state_update(
-        baseline,
-        x,
-        dt[:, :, None].expand_as(x),
-        A,
-        B,
-        C,
-        D=D,
-        dt_bias=dt_bias[:, None].expand(H, P),
-        dt_softplus=True,
-        state_batch_indices=sbi,
-        out=expected_out,
-    )
-
-    x_cache = torch.zeros(2, H, L, P, device=DEV)
-    dt_cache = torch.zeros(2, H, L, device=DEV)
-    B_cache = torch.zeros(2, G, L, N, device=DEV)
-    write_pos = torch.zeros(2, dtype=torch.int32, device=DEV)
-    post_origin = torch.zeros_like(write_pos)
-    is_flush = torch.zeros(2, dtype=torch.int8, device=DEV)
-    first = torch.ones(1, dtype=torch.int8, device=DEV)
-    reset_replayssm_spec_cursors(
-        write_pos,
-        post_origin,
-        is_flush,
-        first,
-        sbi,
-        L,
-        spec_query_len,
-        force_flush_mask=first,
-    )
-    assert is_flush[1].item() == 2
-
-    out = torch.empty_like(x)
-    selective_state_update_replayssm_spec(
-        state,
-        x_cache,
-        dt_cache,
-        B_cache,
-        x,
-        dt,
-        B,
-        C,
-        A,
-        write_pos=write_pos,
-        post_conv_state_pos=post_origin,
-        is_flush=is_flush,
-        query_start_loc=torch.tensor([0, 1], device=DEV, dtype=torch.int32),
-        state_batch_indices=sbi,
-        max_cache_len=L,
-        spec_query_len=spec_query_len,
-        D=D,
-        dt_bias=dt_bias,
-        out=out,
-    )
-    torch.testing.assert_close(out, expected_out, rtol=1e-4, atol=1e-3)
-    torch.testing.assert_close(state[1], baseline[1], rtol=1e-4, atol=1e-3)
-
-    commit_replayssm_spec(
-        write_pos,
-        post_origin,
-        is_flush,
-        torch.ones(1, dtype=torch.int32, device=DEV),
-        sbi,
-        L,
-        spec_query_len,
-    )
-    reset_replayssm_spec_cursors(
-        write_pos, post_origin, is_flush, first, sbi, L, spec_query_len
-    )
-    torch.testing.assert_close(state[1], baseline[1], rtol=0, atol=0)
+    for actual, expected in zip(context.state_checkpoints, expected_states):
+        torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-3)

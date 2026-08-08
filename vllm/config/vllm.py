@@ -2456,10 +2456,9 @@ class VllmConfig:
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
+            self.cache_config.use_replayssm_spec = False
             return self
         self.cache_config.use_replayssm_spec = self.num_speculative_tokens > 0
-        if self.cache_config.use_replayssm_spec:
-            self.cache_config.use_replayssm = False
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
@@ -2478,13 +2477,10 @@ class VllmConfig:
                     "ReplaySSM speculative decoding does not support prefix "
                     "caching; pass --mamba-cache-mode none"
                 )
-            spec_query_len = 1 + self.num_speculative_tokens
-            if self.cache_config.replayssm_buffer_len < spec_query_len:
+            if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
-                    "ReplaySSM speculative decoding requires "
-                    "--replayssm-buffer-len >= 1 + num_speculative_tokens "
-                    f"({spec_query_len}); got "
-                    f"{self.cache_config.replayssm_buffer_len}"
+                    "ReplaySSM speculative decoding currently requires "
+                    "pipeline_parallel_size=1"
                 )
         elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
