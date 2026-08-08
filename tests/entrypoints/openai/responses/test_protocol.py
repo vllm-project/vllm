@@ -5,9 +5,20 @@ from openai_harmony import (
 )
 
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
     serialize_message,
     serialize_messages,
 )
+
+
+def test_tools_none_is_accepted_on_continuation_turns() -> None:
+    """OpenAI-style tool loops null out `tools` once it has been sent, so the
+    Responses API must coerce it to an empty list instead of rejecting the turn,
+    matching Chat Completions' leniency."""
+    request = ResponsesRequest(input="What is the weather?", tools=None)
+
+    assert request.tools == []
+    assert request.tool_choice == "none"
 
 
 def test_serialize_message() -> None:
