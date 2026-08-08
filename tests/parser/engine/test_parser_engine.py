@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
 )
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.qwen3 import _qwen3_arg_converter
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -1412,6 +1413,14 @@ class TestSafeArgPrefix:
 # ── Coercion instability regression tests ────────────────────────
 
 
+def _json_converter(raw_args: str, partial: bool) -> str:
+    """Identity converter: round-trips JSON, returns raw string when partial."""
+    try:
+        return json.dumps(json.loads(raw_args), ensure_ascii=False)
+    except (json.JSONDecodeError, ValueError):
+        return raw_args if partial else ""
+
+
 def _growing_kv_converter(raw_args: str, partial: bool) -> str:
     """Converter that produces growing bare values (no delimiter)."""
     params: dict[str, str] = {}
@@ -1494,6 +1503,76 @@ class TestCoercionInstabilityRegression:
         assert parsed["val"] == "4e"
         assert isinstance(parsed["val"], str)
         assert parsed["extra"] == "ok"
+
+    def test_integer_middle_field_not_truncated_by_coercion(self):
+        """Integer middle field must not cause truncation when coerced at flush.
+
+        Three chunks are required: the first triggers tool-name emission
+        (consuming the chunk without calling _compute_arg_delta), the second
+        leaves the integer value complete in streamed_json as a quoted string
+        ("42") while the JSON is still open, and the third closes the JSON.
+        Without the fix, flush-time coercion changes "42"→42, breaking the
+        startswith invariant and silently dropping the rest of the arguments.
+        """
+        tool = _make_tool(
+            "f", {"n": {"type": "integer"}, "s": {"type": "string"}}
+        )
+        engine = _make_engine(_converter_config(_json_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine, "f", ["{", '"n": "42", "s": "h', 'i"}']
+        )
+        assert parsed == {"n": 42, "s": "hi"}
+        assert isinstance(parsed["n"], int)
+
+    def test_boolean_middle_field_not_truncated_by_coercion(self):
+        """Boolean middle field must not cause truncation when coerced at flush."""
+        tool = _make_tool(
+            "f", {"flag": {"type": "boolean"}, "msg": {"type": "string"}}
+        )
+        engine = _make_engine(_converter_config(_json_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine, "f", ["{", '"flag": "true", "msg": "h', 'i"}']
+        )
+        assert parsed == {"flag": True, "msg": "hi"}
+        assert isinstance(parsed["flag"], bool)
+
+    def test_null_middle_field_not_truncated_by_coercion(self):
+        """Null-typed middle field must not cause truncation when coerced at flush."""
+        tool = _make_tool(
+            "f", {"v": {"type": "null"}, "tag": {"type": "string"}}
+        )
+        engine = _make_engine(_converter_config(_json_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine, "f", ["{", '"v": "null", "tag": "h', 'i"}']
+        )
+        assert parsed == {"v": None, "tag": "hi"}
+        assert parsed["v"] is None
+
+    def test_qwen3_partial_xml_close_tag_not_included_in_value(self):
+        """Qwen3 partial XML close tag must not leak into streamed string value.
+
+        When an XML close tag (</parameter>) is split across chunks, the
+        partial tag text must not appear in the streamed string value for
+        the preceding key.
+        """
+        tool = _make_tool(
+            "f", {"n": {"type": "integer"}, "s": {"type": "string"}}
+        )
+        engine = _make_engine(
+            _converter_config(_qwen3_arg_converter), tools=[tool]
+        )
+        parsed = _run_streaming_tool(
+            engine,
+            "f",
+            [
+                "<parameter=",
+                "n>42</parameter><parameter=s>ok</par",
+                "ameter>",
+            ],
+        )
+        assert parsed == {"n": 42, "s": "ok"}
+        assert isinstance(parsed["n"], int)
+        assert parsed["s"] == "ok"
 
 
 _DROP_VOCAB: dict[str, int] = {
