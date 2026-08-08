@@ -18,7 +18,10 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.engine.streaming_parser_engine import (
+    StreamingParserEngine,
+    _build_drop_info_cached,
+)
 
 
 def _hermes_config() -> ParserEngineConfig:
@@ -69,6 +72,21 @@ def _think_config() -> ParserEngineConfig:
             ),
         },
     )
+
+
+def test_drop_info_is_reused_across_requests():
+    """Equivalent per-request parser configs reuse immutable lexer metadata."""
+    tokenizer = _make_think_tokenizer()
+    tokenizer.all_special_tokens = ["<think>", "</think>", "<unused>"]
+    tokenizer.all_special_ids = [_START_ID, _END_ID, 99]
+    _build_drop_info_cached.cache_clear()
+
+    StreamingParserEngine(_think_config(), tokenizer)
+    StreamingParserEngine(_think_config(), tokenizer)
+
+    cache_info = _build_drop_info_cached.cache_info()
+    assert cache_info.misses == 1
+    assert cache_info.hits == 1
 
 
 class TestNonStreaming:
