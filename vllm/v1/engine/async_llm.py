@@ -40,7 +40,11 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import (
+    EngineDeadError,
+    EngineGenerateError,
+    EnginePausedError,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -119,6 +123,11 @@ class AsyncLLM(EngineClient):
             init_tracer("vllm.llm_engine", tracing_endpoint)
 
         self.log_requests = log_requests
+
+        # Pause mode whose contract is to hand requests back to the caller,
+        # so new ones are rejected rather than silently queued. None when
+        # unpaused or paused in "keep" mode.
+        self._reject_while_paused: PauseMode | None = None
 
         custom_stat_loggers = list(stat_loggers or [])
         custom_stat_loggers.extend(load_stat_logger_plugin_factories())
@@ -303,6 +312,13 @@ class AsyncLLM(EngineClient):
 
         if self.errored:
             raise EngineDeadError()
+
+        if self._reject_while_paused is not None:
+            raise EnginePausedError(
+                f"Generation is paused (mode={self._reject_while_paused!r}); "
+                "this mode treats the pause as a generation boundary, so new "
+                "requests are rejected until resume. Retryable."
+            )
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -629,6 +645,10 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
+        # Generation is paused; the caller owns the retry.
+        except EnginePausedError:
+            raise
+
         # Request validation error.
         except VLLMClientError as e:
             if self.log_requests:
@@ -809,6 +829,8 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
+        if mode != "keep":
+            self._reject_while_paused = mode
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
@@ -823,6 +845,7 @@ class AsyncLLM(EngineClient):
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
         await self.engine_core.resume_scheduler_async()
+        self._reject_while_paused = None
 
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
@@ -894,6 +917,10 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
+        # Generation is paused; the caller owns the retry.
+        except EnginePausedError:
+            raise
+
         # Request validation error.
         except VLLMClientError:
             if self.log_requests:
@@ -957,6 +984,8 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        if mode != "keep":
+            self._reject_while_paused = mode
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.sleep_async(level, mode)
@@ -966,6 +995,10 @@ class AsyncLLM(EngineClient):
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)
+        # A partial wake leaves the scheduler paused (see EngineCore.wake_up),
+        # so keep rejecting until all executor memory is resident again.
+        if not await self.engine_core.is_scheduler_paused_async():
+            self._reject_while_paused = None
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)

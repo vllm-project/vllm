@@ -26,6 +26,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.exceptions import EnginePausedError
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
     LoggingStatLogger,
@@ -57,6 +58,14 @@ VISION_PROMPT = {
     "prompt": VISION_PROMPT_TEMPLATE,
     "multi_modal_data": {"image": ImageAsset("stop_sign").pil_image},
 }
+
+
+async def _add(engine: AsyncLLM, request_id: str, max_tokens: int = 5):
+    return await engine.add_request(
+        request_id=request_id,
+        prompt=TEXT_PROMPT,
+        params=SamplingParams(max_tokens=max_tokens),
+    )
 
 
 async def generate(
@@ -785,35 +794,30 @@ async def test_pause_abort():
         assert final_output.finished
         assert final_output.outputs[0].finish_reason == "abort"
 
-        # Also test that new requests are blocked while paused, then resume
+        # Also test that new requests are rejected while paused, then resume
         assert await engine.is_paused()
 
-        request_completed = False
-
-        async def gen_blocked():
-            nonlocal request_completed
-            async for out in engine.generate(
-                request_id="test-blocked",
+        async def gen_rejected():
+            async for _ in engine.generate(
+                request_id="test-rejected",
                 prompt=TEXT_PROMPT,
                 sampling_params=SamplingParams(max_tokens=5),
             ):
                 pass
-            request_completed = True
-            return out
 
-        # Start a request (should block)
-        gen_task2 = asyncio.create_task(gen_blocked())
-
-        # Wait a bit - request should not have completed
-        await asyncio.sleep(0.3)
-        assert not request_completed, "Request should be blocked while paused"
+        with pytest.raises(EnginePausedError):
+            await gen_rejected()
 
         # Resume
         await engine.resume_generation()
 
-        # Now request should complete
-        final_output2 = await asyncio.wait_for(gen_task2, timeout=10.0)
-        assert request_completed
+        # Now the same request is accepted and completes.
+        async for final_output2 in engine.generate(
+            request_id="test-rejected",
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
         assert final_output2.finished
 
 
@@ -1016,3 +1020,146 @@ async def test_pause_keep_multi_request():
         for result in results:
             assert result.finished
             assert len(result.outputs[0].token_ids) == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["abort", "wait", "keep"])
+async def test_pause_admission_policy_per_mode(mode: str):
+    """`abort` and `wait` make the pause a generation boundary, so requests
+    arriving afterwards are rejected rather than silently queued until resume.
+    `keep` carries requests across the pause, so it still accepts them.
+    """
+    rejects = mode != "keep"
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        await engine.pause_generation(mode=mode)
+        if rejects:
+            with pytest.raises(EnginePausedError):
+                await _add(engine, "during-pause")
+        else:
+            await _add(engine, "during-pause")
+
+        # Resume always restores admission, and the engine still generates.
+        await engine.resume_generation()
+        async for out in engine.generate(
+            request_id="after-resume",
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished
+
+
+@pytest.mark.asyncio
+async def test_pause_rejection_is_idempotent_and_id_reusable():
+    """Repeated pauses collapse to one resume, and a rejected request leaves no
+    residue: its id is reusable once generation resumes."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        await engine.pause_generation(mode="abort")
+        await engine.pause_generation(mode="abort")
+
+        for _ in range(3):
+            with pytest.raises(EnginePausedError):
+                await _add(engine, "rejected")
+
+        await engine.resume_generation()
+
+        # The id used by the rejected attempts is free.
+        async for out in engine.generate(
+            request_id="rejected",
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished
+
+
+@pytest.mark.asyncio
+async def test_pause_keep_does_not_reject_in_flight_or_new():
+    """`keep` must remain fully transparent to admission: an in-flight request
+    survives the pause and a request added during it completes on resume."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        inflight = await _add(engine, "inflight", max_tokens=20)
+        await engine.pause_generation(mode="keep")
+        queued = await _add(engine, "queued", max_tokens=5)
+        await engine.resume_generation()
+
+        for collector in (inflight, queued):
+            while True:
+                out = await asyncio.wait_for(collector.get(), timeout=60.0)
+                if out.finished:
+                    break
+
+
+@pytest.mark.asyncio
+async def test_sleep_rejects_and_partial_wake_keeps_rejecting():
+    """Sleep is a pause plus memory release. A partial wake leaves the
+    scheduler paused (see `EngineCore.wake_up`), so admission must stay closed
+    until every allocation is resident again -- admitting after a weights-only
+    wake would schedule against unmapped KV cache.
+    """
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        await engine.sleep(level=1)
+        assert await engine.is_sleeping()
+        with pytest.raises(EnginePausedError):
+            await _add(engine, "during-sleep")
+
+        await engine.wake_up(tags=["weights"])
+        with pytest.raises(EnginePausedError):
+            await _add(engine, "during-partial-wake")
+
+        await engine.wake_up()
+        assert not await engine.is_sleeping()
+        async for out in engine.generate(
+            request_id="after-wake",
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished
+
+
+@pytest.mark.asyncio
+async def test_pause_rejection_races_with_concurrent_adds():
+    """Requests racing a pause must either be admitted and complete, or be
+    rejected outright -- never accepted and then stranded."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        async def try_add(i: int):
+            try:
+                return await _add(engine, f"race-{i}", max_tokens=5)
+            except EnginePausedError:
+                return None
+
+        adds = [asyncio.create_task(try_add(i)) for i in range(16)]
+        await engine.pause_generation(mode="abort")
+        collectors = await asyncio.gather(*adds)
+
+        # Whatever was admitted before the pause landed was aborted by it;
+        # everything else was rejected. Neither outcome may hang.
+        await engine.resume_generation()
+        for collector in collectors:
+            if collector is None:
+                continue
+            while True:
+                out = await asyncio.wait_for(collector.get(), timeout=60.0)
+                if out.finished:
+                    break
