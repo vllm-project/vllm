@@ -2005,6 +2005,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
     extra_cache: torch.Tensor | None = None,
     extra_indices: torch.Tensor | None = None,
     extra_indptr: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
+    split_k_buffers: (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+    ) = None,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[b,h,d], got {q.shape}"
     assert main_cache.ndim == 3, (
@@ -2066,7 +2070,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
         extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
 
     block_h = 16
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    if out is None:
+        out = torch.empty_like(q, dtype=torch.bfloat16)
     heads_blocks = triton.cdiv(num_heads, block_h)
     nope_block = triton.next_power_of_2(nope_head_dim)
     comb_dim = nope_head_dim + rope_head_dim
@@ -2120,15 +2125,24 @@ def _rocm_sparse_attn_decode_ragged_triton(
         num_queries, heads_blocks, avg_main_len, avg_extra_len, block_k
     )
 
-    part_m = torch.empty(
-        (num_queries, num_splits, num_heads), dtype=torch.float32, device=q.device
-    )
-    part_l = torch.empty_like(part_m)
-    part_acc = torch.empty(
-        (num_queries, num_splits, num_heads, comb_dim),
-        dtype=torch.float32,
-        device=q.device,
-    )
+    if split_k_buffers is not None:
+        # Reuse pre-allocated buffers, slicing to the actual dimensions needed.
+        part_m_buf, part_l_buf, part_acc_buf = split_k_buffers
+        part_m = part_m_buf[:num_queries, :num_splits, :num_heads]
+        part_l = part_l_buf[:num_queries, :num_splits, :num_heads]
+        part_acc = part_acc_buf[:num_queries, :num_splits, :num_heads, :]
+    else:
+        part_m = torch.empty(
+            (num_queries, num_splits, num_heads),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        part_l = torch.empty_like(part_m)
+        part_acc = torch.empty(
+            (num_queries, num_splits, num_heads, comb_dim),
+            dtype=torch.float32,
+            device=q.device,
+        )
 
     _sparse_attn_decode_partial_kernel[(num_queries, num_splits, heads_blocks)](
         q,
@@ -2213,6 +2227,10 @@ def _rocm_sparse_attn_decode_triton(
     main_ragged_indptr: torch.Tensor | None = None,
     extra_ragged_indices: torch.Tensor | None = None,
     extra_ragged_indptr: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
+    split_k_buffers: (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+    ) = None,
 ) -> torch.Tensor:
     if main_ragged_indices is None or main_ragged_indptr is None:
         main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
@@ -2248,6 +2266,8 @@ def _rocm_sparse_attn_decode_triton(
         extra_cache=extra_cache,
         extra_indices=extra_ragged_indices,
         extra_indptr=extra_ragged_indptr,
+        out=out,
+        split_k_buffers=split_k_buffers,
     )
 
 
@@ -2319,6 +2339,9 @@ def rocm_sparse_attn_decode(
     nope_head_dim: int,
     rope_head_dim: int,
     output: torch.Tensor,
+    split_k_buffers: (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+    ) = None,
 ) -> None:
     assert swa_k_cache.dtype == torch.uint8, (
         "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "
@@ -2348,7 +2371,7 @@ def rocm_sparse_attn_decode(
         if topk_indices is not None:
             extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
 
-    attn_out = _rocm_sparse_attn_decode_triton(
+    _rocm_sparse_attn_decode_triton(
         q=q,
         main_cache=swa_k_cache,
         main_indices=main_indices,
@@ -2364,5 +2387,6 @@ def rocm_sparse_attn_decode(
         main_ragged_indptr=swa_ragged_indptr,
         extra_ragged_indices=topk_ragged_indices,
         extra_ragged_indptr=topk_ragged_indptr,
+        out=output,
+        split_k_buffers=split_k_buffers,
     )
-    output.copy_(attn_out.to(output.dtype))
