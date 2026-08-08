@@ -432,6 +432,7 @@ class SendBlockMeta:
     local_block_ids: list[list[int]]
     ready: asyncio.Event
     expire_time: float = float("inf")
+    created_at: float = 0.0
     need_send: int = 0
     sent: int = 0
     sending: int = 0
@@ -1251,12 +1252,14 @@ class MooncakeConnectorWorker:
             return
         for d_req_id, (transfer_id, _) in meta.req_blocks.items():
             if transfer_id not in self.reqs_need_send:
-                # This req is not enqueued in P side yet, create it here.
+                now = time.perf_counter()
                 self.reqs_need_send[transfer_id] = SendBlockMeta(
                     p_req_id="",
                     transfer_id=transfer_id,
                     local_block_ids=[],
                     ready=asyncio.Event(),
+                    expire_time=now + envs.VLLM_MOONCAKE_ORPHAN_TRANSFER_TIMEOUT,
+                    created_at=now,
                 )
             send_meta = self.reqs_need_send[transfer_id]
             pending_reqs[d_req_id] = send_meta
@@ -1273,9 +1276,14 @@ class MooncakeConnectorWorker:
         ]
 
         while wait_tasks:
+            min_expiry = min(
+                send_meta.expire_time for send_meta in pending_reqs.values()
+            )
+            wait_timeout = max(0, min_expiry - time.perf_counter())
+
             done, pending = await asyncio.wait(
                 wait_tasks,
-                timeout=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                timeout=wait_timeout,
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
@@ -1283,6 +1291,9 @@ class MooncakeConnectorWorker:
                 # Timeout, abort all pending requests.
                 for task in wait_tasks:
                     task.cancel()
+                for send_meta in pending_reqs.values():
+                    if not send_meta.p_req_id:
+                        self.reqs_need_send.pop(send_meta.transfer_id, None)
                 logger.warning(
                     "Timeout waiting for P side ready: %s", list(pending_reqs)
                 )
@@ -1757,11 +1768,9 @@ class MooncakeConnectorWorker:
 
         expired_transfer_id = []
         for transfer_id, send_meta in self.reqs_need_send.items():
-            if (
-                send_meta.p_req_id
-                and send_meta.expire_time < now
-                and send_meta.sending == 0
-            ):
+            if send_meta.sending != 0:
+                continue
+            if send_meta.p_req_id and send_meta.expire_time < now:
                 logger.warning(
                     "Request %s timed out after %d seconds without "
                     "being sent. Freeing its blocks on the producer side.",
@@ -1770,6 +1779,14 @@ class MooncakeConnectorWorker:
                 )
                 self.xfer_stats.record_kv_expired_req()
                 finished_sending_reqs.add(send_meta.p_req_id)
+                expired_transfer_id.append(transfer_id)
+            elif not send_meta.p_req_id and send_meta.expire_time < now:
+                logger.warning(
+                    "Ownerless transfer %s expired after %d seconds "
+                    "without being claimed. Removing placeholder.",
+                    transfer_id,
+                    envs.VLLM_MOONCAKE_ORPHAN_TRANSFER_TIMEOUT,
+                )
                 expired_transfer_id.append(transfer_id)
 
         for transfer_id in expired_transfer_id:
