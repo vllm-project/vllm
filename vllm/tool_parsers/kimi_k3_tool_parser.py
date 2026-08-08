@@ -73,7 +73,7 @@ class KimiK3ToolParser(ToolParser):
     supports_required_and_named = False
     # Enables the vLLM-side XTML structural tag builder
     # (``get_kimi_k3_structural_tag`` in ``structural_tag_registry``). With
-    # ``VLLM_ENFORCE_STRICT_TOOL_CALLING`` on (default), ``_apply_structural_tag``
+    # strict tool calling not explicitly disabled, ``_apply_structural_tag``
     # constrains generation to K3's ``<|open|>tools<|sep|>`` channel for
     # ``required`` (and ``auto`` when a tool sets ``strict``) instead of the
     # generic JSON guided decoding, which conflicts with the XTML format.

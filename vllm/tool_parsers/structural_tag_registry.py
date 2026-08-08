@@ -104,16 +104,20 @@ def get_model_structural_tag(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool] | None,
     tool_choice: ToolChoice,
     reasoning: bool,
+    *,
+    force_strict: bool = False,
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
 
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    if tool_choice == "auto" and not force_strict and not _any_tool_strict(tools):
         return None
 
-    dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
+    dumped_tools = [
+        _dump_tool_for_xgrammar(tool, force_strict=force_strict) for tool in tools
+    ]
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
 
     if model in _VLLM_STRUCTURAL_TAG_REGISTRY:
@@ -142,8 +146,16 @@ def get_model_structural_tag(
 
 def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
+    *,
+    force_strict: bool = False,
 ) -> dict[str, Any]:
-    """Convert tool objects to xgrammar's Chat Completions tool protocol."""
+    """Convert tool objects to xgrammar's Chat Completions tool protocol.
+
+    Args:
+        tool: The requested tool.
+        force_strict: Whether to mark the dumped copy as strict without
+            mutating the request.
+    """
 
     if isinstance(tool, FunctionTool):
         function: dict[str, Any] = {"name": tool.name}
@@ -151,11 +163,15 @@ def _dump_tool_for_xgrammar(
             function["description"] = tool.description
         if tool.parameters is not None:
             function["parameters"] = tool.parameters
-        if tool.strict is not None:
-            function["strict"] = tool.strict
+        strict = True if force_strict else tool.strict
+        if strict is not None:
+            function["strict"] = strict
         return {"type": "function", "function": function}
     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
     if isinstance(tool, ChatCompletionToolsParam):
+        strict = True if force_strict else tool.function.strict
+        if strict is not None:
+            dumped_tool["function"]["strict"] = strict
         return dumped_tool
     return dict(dumped_tool)
 
