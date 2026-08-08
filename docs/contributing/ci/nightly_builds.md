@@ -23,7 +23,10 @@ Each build step:
 
 ### Index Generation
 
-After uploading each wheel, the `.buildkite/scripts/upload-wheels.sh` script:
+Wheel upload and index generation run as separate pipeline stages. CUDA, CPU,
+and macOS wheel jobs use `.buildkite/scripts/upload-nightly-wheels.sh` to retag
+Linux wheels when needed and upload them. After the dependent wheel builds
+finish, `.buildkite/scripts/generate-and-upload-nightly-index.sh`:
 
 1. **Lists all existing wheels** in the commit directory from S3
 2. **Generates indices** using `.buildkite/scripts/generate-nightly-index.py`:
@@ -36,7 +39,9 @@ After uploading each wheel, the `.buildkite/scripts/upload-wheels.sh` script:
     - `/{version}/` - Only for release wheels (no `dev` in its version).
 
 !!! tip "Handling Concurrent Builds"
-    The index generation script can handle multiple variants being built concurrently by always listing all wheels in the commit directory before generating indices, avoiding race conditions.
+    Wheel builds can upload concurrently because they do not write indices. A
+    dedicated post-build step lists the uploaded wheels and generates indices,
+    preventing concurrent upload jobs from overwriting partial indices.
 
 ## Directory Structure
 
@@ -159,6 +164,7 @@ _Note: it's users' responsibility to ensure there is no native code (e.g., C++ o
 Key files involved in the nightly wheel mechanism:
 
 - **`.buildkite/release-pipeline.yaml`**: CI pipeline that builds wheels
-- **`.buildkite/scripts/upload-wheels.sh`**: Script that uploads wheels and generates indices
+- **`.buildkite/scripts/upload-nightly-wheels.sh`**: Script that retags Linux wheels when needed and uploads CUDA, CPU, and macOS wheels
+- **`.buildkite/scripts/generate-and-upload-nightly-index.sh`**: Script that generates and uploads indices after wheel builds finish
 - **`.buildkite/scripts/generate-nightly-index.py`**: Python script that generates PyPI-compatible indices
 - **`setup.py`**: Contains `precompiled_wheel_utils` class for fetching and using precompiled wheels
