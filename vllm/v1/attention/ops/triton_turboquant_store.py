@@ -14,6 +14,8 @@ import math
 
 import torch
 
+import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_turboquant_decode import _use_fp8_e4b15
 
@@ -164,7 +166,7 @@ def _tq_fused_store_fp8(
     # Packing block sizes
     BLOCK_VAL: tl.constexpr,
     BLOCK_GRP: tl.constexpr = 16,
-    FP8_E4B15: tl.constexpr = 0,  # 1 = e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    FP8_E4B15: tl.constexpr = 0,  # 1 = e4b15 (SM < 8.9), 0 = e4nv (SM >= 8.9)
 ):
     """FP8 key cast+scatter + value uniform quantization."""
     pid = tl.program_id(0)
@@ -358,8 +360,9 @@ def triton_turboquant_store(
     key_packed_size: int,
     value_quant_bits: int,
     key_fp8: bool = False,
+    use_native_store: bool = True,
 ):
-    """Launch TQ store kernel (FP8 or MSE path)."""
+    """Launch TQ store kernel (native CUDA/Triton FP8 path or Triton MSE path)."""
     N, H, D = key.shape
     NH = N * H
     block_size = kv_cache.shape[1]
@@ -384,6 +387,32 @@ def triton_turboquant_store(
         v_flat = value.reshape(NH, D).contiguous()
 
         fp8_e4b15 = _use_fp8_e4b15(key.device.index or 0)
+
+        if (
+            use_native_store
+            and not envs.VLLM_DISABLE_TURBOQUANT_NATIVE_STORE
+            and value_quant_bits == 4
+            and fp8_e4b15 == 0
+            and key.device.type == "cuda"
+            and slot_mapping.dtype == torch.int32
+            and slot_mapping.is_contiguous()
+            and hasattr(torch.ops, "_C")
+            and hasattr(torch.ops._C, "turboquant_store_fp8_v4")
+        ):
+            ops.turboquant_store_fp8_v4(
+                k_flat,
+                v_flat,
+                kv_cache.view(-1),
+                slot_mapping,
+                stride_block,
+                stride_pos,
+                stride_head,
+                H,
+                block_size,
+                key_packed_size,
+                val_data_bytes,
+            )
+            return
 
         grid = (NH,)
         _tq_fused_store_fp8[grid](
