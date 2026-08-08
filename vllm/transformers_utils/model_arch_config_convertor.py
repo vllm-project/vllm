@@ -429,23 +429,13 @@ class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return False
 
 
-class MambaModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_head_size(self) -> int:
-        return 0
+class AttentionFreeModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    """Generic convertor for models without attention.
 
-    def get_total_num_kv_heads(self) -> int:
-        return 0
+    Covers Mamba, Medusa, MLPSpeculator and Terratorch, which all report a
+    head size and KV-head count of zero.
+    """
 
-
-class TerratorchModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_head_size(self) -> int:
-        return 0
-
-    def get_total_num_kv_heads(self) -> int:
-        return 0
-
-
-class MedusaModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
         return 0
 
@@ -684,7 +674,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "diffusion_gemma_text": Gemma4ModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
-    "falcon_mamba": MambaModelArchConfigConvertor,
+    "falcon_mamba": AttentionFreeModelArchConfigConvertor,
     "gemma4": Gemma4ModelArchConfigConvertor,
     "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
     "gemma4_text": Gemma4ModelArchConfigConvertor,
@@ -693,8 +683,9 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
-    "mamba": MambaModelArchConfigConvertor,
-    "medusa": MedusaModelArchConfigConvertor,
+    "mamba": AttentionFreeModelArchConfigConvertor,
+    "medusa": AttentionFreeModelArchConfigConvertor,
+    "mlp_speculator": AttentionFreeModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
     "mimo_v2": MimoV2ModelArchConfigConvertor,
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
@@ -710,6 +701,6 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "RefinedWeb": FalconModelArchConfigConvertor,
     "RefinedWebModel": FalconModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
-    "timm_wrapper": TerratorchModelArchConfigConvertor,
+    "timm_wrapper": AttentionFreeModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,
 }
