@@ -46,7 +46,12 @@ def ensure_tiktoken_files():
             print(f"  {filename} already exists.")
 
 
-def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> float:
+def run_gpqa_eval(
+    model_name: str,
+    base_url: str,
+    reasoning_effort: str,
+    temperature: float = 1.0,
+) -> float:
     """Run GPQA evaluation using the gpt-oss evaluation package."""
 
     # Build the command to run the evaluation
@@ -64,6 +69,8 @@ def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> floa
         base_url,
         "--n-threads",
         "200",
+        "--temperature",
+        str(temperature),
     ]
 
     try:
@@ -136,10 +143,12 @@ def test_gpqa_correctness(config_filename):
         server_env.update(eval_config["env"])
 
     reasoning_effort = eval_config.get("reasoning_effort", "low")
+    temperature = eval_config.get("temperature", 1.0)
 
     print(f"Starting GPQA evaluation for model: {eval_config['model_name']}")
     print(f"Expected metric threshold: {eval_config['metric_threshold']}")
     print(f"Reasoning effort: {reasoning_effort}")
+    print(f"Temperature: {temperature}")
     print(f"Server args: {' '.join(server_args)}")
     print(f"Server environment variables: {server_env}")
 
@@ -154,7 +163,10 @@ def test_gpqa_correctness(config_filename):
         print(f"Server started at: {base_url}")
 
         measured_metric = run_gpqa_eval(
-            eval_config["model_name"], base_url, reasoning_effort
+            eval_config["model_name"],
+            base_url,
+            reasoning_effort,
+            temperature=temperature,
         )
         expected_metric = eval_config["metric_threshold"]
 
