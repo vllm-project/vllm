@@ -457,9 +457,8 @@ class KimiMLAAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
-        output[:] = self.mla_attn(positions, hidden_states)
+    ) -> torch.Tensor:
+        return self.mla_attn(positions, hidden_states)
 
 
 class KimiDecoderLayer(nn.Module):
@@ -583,6 +582,12 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if isinstance(self.self_attn, KimiMLAAttention):
+            return self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+            )
+
         attn_output = torch.empty_like(hidden_states)
         self.self_attn(
             hidden_states=hidden_states,
