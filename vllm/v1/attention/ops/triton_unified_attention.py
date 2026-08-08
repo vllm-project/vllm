@@ -15,6 +15,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -32,6 +33,7 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
+_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
@@ -105,41 +107,6 @@ def _load_q_td(
         block_shape=(BLOCK_Q, num_queries_per_kv * HEAD_SIZE_PADDED),
     )
     return q_desc.load([0, 0]).reshape(BLOCK_M, HEAD_SIZE_PADDED)
-
-
-@triton.jit
-def _load_kv_tile_td(
-    cache_ptr,
-    physical_block_idx_scalar,
-    kv_head_idx,
-    offset_in_block,
-    stride_cache_0: tl.int64,
-    stride_cache_1: tl.int64,
-    stride_cache_2: tl.int64,
-    stride_cache_3: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    TILE_SIZE: tl.constexpr,
-    HEAD_SIZE: tl.constexpr,
-    HEAD_SIZE_PADDED: tl.constexpr,
-):
-    """Load a KV cache tile via tensor descriptor.
-
-    Returns shape (TILE_SIZE, HEAD_SIZE_PADDED). Caller transposes for K.
-    Tensor descriptors zero-pad reads beyond the shape boundary, so
-    ``HEAD_SIZE_PADDED > HEAD_SIZE`` is handled correctly.
-    """
-    base = (
-        cache_ptr
-        + physical_block_idx_scalar * stride_cache_0
-        + kv_head_idx * stride_cache_2
-    )
-    desc = tl.make_tensor_descriptor(
-        base=base,
-        shape=(BLOCK_SIZE, HEAD_SIZE),
-        strides=(stride_cache_1, stride_cache_3),
-        block_shape=(TILE_SIZE, HEAD_SIZE_PADDED),
-    )
-    return desc.load([offset_in_block, 0])
 
 
 @triton.jit
@@ -232,6 +199,10 @@ def kernel_unified_attention(
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
     stride_v_cache_3: tl.constexpr,  # int
+    # Block-table dim of the KV cache (``key_cache.shape[0]``). Only read
+    # when ``USE_TD`` — needed as the outer shape dim of the hoisted
+    # tensor descriptor built once before the tile loop.
+    num_kv_blocks,
     query_start_len_ptr,
     BLOCK_Q: tl.constexpr,
     num_seqs: tl.int32,
@@ -416,6 +387,28 @@ def kernel_unified_attention(
         CHUNK_SIZE,
     )
 
+    if USE_TD:
+        # Built once, outside the tile loop. The old per-tile helper baked
+        # ``physical_block_idx`` into the descriptor ``base``, which changes
+        # every tile and forces a ``tensormap_create`` per iteration; that op
+        # can't be predicated, so the pipeliner refuses to overlap loop
+        # iterations (``num_stages > 1`` fails to compile). Folding the
+        # loop-invariant ``kv_head_idx`` into ``base`` instead, and
+        # addressing the per-tile block as a ``load()`` coordinate, makes
+        # the descriptor itself loop-invariant and restores pipelining.
+        k_tile_desc = tl.make_tensor_descriptor(
+            base=key_cache_ptr + kv_head_idx.to(tl.int64) * stride_k_cache_2,
+            shape=(num_kv_blocks, BLOCK_SIZE, HEAD_SIZE),
+            strides=(stride_k_cache_0, stride_k_cache_1, stride_k_cache_3),
+            block_shape=(1, TILE_SIZE, HEAD_SIZE_PADDED),
+        )
+        v_tile_desc = tl.make_tensor_descriptor(
+            base=value_cache_ptr + kv_head_idx.to(tl.int64) * stride_v_cache_2,
+            shape=(num_kv_blocks, BLOCK_SIZE, HEAD_SIZE),
+            strides=(stride_v_cache_0, stride_v_cache_1, stride_v_cache_3),
+            block_shape=(1, TILE_SIZE, HEAD_SIZE_PADDED),
+        )
+
     # iterate through tiles (now limited to the sliding window range)
     for j in range(loop_lo, loop_hi):
         seq_offset = j * TILE_SIZE + offs_t
@@ -429,41 +422,22 @@ def kernel_unified_attention(
             # All TILE_SIZE slots within a single KV tile map to one
             # physical block (guaranteed by ``BLOCK_SIZE % TILE_SIZE == 0``
             # from the static_assert above), so load the block index as
-            # a scalar instead of a broadcast reduction.
+            # a scalar instead of a broadcast reduction. Descriptor load
+            # coordinates must be int32.
             offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
             physical_block_scalar = tl.load(
                 block_tables_ptr + block_table_offset + (j * TILE_SIZE) // BLOCK_SIZE
-            ).to(tl.int64)
+            ).to(tl.int32)
             # K : (HEAD_SIZE, TILE_SIZE)
-            K_load = _load_kv_tile_td(
-                key_cache_ptr,
-                physical_block_scalar,
-                kv_head_idx,
-                offset_in_block,
-                stride_k_cache_0,
-                stride_k_cache_1,
-                stride_k_cache_2,
-                stride_k_cache_3,
-                BLOCK_SIZE,
-                TILE_SIZE,
-                HEAD_SIZE,
-                HEAD_SIZE_PADDED,
-            ).T
-            # V : (TILE_SIZE, HEAD_SIZE)
-            V_load = _load_kv_tile_td(
-                value_cache_ptr,
-                physical_block_scalar,
-                kv_head_idx,
-                offset_in_block,
-                stride_v_cache_0,
-                stride_v_cache_1,
-                stride_v_cache_2,
-                stride_v_cache_3,
-                BLOCK_SIZE,
-                TILE_SIZE,
-                HEAD_SIZE,
-                HEAD_SIZE_PADDED,
+            K_load = (
+                k_tile_desc.load([physical_block_scalar, offset_in_block, 0])
+                .reshape(TILE_SIZE, HEAD_SIZE_PADDED)
+                .T
             )
+            # V : (TILE_SIZE, HEAD_SIZE)
+            V_load = v_tile_desc.load(
+                [physical_block_scalar, offset_in_block, 0]
+            ).reshape(TILE_SIZE, HEAD_SIZE_PADDED)
         else:
             v_offset = (
                 physical_block_idx[:, None] * stride_v_cache_0
@@ -1087,6 +1061,15 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
+    if (use_td or use_td_qo) and q.device not in _TD_ALLOCATOR_DEVICES:
+        # The hoisted 3D descriptor requires a PyTorch-backed scratch
+        # allocator to be registered (Triton raises "no allocator was
+        # set" otherwise on sm_100/sm_120). Same pattern as fused_moe /
+        # GDN / LoRA's TD paths; cached per device like the newer
+        # triton_scaled_mm TD path, since this call site is per-forward-pass.
+        set_triton_allocator(q.device)
+        _TD_ALLOCATOR_DEVICES.add(q.device)
+
     kernel_unified_attention[grid](
         output_ptr=out,
         segm_output_ptr=segm_output_ptr,
@@ -1143,6 +1126,7 @@ def unified_attention(
         stride_v_cache_1=v.stride(1),
         stride_v_cache_2=v.stride(2),
         stride_v_cache_3=v.stride(3),
+        num_kv_blocks=k.shape[0],
         stride_ks_blk=ks_blk,
         stride_ks_slot=ks_slot,
         stride_ks_head=ks_head,
