@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
+import torch.nn as nn
 
 import vllm.model_executor.kernels.mhc  # noqa: F401
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -9,6 +12,10 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     _torch_hc_prenorm_gemm,
 )
 from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
+from vllm.models.deepseek_v4.nvidia.model import (
+    DeepseekV4DecoderLayer,
+    DeepseekV4Model,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -355,3 +362,57 @@ def test_hc_head_tilelang(num_tokens, hidden_size, hc_mult):
 
     out_ref = hc_head_ref(residual, fn, hc_scale, hc_base, rms_eps, hc_eps)
     torch.testing.assert_close(out, out_ref, atol=5e-2, rtol=1e-2)
+
+
+def _make_mhc_decoder_layer(hc_mult: int, hidden_size: int) -> DeepseekV4DecoderLayer:
+    layer = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
+    nn.Module.__init__(layer)
+    layer.hc_mult = hc_mult
+    layer.hidden_size = hidden_size
+    mix_hc = (2 + hc_mult) * hc_mult
+    layer.hc_attn_fn = nn.Parameter(
+        torch.randn(mix_hc, hc_mult * hidden_size, dtype=torch.float32),
+        requires_grad=False,
+    )
+    layer.hc_attn_fn_broadcast = None
+    return layer
+
+
+def _patch_first_rank_pp_group(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.model.get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True),
+    )
+
+
+def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
+    """First finalize (run at __init__ so dummy load has a valid buffer)
+    allocates hc_attn_fn_broadcast as hc_attn_fn summed over hc streams."""
+    _patch_first_rank_pp_group(monkeypatch)
+    layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
+    model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
+
+    DeepseekV4Model.finalize_mhc_broadcast_weights(model)
+
+    assert layer.hc_attn_fn_broadcast is not None
+    expected = layer.hc_attn_fn.detach().view(-1, 2, 8).sum(dim=1)
+    assert torch.equal(layer.hc_attn_fn_broadcast, expected)
+
+
+def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
+    """Re-finalizing after load_weights (e.g. dummy init then refit) must
+    copy into the existing broadcast tensor so its address stays stable for
+    captured CUDA graphs, while picking up the new hc_attn_fn values."""
+    _patch_first_rank_pp_group(monkeypatch)
+    layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
+    model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
+
+    DeepseekV4Model.finalize_mhc_broadcast_weights(model)
+    buffer = layer.hc_attn_fn_broadcast
+
+    layer.hc_attn_fn.add_(1.0)
+    DeepseekV4Model.finalize_mhc_broadcast_weights(model)
+
+    assert layer.hc_attn_fn_broadcast is buffer
+    expected = layer.hc_attn_fn.detach().view(-1, 2, 8).sum(dim=1)
+    assert torch.equal(layer.hc_attn_fn_broadcast, expected)
