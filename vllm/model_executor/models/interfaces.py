@@ -95,6 +95,23 @@ class StreamingTranscriptionPostProcessor:
         return text_delta
 
 
+class RealtimeSegmentTimestamper:
+    """Per-utterance mapper from realtime output tokens to segment end times.
+
+    A segment is one *emission group*: the run of text the model commits at a
+    single boundary marker. Instances are stateful and must not be shared
+    across utterances, since the token index restarts at 0 on every commit.
+    """
+
+    def process_token_ids(self, token_ids: Sequence[int]) -> list[tuple[str, float]]:
+        """Return ``(text, end_seconds)`` for segments closed by this delta."""
+        return []
+
+    def flush(self) -> list[tuple[str, float]]:
+        """Return the trailing segment, if it was not closed by a boundary."""
+        return []
+
+
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     """
     A helper function to be used in the context of
@@ -1172,6 +1189,12 @@ class SupportsRealtime(Protocol):
     """Maximum tokens to generate per streaming audio segment.
     Override in subclasses based on the model's expected output length."""
 
+    supports_realtime_segment_timestamps: ClassVar[bool] = False
+    """Enables opt-in segment timestamps on `/v1/realtime` events.
+
+    Only meaningful for models that emit one output token per audio frame, so
+    that a token index maps back to a position in the audio."""
+
     @classmethod
     async def buffer_realtime_audio(
         cls,
@@ -1179,6 +1202,21 @@ class SupportsRealtime(Protocol):
         input_stream: asyncio.Queue[list[int]],
         model_config: "ModelConfig",
     ) -> AsyncGenerator["PromptType", None]: ...
+
+    @classmethod
+    def get_realtime_segment_timestamper(
+        cls, model_config: "ModelConfig"
+    ) -> RealtimeSegmentTimestamper:
+        """Build a timestamper for one utterance.
+
+        Only models that set ``supports_realtime_segment_timestamps`` must
+        override this method.
+
+        Raises:
+            ValueError: The checkpoint cannot support segment timestamps, e.g.
+                its tokenizer has no boundary marker.
+        """
+        raise NotImplementedError
 
 
 @overload
