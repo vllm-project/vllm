@@ -57,6 +57,14 @@ def eagle_step_slot_mapping_metadata_kernel(
         tl.store(out_slot_mapping_ptr + req_idx, PAD_ID)
         return
 
+    # Padded rows inside the captured batch can have seq_lens == 0 and
+    # block_table entries of -1. Do not advance them into a real request.
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    if seq_len == 0:
+        tl.store(out_clamped_positions_ptr + req_idx, 0)
+        tl.store(out_slot_mapping_ptr + req_idx, PAD_ID)
+        return
+
     # Load current position and increment
     position = tl.load(positions_ptr + req_idx)
     new_position = position + 1
@@ -75,7 +83,6 @@ def eagle_step_slot_mapping_metadata_kernel(
     slot_id = tl.where(exceeds_max, PAD_ID, slot_id)
 
     # Update seq_lens: +1 normally, or 1 if exceeded
-    seq_len = tl.load(seq_lens_ptr + req_idx)
     new_seq_len = tl.where(exceeds_max, 1, seq_len + 1)
     new_seq_len = tl.minimum(new_seq_len, max_model_len)
 
