@@ -21,6 +21,7 @@ from vllm.entrypoints.chat_utils import (
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
+    validate_chat_template,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -2806,3 +2807,9 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
         f"resolve_items left {len(leaked_tasks)} task(s) running after "
         f"raising: {leaked_tasks}"
     )
+
+
+def test_validate_chat_template_resolves_packaged_examples_gemma4(monkeypatch, tmp_path):
+    """Regression for #47600: the packaged fallback must resolve even outside a git checkout."""
+    monkeypatch.chdir(tmp_path)  # no local examples/, so this can only pass via the packaged copy
+    validate_chat_template("examples/tool_chat_template_gemma4.jinja")
