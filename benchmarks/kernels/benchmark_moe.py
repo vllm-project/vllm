@@ -771,6 +771,7 @@ def get_model_params(config):
         "Glm4MoeLiteForCausalLM",
         "NemotronHForCausalLM",
         "MistralLarge3ForCausalLM",
+        "SolarOpen2ForCausalLM",
     ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok

@@ -279,13 +279,15 @@ def find_tool_properties(
         if isinstance(tool, (FunctionTool, NamespaceTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
-                    return (params or {}).get("properties", {})
+                    properties = (params or {}).get("properties", {})
+                    return properties if isinstance(properties, dict) else {}
             continue
         if not _is_function_tool(tool):
             continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
-            return (params or {}).get("properties", {})
+            properties = (params or {}).get("properties", {})
+            return properties if isinstance(properties, dict) else {}
     return {}
 
 
