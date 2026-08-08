@@ -320,7 +320,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
     # Port allocation is deferred to the front-end's bind() to avoid TOCTOU;
     # the bound addresses are gathered below and forwarded to the engines
-    # (via the startup handshake, or the address broker for Ray DP actors).
+    # (via the startup handshake, or by starting Ray DP actors afterward).
     is_ray_dp = parallel_config.data_parallel_backend == "ray"
     addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
 
@@ -329,7 +329,7 @@ def run_multi_api_server(args: argparse.Namespace):
         executor_class,
         log_stats,
         addresses,
-        defer_engine_addresses=is_ray_dp,
+        defer_ray_actor_start=is_ray_dp,
     ) as engine_launch:
         local_engine_manager = engine_launch.engine_manager
         coordinator = engine_launch.coordinator
@@ -370,14 +370,14 @@ def run_multi_api_server(args: argparse.Namespace):
             )
 
         # Forward the front-end's bound endpoints to the engines: via the
-        # startup handshake (runs on ``with`` exit), or the address broker
-        # for Ray DP actors.
+        # startup handshake (runs on ``with`` exit), or by creating Ray DP
+        # actors with the final addresses.
         addresses.inputs, addresses.outputs = (
             api_server_manager.gather_actual_addresses()
         )
         if is_ray_dp:
             assert isinstance(local_engine_manager, CoreEngineActorManager)
-            local_engine_manager.publish_addresses(addresses)
+            local_engine_manager.start_actors(addresses)
 
         # Set frontend processes to watch during engine startup.
         # If any of these processes exit before the engines are up, the engine startup

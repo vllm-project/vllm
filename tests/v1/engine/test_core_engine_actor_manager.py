@@ -36,25 +36,21 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
         log_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
-        address_broker: Any | None = None,
     ):
         # Exercise the production Ray actor mixin without loading a model.
-        self._vllm_config = vllm_config
         EngineCoreActorMixin.__init__(
             self,
             vllm_config,
             addresses,
             dp_rank,
             local_dp_rank,
-            address_broker,
         )
 
     def _set_visible_devices(self, vllm_config: Any, local_dp_rank: int) -> None:
         pass
 
     def wait_for_init(self) -> None:
-        with self._perform_handshakes("", b"", False, self._vllm_config, None):
-            pass
+        pass
 
     def run(self) -> None:
         pass
@@ -63,11 +59,7 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
         return os.environ.get("VLLM_NIXL_SIDE_CHANNEL_HOST")
 
     def get_addresses(self) -> tuple[list[str], list[str]]:
-        """Return the addresses snapshot the actor was constructed with.
-
-        Used by the Ray-DP regression test to assert that no ``tcp://host:0``
-        placeholders were pickled into the actor at ``.remote()`` time.
-        """
+        """Return the addresses snapshot the actor was constructed with."""
         return list(self.addresses.inputs), list(self.addresses.outputs)
 
 
@@ -258,10 +250,10 @@ def _make_vllm_config_ray_dp_multinode() -> SimpleNamespace:
 
 @pytest.mark.timeout(120)
 @pytest.mark.usefixtures("ray_context_dp2")
-def test_ray_dp_addresses_published_after_frontend_bind(
+def test_ray_dp_actors_start_after_frontend_bind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ray actors receive endpoints only after the front-end binds them."""
+    """Ray actors are created only after the front-end binds its endpoints."""
     created_placement_groups: list[Any] = []
 
     def create_dp_placement_groups(vllm_config: Any):
@@ -289,16 +281,18 @@ def test_ray_dp_addresses_published_after_frontend_bind(
     actor_snapshots: list[tuple[list[str], list[str]]] = []
     api_server_manager: APIServerProcessManager | None = None
     try:
-        # Ray actors start with placeholders and wait on the address broker.
+        # Defer actor creation while front-end addresses are placeholders.
         with launch_core_engines(
             vllm_config,
             executor_class=_DummyExecutor,
             log_stats=False,
             addresses=addresses,
-            defer_engine_addresses=True,
+            defer_ray_actor_start=True,
         ) as engine_launch:
             engine_manager = engine_launch.engine_manager
             assert isinstance(engine_manager, CoreEngineActorManager)
+            assert not engine_manager.local_engine_actors
+            assert not engine_manager.remote_engine_actors
 
             # API-server children bind first and report kernel-assigned ports.
             api_server_manager = APIServerProcessManager(
@@ -314,7 +308,7 @@ def test_ray_dp_addresses_published_after_frontend_bind(
             addresses.inputs, addresses.outputs = (
                 api_server_manager.gather_actual_addresses(timeout=15.0)
             )
-            engine_manager.publish_addresses(addresses)
+            engine_manager.start_actors(addresses)
 
             actors = (
                 engine_manager.local_engine_actors + engine_manager.remote_engine_actors
@@ -340,7 +334,7 @@ def test_ray_dp_addresses_published_after_frontend_bind(
             scheme, _host, port = split_zmq_path(url)
             assert scheme == "tcp", url
             assert port and int(port) > 0, (
-                f"Ray actor retained placeholder address {url!r}; "
-                "the address broker must publish the front-end's bound "
-                "endpoint before the actor finishes initialization."
+                f"Ray actor was created with placeholder address {url!r}; "
+                "actors must start only after the front-end reports its "
+                "bound endpoints."
             )

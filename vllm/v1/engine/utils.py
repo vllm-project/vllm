@@ -364,26 +364,6 @@ def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
         )
 
 
-class _EngineAddressBroker:
-    """Ray actor holding the engine ZMQ addresses until the front-end has
-    bound its sockets and published the final (kernel-assigned) ports."""
-
-    def __init__(self):
-        import asyncio
-
-        self._addresses: EngineZmqAddresses | None = None
-        self._event = asyncio.Event()
-
-    async def set_addresses(self, addresses: EngineZmqAddresses) -> None:
-        self._addresses = addresses
-        self._event.set()
-
-    async def get_addresses(self) -> EngineZmqAddresses:
-        await self._event.wait()
-        assert self._addresses is not None
-        return self._addresses
-
-
 class CoreEngineActorManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -401,18 +381,14 @@ class CoreEngineActorManager:
         log_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
-        defer_addresses: bool = False,
+        defer_actor_start: bool = False,
     ):
-        import copy
-
         import ray
-        from ray.runtime_env import RuntimeEnv
-        from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
         from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
 
         dp_size = vllm_config.parallel_config.data_parallel_size
-        actor_class = (
+        self._actor_class = (
             DPMoEEngineCoreActor
             if dp_size > 1 and vllm_config.model_config.is_moe
             else EngineCoreActor
@@ -422,19 +398,16 @@ class CoreEngineActorManager:
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
         env_vars_list = get_env_vars_to_copy(
-            destination=actor_class.__name__,
+            destination=self._actor_class.__name__,
             exclude_vars=WORKER_SPECIFIC_ENV_VARS,
         )
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
         }
-        runtime_env = RuntimeEnv(env_vars=self.env_vars_dict)
-
         self.addresses = addresses
+        self._vllm_config = vllm_config
         self.executor_class = executor_class
         self.log_stats = log_stats
-        local_engine_count = vllm_config.parallel_config.data_parallel_size_local
-        world_size = vllm_config.parallel_config.world_size
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
 
@@ -442,14 +415,6 @@ class CoreEngineActorManager:
             logger.info("Ray is already initialized. Skipping Ray initialization.")
         else:
             ray.init()
-
-        # With deferred front-end ports, actors wait on the broker for the
-        # final addresses (published after the front-end binds its sockets).
-        self.address_broker = None
-        if defer_addresses:
-            self.address_broker = (
-                ray.remote(_EngineAddressBroker).options(num_cpus=0).remote()
-            )
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_elastic_ep:
@@ -484,11 +449,38 @@ class CoreEngineActorManager:
         assert len(placement_groups) == dp_size, (
             "Number of placement groups must match data parallel size"
         )
+        self._placement_groups = placement_groups
+        self._local_dp_ranks = local_dp_ranks
+        self.placement_group_is_local: list[bool] = []
+        self.run_refs: list[Any] = []
+        self.actor_run_ref_dict: dict[Any, Any] = {}
+        self._actors_started = False
+        if not defer_actor_start:
+            self.start_actors(addresses)
 
-        self.placement_group_is_local = []
+    def start_actors(self, addresses: EngineZmqAddresses) -> None:
+        """Create Ray engine actors after front-end addresses are final."""
+        import copy
+
+        import ray
+        from ray.runtime_env import RuntimeEnv
+        from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
+        if self._actors_started:
+            raise RuntimeError("Core engine actors have already been started")
+        self._actors_started = True
+        self.addresses = addresses
+
+        vllm_config = self._vllm_config
+        parallel_config = vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        local_engine_count = parallel_config.data_parallel_size_local
+        world_size = parallel_config.world_size
+        runtime_env = RuntimeEnv(env_vars=self.env_vars_dict)
         refs = []
+
         for index, local_index, pg in zip(
-            range(dp_size), local_dp_ranks, placement_groups
+            range(dp_size), self._local_dp_ranks, self._placement_groups
         ):
             dp_vllm_config = copy.deepcopy(vllm_config)
             if dp_size > 1:
@@ -510,7 +502,7 @@ class CoreEngineActorManager:
                 runtime_env = RuntimeEnv(env_vars=actor_env_vars)
 
             actor = (
-                ray.remote(actor_class)
+                ray.remote(self._actor_class)
                 .options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg,
@@ -520,13 +512,12 @@ class CoreEngineActorManager:
                 )
                 .remote(
                     vllm_config=dp_vllm_config,
-                    executor_class=executor_class,
-                    log_stats=log_stats,
+                    executor_class=self.executor_class,
+                    log_stats=self.log_stats,
                     local_client=local_client,
                     addresses=addresses,
                     dp_rank=index,
                     local_dp_rank=local_index,
-                    address_broker=self.address_broker,
                 )
             )
             if local_client:
@@ -536,31 +527,11 @@ class CoreEngineActorManager:
             self.placement_group_is_local.append(local_client)
             refs.append(actor.wait_for_init.remote())
 
-        self.run_refs: list[Any] = []
-        self.actor_run_ref_dict: dict[Any, Any] = {}
-        self._init_refs = refs
-        # Actors waiting on the address broker cannot finish init until
-        # publish_addresses() runs, so defer the readiness wait until then.
-        if not defer_addresses:
-            self._finish_startup()
-
-    def _finish_startup(self) -> None:
-        import ray
-
-        ray.get(self._init_refs)
+        ray.get(refs)
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)
             self.actor_run_ref_dict[actor] = ref
-
-    def publish_addresses(self, addresses: EngineZmqAddresses) -> None:
-        """Publish the front-end's final bound addresses to waiting actors."""
-        import ray
-
-        self.addresses = addresses
-        if self.address_broker is not None:
-            ray.get(self.address_broker.set_addresses.remote(addresses))
-            self._finish_startup()
 
     @staticmethod
     def create_dp_placement_groups(
@@ -1115,7 +1086,7 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     addresses: EngineZmqAddresses,
-    defer_engine_addresses: bool = False,
+    defer_ray_actor_start: bool = False,
 ) -> Iterator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
 
@@ -1170,7 +1141,7 @@ def launch_core_engines(
             addresses=addresses,
             executor_class=executor_class,
             log_stats=log_stats,
-            defer_addresses=defer_engine_addresses,
+            defer_actor_start=defer_ray_actor_start,
         )
 
         yield CoreEngineLaunch(
