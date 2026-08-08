@@ -184,7 +184,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             )
             if (
                 not single_request.include_reasoning
-                or single_request._grammar_from_tool_parser
+                or single_request._grammar_from_parser
             ):
                 reasoning_ended = True
             elif parser:
@@ -192,6 +192,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             else:
                 reasoning_ended = None
             chat_template_kwargs = self._effective_chat_template_kwargs(single_request)
+            session_id = self._get_session_id(single_request, raw_request)
             generators.append(
                 self.engine_client.generate(
                     engine_prompt,
@@ -201,6 +202,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     trace_headers=trace_headers,
                     priority=single_request.priority,
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": chat_template_kwargs,
@@ -276,12 +278,15 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
 
-                if request.logprobs and request.top_logprobs is not None:
+                if request.logprobs and (
+                    request.top_logprobs is not None or request.logprob_token_ids
+                ):
                     assert output.logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_chat_logprobs(
                         token_ids=output.token_ids,
                         top_logprobs=output.logprobs,
                         num_output_top_logprobs=request.top_logprobs,
+                        logprob_token_ids=request.logprob_token_ids,
                         tokenizer=tokenizer,
                         return_as_token_id=request.return_tokens_as_token_ids,
                     )

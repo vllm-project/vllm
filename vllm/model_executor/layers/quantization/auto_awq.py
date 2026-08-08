@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
     convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
     make_wna16_moe_quant_config,
@@ -295,13 +296,12 @@ class AutoAWQConfig(QuantizationConfig):
             ):
                 return UnquantizedLinearMethod()
 
-            # Check if XPU - use XPU-specific linear method
-            if current_platform.is_xpu():
-                return AutoAWQXPULinearMethod(self)
-
-            # On CPU, use Marlin linear method which uses choose_mp_linear_kernel
-            # to select the best available kernel (CPUWNA16LinearKernel on CPU)
-            if current_platform.is_cpu():
+            # On CPU and XPU, use the Marlin linear method which uses
+            # choose_mp_linear_kernel to select the best available kernel
+            # (CPUWNA16LinearKernel on CPU, XPUwNa16LinearKernel on XPU).
+            # The AWQ checkpoint is converted to the standard GPTQ-like format
+            # in process_weights_after_loading before being handed to the kernel.
+            if current_platform.is_cpu() or current_platform.is_xpu():
                 return AutoAWQMarlinLinearMethod(self)
 
             # Check if Marlin is supported and not using batch invariant mode
@@ -427,8 +427,9 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
 
-        # Skip Marlin verification on CPU - it will use CPUWNA16LinearKernel
-        if not current_platform.is_cpu():
+        # Skip Marlin verification on CPU/XPU - they use dedicated WNA16
+        # kernels (CPUWNA16LinearKernel / XPUwNa16LinearKernel) instead.
+        if not (current_platform.is_cpu() or current_platform.is_xpu()):
             verify_marlin_supported(
                 quant_type=self.quant_config.quant_type,
                 group_size=self.quant_config.group_size,
@@ -559,6 +560,10 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             kInt4Static,
+            quant_config=self.quant_config,
+            may_have_zp=self.quant_config.zero_point,
+            may_have_bias=True,
+            allow_tile_padding=True,
         )
 
     def create_weights(
@@ -587,7 +592,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 hidden_size,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                self.moe.w13_num_shards
+                * intermediate_size_per_partition
+                // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -618,7 +625,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                intermediate_size_per_partition * 2,
+                intermediate_size_per_partition * self.moe.w13_num_shards,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -639,7 +646,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                2 * intermediate_size_per_partition // self.quant_config.pack_factor,
+                self.moe.w13_num_shards
+                * intermediate_size_per_partition
+                // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -663,6 +672,26 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        converted = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_moe_backend,
+            layer=layer,
+            quant_config=self.quant_config,
+            input_dtype=self.input_dtype,
+            w13=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            w13_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w13_qzeros=layer.w13_qzeros,
+            w2_qzeros=layer.w2_qzeros,
+            w13_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
+        )
+
+        if converted is None:
+            # Backend rewrote the layer's params in place (e.g. Humming).
+            self._setup_kernel(layer)
+            return
+
         (
             w13,
             w2,
@@ -678,20 +707,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2_input_global_scale,
             w13_bias,
             w2_bias,
-        ) = convert_to_wna16_moe_kernel_format(
-            backend=self.wna16_moe_backend,
-            layer=layer,
-            quant_config=self.quant_config,
-            input_dtype=self.input_dtype,
-            w13=layer.w13_qweight,
-            w2=layer.w2_qweight,
-            w13_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
-            w13_qzeros=layer.w13_qzeros,
-            w2_qzeros=layer.w2_qzeros,
-            w13_bias=getattr(layer, "w13_bias", None),
-            w2_bias=getattr(layer, "w2_bias", None),
-        )
+        ) = converted
 
         replace_parameter(layer, "w13_qweight", w13)
         replace_parameter(layer, "w2_qweight", w2)
@@ -734,6 +750,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.wna16_moe_backend,
             is_k_full=self.is_k_full,
             w13_g_idx=getattr(layer, "w13_g_idx", None),
             w2_g_idx=getattr(layer, "w2_g_idx", None),
@@ -743,6 +760,17 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+        if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+                get_humming_moe_quant_config,
+            )
+
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
@@ -758,16 +786,9 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2_bias=getattr(layer, "w2_bias", None),
             a1_gscale=getattr(layer, "w13_input_global_scale", None),
             a2_gscale=getattr(layer, "w2_input_global_scale", None),
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
     def apply(
@@ -783,8 +804,8 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_qweight,
-            w2=layer.w2_qweight,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -806,8 +827,8 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=layer.w13_qweight,
-            w2=layer.w2_qweight,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             router_logits=router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
@@ -938,65 +959,4 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
             out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
         if bias is not None:
             out.add_(bias)
-        return out.reshape(out_shape)
-
-
-class AutoAWQXPULinearMethod(BaseAWQLinearMethod):
-    """Linear method for AWQ on XPU using int4 GEMM kernel.
-
-    Args:
-        quant_config: The AWQ quantization config.
-    """
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
-        layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
-        layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
-
-        try:
-            from vllm_xpu_kernels.quantization._quantize_convert import (
-                AWQUtils,
-                transpose_onednn_woq_format,
-            )
-        except ImportError as e:
-            raise ImportError(
-                "XPU AWQ requires vllm-xpu-kernels. "
-                "Please install it with: pip install vllm-xpu-kernels"
-            ) from e
-
-        layer.xpu_output_size = layer.qweight.size(1) * self.quant_config.pack_factor
-        qweight_new, qzeros_new = AWQUtils.repack(layer.qweight, layer.qzeros)
-        if qweight_new.shape != layer.qweight.data.shape:
-            layer.qweight.data = layer.qweight.data.view_as(qweight_new)
-        if qzeros_new.shape != layer.qzeros.data.shape:
-            layer.qzeros.data = layer.qzeros.data.view_as(qzeros_new)
-        layer.qweight.data.copy_(qweight_new)
-        layer.qzeros.data.copy_(qzeros_new)
-        transpose_onednn_woq_format(layer, "awq", False)
-
-    def _get_group_size(self, layer: torch.nn.Module) -> int:
-        """Get the effective group size for kernel computation."""
-        if self.quant_config.group_size != -1:
-            return self.quant_config.group_size
-        return layer.qweight.shape[0]  # input_size_per_partition
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        reshaped_x = x.reshape(-1, x.shape[-1])
-        group_size = self._get_group_size(layer)
-
-        out = torch.ops._xpu_C.int4_gemm_w4a16(
-            reshaped_x,
-            layer.qweight,
-            bias,
-            layer.scales,
-            layer.qzeros,
-            group_size,
-            None,
-        )
-        out_shape = x.shape[:-1] + (layer.xpu_output_size,)
         return out.reshape(out_shape)

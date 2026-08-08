@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_engine_core_client::protocol::output::{
@@ -330,7 +333,7 @@ fn diff_or_zero(end: f64, start: f64) -> f64 {
 ///
 /// Original Python request timestamp source:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L206-L216>
-pub(crate) fn current_unix_timestamp_secs() -> f64 {
+pub fn current_unix_timestamp_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is before unix epoch")
@@ -372,6 +375,7 @@ mod tests {
                     num_cached_tokens: 4,
                     num_local_cached_tokens: 4,
                     num_external_cached_tokens: 0,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },

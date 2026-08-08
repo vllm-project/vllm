@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model
@@ -25,12 +25,28 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
     return torch.equal(w, target.weight)
 
 
+def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
+    """The target's lm_head — from get_language_model() for
+    *ForConditionalGeneration targets, else the top-level module."""
+    return getattr(target_language_model, "lm_head", None) or getattr(
+        target_model, "lm_head", None
+    )
+
+
 def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     from vllm.compilation.backends import set_model_tag
 
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
+    if speculative_config.kv_cache_dtype is not None:
+        vllm_config = replace(
+            vllm_config,
+            cache_config=replace(
+                vllm_config.cache_config,
+                cache_dtype=speculative_config.kv_cache_dtype,
+            ),
+        )
     with set_model_tag("eagle_head"):
         eagle_model = get_model(
             vllm_config=vllm_config, model_config=draft_model_config
@@ -64,7 +80,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 del draft_inner.embed_tokens
             draft_inner.embed_tokens = target_embed
 
-    target_lm_head = getattr(target_model, "lm_head", None)
+    target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(eagle_model, "lm_head", None)
     if target_lm_head is not None and _should_share(
         eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head

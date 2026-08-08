@@ -122,6 +122,7 @@ class IrOpPriorityConfig:
 MoEBackend = Literal[
     "auto",
     "triton",
+    "batched_triton",
     "deep_gemm",
     "deep_gemm_mega_moe",
     "cutlass",
@@ -147,6 +148,7 @@ LinearBackend = Literal[
     "flashinfer_cudnn",
     "flashinfer_b12x",
     "marlin",
+    "humming",
     "triton",
     "deep_gemm",
     "torch",
@@ -174,14 +176,25 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+    # to the shared JIT warmup infrastructure.
+    # https://github.com/vllm-project/vllm/pull/47451
     enable_cutedsl_warmup: bool = True
     """If True, run CuTeDSL compile warmup during kernel warmup."""
+
+    enable_jit_warmup: bool = True
+    """If True, run JIT compile warmup during kernel warmup."""
+
+    enable_bf16x3_router_gemm: bool = False
+    """If True, use the experimental SM100 BF16x3 CuteDSL router GEMM."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
+    - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
+      activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
@@ -246,6 +259,7 @@ class KernelConfig:
         """
         ignored_factors = {
             "enable_cutedsl_warmup",
+            "enable_jit_warmup",
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
@@ -256,6 +270,7 @@ class KernelConfig:
     @field_validator(
         "enable_flashinfer_autotune",
         "enable_cutedsl_warmup",
+        "enable_jit_warmup",
         mode="wrap",
     )
     @classmethod
