@@ -20,8 +20,20 @@ class KVConnectorStats:
     """
     Base class for KV Connector Stats, a container for transfer performance
     metrics or otherwise important telemetry from the connector.
+
     All sub-classes need to be serializable as stats are sent from worker to
-    logger process.
+    logger process via IPC.
+
+    The stats pipeline works as follows:
+    1. **Worker (observe)**: Each TP rank records per-transfer telemetry via
+       connector-specific `record_*()` methods (e.g., `NixlKVConnectorStats.record_transfer()`).
+    2. **Worker → Logger (aggregate)**: Stats are serialized and sent to the logger.
+       The logger calls `aggregate()` to concatenate observations from all ranks
+       into a combined pool (using `list.extend()`).
+    3. **Logger (reduce)**: The logger periodically calls `reduce()` to compute
+       summary statistics (averages, percentiles, throughput) over the combined
+       pool for CLI logging and Prometheus metric emission.
+    4. **Logger (log)**: `KVConnectorLogging.log()` formats and emits the metrics.
     """
 
     data: dict[str, Any] = field(default_factory=dict)
@@ -33,24 +45,52 @@ class KVConnectorStats:
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         """
         Aggregate stats with another `KVConnectorStats` object.
+
+        Combines observations from another instance (typically a different TP rank)
+        into this instance's observation pool. Subclasses should implement
+        concatenation logic (e.g., `list.extend()`).
         """
         raise NotImplementedError
 
     def reduce(self) -> dict[str, int | float]:
         """
         Reduce the observations collected during a time interval to one or
-        more representative values (eg avg/median/sum of the series).
+        more representative values (e.g., avg/median/sum of the series).
+
         This is meant to be called by the logger to produce a summary of the
-        stats for the last time interval.
+        stats for the last time interval. The summary is used for CLI logging
+        and Prometheus metric emission.
+
+        Subclasses should implement the specific reduction logic.
         """
         raise NotImplementedError
 
     def is_empty(self) -> bool:
-        """Return True if the stats are empty."""
+        """Return True if the stats are empty (no observations to report)."""
         raise NotImplementedError
 
 
 class KVConnectorLogging:
+    """
+    Handles the observe → aggregate → reduce → log pipeline for KV connector metrics.
+
+    This class manages the periodic logging of transfer metrics from the connector
+    to the logger process. It accumulates stats across logging intervals and
+    emits them via a configurable log function.
+
+    Pipeline:
+    1. **observe()**: Called periodically when the connector syncs with the scheduler.
+       Receives stats data already aggregated across all workers/ranks.
+       Creates/updates the internal `transfer_stats_accumulator` by aggregating
+       with the new data.
+    2. **log()**: Called periodically (on a separate logging interval) to emit
+       the accumulated metrics. Calls `reduce()` on the accumulator to produce
+       summary statistics, logs them, then resets for the next interval.
+
+    The stats data passed to `observe()` is expected to be pre-aggregated across
+    all TP ranks (i.e., the worker sends concatenated observations from all ranks).
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
@@ -108,8 +148,18 @@ class KVConnectorLogging:
 
 class KVConnectorPromMetrics:
     """
-    A base class for per-connector Prometheus metric registration
-    and recording.
+    A base class for per-connector Prometheus metric registration and recording.
+
+    Subclasses implement `observe()` to record transfer statistics to Prometheus
+    metrics (Gauge, Counter, Histogram). Metrics are registered per-engine
+    (using the 'engine' label) to support multi-engine deployments.
+
+    The metrics pipeline:
+    1. **Registration**: Connector-specific subclasses create metric instances
+       in `__init__` using `_gauge_cls`, `_counter_cls`, `_histogram_cls`.
+    2. **Recording**: `observe()` is called with transfer stats data and engine_idx
+       to update the appropriate metric instances.
+    3. **Scraping**: Prometheus scrapes metrics via the standard HTTP endpoint.
     """
 
     def __init__(
@@ -128,10 +178,15 @@ class KVConnectorPromMetrics:
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
-        Record the supplied transfer statistics to Prometheus metrics. These
-        statistics are engine-specific, and should be recorded to a metric
+        Record the supplied transfer statistics to Prometheus metrics.
+
+        These statistics are engine-specific, and should be recorded to a metric
         with the appropriate 'engine' label. These metric instances can be
         created using the create_metric_per_engine() helper method.
+
+        Args:
+            transfer_stats_data: Aggregated stats data from all TP ranks.
+            engine_idx: Engine index for labeling metrics in multi-engine deployments.
         """
         raise NotImplementedError
 
