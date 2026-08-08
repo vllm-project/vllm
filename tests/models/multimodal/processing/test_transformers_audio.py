@@ -58,18 +58,7 @@ AUDIO_MODEL_SETTINGS = {
     [
         "ibm-granite/granite-speech-3.3-2b",
         "nvidia/audio-flamingo-3-hf",
-        pytest.param(
-            "mistralai/Voxtral-Mini-3B-2507",
-            marks=pytest.mark.xfail(
-                reason="MistralCommonBackend.encode does not produce the audio "
-                "placeholder token (ID 24) from raw text. apply_chat_template "
-                "yields token IDs with placeholders, but MultiModalProcessor."
-                "apply() decodes the prompt back to text and re-tokenizes, at "
-                "which point the placeholders are lost. Fix belongs in "
-                "mistral_common or in the Voxtral-specific path.",
-                strict=False,
-            ),
-        ),
+        "mistralai/Voxtral-Mini-3B-2507",
         "microsoft/VibeVoice-ASR-HF",
         "zai-org/GLM-ASR-Nano-2512",
     ],

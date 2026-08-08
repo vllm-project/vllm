@@ -194,17 +194,21 @@ class InputProcessingContext:
 
             typ = ProcessorMixin
 
-        tokenizer = self.tokenizer
-        if is_mistral_tokenizer(tokenizer):
-            tokenizer = tokenizer.transformers_tokenizer  # type: ignore[union-attr]
+        from transformers import MistralCommonBackend
 
+        tokenizer = self.tokenizer
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
         merged_kwargs.pop("tokenizer", None)
+
+        # `MistralCommonBackend` rejects a forwarded `tokenizer` kwarg
+        if not is_mistral_tokenizer(tokenizer) and not isinstance(
+            tokenizer, MistralCommonBackend
+        ):
+            merged_kwargs["tokenizer"] = tokenizer
 
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
-            tokenizer=tokenizer,
             **merged_kwargs,
         )
 

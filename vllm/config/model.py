@@ -612,6 +612,10 @@ class ModelConfig:
         ):
             raise ValueError("cumem allocator is not supported on current platform.")
 
+        # AutoModel.from_config resolves by class, needs typed HF config not params.json
+        if self.model_impl == "transformers" and self.config_format == "auto":
+            self.config_format = "hf"
+
         hf_config = get_config(
             self.hf_config_path or self.model,
             self.trust_remote_code,
