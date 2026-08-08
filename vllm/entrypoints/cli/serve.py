@@ -20,11 +20,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.v1.engine.utils import (
-    CoreEngineActorManager,
-    CoreEngineProcManager,
-    launch_core_engines,
-)
+from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -318,9 +314,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-    # Port allocation is deferred to the front-end's bind() to avoid TOCTOU;
-    # the bound addresses are gathered below and forwarded to the engines
-    # (via the startup handshake, or by starting Ray DP actors afterward).
+    # Port allocation is deferred to the front-end's bind() to avoid TOCTOU.
     is_ray_dp = parallel_config.data_parallel_backend == "ray"
     addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
 
@@ -331,7 +325,6 @@ def run_multi_api_server(args: argparse.Namespace):
         addresses,
         defer_ray_actor_start=is_ray_dp,
     ) as engine_launch:
-        local_engine_manager = engine_launch.engine_manager
         coordinator = engine_launch.coordinator
         addresses = engine_launch.addresses
         stats_update_address = (
@@ -369,20 +362,18 @@ def run_multi_api_server(args: argparse.Namespace):
                 tensor_queue=engine_launch.tensor_queue,
             )
 
-        # Forward the front-end's bound endpoints to the engines: via the
-        # startup handshake (runs on ``with`` exit), or by creating Ray DP
-        # actors with the final addresses.
+        # Forward the front-end's bound endpoints to the engines on context
+        # manager exit.
         addresses.inputs, addresses.outputs = (
             api_server_manager.gather_actual_addresses()
         )
-        if is_ray_dp:
-            assert isinstance(local_engine_manager, CoreEngineActorManager)
-            local_engine_manager.start_actors(addresses)
 
         # Set frontend processes to watch during engine startup.
         # If any of these processes exit before the engines are up, the engine startup
         # will be aborted with an error.
         engine_launch.watched_frontend_processes = api_server_manager.processes
+
+    local_engine_manager = engine_launch.engine_manager
 
     # Wait for API servers.
     try:

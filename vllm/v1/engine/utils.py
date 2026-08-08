@@ -11,7 +11,7 @@ from enum import Enum, auto
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 import zmq
@@ -381,14 +381,17 @@ class CoreEngineActorManager:
         log_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
-        defer_actor_start: bool = False,
     ):
+        import copy
+
         import ray
+        from ray.runtime_env import RuntimeEnv
+        from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
         from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
 
         dp_size = vllm_config.parallel_config.data_parallel_size
-        self._actor_class = (
+        actor_class = (
             DPMoEEngineCoreActor
             if dp_size > 1 and vllm_config.model_config.is_moe
             else EngineCoreActor
@@ -398,16 +401,19 @@ class CoreEngineActorManager:
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
         env_vars_list = get_env_vars_to_copy(
-            destination=self._actor_class.__name__,
+            destination=actor_class.__name__,
             exclude_vars=WORKER_SPECIFIC_ENV_VARS,
         )
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
         }
+        runtime_env = RuntimeEnv(env_vars=self.env_vars_dict)
+
         self.addresses = addresses
-        self._vllm_config = vllm_config
         self.executor_class = executor_class
         self.log_stats = log_stats
+        local_engine_count = vllm_config.parallel_config.data_parallel_size_local
+        world_size = vllm_config.parallel_config.world_size
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
 
@@ -449,38 +455,10 @@ class CoreEngineActorManager:
         assert len(placement_groups) == dp_size, (
             "Number of placement groups must match data parallel size"
         )
-        self._placement_groups = placement_groups
-        self._local_dp_ranks = local_dp_ranks
-        self.placement_group_is_local: list[bool] = []
-        self.run_refs: list[Any] = []
-        self.actor_run_ref_dict: dict[Any, Any] = {}
-        self._actors_started = False
-        if not defer_actor_start:
-            self.start_actors(addresses)
-
-    def start_actors(self, addresses: EngineZmqAddresses) -> None:
-        """Create Ray engine actors after front-end addresses are final."""
-        import copy
-
-        import ray
-        from ray.runtime_env import RuntimeEnv
-        from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
-        if self._actors_started:
-            raise RuntimeError("Core engine actors have already been started")
-        self._actors_started = True
-        self.addresses = addresses
-
-        vllm_config = self._vllm_config
-        parallel_config = vllm_config.parallel_config
-        dp_size = parallel_config.data_parallel_size
-        local_engine_count = parallel_config.data_parallel_size_local
-        world_size = parallel_config.world_size
-        runtime_env = RuntimeEnv(env_vars=self.env_vars_dict)
+        self.placement_group_is_local = []
         refs = []
-
         for index, local_index, pg in zip(
-            range(dp_size), self._local_dp_ranks, self._placement_groups
+            range(dp_size), local_dp_ranks, placement_groups
         ):
             dp_vllm_config = copy.deepcopy(vllm_config)
             if dp_size > 1:
@@ -502,7 +480,7 @@ class CoreEngineActorManager:
                 runtime_env = RuntimeEnv(env_vars=actor_env_vars)
 
             actor = (
-                ray.remote(self._actor_class)
+                ray.remote(actor_class)
                 .options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg,
@@ -512,8 +490,8 @@ class CoreEngineActorManager:
                 )
                 .remote(
                     vllm_config=dp_vllm_config,
-                    executor_class=self.executor_class,
-                    log_stats=self.log_stats,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
                     local_client=local_client,
                     addresses=addresses,
                     dp_rank=index,
@@ -528,6 +506,8 @@ class CoreEngineActorManager:
             refs.append(actor.wait_for_init.remote())
 
         ray.get(refs)
+        self.run_refs = []
+        self.actor_run_ref_dict = dict()
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)
@@ -1136,17 +1116,16 @@ def launch_core_engines(
     if parallel_config.data_parallel_backend == "ray":
         logger.info("Starting ray-based data parallel backend")
 
-        engine_actor_manager = CoreEngineActorManager(
-            vllm_config=vllm_config,
-            addresses=addresses,
-            executor_class=executor_class,
-            log_stats=log_stats,
-            defer_actor_start=defer_ray_actor_start,
-        )
-
-        yield CoreEngineLaunch(
-            engine_actor_manager, coordinator, addresses, tensor_queue
-        )
+        engine_launch = CoreEngineLaunch(None, coordinator, addresses, tensor_queue)
+        if not defer_ray_actor_start:
+            engine_launch.engine_manager = CoreEngineActorManager(
+                vllm_config, addresses, executor_class, log_stats
+            )
+        yield engine_launch
+        if defer_ray_actor_start:
+            engine_launch.engine_manager = CoreEngineActorManager(
+                vllm_config, addresses, executor_class, log_stats
+            )
         return
 
     if offline_mode:

@@ -289,10 +289,7 @@ def test_ray_dp_actors_start_after_frontend_bind(
             addresses=addresses,
             defer_ray_actor_start=True,
         ) as engine_launch:
-            engine_manager = engine_launch.engine_manager
-            assert isinstance(engine_manager, CoreEngineActorManager)
-            assert not engine_manager.local_engine_actors
-            assert not engine_manager.remote_engine_actors
+            assert engine_launch.engine_manager is None
 
             # API-server children bind first and report kernel-assigned ports.
             api_server_manager = APIServerProcessManager(
@@ -308,14 +305,13 @@ def test_ray_dp_actors_start_after_frontend_bind(
             addresses.inputs, addresses.outputs = (
                 api_server_manager.gather_actual_addresses(timeout=15.0)
             )
-            engine_manager.start_actors(addresses)
 
-            actors = (
-                engine_manager.local_engine_actors + engine_manager.remote_engine_actors
-            )
-            actor_snapshots = ray.get(
-                [actor.get_addresses.remote() for actor in actors]
-            )
+        engine_manager = engine_launch.engine_manager
+        assert isinstance(engine_manager, CoreEngineActorManager)
+        actors = (
+            engine_manager.local_engine_actors + engine_manager.remote_engine_actors
+        )
+        actor_snapshots = ray.get([actor.get_addresses.remote() for actor in actors])
     finally:
         if api_server_manager is not None:
             api_server_manager.shutdown()
