@@ -1708,6 +1708,7 @@ class ModelConfig:
             "top_p",
             "min_p",
             "max_new_tokens",
+            "stop_token_ids",
         ]
         if any(p in config for p in available_params):
             diff_sampling_param = {
