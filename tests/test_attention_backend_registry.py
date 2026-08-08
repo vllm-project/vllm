@@ -7,6 +7,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     MambaAttentionBackendEnum,
+    get_dcp_capable_backend_names,
     register_backend,
 )
 
@@ -32,6 +33,42 @@ class CustomAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls():
         return CustomAttentionImpl
+
+    @staticmethod
+    def get_builder_cls():
+        """Mock builder class."""
+        return None
+
+    @staticmethod
+    def get_required_kv_cache_layout():
+        """Mock KV cache layout."""
+        return None
+
+
+class DcpCapableAttentionImpl(AttentionImpl):
+    """Mock attention impl that can return the softmax LSE for decode,
+    i.e. one that supports Decode Context Parallelism (DCP)."""
+
+    can_return_lse_for_decode = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, *args, **kwargs):
+        """Mock forward pass."""
+        pass
+
+
+class DcpCapableAttentionBackend(AttentionBackend):
+    """Mock backend wrapping DcpCapableAttentionImpl for testing."""
+
+    @staticmethod
+    def get_name():
+        return "CUSTOM"
+
+    @staticmethod
+    def get_impl_cls():
+        return DcpCapableAttentionImpl
 
     @staticmethod
     def get_builder_cls():
@@ -167,3 +204,47 @@ def test_register_custom_mamba_backend_with_class_path():
     backend_cls = MambaAttentionBackendEnum.CUSTOM.get_class()
     assert backend_cls.get_name() == "CUSTOM_MAMBA"
     assert backend_cls.get_impl_cls() == CustomMambaAttentionImpl
+
+
+def test_get_dcp_capable_backend_names_includes_lse_capable_backend():
+    # Register a mock backend whose impl explicitly supports returning the
+    # softmax LSE for decode - it must show up as DCP-capable.
+    register_backend(
+        backend=AttentionBackendEnum.CUSTOM,
+        class_path="tests.test_attention_backend_registry.DcpCapableAttentionBackend",
+        is_mamba=False,
+    )
+    try:
+        assert "CUSTOM" in get_dcp_capable_backend_names()
+    finally:
+        AttentionBackendEnum.CUSTOM.clear_override()
+
+
+def test_get_dcp_capable_backend_names_excludes_non_lse_backend():
+    # Register a mock backend whose impl does NOT support returning the
+    # softmax LSE for decode (the CustomAttentionImpl default) - it must not
+    # be reported as DCP-capable.
+    register_backend(
+        backend=AttentionBackendEnum.CUSTOM,
+        class_path="tests.test_attention_backend_registry.CustomAttentionBackend",
+        is_mamba=False,
+    )
+    try:
+        assert "CUSTOM" not in get_dcp_capable_backend_names()
+    finally:
+        AttentionBackendEnum.CUSTOM.clear_override()
+
+
+def test_get_dcp_capable_backend_names_skips_unimportable_backends():
+    # Point CUSTOM at a class path that can't be imported. The helper must
+    # skip it silently rather than raising, since it only powers a
+    # best-effort error/log message.
+    register_backend(
+        backend=AttentionBackendEnum.CUSTOM,
+        class_path="tests.test_attention_backend_registry.DoesNotExist",
+        is_mamba=False,
+    )
+    try:
+        assert "CUSTOM" not in get_dcp_capable_backend_names()
+    finally:
+        AttentionBackendEnum.CUSTOM.clear_override()
