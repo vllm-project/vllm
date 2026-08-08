@@ -19,7 +19,9 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
+    KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
 )
@@ -36,6 +38,10 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _effective_group_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
+    return spec.block_size * (dcp_world_size if isinstance(spec, AttentionSpec) else 1)
 
 
 @dataclass
@@ -89,11 +95,11 @@ class SimpleCPUOffloadScheduler:
         )
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.cp_world_size = dcp_world_size
+        assert kv_cache_config is not None
         self.block_size = scheduler_block_size
         self.hash_block_size = hash_block_size
         assert self.block_size % self.hash_block_size == 0
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
-        assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
             kv_cache_config, offload_capacity
         )
@@ -107,11 +113,9 @@ class SimpleCPUOffloadScheduler:
         assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
         # FA group's own block_size; divides scheduler_block_size (the LCM)
         # but is NOT assumed to equal it.
-        self.fa_block_size: int = (
-            self.cpu_kv_cache_config.kv_cache_groups[
-                self.fa_gidx
-            ].kv_cache_spec.block_size
-            * self.cp_world_size
+        self.fa_block_size = _effective_group_block_size(
+            self.cpu_kv_cache_config.kv_cache_groups[self.fa_gidx].kv_cache_spec,
+            self.cp_world_size,
         )
         assert self.block_size % self.fa_block_size == 0
 
@@ -232,7 +236,7 @@ class SimpleCPUOffloadScheduler:
         target = 0
         for g in kv_cache_config.kv_cache_groups:
             spec = g.kv_cache_spec
-            block_size = spec.block_size * cp_world_size
+            block_size = _effective_group_block_size(spec, cp_world_size)
             if isinstance(spec, MambaSpec):
                 target += 2
             elif isinstance(spec, SlidingWindowSpec):
@@ -355,8 +359,8 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
-            g_block_size = (
-                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+            g_block_size = _effective_group_block_size(
+                kv_cache_groups[g].kv_cache_spec, self.cp_world_size
             )
             assert num_external_tokens % g_block_size == 0, (
                 f"num_external_tokens={num_external_tokens} not aligned to "
@@ -376,8 +380,8 @@ class SimpleCPUOffloadScheduler:
                 continue
 
             # Number of blocks in the computed range for this group.
-            g_block_size = (
-                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+            g_block_size = _effective_group_block_size(
+                kv_cache_groups[g].kv_cache_spec, self.cp_world_size
             )
             n_computed_g = cdiv(total_computed_tokens, g_block_size)
 
@@ -595,8 +599,8 @@ class SimpleCPUOffloadScheduler:
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
-                g_block_size = (
-                    kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+                g_block_size = _effective_group_block_size(
+                    kv_cache_groups[g].kv_cache_spec, self.cp_world_size
                 )
                 ready_blocks_g = aligned_tokens // g_block_size
                 scannable = group_gpu_ids[already_stored_g:ready_blocks_g]

@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -1580,6 +1581,90 @@ def _make_cp_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
     )
+
+
+def _make_hybrid_dcp_scheduler() -> SchedulerFixture:
+    num_gpu_blocks = 16
+    full = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    mamba = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((1, 1),),
+        dtypes=(DTYPE,),
+        mamba_cache_mode="align",
+    )
+    groups = [
+        KVCacheGroupSpec(["full_layer"], full),
+        KVCacheGroupSpec(["mamba_layer"], mamba),
+    ]
+    tensors = [
+        KVCacheTensor(
+            size=spec.page_size_bytes * num_gpu_blocks,
+            shared_by=group.layer_names,
+        )
+        for group, spec in zip(groups, (full, mamba), strict=True)
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+    )
+    vllm_config = _make_cp_vllm_config(dcp_world_size=2)
+    bytes_per_block = sum(t.size for t in tensors) // num_gpu_blocks
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=bytes_per_block * 16,
+        scheduler_block_size=BLOCK_SIZE * 2,
+        hash_block_size=BLOCK_SIZE,
+        lazy_offload=False,
+    )
+    gpu_block_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=True,
+        hash_block_size=BLOCK_SIZE,
+    )
+    sched.bind_gpu_block_pool(gpu_block_pool)
+    return SchedulerFixture(
+        scheduler=sched,
+        gpu_block_pool=gpu_block_pool,
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        num_groups=2,
+    )
+
+
+def test_hybrid_dcp_store_uses_unscaled_mamba_block_size() -> None:
+    fix = _make_hybrid_dcp_scheduler()
+    req = make_request(num_blocks=4)
+    req.num_computed_tokens = 4 * BLOCK_SIZE
+
+    full_blocks = fix.gpu_block_pool.get_new_blocks(2)
+    mamba_blocks = fix.gpu_block_pool.get_new_blocks(4)
+    for idx, block in enumerate(full_blocks):
+        block._block_hash = make_block_hash_with_group_id(
+            req.block_hashes[2 * idx + 1], 0
+        )
+    for idx, block in enumerate(mamba_blocks):
+        block._block_hash = make_block_hash_with_group_id(req.block_hashes[idx], 1)
+
+    blocks = KVCacheBlocks(blocks=(full_blocks, mamba_blocks))
+    fix.scheduler.update_state_after_alloc(req, blocks, num_external_tokens=0)
+    meta = fix.scheduler.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 4 * BLOCK_SIZE},
+            new_reqs={req.request_id: blocks.get_block_ids()},
+        )
+    )
+
+    assert meta.store_gpu_blocks == [
+        *(block.block_id for block in full_blocks),
+        *(block.block_id for block in mamba_blocks),
+    ]
 
 
 def _make_cp_request(
