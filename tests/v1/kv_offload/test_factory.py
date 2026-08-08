@@ -6,7 +6,18 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    _all_groups_are_mla,
+    _expected_mla_bytes_per_block,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingHistogramMetadata,
@@ -588,3 +599,56 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     metrics = spec_cls.build_metric_definitions(extra_config)
 
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
+
+
+def _mla_spec(page_size_bytes: int = 512) -> MLAAttentionSpec:
+    return MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=page_size_bytes // 16 // 2,
+        dtype=torch.bfloat16,
+    )
+
+
+def _group(spec, layers: int) -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        layer_names=[f"layer.{i}" for i in range(layers)], kv_cache_spec=spec
+    )
+
+
+def test_replicated_layout_accepts_all_mla_multi_group():
+    """The gate used to require exactly one group, which excluded the
+    multi-group all-MLA shapes (for example DeepSeek V3.2)."""
+    groups = [_group(_mla_spec(), 2), _group(_mla_spec(), 3)]
+
+    assert _all_groups_are_mla(groups)
+    # One MLA page per layer, summed across groups.
+    assert _expected_mla_bytes_per_block(groups) == (
+        groups[0].kv_cache_spec.page_size_bytes * 5
+    )
+
+
+def test_replicated_layout_unwraps_uniform_type_specs():
+    inner = {f"layer.{i}": _mla_spec() for i in range(3)}
+    groups = [_group(UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=inner), 3)]
+
+    assert _all_groups_are_mla(groups)
+    # UniformTypeKVCacheSpecs.page_size_bytes already sums its layers, so it
+    # must not be multiplied by the layer count again.
+    assert _expected_mla_bytes_per_block(groups) == (
+        groups[0].kv_cache_spec.page_size_bytes
+    )
+
+
+def test_replicated_layout_fails_closed_on_non_mla():
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=8, head_size=64, dtype=torch.bfloat16
+    )
+
+    assert not _all_groups_are_mla([_group(full, 1)])
+    # One non-MLA group among MLA groups is enough to refuse.
+    assert not _all_groups_are_mla([_group(_mla_spec(), 1), _group(full, 1)])
+    assert not _all_groups_are_mla([])
+    assert not _all_groups_are_mla(
+        [_group(UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={}), 0)]
+    )
