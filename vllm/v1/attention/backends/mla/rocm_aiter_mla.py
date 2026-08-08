@@ -891,11 +891,13 @@ class AiterMLAHelper:
     def use_gluon_decode(num_heads: int, max_qo_len: int) -> bool:
         # Small-head (<16) single-token decode can use either the Gluon kernel
         # or the padded asm persistent decode, selected by
-        # VLLM_ROCM_AITER_MLA_ASM_PADDING (see _aiter_mla_small_head_mode) and
-        # the arch: Gluon only has a gfx950 build. In "auto" (default) mode
-        # divisor counts keep Gluon on gfx950 and everything else -- non-divisor
-        # counts (e.g. 12 heads/rank at TP8) and all counts on gfx942 -- takes
-        # the asm path, which get_mla_padded_q pads to exactly 16.
+        # VLLM_ROCM_AITER_MLA_ASM_PADDING (see _aiter_mla_small_head_mode)
+        # and the arch: Gluon only has a gfx950 build. In "auto" (default)
+        # mode ALL small-head counts prefer Gluon on gfx950 -- including
+        # non-divisor counts like 12 heads/rank at TP8 -- because the padded
+        # asm path may lack kernels for certain q_type/kv_type combinations
+        # (e.g. bf16 query + fp8 kv at gqa=16). On gfx942 (no Gluon build)
+        # the asm path is still used for all counts.
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         if num_heads >= m or max_qo_len != 1:
             return False
@@ -905,7 +907,7 @@ class AiterMLAHelper:
         gluon_supported = _gluon_mla_decode_supported()
         if mode == "gluon":
             return gluon_supported
-        return m % num_heads == 0 and gluon_supported
+        return gluon_supported
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
