@@ -31,6 +31,10 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
+from vllm.renderers.online_renderer import (
+    get_parser_chat_template_kwargs,
+    get_tools_for_prompt,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.utils import random_uuid
@@ -137,10 +141,20 @@ class OnlineDerenderer:
                         .chat_template_kwargs
                     )
 
+                parser_tools = get_tools_for_prompt(
+                    chat_request, self.exclude_tools_when_tool_choice_none
+                )
+                parser_chat_template_kwargs = get_parser_chat_template_kwargs(
+                    chat_request,
+                    chat_template_kwargs,
+                    parser_tools,
+                    self.default_chat_template_kwargs,
+                    chat_request.messages,
+                )
                 parser = self.parser(
                     tokenizer,
-                    chat_request.tools,
-                    chat_template_kwargs=chat_template_kwargs,
+                    parser_tools,
+                    chat_template_kwargs=parser_chat_template_kwargs,
                 )
                 reasoning, content, tool_calls = parser.parse(
                     decoded_text,

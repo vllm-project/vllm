@@ -24,6 +24,10 @@ from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.inkling import InklingParser, _inkling_arg_converter
 from vllm.parser.parser_manager import ParserManager
+from vllm.renderers.online_renderer import (
+    get_parser_chat_template_kwargs,
+    get_tools_for_prompt,
+)
 
 MSG_MODEL = "<|message_model|>"
 TEXT_START = "<|content_text|>"
@@ -735,6 +739,135 @@ class TestRegisteredAdapters:
         assert reasoning is None
         assert content is None
         assert tools[0].name == "get_weather"
+
+    def test_plain_text_mode_uses_tools_rendered_in_prompt(
+        self, mock_tokenizer, mock_request
+    ):
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            tool_choice="none",
+        )
+        parser = _make_delegating_parser(
+            mock_tokenizer,
+            get_tools_for_prompt(request, exclude_tools_when_tool_choice_none=True),
+        )
+        results = _stream_delegating(parser, mock_request, f"answer{END_MESSAGE}")
+
+        assert "".join(result.content for result in results if result) == "answer"
+
+    def test_developer_message_tools_disable_plain_text_mode(
+        self, mock_tokenizer, mock_request
+    ):
+        developer_tool = {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[
+                {
+                    "role": "developer",
+                    "content": "Use the weather tool.",
+                    "tools": [developer_tool],
+                },
+                {"role": "user", "content": "Weather?"},
+            ],
+            reasoning_effort="none",
+        )
+        parser_chat_template_kwargs = get_parser_chat_template_kwargs(
+            request,
+            {"reasoning_effort": "none"},
+            get_tools_for_prompt(request, False),
+            messages=request.messages,
+        )
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="inkling",
+            reasoning_parser_name="inkling",
+            enable_auto_tools=True,
+        )
+        assert parser_cls is not None
+        parser = parser_cls(
+            mock_tokenizer,
+            None,
+            chat_template_kwargs=parser_chat_template_kwargs,
+        )
+
+        reasoning, content, tools = parser.parse(
+            "get_weather" + _tool_block("get_weather", '{"city":"SF"}'),
+            mock_request,
+            enable_auto_tools=True,
+        )
+
+        assert reasoning is None
+        assert content is None
+        assert tools[0].name == "get_weather"
+
+        streaming_parser = parser_cls(
+            mock_tokenizer,
+            None,
+            chat_template_kwargs=parser_chat_template_kwargs,
+        )
+        results = _stream_delegating(
+            streaming_parser,
+            mock_request,
+            "get_weather" + _tool_block("get_weather", '{"city":"SF"}'),
+        )
+
+        # No-thinking streaming tool handoff is handled separately. This
+        # regression verifies that developer tools do not select plain-text
+        # mode and expose the leading function-name header as content.
+        assert not "".join(
+            result.content or "" for result in results if result
+        ).startswith("get_weather")
+
+    @pytest.mark.parametrize(
+        ("request_kwargs", "prompt_tools", "default_kwargs", "expects_tools"),
+        [
+            (
+                {"tools": []},
+                [{"name": "request"}],
+                {"tools": [{"name": "default"}]},
+                False,
+            ),
+            (None, [{"name": "request"}], {"tools": [{"name": "default"}]}, True),
+            (None, None, {"tools": [{"name": "default"}]}, True),
+        ],
+    )
+    def test_parser_tools_follow_chat_template_precedence(
+        self,
+        request_kwargs,
+        prompt_tools,
+        default_kwargs,
+        expects_tools,
+    ):
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[{"role": "user", "content": "hello"}],
+            chat_template_kwargs=request_kwargs,
+        )
+
+        parser_kwargs = get_parser_chat_template_kwargs(
+            request,
+            {},
+            prompt_tools,
+            default_kwargs,
+            request.messages,
+        )
+
+        assert parser_kwargs["_vllm_prompt_has_tools"] is expects_tools
 
     def test_skip_tool_transition_clears_message_header(self, mock_tokenizer):
         parser = InklingParser(

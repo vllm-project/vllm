@@ -53,6 +53,7 @@ from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser.harmony import Segment
 from vllm.sampling_params import SamplingParams
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 
 class MockConversationContext(ConversationContext):
@@ -349,6 +350,91 @@ class TestValidateGeneratorInput:
         assert isinstance(result, ErrorResponse)
 
 
+@pytest.mark.parametrize(
+    ("exclude_tools_when_tool_choice_none", "expects_tools"),
+    [(True, False), (False, True)],
+)
+def test_response_parser_uses_tools_rendered_in_prompt(
+    exclude_tools_when_tool_choice_none: bool,
+    expects_tools: bool,
+) -> None:
+    parser_cls = MagicMock()
+    serving = object.__new__(OpenAIServingResponses)
+    serving.parser = parser_cls
+    serving.model_config = MagicMock()
+    serving.online_renderer = MagicMock()
+    serving.online_renderer.exclude_tools_when_tool_choice_none = (
+        exclude_tools_when_tool_choice_none
+    )
+    serving.chat_template_kwargs = {}
+    request = ResponsesRequest(
+        input="hi",
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        tool_choice="none",
+        reasoning={"effort": "none"},
+    )
+
+    serving._make_response_parser(
+        request,
+        MagicMock(),
+        {"reasoning_effort": "none"},
+        [],
+    )
+
+    parser_tools = parser_cls.call_args.args[1]
+    parser_kwargs = parser_cls.call_args.kwargs["chat_template_kwargs"]
+    if expects_tools:
+        assert parser_tools is request.tools
+        assert ToolParser(MagicMock(), parser_tools).tools == request.tools
+    else:
+        assert parser_tools is None
+    assert parser_kwargs["_vllm_prompt_has_tools"] is expects_tools
+
+
+@pytest.mark.parametrize(
+    "builtin_tool",
+    [
+        {"type": "web_search_preview"},
+        {"type": "code_interpreter", "container": {"type": "auto"}},
+        {"type": "mcp", "server_label": "test", "server_url": ""},
+    ],
+)
+def test_response_parser_marks_builtin_tools_as_not_rendered(
+    builtin_tool: dict,
+) -> None:
+    parser_cls = MagicMock()
+    serving = object.__new__(OpenAIServingResponses)
+    serving.parser = parser_cls
+    serving.model_config = MagicMock()
+    serving.online_renderer = MagicMock()
+    serving.online_renderer.exclude_tools_when_tool_choice_none = False
+    serving.chat_template_kwargs = {}
+    request = ResponsesRequest(
+        input="hi",
+        tools=[builtin_tool],
+        reasoning={"effort": "none"},
+    )
+
+    serving._make_response_parser(
+        request,
+        MagicMock(),
+        {"reasoning_effort": "none"},
+        [],
+    )
+
+    parser_tools = parser_cls.call_args.args[1]
+    parser_kwargs = parser_cls.call_args.kwargs["chat_template_kwargs"]
+    assert parser_tools is request.tools
+    assert ToolParser(MagicMock(), parser_tools).tools == []
+    assert parser_kwargs["_vllm_prompt_has_tools"] is False
+
+
 @pytest.mark.asyncio
 async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     """Ensure reasoning_tokens usage is derived from thinking token spans."""
@@ -392,6 +478,7 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
         request,
         tokenizer,
         serving._effective_chat_template_kwargs(request),
+        [],
     )
 
     # Build a SimpleContext with thinking tokens in the output.

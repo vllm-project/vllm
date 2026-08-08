@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, overload
 
+from openai.types.responses.tool import Tool as ResponsesTool
 from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig
@@ -14,6 +15,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
@@ -58,6 +60,71 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     if not isinstance(kv, dict):
         return None
     return kv.pop("prompt_token_ids", None) or None
+
+
+@overload
+def get_tools_for_prompt(
+    request: ChatCompletionRequest,
+    exclude_tools_when_tool_choice_none: bool,
+) -> list[ChatCompletionToolsParam] | None: ...
+
+
+@overload
+def get_tools_for_prompt(
+    request: ResponsesRequest,
+    exclude_tools_when_tool_choice_none: bool,
+) -> list[ResponsesTool] | None: ...
+
+
+def get_tools_for_prompt(
+    request: ChatCompletionRequest | ResponsesRequest,
+    exclude_tools_when_tool_choice_none: bool,
+) -> list[ChatCompletionToolsParam] | list[ResponsesTool] | None:
+    if request.tools is None or (
+        request.tool_choice == "none" and exclude_tools_when_tool_choice_none
+    ):
+        return None
+    return request.tools
+
+
+def get_parser_chat_template_kwargs(
+    request: ChatCompletionRequest | ResponsesRequest,
+    chat_template_kwargs: dict[str, Any] | None,
+    prompt_tools: Sequence[Any] | None,
+    default_chat_template_kwargs: dict[str, Any] | None = None,
+    messages: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    """Attach the rendered prompt's tool context for parser construction.
+
+    ``prompt_tools`` is the request-level tool list after API-specific
+    filtering/conversion. Chat-template kwargs follow the same precedence as
+    :meth:`ChatParams.with_defaults`: a request override wins, otherwise the
+    request-level prompt tools win when present, then the server default is
+    used. Inkling additionally declares tools attached to developer messages.
+
+    The private flag is carried only in the parser's copy of the template
+    kwargs, so renderer-specific message tools do not alter other tool
+    parsers' configured tool lists or leak into chat-template rendering.
+    """
+    request_kwargs = request.chat_template_kwargs or {}
+    request_override = request_kwargs.get("tools")
+    if "tools" in request_kwargs and request_override not in (None, "auto"):
+        effective_tools = request_override
+    elif prompt_tools is not None:
+        effective_tools = prompt_tools
+    else:
+        effective_tools = (default_chat_template_kwargs or {}).get("tools")
+        if effective_tools == "auto":
+            effective_tools = None
+
+    prompt_has_tools = bool(effective_tools)
+    for message in messages or ():
+        if isinstance(message, dict) and message.get("role") == "developer":
+            prompt_has_tools = prompt_has_tools or bool(message.get("tools"))
+
+    parser_kwargs = dict(chat_template_kwargs or {})
+    parser_kwargs["_vllm_prompt_has_tools"] = prompt_has_tools
+    return parser_kwargs
 
 
 class OnlineRenderer:
@@ -172,12 +239,14 @@ class OnlineRenderer:
                     "--tool-call-parser to be set"
                 )
 
-        if request.tools is None or (
-            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
-        ):
-            tool_dicts = None
-        else:
-            tool_dicts = [tool.model_dump() for tool in request.tools]
+        prompt_tools = get_tools_for_prompt(
+            request, self.exclude_tools_when_tool_choice_none
+        )
+        tool_dicts = (
+            None
+            if prompt_tools is None
+            else [tool.model_dump() for tool in prompt_tools]
+        )
 
         if not self.use_harmony:
             # Common case.

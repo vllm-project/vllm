@@ -99,7 +99,11 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.online_renderer import (
+    OnlineRenderer,
+    get_parser_chat_template_kwargs,
+    get_tools_for_prompt,
+)
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -259,13 +263,32 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         tokenizer: TokenizerLike,
         chat_template_kwargs: dict[str, Any],
+        messages: Sequence[Any],
     ) -> Parser | None:
         if self.parser is None:
             return None
+        prompt_tools = construct_tool_dicts(
+            request.tools,
+            request.tool_choice,
+            exclude_tools_when_tool_choice_none=(
+                self.online_renderer.exclude_tools_when_tool_choice_none
+            ),
+        )
+        parser_tools = get_tools_for_prompt(
+            request,
+            self.online_renderer.exclude_tools_when_tool_choice_none,
+        )
+        parser_chat_template_kwargs = get_parser_chat_template_kwargs(
+            request,
+            chat_template_kwargs,
+            prompt_tools,
+            self.chat_template_kwargs,
+            messages,
+        )
         return self.parser(
             tokenizer,
-            request.tools,
-            chat_template_kwargs=chat_template_kwargs,
+            parser_tools,
+            chat_template_kwargs=parser_chat_template_kwargs,
             model_config=self.model_config,
         )
 
@@ -455,7 +478,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
-                request, tokenizer, chat_template_kwargs
+                request, tokenizer, chat_template_kwargs, messages
             )
 
             context: ConversationContext
