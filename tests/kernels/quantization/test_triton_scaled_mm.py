@@ -13,7 +13,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-device = "cuda"
+device = current_platform.device_type
 
 triton_scaled_mm_module = importlib.import_module(
     "vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm"
