@@ -373,3 +373,21 @@ def test_reasoning_thinking_disabled(
 
     assert reasoning == expected_reasoning
     assert content == expected_content
+
+
+def test_count_reasoning_tokens(qwen3_tokenizer):
+    """Qwen3.5 / *-Thinking pre-fill <think> in the prompt, so the output has
+    no <think> — just reasoning, then </think>, then content. The reasoning
+    tokens before </think> must still be counted."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer,
+    )
+
+    reasoning_ids = qwen3_tokenizer.encode(
+        "Let me think about this.", add_special_tokens=False
+    )
+    end_id = qwen3_tokenizer.get_vocab()[end_token]
+    content_ids = qwen3_tokenizer.encode("The answer is 42.", add_special_tokens=False)
+    output_ids = reasoning_ids + [end_id] + content_ids
+
+    assert parser.count_reasoning_tokens(output_ids) == len(reasoning_ids)
