@@ -12,7 +12,9 @@ from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
@@ -127,6 +129,45 @@ async def async_engine():
         wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
 
+def _build_inputs(
+    audio_assets: list[AudioAsset], tokenizer: MistralTokenizer
+) -> tuple[list[dict], list[SamplingParams]]:
+    audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
+    inputs = []
+    sampling_params = []
+    for audio_asset in audio_assets:
+        audio = Audio.from_file(audio_asset.get_local_path(), strict=False)
+        req = TranscriptionRequest(
+            audio=audio.to_base64(audio.format),
+            streaming=StreamingMode.OFFLINE,
+            language=None,
+        )
+        tokenized = tokenizer.instruct_tokenizer.encode_transcription(req)
+        tokens = tokenized.tokens
+        audio_array = tokenized.audios[0].audio_array
+
+        num_samples = audio_array.shape[0]
+        max_tokens = audio_config.num_audio_tokens(num_samples) - len(tokens) - 1
+        sampling_params.append(SamplingParams(temperature=0.0, max_tokens=max_tokens))
+        inputs.append(
+            {
+                "multi_modal_data": {"audio": [(audio_array, None)]},
+                "prompt_token_ids": tokens,
+            }
+        )
+    return inputs, sampling_params
+
+
+def _assert_expected_text(outputs) -> None:
+    texts = _normalize([out.outputs[0].text for out in outputs])
+    for i, (got, expected) in enumerate(zip(texts, EXPECTED_TEXT)):
+        assert got == expected, (
+            f"Output mismatch at index {i}:\n"
+            f"  got:      {got!r}\n"
+            f"  expected: {expected!r}"
+        )
+
+
 def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -135,51 +176,38 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypa
 
     with vllm_runner(**vllm_kwargs) as vllm_model:
         assert_encoder_kv_cache_spec(vllm_model.llm)
-        audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
+        inputs, sampling_params = _build_inputs(audio_assets, tokenizer)
 
-        def from_file(file_path: str):
-            audio = Audio.from_file(file_path, strict=False)
-            req = TranscriptionRequest(
-                audio=audio.to_base64(audio.format),
-                streaming=StreamingMode.OFFLINE,
-                language=None,
-            )
-            tokenized = tokenizer.instruct_tokenizer.encode_transcription(req)
+        outputs = vllm_model.llm.generate(inputs, sampling_params=sampling_params)
+        _assert_expected_text(outputs)
 
-            return (tokenized.tokens, tokenized.audios[0].audio_array)
 
-        tokenized_list = [
-            from_file(audio_asset.get_local_path()) for audio_asset in audio_assets
-        ]
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Full cudagraphs require CUDA"
+)
+@pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
+)
+def test_voxtral_realtime_cudagraph(
+    audio_assets, tokenizer, vllm_runner, monkeypatch, cudagraph_mode
+):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-        inputs = []
-        sampling_params = []
+    vllm_kwargs = {**ENGINE_CONFIG}
+    vllm_kwargs["model_name"] = vllm_kwargs.pop("model")
+    vllm_kwargs["enforce_eager"] = False
+    vllm_kwargs["compilation_config"] = {
+        "cudagraph_mode": cudagraph_mode,
+        # max_num_seqs is 4, so this is the only decode size worth capturing.
+        "cudagraph_capture_sizes": [4],
+    }
 
-        for tokens, audio_array in tokenized_list:
-            num_samples = audio_array.shape[0]
-            max_tokens = audio_config.num_audio_tokens(num_samples) - len(tokens) - 1
-            sampling_params.append(
-                SamplingParams(temperature=0.0, max_tokens=max_tokens)
-            )
+    with vllm_runner(**vllm_kwargs) as vllm_model:
+        inputs, sampling_params = _build_inputs(audio_assets, tokenizer)
 
-            input_dict = {
-                "multi_modal_data": {"audio": [(audio_array, None)]},
-                "prompt_token_ids": tokens,
-            }
-            inputs.append(input_dict)
-
-        outputs = vllm_model.llm.generate(
-            inputs,
-            sampling_params=sampling_params,
-        )
-
-        texts = _normalize([out.outputs[0].text for out in outputs])
-        for i, (got, expected) in enumerate(zip(texts, EXPECTED_TEXT)):
-            assert got == expected, (
-                f"Output mismatch at index {i}:\n"
-                f"  got:      {got!r}\n"
-                f"  expected: {expected!r}"
-            )
+        outputs = vllm_model.llm.generate(inputs, sampling_params=sampling_params)
+        _assert_expected_text(outputs)
 
 
 @pytest.mark.asyncio
