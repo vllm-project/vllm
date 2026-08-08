@@ -22,21 +22,23 @@ calling for parsers relying on special-token delimiters (Gemma4):
    wrong-purpose string ``"Response format for tool calling"``.
 
 3. :class:`Gemma4EngineToolParser` (the engine-based parser, #45588) sets
-   ``supports_required_and_named=False`` but did not skip the forced
-   ``structured_outputs`` JSON for ``required``/named tool choice. The model
-   was constrained to JSON the native parser cannot read, so the call leaked
-   as content with empty ``tool_calls``. ``adjust_request`` now skips that
-   constraint so Gemma4 emits its native ``<|tool_call>`` syntax.
+   ``supports_required_and_named=False`` and skips the forced
+   ``structured_outputs`` JSON for ``required`` tool choice so Gemma4 emits
+   its native ``<|tool_call>`` syntax. Named tool choice cannot be enforced
+   without that JSON path, so ``adjust_request`` rejects it instead of
+   silently falling back to auto parsing (#50477).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from openai.types.responses.tool_param import FunctionToolParam
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.gemma4_engine_tool_parser import (
     Gemma4EngineToolParser as Gemma4ToolParser,
@@ -186,19 +188,19 @@ def test_gemma4_required_skips_structured_outputs_chatcompletion() -> None:
     assert request.skip_special_tokens is False
 
 
-def test_gemma4_named_skips_structured_outputs_chatcompletion() -> None:
-    """named + ChatCompletion: the forced single-function JSON schema must be
-    skipped, same as ``required``.
+def test_gemma4_named_rejected_chatcompletion() -> None:
+    """named + ChatCompletion: Gemma4 cannot force a specific function, so
+    named tool_choice must fail loudly instead of silently returning prose.
     """
     parser = Gemma4ToolParser(_StubTokenizer())
     request = _build_chat_request(
         tool_choice={"type": "function", "function": {"name": "get_weather"}}
     )
 
-    parser.adjust_request(request)
+    with pytest.raises(VLLMValidationError, match="Named tool choice") as exc_info:
+        parser.adjust_request(request)
 
-    assert request.structured_outputs is None
-    assert request.skip_special_tokens is False
+    assert exc_info.value.parameter == "tool_choice"
 
 
 def test_gemma4_required_skips_structured_outputs_responses() -> None:
@@ -214,19 +216,19 @@ def test_gemma4_required_skips_structured_outputs_responses() -> None:
     assert request.skip_special_tokens is False
 
 
-def test_gemma4_named_skips_structured_outputs_responses() -> None:
-    """named (``ToolChoiceFunction``) + Responses: the forced single-function
-    JSON schema must be skipped.
+def test_gemma4_named_rejected_responses() -> None:
+    """named (``ToolChoiceFunction``) + Responses: reject instead of
+    silently ignoring the forced contract.
     """
     parser = Gemma4ToolParser(_StubTokenizer())
     request = _build_responses_request(
         tool_choice={"type": "function", "name": "get_weather"}
     )
 
-    parser.adjust_request(request)
+    with pytest.raises(VLLMValidationError, match="Named tool choice") as exc_info:
+        parser.adjust_request(request)
 
-    assert request.text is None
-    assert request.skip_special_tokens is False
+    assert exc_info.value.parameter == "tool_choice"
 
 
 def test_gemma4_keeps_special_tokens_with_tools_thinking_disabled() -> None:
