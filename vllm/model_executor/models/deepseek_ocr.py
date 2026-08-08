@@ -75,6 +75,8 @@ from .deepseek_vl2 import MlpProjector
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
+MAX_NGRAM_SIZE = 128
+MAX_NGRAM_WINDOW_SIZE = 1024
 
 
 class DeepseekOCRImagePixelInputs(TensorSchema):
@@ -118,9 +120,15 @@ class NoRepeatNGramLogitsProcessor:
         if len(output_ids) < self.ngram_size:
             return logits
 
-        current_prefix = tuple(output_ids[-(self.ngram_size - 1) :])
-
         search_start = max(0, len(output_ids) - self.window_size)
+        if self.ngram_size == 1:
+            banned_tokens = set(output_ids[search_start:])
+            banned_tokens -= self.whitelist_token_ids
+            if banned_tokens:
+                logits[list(banned_tokens)] = -float("inf")
+            return logits
+
+        current_prefix = tuple(output_ids[-(self.ngram_size - 1) :])
         search_end = len(output_ids) - self.ngram_size + 1
 
         banned_tokens = set()
@@ -157,10 +165,18 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
             raise ValueError(
                 f"`ngram_size` has to be a strictly positive integer, got {ngram_size}."
             )
+        if ngram_size > MAX_NGRAM_SIZE:
+            raise ValueError(
+                f"`ngram_size` must be <= {MAX_NGRAM_SIZE}, got {ngram_size}."
+            )
         if not isinstance(window_size, int) or window_size <= 0:
             raise ValueError(
                 "`window_size` has to be a strictly positive integer, "
                 f"got {window_size}."
+            )
+        if window_size > MAX_NGRAM_WINDOW_SIZE:
+            raise ValueError(
+                f"`window_size` must be <= {MAX_NGRAM_WINDOW_SIZE}, got {window_size}."
             )
         if whitelist_token_ids is not None and not isinstance(
             whitelist_token_ids, Iterable
