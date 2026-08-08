@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -443,6 +445,163 @@ def test_rmsnorm_gated_forward_native_dtype(
         upcast=True,
     )
     torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("hidden_size", [64, 96, 128, 192, 256])
+@pytest.mark.parametrize("num_tokens", [1, 17, 257])
+@torch.inference_mode()
+def test_strided_gdn_rmsnorm_gated_matches_native(
+    default_vllm_config,
+    hidden_size: int,
+    num_tokens: int,
+) -> None:
+    from vllm.model_executor.layers.mamba.ops.gdn_rmsnorm import (
+        fused_gdn_rmsnorm_gated,
+    )
+
+    set_random_seed(42)
+    heads = 8
+    x = torch.randn(
+        num_tokens,
+        heads,
+        hidden_size,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    projected = torch.randn(
+        num_tokens,
+        heads + 12,
+        hidden_size,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    z = projected[:, 12:, :]
+    weight = torch.randn(hidden_size, device="cuda", dtype=torch.bfloat16)
+    eps = 1e-6
+
+    actual = fused_gdn_rmsnorm_gated(x, z, weight, eps)
+    x_float = x.float()
+    variance = x_float.square().mean(dim=-1, keepdim=True)
+    expected = x_float * torch.rsqrt(variance + eps)
+    expected *= weight.float() * torch.nn.functional.silu(z.float())
+    expected = expected.to(torch.bfloat16)
+
+    difference = actual.float() - expected.float()
+    relative_l2 = torch.linalg.vector_norm(difference) / torch.linalg.vector_norm(
+        expected.float()
+    )
+    assert relative_l2.item() <= 1e-3
+    assert not torch.isnan(actual).any()
+    assert not torch.isinf(actual).any()
+
+
+@pytest.mark.parametrize(
+    ("tokens", "heads", "hidden_size"),
+    [(1, 1, 384), (2049, 64, 192)],
+)
+def test_strided_gdn_rmsnorm_gated_rejects_unsupported_shape(
+    monkeypatch,
+    tokens: int,
+    heads: int,
+    hidden_size: int,
+) -> None:
+    from vllm.model_executor.layers.mamba.ops import gdn_rmsnorm
+
+    monkeypatch.setattr(gdn_rmsnorm, "_IS_SM103", True)
+    x = torch.empty(tokens, heads, hidden_size, device="meta", dtype=torch.bfloat16)
+    z = torch.empty_like(x)
+    weight = torch.empty(hidden_size, device="meta", dtype=torch.bfloat16)
+
+    output = gdn_rmsnorm.try_fused_gdn_rmsnorm_gated(
+        x,
+        z,
+        weight,
+        1e-6,
+        group_size=None,
+        norm_before_gate=True,
+        activation="silu",
+    )
+
+    assert output is None
+
+
+def test_strided_gdn_rmsnorm_gated_rejects_cpu_input(monkeypatch) -> None:
+    from vllm.model_executor.layers.mamba.ops import gdn_rmsnorm
+
+    monkeypatch.setattr(gdn_rmsnorm, "_IS_SM103", True)
+    monkeypatch.setattr(
+        gdn_rmsnorm,
+        "fused_gdn_rmsnorm_gated_op",
+        lambda *args, **kwargs: torch.empty_like(args[0]),
+    )
+    x = torch.empty(8, 4, 128, dtype=torch.bfloat16)
+    z = torch.empty_like(x)
+    weight = torch.empty(128, dtype=torch.bfloat16)
+
+    output = gdn_rmsnorm.try_fused_gdn_rmsnorm_gated(
+        x,
+        z,
+        weight,
+        1e-6,
+        group_size=None,
+        norm_before_gate=True,
+        activation="silu",
+    )
+
+    assert output is None
+
+
+@pytest.mark.skipif(
+    current_platform.get_device_capability() != (10, 3),
+    reason="Qwen strided GDN RMSNorm dispatch is SM103-specific",
+)
+def test_qwen_output_projection_uses_strided_gdn_rmsnorm() -> None:
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+    )
+    from vllm.model_executor.layers.mamba.ops.gdn_rmsnorm import (
+        fused_gdn_rmsnorm_gated,
+    )
+
+    set_random_seed(42)
+    x = torch.randn(17, 8, 128, device="cuda", dtype=torch.bfloat16)
+    projected = torch.randn(17, 20, 128, device="cuda", dtype=torch.bfloat16)
+    z = projected[:, 12:, :]
+    weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
+    layer = SimpleNamespace(
+        norm=SimpleNamespace(
+            weight=weight,
+            eps=1e-6,
+            group_size=None,
+            norm_before_gate=True,
+            activation="silu",
+        ),
+        out_proj=lambda value: (value, None),
+    )
+
+    actual = QwenGatedDeltaNetAttention._output_projection(layer, x, z)
+    expected = fused_gdn_rmsnorm_gated(x, z, weight, 1e-6).flatten(-2)
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+def test_strided_gdn_rmsnorm_gated_preserves_fake_layout() -> None:
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    from vllm.model_executor.layers.mamba.ops.gdn_rmsnorm import (
+        fused_gdn_rmsnorm_gated_op,
+    )
+
+    mode = FakeTensorMode()
+    x = mode.from_tensor(torch.empty(8, 16, 128))
+    z = mode.from_tensor(torch.empty_strided((8, 16, 128), (4096, 128, 1)))
+    weight = mode.from_tensor(torch.empty(128))
+
+    output = fused_gdn_rmsnorm_gated_op(x, z, weight, 1e-6)
+
+    assert output.shape == x.shape
+    assert output.stride() == x.stride()
+    assert output.is_contiguous()
 
 
 if __name__ == "__main__":

@@ -36,6 +36,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gdn_rmsnorm import (
+    try_fused_gdn_rmsnorm_gated,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -784,13 +787,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
         """
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output, _ = self.out_proj(core_attn_out)
+        normalized = try_fused_gdn_rmsnorm_gated(
+            core_attn_out,
+            z,
+            self.norm.weight,
+            self.norm.eps,
+            self.norm.group_size,
+            self.norm.norm_before_gate,
+            self.norm.activation,
+        )
+        if normalized is None:
+            z_shape = z.shape
+            core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+            z = z.reshape(-1, z.shape[-1])
+            normalized = self.norm(core_attn_out, z).reshape(z_shape)
+        normalized = normalized.flatten(-2)  # ... h d -> ... (h d)
+        output, _ = self.out_proj(normalized)
         return output
 
     def forward_hip(
