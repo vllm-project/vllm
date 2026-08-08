@@ -50,15 +50,11 @@ from .utils import (
 
 logger = init_logger(__name__)
 
-IMAGE_TOKEN_INDEX = -200
 DEFAULT_IMAGE_TOKEN = "<image>"
 
-# The HF processor replaces "<image>" with IMAGE_TOKEN_INDEX (-200) in input_ids.
-# Negative token IDs cause OverflowError during decoding, so we remap to a real
-# in-vocabulary token.  The Phi-4-reasoning-vision tokenizer ships with reserved
-# dummy tokens (<|dummy_0|> … <|dummy_83|>); we reuse the first one as the
-# image placeholder.  This mirrors how Phi-3-vision uses its dedicated <|image|>
-# token (ID 32044).
+# The checkpoint has no dedicated image token, so the vision placeholders reuse
+# a reserved dummy token (<|dummy_0|> … <|dummy_83|>).  This mirrors how
+# Phi-3-vision uses its dedicated <|image|> token (ID 32044).
 _IMAGE_TOKEN_ID = 100256  # <|dummy_0|> in the Phi-4 tokenizer
 
 
@@ -82,25 +78,6 @@ class Phi4SiglipProcessingInfo(BaseProcessingInfo):
 
     def _get_max_num_patches(self) -> int:
         return getattr(self.get_hf_config(), "max_num_patches", 3600)
-
-    def _get_min_num_patches(self) -> int:
-        return getattr(self.get_hf_config(), "min_num_patches", 256)
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
-        patch_size = self._get_patch_size()
-        min_patches = self._get_min_num_patches()
-        max_patches = self._get_max_num_patches()
-
-        num_patches_h = image_height // patch_size
-        num_patches_w = image_width // patch_size
-        num_patches = max(num_patches_h * num_patches_w, 1)
-        num_patches = max(min(num_patches, max_patches), min_patches)
-        return num_patches
 
     def get_image_size_with_most_features(self) -> ImageSize:
         patch_size = self._get_patch_size()
@@ -142,34 +119,6 @@ class Phi4SiglipDummyInputsBuilder(
 class Phi4SiglipMultiModalProcessor(
     BaseMultiModalProcessor[Phi4SiglipProcessingInfo],
 ):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        # The HF processor's tokenizer_image_token() replaces the "<image>"
-        # string with IMAGE_TOKEN_INDEX (-200) in input_ids.  This breaks
-        # vLLM's prompt-replacement pipeline which needs to find "<image>"
-        # as normal sub-tokens.  Re-tokenize with the plain tokenizer so
-        # that "<image>" stays as sub-tokens and can be located by
-        # PromptReplacement.
-        # NOTE: tokenizer.__call__() (not .encode()) must be used so that
-        # added/special tokens like <|user|>, <|end|> are kept as single IDs.
-        tokenizer = self.info.get_tokenizer()
-        new_ids = tokenizer(prompt).input_ids
-        processed["input_ids"] = torch.tensor([new_ids])
-
-        return processed
-
     def _hf_processor_applies_updates(
         self,
         prompt_text: str,
@@ -177,11 +126,9 @@ class Phi4SiglipMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
     ) -> bool:
-        # The HF processor replaces "<image>" with a single -200 placeholder
-        # but does NOT expand it into N vision-encoder tokens.  Since we also
-        # re-tokenize the prompt (see _call_hf_processor), prompt updates are
-        # never applied by the HF processor — vLLM handles the expansion via
-        # _apply_prompt_updates.
+        # The processor tokenizes "<image>" as ordinary sub-tokens and does NOT
+        # expand it into N vision-encoder tokens, so vLLM handles the expansion
+        # via _apply_prompt_updates.
         return False
 
     def _get_mm_fields_config(
