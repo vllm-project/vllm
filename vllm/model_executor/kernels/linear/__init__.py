@@ -223,10 +223,7 @@ def _get_linear_backend() -> str:
     return "auto"
 
 
-# Mapping from linear_backend name to the set of kernel classes it covers.
-# When a user sets --linear-backend <name>, only kernels in the corresponding
-# set are considered candidates. If none can implement the layer config,
-# an error is raised to respect the user's explicit intent.
+# Kernel classes covered by each --linear-backend value.
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "cutlass": {
         CutlassInt8ScaledMMLinearKernel,
@@ -323,9 +320,17 @@ def _filter_kernels_by_backend(
     backend: str,
     kernels: list[type],
 ) -> list[type]:
-    """Filter a kernel priority list to only those matching the backend."""
+    """Prefer matching kernels, falling back to auto by layer type."""
     backend_kernels = _LINEAR_BACKEND_KERNEL_MAP.get(backend, set())
-    return [k for k in kernels if k in backend_kernels]
+    filtered = [kernel for kernel in kernels if kernel in backend_kernels]
+    if not filtered:
+        logger.info_once(
+            "--linear-backend=%s has no kernel for this linear layer type; "
+            "using automatic selection for that layer type.",
+            backend,
+        )
+        return kernels
+    return filtered
 
 
 def _resolve_backend_kernels(
