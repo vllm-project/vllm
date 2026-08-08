@@ -53,6 +53,9 @@ class ObservabilityConfig:
     kv_cache_metrics_sample: float = Field(default=0.01, gt=0, le=1)
     """Sampling rate for KV cache metrics (0.0, 1.0]. Default 0.01 = 1% of blocks."""
 
+    prefix_cache_hit_rate_window: int = Field(default=1000, gt=0)
+    """Window size (number of recent requests) for calculating prefix cache hit rate."""
+
     cudagraph_metrics: bool = False
     """Enable CUDA graph metrics (number of padded/unpadded tokens, runtime cudagraph
     dispatch modes, and their observed frequencies at every logging interval)."""
