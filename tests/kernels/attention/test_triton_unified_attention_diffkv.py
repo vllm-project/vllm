@@ -71,6 +71,8 @@ def _alloc_segm_buffers(seq_threshold_3D: int, num_query_heads: int, head_size_v
     [
         [(1, 1328), (5, 18), (129, 463)],  # mixed prefill + decode
         [(1, 523), (1, 37), (1, 2011)],  # decode-only (exercises 3D path)
+        # Issue #44575: non-tile-aligned sliding-window loop base
+        [(1, 1001), (1, 1015), (1, 1031)],
     ],
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
