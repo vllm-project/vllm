@@ -724,15 +724,28 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
+        if not self.enable_caching:
+            # Without prefix caching no block ever carries a hash, so the
+            # LRU hash-split below would be a no-op partition. Skip it and
+            # return freed blocks to the head of the free queue: allocation
+            # pops from the head, so the next request immediately reuses
+            # the most recently freed blocks (LIFO), keeping the set of
+            # live block ids small and dense.
+            freed = []
+            for block in ordered_blocks:
+                block.ref_cnt -= 1
+                if block.ref_cnt == 0 and not block.is_null:
+                    freed.append(block)
+            self.free_block_queue.prepend_n(freed)
+            return
+
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_with_hash = []
         blocks_without_hash = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
-                # When caching is disabled we always append for better
-                # GPU cache locality from reusing recently used blocks
-                if block.block_hash is None and self.enable_caching:
+                if block.block_hash is None:
                     blocks_without_hash.append(block)
                 else:
                     blocks_with_hash.append(block)
