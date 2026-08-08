@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -64,6 +65,10 @@ from vllm.model_executor.models.utils import (
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.models.kimi_k3.amd.ops.moe_preroute import (
+    KimiK3PrerouteBf16,
+    KimiK3PrerouteFp8Weights,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
@@ -207,6 +212,8 @@ class KimiMoE(nn.Module):
         activation_situ_linear_beta = (
             config.activation_situ_linear_beta if config.hidden_act == "situ" else None
         )
+        self.activation_situ_beta = activation_situ_beta
+        self.activation_situ_linear_beta = activation_situ_linear_beta
 
         # Route with fp32 logits for numerically stable expert selection.
         self.gate = GateLinear(
@@ -305,13 +312,108 @@ class KimiMoE(nn.Module):
                 moe_intermediate_size // self.tp_size
             )
 
+        self._preroute_bf16: KimiK3PrerouteBf16 | None = None
+        self._preroute_fp8: KimiK3PrerouteFp8Weights | None = None
+        if envs.VLLM_ROCM_USE_KIMI_K3_PREROUTE_BF16:
+            self._preroute_bf16 = KimiK3PrerouteBf16.create_if_supported(
+                use_latent_moe=self.use_latent_moe,
+                tensor_parallel_size=self.tp_size,
+                shared_experts=self.shared_experts,
+                routed_projection=self.routed_expert_down_proj,
+                situ_beta=activation_situ_beta,
+                situ_linear_beta=activation_situ_linear_beta,
+                lora_enabled=self.experts.moe_config.is_lora_enabled,
+            )
+            if self._preroute_bf16 is None:
+                logger.warning_once(
+                    "Kimi-K3 BF16 pre-route fusion is unavailable for this "
+                    "configuration; using the existing projection path."
+                )
+
+    def finalize_preroute_fp8_weights(self) -> None:
+        """Create the opt-in FP8 representation after checkpoint loading."""
+
+        if not envs.VLLM_ROCM_USE_KIMI_K3_PREROUTE_FP8:
+            return
+
+        source_weights = None
+        if self.routed_expert_down_proj is not None and self.shared_experts is not None:
+            source_weights = (
+                self.routed_expert_down_proj.weight,
+                self.shared_experts.gate_up_proj.weight,
+                self.shared_experts.down_proj.weight,
+            )
+        self._preroute_fp8 = KimiK3PrerouteFp8Weights.create_if_supported(
+            use_latent_moe=self.use_latent_moe,
+            tensor_parallel_size=self.tp_size,
+            source_weights=source_weights,
+            situ_beta=self.activation_situ_beta,
+            situ_linear_beta=self.activation_situ_linear_beta,
+            lora_enabled=self.experts.moe_config.is_lora_enabled,
+        )
+        if self._preroute_fp8 is None:
+            logger.warning_once(
+                "Kimi-K3 FP8 pre-route fusion is unavailable for this "
+                "configuration; using the existing projection path."
+            )
+
+    def _apply_preroute_fp8(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        preroute_fp8 = self._preroute_fp8
+        if preroute_fp8 is None or not preroute_fp8.supports_inputs(
+            hidden_states, self.gate.weight
+        ):
+            return None
+
+        assert self.activation_situ_beta is not None
+        assert self.activation_situ_linear_beta is not None
+        return preroute_fp8(
+            hidden_states,
+            self.gate.weight,
+            self.activation_situ_beta,
+            self.activation_situ_linear_beta,
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        # The explicitly enabled FP8 representation takes precedence when both
+        # pre-route flags are set. Unsupported inputs fall back to exact BF16.
+        router_logits = None
+        preroute_fp8 = self._apply_preroute_fp8(hidden_states)
+        if preroute_fp8 is None:
+            preroute_output = None
+        else:
+            routed_hidden_states, shared_output, router_logits = preroute_fp8
+            preroute_output = (routed_hidden_states, shared_output)
+        if preroute_output is None and self._preroute_bf16 is not None:
+            assert self.routed_expert_down_proj is not None
+            assert self.shared_experts is not None
+            preroute_output = self._preroute_bf16(
+                hidden_states,
+                self.routed_expert_down_proj.weight,
+                self.shared_experts.gate_up_proj.weight,
+                self.shared_experts.down_proj.weight,
+            )
+        if router_logits is None:
+            router_logits, _ = self.gate(hidden_states)
+        if preroute_output is None:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+        else:
+            routed_hidden_states, shared_output = preroute_output
+            shared_experts = self.experts.shared_experts
+            assert shared_experts is not None
+            with shared_experts.use_precomputed_output(shared_output):
+                final_hidden_states = self.experts(
+                    hidden_states=routed_hidden_states,
+                    router_logits=router_logits,
+                    shared_experts_input=hidden_states,
+                )
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -985,6 +1087,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             loaded_params.add(name)
         return loaded_params
 
+    def finalize_preroute_fp8_weights(self) -> None:
+        """Finalize every local Kimi MoE layer after checkpoint loading."""
+
+        for module in self.modules():
+            if isinstance(module, KimiMoE):
+                module.finalize_preroute_fp8_weights()
+
 
 class KimiLinearForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
@@ -1086,4 +1195,6 @@ class KimiLinearForCausalLM(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        loaded_weights = loader.load_weights(weights)
+        self.model.finalize_preroute_fp8_weights()
+        return loaded_weights
