@@ -13,6 +13,22 @@ from vllm.distributed.parallel_state import (
 )
 
 
+def _file_store_worker(rank, init_method, result_queue):
+    try:
+        init_distributed_environment(
+            world_size=2,
+            rank=rank,
+            local_rank=rank,
+            backend="gloo",
+            distributed_init_method=init_method,
+        )
+        result = torch.tensor(rank)
+        torch.distributed.all_reduce(result)
+        result_queue.put(result.item())
+    finally:
+        destroy_distributed_environment()
+
+
 def test_file_store_preserves_raw_path(tmp_path, monkeypatch):
     monkeypatch.setenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0")
     store_path = tmp_path / "store#?"
@@ -28,6 +44,21 @@ def test_file_store_preserves_raw_path(tmp_path, monkeypatch):
         assert store_path.exists()
     finally:
         destroy_distributed_environment()
+
+
+def test_file_store_rendezvouses_local_processes(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0")
+    context = torch.multiprocessing.get_context("spawn")
+    result_queue = context.SimpleQueue()
+
+    torch.multiprocessing.spawn(
+        _file_store_worker,
+        args=(f"file://{tmp_path / 'store#?'}", result_queue),
+        nprocs=2,
+        join=True,
+    )
+
+    assert sorted(result_queue.get() for _ in range(2)) == [1, 1]
 
 
 def test_multinode_overrides_file_store_rendezvous(monkeypatch):
