@@ -75,14 +75,32 @@ def _copy_mamba_state_block(
     # Widen block ids to int64 before they reach `block_id * state_block_stride`
     # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
     # and Triton would otherwise do the multiply in int32 and wrap.
-    dest_block_id = tl.load(block_table_base + dst_col).to(tl.int64)
+    # FIX I: the block-table columns below are derived from per-request
+    # accepted-token counts. A wrong count walks the read past this request's
+    # row; the loaded int32 is then multiplied by state_block_stride and
+    # dereferenced, so an out-of-range column becomes a wild (and possibly
+    # misaligned) address rather than merely a wrong copy. Bound the columns to
+    # the row: an out-of-range column loads the ``other=-1`` sentinel, and the
+    # ``<= 0`` guards below reject both that sentinel and ``NULL_BLOCK_ID`` (0,
+    # the unallocated-slot marker), so neither reaches the address math.
+    dst_col_ok = (dst_col >= 0) & (dst_col < block_table_stride_req)
+    dest_block_id = tl.load(
+        block_table_base + dst_col, mask=dst_col_ok, other=-1
+    ).to(tl.int64)
+    if dest_block_id <= 0:
+        return
     dst_addr = state_base_addr + dest_block_id * state_block_stride
 
     is_conv_state = conv_width > 0
 
     if CONV_STATE_DIM_FIRST and is_conv_state:
         # DS conv layout: state_len is the slide axis; copy per dim row.
-        src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
+        src_col_ok = (src_col >= 0) & (src_col < block_table_stride_req)
+        src_block_id = tl.load(
+            block_table_base + src_col, mask=src_col_ok, other=-1
+        ).to(tl.int64)
+        if src_block_id <= 0:
+            return
         dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
         row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
         per_row_bytes = (conv_width - token_bias).to(tl.int64) * state_elem_size
@@ -104,7 +122,12 @@ def _copy_mamba_state_block(
         # SD conv: copy
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
-        src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
+        src_col_ok = (src_col >= 0) & (src_col < block_table_stride_req)
+        src_block_id = tl.load(
+            block_table_base + src_col, mask=src_col_ok, other=-1
+        ).to(tl.int64)
+        if src_block_id <= 0:
+            return
         src_offset = token_bias.to(tl.int64) * state_inner_size * state_elem_size
         src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
         num_elems_to_copy = (conv_width - token_bias).to(tl.int64) * state_inner_size
@@ -119,7 +142,13 @@ def _copy_mamba_state_block(
         return
 
     # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
-    actual_src_block_id = tl.load(block_table_base + src_col + token_bias).to(tl.int64)
+    tmp_col = src_col + token_bias
+    tmp_col_ok = (tmp_col >= 0) & (tmp_col < block_table_stride_req)
+    actual_src_block_id = tl.load(
+        block_table_base + tmp_col, mask=tmp_col_ok, other=-1
+    ).to(tl.int64)
+    if actual_src_block_id <= 0:
+        return
     src_addr = state_base_addr + actual_src_block_id * state_block_stride
     # Use natural block data size (inner_size * elem_size), NOT
     # state_block_stride which is the page stride and can exceed the
