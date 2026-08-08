@@ -334,6 +334,16 @@ def get_physical_gpu_ids_for_local_dp_rank(
             )
         return user_assigned_gpu_ids[start:stop]
     try:
+        if local_dp_rank > 0 and local_world_size < world_size:
+            env_val = os.getenv(device_control_env_var)
+            if env_val:
+                device_ids = [d for d in env_val.split(",") if d]
+                if len(device_ids) == local_world_size:
+                    return [
+                        current_platform.device_control_id_to_physical_device_id(d)
+                        for d in device_ids
+                    ]
+
         return [
             current_platform.device_id_to_physical_device_id(i)
             for i in range(
