@@ -1333,11 +1333,11 @@ __global__ void Marlin(
           if constexpr (a_type == vllm::kS8) {
             int2 s_vals[2];
             s_vals[0] = {
-                (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2][0])[0],
-                (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2][0])[1]};
+                (int)reinterpret_cast<int16_t*>(&frag_s[k2][j * 2][0])[0],
+                (int)reinterpret_cast<int16_t*>(&frag_s[k2][j * 2][0])[1]};
             s_vals[1] = {
-                (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2 + 1][0])[0],
-                (int)reinterpret_cast<uint16_t*>(&frag_s[k2][j * 2 + 1][0])[1]};
+                (int)reinterpret_cast<int16_t*>(&frag_s[k2][j * 2 + 1][0])[0],
+                (int)reinterpret_cast<int16_t*>(&frag_s[k2][j * 2 + 1][0])[1]};
 
   #pragma unroll
             for (int i = 0; i < thread_m_blocks; i++) {
