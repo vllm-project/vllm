@@ -114,7 +114,7 @@ def _resolve_layer_name(layer_name: str | LayerName) -> str:
 # include all the functionality of the MoE layer.
 def _moe_forward(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
@@ -131,7 +131,7 @@ def _moe_forward(
 
 def _moe_forward_fake(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
@@ -148,7 +148,7 @@ def _moe_forward_fake(
 
 def _moe_forward_shared(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
@@ -165,7 +165,7 @@ def _moe_forward_shared(
 
 def _moe_forward_shared_fake(
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
@@ -310,10 +310,6 @@ class MoERunner(MoERunnerInterface):
     @property
     def shared_experts(self) -> SharedExperts | None:
         return self._shared_experts
-
-    @property
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
@@ -668,7 +664,7 @@ class MoERunner(MoERunnerInterface):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
+        router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -676,7 +672,7 @@ class MoERunner(MoERunnerInterface):
 
         Input:
         - hidden_states
-        - router_logits
+        - router_logits: Optional, not supplied if the runner is handling the gate.
 
         Output:
         - The new hidden_states.
@@ -834,7 +830,7 @@ class MoERunner(MoERunnerInterface):
     def _forward_impl(
         self,
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
+        router_logits: torch.Tensor | None,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -860,11 +856,13 @@ class MoERunner(MoERunnerInterface):
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
+            assert router_logits is None
             if self._fse_fuse_gate:
                 self._maybe_fuse_gate_weights()
                 router_logits = F.linear(hidden_states, self._combined_gate_weight)
             else:
                 router_logits, _ = self.gate(hidden_states)
+        assert router_logits is not None
 
         with self._sequence_parallel_context():
             # TODO(bnell): parts of the dispatch/combine steps will go away once
