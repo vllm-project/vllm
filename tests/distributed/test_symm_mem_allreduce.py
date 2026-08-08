@@ -12,6 +12,7 @@ import torch.multiprocessing as mp
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.compilation import CompilationConfig, PassConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
@@ -33,7 +34,12 @@ test_size_elements = 1024 * 1024
 
 def symm_mem_allreduce_worker(local_rank: int, world_size: int, q: mp.Queue):
     monkeypatch = pytest.MonkeyPatch()
-    config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=world_size))
+    config = VllmConfig(
+        parallel_config=ParallelConfig(tensor_parallel_size=world_size),
+        compilation_config=CompilationConfig(
+            pass_config=PassConfig(fuse_allreduce_rms=False),
+        ),
+    )
 
     with monkeypatch.context() as m, set_current_vllm_config(config):
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
