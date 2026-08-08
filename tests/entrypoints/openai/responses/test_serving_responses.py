@@ -583,6 +583,36 @@ class TestHarmonyPreambleStreaming:
         assert "response.output_text.delta" in type_names
         assert "response.output_item.added" not in type_names
 
+    @pytest.mark.parametrize(
+        ("channel", "expected_phase"),
+        [("commentary", "commentary"), ("final", "final_answer")],
+    )
+    def test_streamed_message_item_carries_phase(self, channel, expected_phase) -> None:
+        """Preambles and final answers are both text items, so `phase` is the
+        only signal that tells a client which one it is receiving."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+            emit_previous_item_done_events,
+        )
+
+        segment = self._make_segment(channel=channel, recipient=None)
+        state = StreamingState()
+
+        added = [
+            e
+            for e in emit_content_delta_events(segment, state)
+            if e.type == "response.output_item.added"
+        ]
+        assert [e.item.phase for e in added] == [expected_phase]
+
+        previous = self._make_previous_item(channel=channel, recipient=None)
+        done = [
+            e
+            for e in emit_previous_item_done_events(previous, state)
+            if e.type == "response.output_item.done"
+        ]
+        assert [e.item.phase for e in done] == [expected_phase]
+
     def test_commentary_with_function_recipient_not_preamble(self) -> None:
         """commentary + recipient='functions.X' must NOT use preamble path."""
         from vllm.entrypoints.openai.responses.streaming_events import (
