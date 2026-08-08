@@ -8,10 +8,24 @@ from vllm.utils.torch_utils import (
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
+    get_kv_cache_torch_dtype,
     is_lossless_cast,
+    is_quantized_kv_cache,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
+
+
+def test_nvfp4_4over6_cache_dtype() -> None:
+    from vllm.config.cache import CacheConfig
+    from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
+
+    cache_config = CacheConfig(cache_dtype="nvfp4_4over6")
+
+    assert cache_config.cache_dtype == "nvfp4_4over6"
+    assert get_kv_cache_torch_dtype(cache_config.cache_dtype) == torch.uint8
+    assert is_quantized_kv_cache(cache_config.cache_dtype)
+    assert get_kv_quant_mode(cache_config.cache_dtype) == KVQuantMode.NVFP4
 
 
 @pytest.mark.parametrize(
