@@ -5,7 +5,6 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future
-from contextlib import suppress
 from multiprocessing import Lock
 from typing import Any
 
@@ -72,12 +71,9 @@ class UniProcExecutor(Executor):
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
-        # The only worker is a local process; rendezvous via a unique temp
-        # file instead of a TCP port to avoid probe-then-bind port races.
-        self._init_file = os.path.join(
-            tempfile.gettempdir(), f"vllm_dist_{uuid.uuid4().hex}"
+        distributed_init_method = (
+            f"file://{tempfile.gettempdir()}/vllm_dist_{uuid.uuid4().hex}"
         )
-        distributed_init_method = f"file://{self._init_file}"
         # set local rank as the device index if specified
         device_info = self.vllm_config.device_config.device.__str__().split(":")
         local_rank = int(device_info[1]) if len(device_info) > 1 else 0
@@ -148,9 +144,6 @@ class UniProcExecutor(Executor):
     def shutdown(self) -> None:
         if worker := self.driver_worker:
             worker.shutdown()
-        with suppress(OSError):
-            if init_file := getattr(self, "_init_file", None):
-                os.remove(init_file)
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:

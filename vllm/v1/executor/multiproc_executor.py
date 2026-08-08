@@ -128,12 +128,9 @@ class MultiprocExecutor(Executor):
 
         set_multiprocessing_worker_envs(self.local_world_size)
 
-        # Workers are all local processes: rendezvous via a unique temp file
-        # instead of a TCP port to avoid probe-then-bind port races.
-        self._init_file = os.path.join(
-            tempfile.gettempdir(), f"vllm_dist_{uuid.uuid4().hex}"
+        distributed_init_method = (
+            f"file://{tempfile.gettempdir()}/vllm_dist_{uuid.uuid4().hex}"
         )
-        distributed_init_method = f"file://{self._init_file}"
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -511,10 +508,6 @@ class MultiprocExecutor(Executor):
             for mq in response_mqs:
                 mq.shutdown()
             self.response_mqs = []
-
-        with suppress(OSError):
-            if init_file := getattr(self, "_init_file", None):
-                os.remove(init_file)
 
         logger.debug_once("[shutdown] Executor: complete")
 
