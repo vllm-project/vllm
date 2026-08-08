@@ -67,6 +67,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -1059,6 +1060,14 @@ class Gemma4ForConditionalGeneration(
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            if getattr(config.vision_config, "standardize", False):
+                # std_bias reaches ~5.4e4; `h - std_bias` overflows fp16.
+                safe_dtype = (
+                    torch.bfloat16
+                    if torch.bfloat16 in current_platform.supported_dtypes
+                    else torch.float32
+                )
+                self.vision_tower = self.vision_tower.to(safe_dtype)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
@@ -1274,6 +1283,8 @@ class Gemma4ForConditionalGeneration(
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
 
+        vt_dtype = next(vt.parameters()).dtype
+
         # Concurrent requests with different image resolutions may
         # arrive as a list of per-image tensors, while same-resolution
         # batches may arrive as a stacked tensor.
@@ -1314,10 +1325,10 @@ class Gemma4ForConditionalGeneration(
                 pad_tensor = (pp_tensor == -1).all(dim=-1)
 
                 inputs_embeds = vt.patch_embedder(
-                    pv_tensor,
+                    pv_tensor.to(vt_dtype),
                     pp_tensor,
                     pad_tensor,
-                ).to(self.model_dtype)
+                ).to(vt_dtype)
                 encoder_outputs = vt.encoder(
                     inputs_embeds=inputs_embeds,
                     attention_mask=~pad_tensor,
@@ -1393,6 +1404,7 @@ class Gemma4ForConditionalGeneration(
         frame_counts = video_input["video_frame_counts"]
 
         vt = self.vision_tower
+        vt_dtype = next(vt.parameters()).dtype
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
 
@@ -1423,10 +1435,10 @@ class Gemma4ForConditionalGeneration(
             pad_chunk = padding_positions[i : i + max_batch_size]
 
             inputs_embeds = vt.patch_embedder(
-                pv_chunk,
+                pv_chunk.to(vt_dtype),
                 pp_chunk,
                 pad_chunk,
-            ).to(self.model_dtype)
+            ).to(vt_dtype)
             encoder_outputs = vt.encoder(
                 inputs_embeds=inputs_embeds,
                 attention_mask=~pad_chunk,
@@ -1889,11 +1901,12 @@ class Gemma4ForConditionalGeneration(
         pad_tensor = (pixel_position_ids == -1).all(dim=-1)
 
         vt = self.vision_tower
+        vt_dtype = next(vt.parameters()).dtype
         inputs_embeds = vt.patch_embedder(
-            pixel_values,
+            pixel_values.to(vt_dtype),
             pixel_position_ids,
             pad_tensor,
-        ).to(self.model_dtype)
+        ).to(vt_dtype)
 
         encoder_outputs = vt.encoder(
             inputs_embeds=inputs_embeds,
