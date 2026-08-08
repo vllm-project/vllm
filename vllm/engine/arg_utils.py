@@ -593,6 +593,7 @@ class EngineArgs:
     )
     io_processor_plugin: str | None = None
     renderer_num_workers: int = 1
+    enable_incremental_encoding: bool = ModelConfig.enable_incremental_encoding
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
@@ -918,6 +919,10 @@ class EngineArgs:
         model_group.add_argument(
             "--renderer-num-workers",
             **model_kwargs["renderer_num_workers"],
+        )
+        model_group.add_argument(
+            "--enable-incremental-encoding",
+            **model_kwargs["enable_incremental_encoding"],
         )
 
         # Model loading arguments
@@ -1782,6 +1787,7 @@ class EngineArgs:
             mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
+            enable_incremental_encoding=self.enable_incremental_encoding,
         )
 
     def validate_tensorizer_args(self):
