@@ -17,7 +17,9 @@
 """Inference-only Qwen3-ASR realtime model."""
 
 import asyncio
+import re
 from collections.abc import AsyncGenerator, Mapping
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -29,11 +31,13 @@ from vllm.model_executor.models.interfaces import (
     SupportsRealtime,
 )
 from vllm.model_executor.models.qwen3_asr import (
+    _ASR_TEXT_TAG,
     Qwen3ASRDummyInputsBuilder,
     Qwen3ASRForConditionalGeneration,
     Qwen3ASRMultiModalProcessor,
     Qwen3ASRProcessingInfo,
     _get_feat_extract_output_lengths,
+    _sanitize_transcription_user_text,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
@@ -47,9 +51,17 @@ from vllm.multimodal.processing.processor import (
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.speech_to_text.realtime.protocol import (
+        RealtimeSessionConfig,
+    )
+
 logger = init_logger(__name__)
 
 _PRE_ALLOCATE_BUFFER_SIZE_IN_S = 60
+
+_REALTIME_PREAMBLE = re.compile(r"language ([^<\n]*?)<asr_text>")
+_LANG_LEAD = "language "
 
 
 class Qwen3ASRRealtimeBuffer:
@@ -179,8 +191,96 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
 class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealtime):
     realtime_max_tokens = 64
 
+    _name_to_iso_cache: ClassVar[dict[str, str] | None] = None
+    _known_names_cache: ClassVar[frozenset[str] | None] = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+    @classmethod
+    def _get_realtime_prompt_template(
+        cls,
+        audio_placeholder: str | None,
+        session_config: "RealtimeSessionConfig | None" = None,
+    ) -> str:
+        request_prompt = session_config.prompt if session_config is not None else None
+        context = _sanitize_transcription_user_text(request_prompt or "")
+        system_turn = f"<|im_start|>system\n{context}<|im_end|>\n" if context else ""
+
+        prompt = (
+            f"{system_turn}"
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+
+        language = session_config.language if session_config is not None else None
+        if language:
+            full_lang_name = cls.supported_languages.get(language, language)
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
+
+        return prompt
+
+    @classmethod
+    def _name_to_iso(cls) -> dict[str, str]:
+        if cls._name_to_iso_cache is None:
+            cls._name_to_iso_cache = {
+                name: code for code, name in cls.supported_languages.items()
+            }
+        return cls._name_to_iso_cache
+
+    @classmethod
+    def _known_names(cls) -> frozenset[str]:
+        if cls._known_names_cache is None:
+            cls._known_names_cache = frozenset(cls.supported_languages.values())
+        return cls._known_names_cache
+
+    @classmethod
+    def _is_pending_preamble(cls, cand: str) -> bool:
+        """Whether ``cand`` is a viable, not-yet-complete language preamble."""
+        if cand and _LANG_LEAD.startswith(cand):
+            return True
+        if cand.startswith(_LANG_LEAD):
+            rest = cand[len(_LANG_LEAD) :]
+            if "<" in rest:
+                name, _, tail = rest.partition("<")
+                return name in cls._known_names() and _ASR_TEXT_TAG.startswith(
+                    "<" + tail
+                )
+            return any(n.startswith(rest) for n in cls._known_names())
+        return False
+
+    @classmethod
+    def _strip_pending_preamble(cls, text: str) -> str:
+        """Withhold a trailing partial preamble at a segment boundary."""
+        boundary = text.rfind("\n") + 1
+        if cls._is_pending_preamble(text[boundary:]):
+            return text[:boundary]
+        return text
+
+    @classmethod
+    def clean_realtime_text(cls, raw_text: str) -> tuple[str, str | None]:
+        """Strip ``language <name><asr_text>`` preambles and detect language.
+
+        Anchored on the ``<asr_text>`` delimiter so the literal word "language"
+        in speech is not mistaken for a preamble. A trailing in-progress
+        preamble at a segment boundary is withheld until it completes (or is
+        disqualified as ordinary speech).
+
+        Args:
+            raw_text: Full accumulated raw model text so far.
+
+        Returns:
+            Tuple of ``(clean_text, language_code)``; ``language_code`` is the
+            most recently detected segment language as an ISO-639-1 code, or
+            ``None`` if no complete preamble has been seen.
+        """
+        lang: str | None = None
+        matches = list(_REALTIME_PREAMBLE.finditer(raw_text))
+        if matches:
+            lang = cls._name_to_iso().get(matches[-1].group(1).strip())
+        clean = _REALTIME_PREAMBLE.sub("", raw_text)
+        clean = cls._strip_pending_preamble(clean)
+        return clean, lang
 
     @classmethod
     async def buffer_realtime_audio(
@@ -188,6 +288,7 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
+        session_config: "RealtimeSessionConfig | None" = None,
     ) -> AsyncGenerator[PromptType, None]:
         processor = cached_processor_from_config(model_config)
         feature_extractor = processor.feature_extractor
@@ -202,8 +303,9 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         )
 
         audio_placeholder = cls.get_placeholder_str("audio", 0)
-        prompt_template = (
-            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n<|im_start|>assistant\n"
+        prompt_template = cls._get_realtime_prompt_template(
+            audio_placeholder,
+            session_config,
         )
 
         prompt_token_ids = tokenizer.encode(prompt_template)

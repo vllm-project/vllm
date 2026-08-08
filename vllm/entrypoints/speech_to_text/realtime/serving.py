@@ -17,6 +17,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime
 from vllm.renderers.inputs.preprocess import parse_model_prompt
 
+from .protocol import RealtimeSessionConfig
+
 logger = init_logger(__name__)
 
 
@@ -56,6 +58,7 @@ class OpenAIServingRealtime(GenerateBaseServing):
         self,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
+        session_config: RealtimeSessionConfig | None = None,
     ) -> AsyncGenerator[StreamingInput, None]:
         """Transform audio stream into StreamingInput for engine.generate().
 
@@ -77,7 +80,7 @@ class OpenAIServingRealtime(GenerateBaseServing):
         stream_input_iter = cast(
             AsyncGenerator[PromptType, None],
             self.model_cls.buffer_realtime_audio(
-                audio_stream, input_stream, model_config
+                audio_stream, input_stream, model_config, session_config
             ),
         )
 
