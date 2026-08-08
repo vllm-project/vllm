@@ -316,6 +316,14 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
+            # The min over groups is the scheduler's allocation granularity; on
+            # hybrid models it can be far below the block size the user passed
+            # and the attention group actually uses (vllm-project/vllm#51163).
+            # Preserve the pre-reduction value so cache_config_info can report
+            # both.
+            vllm_config.cache_config.requested_block_size = (
+                vllm_config.cache_config.block_size
+            )
             vllm_config.cache_config.block_size = min(
                 g.kv_cache_spec.block_size for g in kv_cache_groups
             )

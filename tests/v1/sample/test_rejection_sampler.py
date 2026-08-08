@@ -1183,3 +1183,71 @@ def test_placeholder_draft_token_rejected_random(rejection_sampler):
     assert sampled[0, 1].item() == vocab_size - 1
     recovered = sampled[0, 2].item()
     assert 0 <= recovered < vocab_size
+
+
+@pytest.mark.parametrize("use_fp64_gumbel", [False, True])
+def test_recovered_sampling_nan_draft_probs_never_emits_token_zero(
+    use_fp64_gumbel: bool,
+):
+    """A drafter can hand recovered sampling an all-NaN draft_probs row (the
+    softmax of a fully masked logits row). The residual scores then collapse
+    (fmaxf drops the NaN to 0.0, or the NaN loses every comparison), and the
+    kernel used to fall through to its initializer and emit token id 0 --
+    seen in production as `<|begin of sentence|>` leaking into generated text
+    while p_target(0) ~ 1e-22. The recovered token must come from the healthy
+    target distribution instead.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    vocab_size = 20
+    target_argmax_id = 7
+
+    draft_token_ids = torch.tensor([0], dtype=torch.int64)
+    draft_probs = torch.full((1, vocab_size), float("nan"), dtype=torch.float32)
+    target_probs = torch.full((1, vocab_size), 1e-9, dtype=torch.float32)
+    target_probs[0, target_argmax_id] = 0.97
+
+    metadata = create_sampling_metadata(
+        all_greedy=False, temperature=torch.tensor([0.7])
+    )
+    recovered = sample_recovered_tokens(
+        max_spec_len=1,
+        num_draft_tokens=[1],
+        cu_num_draft_tokens=torch.tensor([1], dtype=torch.int32),
+        draft_token_ids=draft_token_ids,
+        draft_probs=draft_probs,
+        target_probs=target_probs,
+        sampling_metadata=metadata,
+        device=torch.device(DEVICE_TYPE),
+        use_fp64_gumbel=use_fp64_gumbel,
+    )
+    assert recovered[0].item() == target_argmax_id
+
+
+def test_recovered_sampling_healthy_rows_unchanged():
+    """Zero-probability entries must never win recovered sampling, and a row
+    whose residual has all its mass on one token must return that token."""
+    torch.set_default_device(DEVICE_TYPE)
+    vocab_size = 20
+
+    draft_token_ids = torch.tensor([3], dtype=torch.int64)
+    draft_probs = torch.zeros((1, vocab_size), dtype=torch.float32)
+    draft_probs[0, 3] = 1.0
+    target_probs = torch.zeros((1, vocab_size), dtype=torch.float32)
+    target_probs[0, 3] = 0.5
+    target_probs[0, 11] = 0.5
+
+    metadata = create_sampling_metadata(
+        all_greedy=False, temperature=torch.tensor([0.7])
+    )
+    recovered = sample_recovered_tokens(
+        max_spec_len=1,
+        num_draft_tokens=[1],
+        cu_num_draft_tokens=torch.tensor([1], dtype=torch.int32),
+        draft_token_ids=draft_token_ids,
+        draft_probs=draft_probs,
+        target_probs=target_probs,
+        sampling_metadata=metadata,
+        device=torch.device(DEVICE_TYPE),
+    )
+    # residual = clamp(target - draft, 0) has all mass on token 11.
+    assert recovered[0].item() == 11

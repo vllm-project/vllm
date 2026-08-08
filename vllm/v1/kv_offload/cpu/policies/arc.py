@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 
 from typing_extensions import override
 
@@ -114,9 +114,27 @@ class ARCCachePolicy(CachePolicy):
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
         if n == 0:
             return []
+        return self.evict_until(lambda c: len(c) >= n, protected)
 
-        # Collect candidates atomically: simulate T1 size changes as we select,
-        # but do not modify actual data structures until all n are found.
+    @override
+    def evict_until(
+        self,
+        can_fit: Callable[[list[tuple[OffloadKey, BlockStatus]]], bool],
+        protected: set[OffloadKey],
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+        """
+        Yield eviction candidates in exact ARC order (virtual T1 → T2),
+        calling ``can_fit`` after each.  If the predicate returns True the
+        collected prefix is committed atomically — removals, ghost-list
+        promotion, and ghost-list trimming all happen at commit time.  On
+        exhaustion returns None with zero mutation.
+
+        Protected keys and entries with non-zero ``ref_cnt`` are never
+        selected.
+        """
+        # Collect candidates atomically: simulate T1 size changes as we
+        # select, but do not modify actual data structures until the
+        # predicate is satisfied.
         candidates: list[
             tuple[OffloadKey, BlockStatus, bool]
         ] = []  # (key, block, from_t1)
@@ -134,7 +152,7 @@ class ARCCachePolicy(CachePolicy):
                     return key, block
             return None
 
-        for _ in range(n):
+        while True:
             candidate: tuple[OffloadKey, BlockStatus, bool] | None = None
 
             if virtual_t1_size >= int(self.target_t1_size):
@@ -151,20 +169,23 @@ class ARCCachePolicy(CachePolicy):
 
             candidates.append(candidate)
 
-        # Apply all evictions now that we know n candidates exist.
-        result: list[tuple[OffloadKey, BlockStatus]] = []
-        for key, block, from_t1 in candidates:
-            if from_t1:
-                del self.t1[key]
-                self.b1[key] = None
-            else:
-                del self.t2[key]
-                self.b2[key] = None
-            result.append((key, block))
+            if not can_fit([(k, b) for k, b, _ in candidates]):
+                continue
 
-        # Trim ghost lists to cache_capacity.
-        for ghost in (self.b1, self.b2):
-            for _ in range(len(ghost) - self.cache_capacity):
-                ghost.popitem(last=False)
+            # Apply all evictions now that the collected prefix suffices.
+            result: list[tuple[OffloadKey, BlockStatus]] = []
+            for key, block, from_t1 in candidates:
+                if from_t1:
+                    del self.t1[key]
+                    self.b1[key] = None
+                else:
+                    del self.t2[key]
+                    self.b2[key] = None
+                result.append((key, block))
 
-        return result
+            # Trim ghost lists to cache_capacity.
+            for ghost in (self.b1, self.b2):
+                for _ in range(len(ghost) - self.cache_capacity):
+                    ghost.popitem(last=False)
+
+            return result

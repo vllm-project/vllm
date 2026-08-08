@@ -13,8 +13,6 @@ Differences from DFlash:
     token), so we sample at all N positions and ``sample_pos = query_pos + 1``
     (standard next-token), whereas DFlash's masks sit AT the predicted position.
     This is the ``sample_from_anchor`` path in the shared prepare-inputs kernel.
-    Speculators-format checkpoints instead use the DFlash ``1 + N`` fill-in
-    layout (anchor is the bonus token).
   * Sequential Markov sampling: instead of DFlash's single parallel sample, we
     sample left-to-right, adding a prefix-dependent Markov bias derived from the
     previously sampled token at each step.
@@ -29,16 +27,31 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+
+logger = init_logger(__name__)
 
 
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
+        # DSpark only stores the combined main_x hidden state, not the
+        # HC-multiplexed aux hidden state used by DFlash. Size the base
+        # class's buffer directly instead of re-allocating it after super().
+        assert vllm_config.speculative_config is not None
+        draft_hidden = (
+            vllm_config.speculative_config.draft_model_config.get_hidden_size()
+        )
+        super().__init__(
+            vllm_config,
+            device,
+            hidden_states_size=draft_hidden,
+            allocate_hidden_states=False,
+        )
 
         # Whether to sample from the anchor position. When True, uses anchor-as-first
         # (N slots, each position predicts the next token). When False, uses 1+N
@@ -51,22 +64,13 @@ class DSparkSpeculator(DFlashSpeculator):
         else:
             self.num_query_per_req = 1 + self.num_speculative_steps
 
-        # DSpark consumes mean-pooled target aux hidden states at the target
-        # layers, combined to hidden_size via main_proj. Store that combined
-        # main_x (hidden_size wide). DSpark does not use the same pre-allocated buffer
-        # that DeepSeek-V4's MTP uses.
-        draft_hidden = self.draft_model_config.get_hidden_size()
-        self.hidden_states = torch.zeros(
-            self.max_num_tokens, draft_hidden, dtype=self.dtype, device=device
+        self._anchor_idx = (
+            torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
+            * self.num_query_per_req
         )
 
         self._step_cols = torch.arange(
             self.num_speculative_steps, dtype=torch.int32, device=device
-        )
-
-        self._anchor_idx = (
-            torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
-            * self.num_query_per_req
         )
 
         # Reduced-vocab probabilistic drafting only; set in load_draft_model.
@@ -81,24 +85,7 @@ class DSparkSpeculator(DFlashSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        model = load_dspark_model(target_model, self.vllm_config)
-        # Reduced draft vocab: probabilistic rejection sampling indexes draft
-        # logits by target id, so precompute the draft->target column map and a
-        # scratch buffer to scatter logits into target vocab before sampling.
-        if self.draft_logits is not None and model.draft_id_to_target_id is not None:
-            d2t = model.draft_id_to_target_id
-            self._d2t_scatter_index = (
-                torch.arange(d2t.shape[0], device=d2t.device) + d2t
-            )
-            # -inf once; the per-step scatter overwrites the draft->target
-            # columns. Kept separate from draft_logits to avoid aliasing.
-            self._draft_scatter_buf = torch.full(
-                (self.max_num_reqs, self.vocab_size),
-                float("-inf"),
-                dtype=self.draft_logits.dtype,
-                device=self.device,
-            )
-        return model
+        return load_dspark_model(target_model, self.vllm_config)
 
     def _sample_logits(
         self,
@@ -142,8 +129,7 @@ class DSparkSpeculator(DFlashSpeculator):
         num_sample = num_reqs * n_spec
         # Per-(req, position) head hidden, ordered (req, step).
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
-        # Draft-vocab logits; sampled ids are remapped to target vocab below.
-        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = self.model.compute_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 

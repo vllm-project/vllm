@@ -141,6 +141,10 @@ def test_warmup_compiles_every_n_blocks_specialization():
     zeroer.device = device
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
+        # seg_block_strides: this fixture is contiguous, so the logical block
+        # stride equals the page size. A packed view is covered by
+        # test_packed_segment_zeros_only_its_last_block_page.
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         1,  # max_chunks
@@ -178,6 +182,10 @@ def test_warmup_respects_available_block_count():
     zeroer.device = device
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
+        # seg_block_strides: this fixture is contiguous, so the logical block
+        # stride equals the page size. A packed view is covered by
+        # test_packed_segment_zeros_only_its_last_block_page.
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         torch.tensor([page_size_el], dtype=torch.int64, device=device),
         1,

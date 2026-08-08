@@ -7,6 +7,9 @@ import vllm.model_executor.kernels.mhc  # noqa: F401
 from vllm.model_executor.kernels.mhc.tilelang import (
     _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
+    _use_tf32_hc_prenorm_gemm,
+    mhc_fused_post_pre_tilelang,
+    mhc_fused_post_pre_tilelang_reuse_residual,
 )
 from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
 from vllm.platforms import current_platform
@@ -94,6 +97,20 @@ def hc_head_ref(
     pre_mix = torch.nn.functional.linear(residual_norm, fn)
     pre_mix = torch.sigmoid(pre_mix * hc_scale + hc_base) + hc_eps
     return torch.sum(pre_mix.unsqueeze(-1) * residual.float(), dim=-2).bfloat16()
+
+
+def test_sm120_uses_tf32_hc_prenorm_gemm_without_deepgemm(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family: family == 120,
+    )
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm.is_deep_gemm_supported",
+        lambda: False,
+    )
+
+    assert _use_tf32_hc_prenorm_gemm()
 
 
 @pytest.mark.skipif(
@@ -285,6 +302,79 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
+@pytest.mark.parametrize("num_tokens", [8, 128])
+def test_mhc_fused_post_pre_reuses_dead_buffers(num_tokens):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    hidden_size = 4096
+    hc_mult = 4
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    post_layer_mix = torch.randn((num_tokens, hc_mult, 1), dtype=torch.float32)
+    comb_res_mix = torch.randn((num_tokens, hc_mult, hc_mult), dtype=torch.float32)
+
+    hc_mult2 = hc_mult * hc_mult
+    hc_mult3 = hc_mult * 2 + hc_mult2
+    fn = torch.randn((hc_mult3, hc_mult * hidden_size), dtype=torch.float32) * 1e-4
+    hc_scale = torch.randn((3,), dtype=torch.float32) * 0.1
+    hc_base = torch.randn((hc_mult3,), dtype=torch.float32) * 0.1
+    norm_weight = torch.randn((hidden_size,), dtype=torch.bfloat16)
+
+    rms_eps = hc_pre_eps = hc_sinkhorn_eps = norm_eps = 1e-6
+    hc_post_alpha = 1.0
+    sinkhorn_repeat = 20
+
+    expected = mhc_fused_post_pre_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+    )
+
+    residual_reuse = residual.clone()
+    actual = mhc_fused_post_pre_tilelang_reuse_residual(
+        x,
+        residual_reuse,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+    )
+
+    if num_tokens > 16:
+        assert actual[0].data_ptr() == residual_reuse.data_ptr()
+    else:
+        assert actual[0].data_ptr() != residual_reuse.data_ptr()
+    assert actual[3].data_ptr() == x.data_ptr()
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(
+            actual_tensor, expected_tensor, atol=1e-2, rtol=1e-2
+        )
+
+
+@pytest.mark.skipif(
     not current_platform.is_rocm(),
     reason="ROCm required",
 )
@@ -355,3 +445,152 @@ def test_hc_head_tilelang(num_tokens, hidden_size, hc_mult):
 
     out_ref = hc_head_ref(residual, fn, hc_scale, hc_base, rms_eps, hc_eps)
     torch.testing.assert_close(out, out_ref, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
+@pytest.mark.parametrize("num_tokens", [1, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_post_hc_head_tilelang(num_tokens, hidden_size, hc_mult):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    post_layer_mix = torch.randn((num_tokens, hc_mult, 1), dtype=torch.float32)
+    comb_res_mix = torch.randn((num_tokens, hc_mult, hc_mult), dtype=torch.float32)
+    fn = torch.randn(
+        (hc_mult, hc_mult * hidden_size), dtype=torch.float32
+    ) * 1e-4
+    hc_scale = torch.randn((1,), dtype=torch.float32) * 0.1
+    hc_base = torch.randn((hc_mult,), dtype=torch.float32) * 0.1
+    rms_eps = hc_eps = 1e-6
+
+    pre_hc_head = torch.ops.vllm.mhc_post_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+    )
+    expected = torch.ops.vllm.hc_head_fused_kernel_tilelang(
+        pre_hc_head,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_eps,
+    )
+    actual = torch.ops.vllm.mhc_post_hc_head_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_eps,
+    )
+
+    assert actual.shape == (num_tokens, hidden_size)
+    assert actual.dtype == torch.bfloat16
+    assert not torch.isnan(actual).any()
+    torch.testing.assert_close(actual, expected, atol=1.5e-1, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
+@pytest.mark.parametrize("num_tokens", [1, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_post_mean_tilelang(num_tokens, hidden_size, hc_mult):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    post_layer_mix = torch.randn((num_tokens, hc_mult, 1), dtype=torch.float32)
+    comb_res_mix = torch.randn((num_tokens, hc_mult, hc_mult), dtype=torch.float32)
+
+    pre_hc_head = torch.ops.vllm.mhc_post_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+    )
+    expected = pre_hc_head.mean(dim=1)
+    actual = torch.ops.vllm.mhc_post_mean_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+    )
+
+    assert actual.shape == (num_tokens, hidden_size)
+    assert actual.dtype == torch.bfloat16
+    assert not torch.isnan(actual).any()
+    torch.testing.assert_close(actual, expected, atol=5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
+@pytest.mark.parametrize("num_tokens", [1, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_post_mean_hc_head_tilelang(num_tokens, hidden_size, hc_mult):
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    post_layer_mix = torch.randn((num_tokens, hc_mult, 1), dtype=torch.float32)
+    comb_res_mix = torch.randn((num_tokens, hc_mult, hc_mult), dtype=torch.float32)
+    fn = torch.randn(
+        (hc_mult, hc_mult * hidden_size), dtype=torch.float32
+    ) * 1e-4
+    hc_scale = torch.randn((1,), dtype=torch.float32) * 0.1
+    hc_base = torch.randn((hc_mult,), dtype=torch.float32) * 0.1
+    rms_eps = hc_eps = 1e-6
+
+    pre_hc_head = torch.ops.vllm.mhc_post_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+    )
+    expected = torch.ops.vllm.hc_head_fused_kernel_tilelang(
+        pre_hc_head,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_eps,
+    )
+    expected_mean = pre_hc_head.mean(dim=1)
+    actual, actual_mean = torch.ops.vllm.mhc_post_mean_hc_head_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_eps,
+    )
+
+    assert actual.shape == (num_tokens, hidden_size)
+    assert actual_mean.shape == (num_tokens, hidden_size)
+    assert actual.dtype == torch.bfloat16
+    assert actual_mean.dtype == torch.bfloat16
+    assert not torch.isnan(actual).any()
+    assert not torch.isnan(actual_mean).any()
+    torch.testing.assert_close(actual, expected, atol=1.5e-1, rtol=1e-2)
+    torch.testing.assert_close(actual_mean, expected_mean, atol=5e-2, rtol=1e-2)

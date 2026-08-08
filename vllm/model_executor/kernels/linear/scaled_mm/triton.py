@@ -157,6 +157,11 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
 
 
 class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    # Triton cannot bind an E8M0 tensor, so w8a8_triton_block_scaled_mm upcasts
+    # the block scale to fp32 on every call. The weight scale is static, so let
+    # the base class cache the upcast at load time instead.
+    prefers_fp32_block_scale = True
+
     @classmethod
     def is_supported(cls, compute_capability=None):
         if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):

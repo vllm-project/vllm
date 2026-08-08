@@ -324,9 +324,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
             assert w1.is_contiguous() and w2.is_contiguous()
-            assert self.gemm1_alpha is not None
-            assert self.gemm1_beta is not None
-            assert self.gemm1_clamp_limit is not None
             assert topk_ids.is_contiguous()
 
             fc1_expert_biases = self.w1_bias

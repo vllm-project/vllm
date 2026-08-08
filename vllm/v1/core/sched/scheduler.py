@@ -257,6 +257,8 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.use_dspark():
+                self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.use_dflash():
@@ -286,6 +288,7 @@ class Scheduler(SchedulerInterface):
             pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
+            max_num_seqs=self.scheduler_config.max_num_seqs,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
         )

@@ -6,12 +6,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import CompilationConfig
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MegaMoEExperts,
     make_deepseek_v4_expert_params_mapping,
 )
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
+from vllm.utils import deep_gemm as deep_gemm_utils
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
@@ -46,8 +48,8 @@ def test_deepseek_v4_mega_moe_ue8m0_uint8_to_float():
 
 def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
     )
     experts = DeepseekV4MegaMoEExperts(
         vllm_config,
@@ -107,12 +109,75 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     assert torch.count_nonzero(experts.w13_weight[1]) == 0
 
 
+def test_deepseek_v4_mega_moe_finalize_uses_deep_gemm_wrapper(monkeypatch):
+    vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+    )
+    experts = DeepseekV4MegaMoEExperts(
+        vllm_config,
+        num_experts=4,
+        num_local_experts=2,
+        experts_start_idx=0,
+        top_k=2,
+        hidden_size=128,
+        intermediate_size=128,
+    )
+
+    transformed = (object(), object())
+    calls: list[object] = []
+
+    def fake_runtime_check(self):
+        calls.append("runtime_check")
+
+    def fake_transform_sf_into_required_layout(
+        scale, rows, cols, block_shape, num_local_experts
+    ):
+        calls.append((rows, cols, block_shape, num_local_experts))
+        return scale
+
+    def fake_transform_weights_for_mega_moe(w13_weight, w2_weight):
+        calls.append((w13_weight[0].shape, w2_weight[0].shape))
+        return transformed
+
+    monkeypatch.setattr(
+        DeepseekV4MegaMoEExperts,
+        "_check_runtime_supported",
+        fake_runtime_check,
+    )
+    monkeypatch.setattr(
+        deep_gemm_utils,
+        "transform_sf_into_required_layout",
+        fake_transform_sf_into_required_layout,
+    )
+    monkeypatch.setattr(
+        deep_gemm_utils,
+        "transform_weights_for_mega_moe",
+        fake_transform_weights_for_mega_moe,
+    )
+
+    experts.finalize_weights()
+
+    assert experts._transformed_l1_weights is transformed[0]
+    assert experts._transformed_l2_weights is transformed[1]
+    assert experts.w13_weight is None
+    assert experts.w13_weight_scale is None
+    assert experts.w2_weight is None
+    assert experts.w2_weight_scale is None
+    assert calls == [
+        "runtime_check",
+        (256, 128, (1, 32), 2),
+        (128, 128, (1, 32), 2),
+        (torch.Size([2, 256, 64]), torch.Size([2, 128, 64])),
+    ]
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="DeepSeek V4 MegaMoE fused input staging requires CUDA.",
 )
 def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
-    from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+    deep_gemm_utils = pytest.importorskip("deep_gemm.utils")
 
     device = torch.device("cuda")
     num_tokens = 7
@@ -151,7 +216,7 @@ def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
         generator=generator,
     )
 
-    ref_x, ref_x_sf = per_token_cast_to_fp8(
+    ref_x, ref_x_sf = deep_gemm_utils.per_token_cast_to_fp8(
         hidden_states,
         use_ue8m0=True,
         gran_k=32,

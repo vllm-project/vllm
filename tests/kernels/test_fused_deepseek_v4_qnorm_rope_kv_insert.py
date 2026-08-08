@@ -13,7 +13,8 @@ We compare against:
     `dequantize_and_gather_k_cache` for KV
 
 The kernel is imported via
-`torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert`.
+`torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert` and writes Q
+into a caller-owned output tensor.
 """
 
 import pytest
@@ -124,7 +125,11 @@ def rmsnorm_no_weight(x: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 def _op_available() -> bool:
-    return hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert")
+    # The helpers below call the `_out` form (upstream #49236 split the op), so
+    # gate on that one -- the allocating name existing proves nothing about it.
+    return hasattr(
+        torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out"
+    )
 
 
 def _full_cache_fp8_op_available() -> bool:
@@ -148,17 +153,52 @@ pytestmark = pytest.mark.skipif(
 def _call_fused(
     q_in, q_head_padded, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
 ):
-    return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+    q_out = torch.empty(
+        q_in.shape[0],
+        q_head_padded,
+        q_in.shape[2],
+        dtype=q_in.dtype,
+        device=q_in.device,
+    )
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
         q_in,
         kv,
+        q_out,
         k_cache,
         slot_mapping,
         positions,
         cos_sin_cache,
-        q_head_padded,
+        q_out.shape[1],
         eps,
         bs,
     )
+    return q_out
+
+
+def _call_fused_out(
+    q_in,
+    q_out,
+    kv,
+    k_cache,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    eps,
+    bs,
+):
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
+        q_in,
+        kv,
+        q_out,
+        k_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        q_out.shape[1],
+        eps,
+        bs,
+    )
+    return q_out
 
 
 def _as_stored_fp8(t: torch.Tensor) -> torch.Tensor:
@@ -277,6 +317,88 @@ def test_q_path_matches_reference(num_tokens: int, n_heads: int, padded_heads: i
         assert pad_region.abs().max().item() == 0.0, (
             "padded head slots must be exact zero"
         )
+
+
+def test_quant_insert_writes_caller_owned_q_out():
+    torch.manual_seed(4)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    num_tokens = 17
+    n_heads = 8
+    padded_heads = 16
+    block_size = 16
+
+    q = torch.randn(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(4096, ROPE_DIM, torch.float32, device)
+    k_cache = torch.zeros(2, block_size * HEAD_BYTES, dtype=torch.uint8, device=device)
+    slot_mapping = torch.full((num_tokens,), -1, dtype=torch.int64, device=device)
+    q_out = torch.full(
+        (num_tokens, padded_heads, HEAD_DIM),
+        -123.0,
+        dtype=dtype,
+        device=device,
+    )
+
+    # _call_fused_out hands back the very object it was passed, so comparing
+    # data_ptr() against q_out would be a tautology. That the kernel wrote into
+    # the caller's buffer is proved by checking q_out's contents below.
+    _call_fused_out(
+        q, q_out, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, block_size
+    )
+
+    q_ref = apply_rope_gptj_last_k(
+        rmsnorm_no_weight(q, eps), positions, cos_sin_cache
+    ).to(dtype)
+    torch.testing.assert_close(q_out[:, :n_heads], q_ref, rtol=1e-2, atol=1e-2)
+    assert q_out[:, n_heads:padded_heads].abs().max().item() == 0.0
+
+
+def test_quant_insert_allows_inplace_q_when_unpadded():
+    torch.manual_seed(5)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    num_tokens = 17
+    n_heads = 32
+    block_size = 16
+
+    q = torch.randn(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(4096, ROPE_DIM, torch.float32, device)
+    k_cache = torch.zeros(2, block_size * HEAD_BYTES, dtype=torch.uint8, device=device)
+    slot_mapping = torch.full((num_tokens,), -1, dtype=torch.int64, device=device)
+
+    q_out = _call_fused(
+        q,
+        n_heads,
+        kv,
+        k_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+    )
+
+    q_inplace = q.clone()
+    returned = _call_fused_out(
+        q_inplace,
+        q_inplace,
+        kv,
+        torch.zeros_like(k_cache),
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+    )
+
+    assert returned.data_ptr() == q_inplace.data_ptr()
+    torch.testing.assert_close(q_inplace, q_out, rtol=0, atol=0)
 
 
 # ── Test 2: KV path round-trip byte/value parity ─────────────────────────────
