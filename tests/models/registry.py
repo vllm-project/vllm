@@ -995,6 +995,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
+        max_transformers_version="5.14.1",
+        transformers_version_reason={
+            "vllm": (
+                "Remote video processor code imports "
+                "`BASE_VIDEO_PROCESSOR_DOCSTRING`, removed in Transformers 5.15."
+            )
+        },
     ),
     "InternS2MobiusForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S2-Mobius",
