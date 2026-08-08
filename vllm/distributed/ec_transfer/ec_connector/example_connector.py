@@ -114,7 +114,11 @@ class ECExampleConnector(ECConnectorBase):
         # Return if it is PD Instance
         if not self.is_producer:
             return
-        filename = self._generate_filename_debug(mm_hash)
+        try:
+            filename = self._generate_filename_debug(mm_hash)
+        except ValueError:
+            logger.warning("Skipping encoder cache save for unsafe mm_hash %r", mm_hash)
+            return
         ec_cache = encoder_cache[mm_hash]
         tensors = {"ec_cache": ec_cache.detach().cpu()}
         safetensors.torch.save_file(tensors, filename)
@@ -133,7 +137,13 @@ class ECExampleConnector(ECConnectorBase):
         Returns:
             Bool indicate that media exists in cache or not
         """
-        return self._found_match_for_mm_data(identifier)
+        try:
+            return self._found_match_for_mm_data(identifier)
+        except ValueError:
+            logger.warning(
+                "Skipping encoder cache lookup for unsafe mm_hash %r", identifier
+            )
+            return False
 
     def update_state_after_alloc(
         self,
@@ -251,7 +261,10 @@ class ECExampleConnector(ECConnectorBase):
         If `create_folder` is True (default) the directory is created
         recursively the first time it is needed.
         """
-        foldername = os.path.join(self._storage_path, mm_hash)
+        storage_root = os.path.realpath(self._storage_path)
+        foldername = os.path.realpath(os.path.join(storage_root, mm_hash))
+        if os.path.commonpath((storage_root, foldername)) != storage_root:
+            raise ValueError(f"mm_hash escapes shared_storage_path: {mm_hash!r}")
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
         return foldername
