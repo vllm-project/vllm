@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import ClassVar
 
 from vllm.utils.math_utils import cdiv
@@ -13,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    make_block_hash_with_group_id,
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -31,6 +33,15 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+
+
+@dataclass(frozen=True)
+class DecodeCheckpointCandidate:
+    """A materialized recurrent state kept private until request finalization."""
+
+    num_tokens: int
+    block: KVCacheBlock
+    block_hash: BlockHashWithGroupId
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -475,6 +486,18 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+
+    def update_decode_checkpoint_candidate(
+        self, request: Request, materialized_tokens: int
+    ) -> None:
+        """Record a private decode checkpoint for managers that support it."""
+        return
+
+    def finalize_decode_checkpoints(
+        self, request: Request, materialized_tokens: int, keep: bool
+    ) -> None:
+        """Publish or discard private decode checkpoints for this group."""
+        return
 
     @classmethod
     def reachable_block_mask(
@@ -1275,6 +1298,9 @@ class MambaManager(SingleTypeKVCacheManager):
             # into a private cow_block; we record that block for connector
             # offload (see _pending_partial_tail_offloads).
             self._producer_partial_tail_reqs: dict[str, int] = {}
+            self._decode_checkpoint_candidates: dict[
+                str, DecodeCheckpointCandidate
+            ] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1652,6 +1678,7 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         if self.mamba_cache_mode == "align":
+            self._discard_decode_checkpoint_candidates(request_id)
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
@@ -1699,6 +1726,84 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
+
+    def update_decode_checkpoint_candidate(
+        self, request: Request, materialized_tokens: int
+    ) -> None:
+        """Privately pin the latest materialized aligned decode state."""
+        if self.mamba_cache_mode != "align":
+            return
+
+        # Spec-decode postprocessing explicitly copies the state at this
+        # floored boundary into its position-indexed Mamba block (see
+        # postprocess_mamba_align_gpu). Non-spec decode advances one token at a
+        # time, while aligned prefill is split by the scheduler. The floor is
+        # therefore a worker materialization contract, not an inferred state.
+        boundary = (
+            materialized_tokens // self.scheduler_block_size * self.scheduler_block_size
+        )
+        if boundary <= request.num_prompt_tokens:
+            return
+
+        previous = self._decode_checkpoint_candidates.get(request.request_id)
+        if previous is not None and previous.num_tokens == boundary:
+            return
+
+        block_idx = boundary // self.block_size - 1
+        blocks = self.req_to_blocks.get(request.request_id)
+        if blocks is None or block_idx >= len(blocks):
+            return
+        block = blocks[block_idx]
+        if block.is_null:
+            return
+        assert block.ref_cnt > 0, (
+            "Decode checkpoint block must still be owned by the running request"
+        )
+
+        block_hashes = resolve_block_hashes(
+            request.block_hashes,
+            self.block_pool.hash_block_size,
+            self.block_size,
+        )
+        if block_idx >= len(block_hashes):
+            return
+        block_hash = make_block_hash_with_group_id(
+            block_hashes[block_idx], self.kv_cache_group_id
+        )
+        candidate = DecodeCheckpointCandidate(boundary, block, block_hash)
+
+        self.block_pool.touch((block,))
+        self._decode_checkpoint_candidates[request.request_id] = candidate
+        if previous is not None:
+            self.block_pool.free_blocks((previous.block,))
+
+    def finalize_decode_checkpoints(
+        self, request: Request, materialized_tokens: int, keep: bool
+    ) -> None:
+        """Publish the private candidate only after a stopped completion."""
+        if self.mamba_cache_mode != "align":
+            return
+        candidate = self._decode_checkpoint_candidates.pop(request.request_id, None)
+        if candidate is None:
+            return
+
+        try:
+            if keep and candidate.num_tokens <= materialized_tokens:
+                self.block_pool.cache_decode_checkpoint(
+                    request=request,
+                    block=candidate.block,
+                    block_hash_with_group_id=candidate.block_hash,
+                    num_tokens=candidate.num_tokens,
+                    block_size=self.block_size,
+                    kv_cache_group_id=self.kv_cache_group_id,
+                )
+        finally:
+            self.block_pool.free_blocks((candidate.block,))
+
+    def _discard_decode_checkpoint_candidates(self, request_id: str) -> None:
+        candidate = self._decode_checkpoint_candidates.pop(request_id, None)
+        if candidate is not None:
+            self.block_pool.free_blocks((candidate.block,))
 
     def _cache_partial_tail_block(
         self,

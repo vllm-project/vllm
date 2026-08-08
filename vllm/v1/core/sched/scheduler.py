@@ -1862,6 +1862,9 @@ class Scheduler(SchedulerInterface):
                     request.resumable = False
                     stopped = True
 
+            if not output_is_stale:
+                self.kv_cache_manager.update_decode_checkpoint_candidates(request)
+
             routed_experts = None
             if (
                 self.enable_return_routed_experts
@@ -2322,6 +2325,10 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        self.kv_cache_manager.finalize_decode_checkpoints(
+            request,
+            keep=request.status == RequestStatus.FINISHED_STOPPED,
+        )
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
