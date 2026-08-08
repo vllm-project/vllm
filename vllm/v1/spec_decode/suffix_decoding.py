@@ -3,7 +3,11 @@
 import torch
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_input_batch import InputBatch
+
+logger = init_logger(__name__)
 
 
 class SuffixDecodingProposer:
@@ -32,6 +36,22 @@ class SuffixDecodingProposer:
             max_cached_requests=config.suffix_decoding_max_cached_requests,
         )
 
+        self.force_max_spec_tokens = config.force_max_spec_tokens
+        self._pad_token_id = -1
+        self._pad_template = []
+        if self.force_max_spec_tokens:
+            tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+            if tokenizer is None or tokenizer.eos_token_id is None:
+                logger.warning(
+                    "force_max_spec_tokens is enabled but tokenizer is not "
+                    "available or does not have an eos_token_id. "
+                    "Disabling force_max_spec_tokens."
+                )
+                self.force_max_spec_tokens = False
+            else:
+                self._pad_token_id = tokenizer.eos_token_id
+                self._pad_template = [self._pad_token_id] * self.num_speculative_tokens
+
     def propose(
         self,
         num_speculative_tokens: int,
@@ -46,6 +66,8 @@ class SuffixDecodingProposer:
         Propose speculative tokens for each request in the input batch. Suffix Decoding
         will speculate a dynamic number of tokens for each request every decoding step,
         so each entry in the returned list may have different lengths.
+        When force_max_spec_tokens is enabled, all non-empty entries
+        will be padded to num_speculative_tokens.
         """
         draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
@@ -78,17 +100,26 @@ class SuffixDecodingProposer:
             # we extract the pattern from the end of the input.
             start = max(0, num_tokens - self.max_tree_depth)
             pattern = input_batch.token_ids_cpu[i, start:num_tokens]
+            max_spec_tokens = min(
+                self.num_speculative_tokens, self.max_model_len - num_tokens - 1
+            )
             draft = self.suffix_cache.speculate(
                 req_id,
                 pattern,
-                max_spec_tokens=min(
-                    self.num_speculative_tokens, self.max_model_len - num_tokens - 1
-                ),
+                max_spec_tokens=max_spec_tokens,
                 max_spec_factor=self.max_spec_factor,
                 min_token_prob=self.min_token_prob,
             )
 
-            draft_token_ids.append(draft.token_ids)
+            if (
+                self.force_max_spec_tokens
+                and max_spec_tokens >= self.num_speculative_tokens
+            ):
+                draft_token_ids.append(
+                    draft.token_ids + self._pad_template[len(draft.token_ids) :]
+                )
+            else:
+                draft_token_ids.append(draft.token_ids)
 
         # Stop requests that were not seen in the input batch.
         for req_id in (
