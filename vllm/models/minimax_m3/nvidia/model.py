@@ -79,6 +79,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
+    minimax_m3_use_flashinfer_msa,
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
@@ -505,12 +506,21 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # Python value, which would freeze at capture).
         self.topk_indices_buffer = topk_indices_buffer
         # Indexer (top-k selection) and main attention are separate impls, each
-        # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
+        # picking Triton vs MSA off its cache dtype; the FlashInfer verdict is
+        # computed once so both selectors agree. impl is AttentionImplBase
         # (broader than the AttentionImpl that AttentionLayerBase annotates).
+        use_flashinfer_msa = minimax_m3_use_flashinfer_msa(
+            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            kv_cache_dtype=self.kv_cache_dtype,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            indexer_kv_dtype=self.indexer_kv_dtype,
+        )
         self.attn_backend, impl_cls = select_main_backend_and_impl_cls(
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
         self.impl: MiniMaxM3SparseImpl = impl_cls(  # type: ignore[assignment]
             self.num_heads,
@@ -539,6 +549,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
 
         # Register the main K/V cache so the KV-cache manager allocates it.
