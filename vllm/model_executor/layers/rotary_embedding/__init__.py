@@ -252,6 +252,8 @@ def get_rope(
                 "attn_factor",
                 "beta_fast",
                 "beta_slow",
+                "mscale",
+                "mscale_all_dim",
                 "apply_yarn_scaling",
                 "truncate",
             )

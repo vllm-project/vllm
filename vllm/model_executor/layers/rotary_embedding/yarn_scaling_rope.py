@@ -27,6 +27,8 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        mscale: float = 1,
+        mscale_all_dim: float = 0,
         apply_yarn_scaling: bool = True,
         truncate: bool = True,
     ) -> None:
@@ -36,12 +38,18 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
-        # Get n-d magnitude scaling corrected for interpolation
-        self.mscale = (
-            float(yarn_get_mscale(self.scaling_factor) * attn_factor)
-            if apply_yarn_scaling
-            else float(attn_factor)
-        )
+        # Get n-d magnitude scaling corrected for interpolation.
+        # When mscale/mscale_all_dim are provided (Transformers-native configs
+        # like Ministral3), use the same ratio formula as DeepSeek YaRN so that
+        # the effective attention multiplier matches Transformers' output.
+        if apply_yarn_scaling:
+            self.mscale = float(
+                yarn_get_mscale(self.scaling_factor, float(mscale))
+                / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
+                * attn_factor
+            )
+        else:
+            self.mscale = float(attn_factor)
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
         )
