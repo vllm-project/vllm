@@ -5,6 +5,7 @@
 
 #[macro_use]
 pub(crate) mod error;
+mod apertus;
 mod deepseek_dsml;
 pub(crate) mod deepseek_json;
 mod glm_xml;
@@ -20,6 +21,7 @@ mod seed_oss;
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
 
+pub use apertus::ApertusToolParser;
 pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};

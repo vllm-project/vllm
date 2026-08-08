@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 asynk-strim-attr.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
