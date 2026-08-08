@@ -21,6 +21,7 @@ def main():
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
+    import vllm.entrypoints.cli.snapshot
     from vllm.entrypoints.serve.utils.api_utils import (
         VLLM_SUBCMD_PARSER_EPILOG,
         cli_env_setup,
@@ -34,6 +35,7 @@ def main():
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.run_batch,
+        vllm.entrypoints.cli.snapshot,
     ]
 
     cli_env_setup()
