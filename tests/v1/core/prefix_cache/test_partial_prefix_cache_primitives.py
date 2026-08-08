@@ -18,6 +18,8 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
@@ -457,4 +459,57 @@ def test_partial_block_promotes_to_direct_full_block_hash():
         kv_cache_group_id=kv_cache_group_id,
     )
     assert pool.get_cached_block(promoted_full_hash, [kv_cache_group_id]) == [blocks[1]]
+    assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) is None
+
+
+def test_manager_does_not_resurrect_partial_hash_after_full_promotion():
+    hash_block_size = 2
+    block_size = 6
+    kv_cache_group_id = 0
+    req = make_request(
+        "0",
+        [0, 0, 1, 1, 2, 2, 3, 3, 4, 4],
+        hash_block_size,
+        sha256,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=None,
+    )
+    manager = FullAttentionManager(
+        kv_cache_spec=kv_cache_spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=kv_cache_group_id,
+        scheduler_block_size=block_size,
+    )
+    manager.req_to_blocks[req.request_id] = pool.get_new_blocks(2)
+
+    manager.cache_blocks(req, num_tokens=10)
+    partial_hash_10 = boundary_hash(req, hash_block_size, 10)
+    assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) == [
+        manager.req_to_blocks[req.request_id][1]
+    ]
+
+    req.append_output_token_ids([5])
+    manager.cache_blocks(req, num_tokens=11)
+    req.append_output_token_ids([5])
+    manager.cache_blocks(req, num_tokens=12)
+
+    full_hashes = BlockHashListWithBlockSize(
+        req.block_hashes,
+        hash_block_size,
+        block_size,
+    )
+    promoted_full_hash = full_hashes[1]
+    assert pool.get_cached_block(promoted_full_hash, [kv_cache_group_id]) == [
+        manager.req_to_blocks[req.request_id][1]
+    ]
     assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) is None
