@@ -44,6 +44,10 @@ except ImportError:
 _BAD_SF_CODES = {0, 1, 3, 4}
 
 
+class AudioDurationExceededError(ValueError):
+    """Audio rejected by the ``VLLM_MAX_AUDIO_DECODE_DURATION_S`` guard."""
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
@@ -91,7 +95,7 @@ def load_audio_pyav(
                     metadata_duration_s is not None
                     and metadata_duration_s > max_duration_s
                 ):
-                    raise ValueError(
+                    raise AudioDurationExceededError(
                         f"Audio exceeds maximum allowed duration of "
                         f"{max_duration_s}s (metadata reports "
                         f"{metadata_duration_s:.1f}s). Set "
@@ -129,7 +133,7 @@ def load_audio_pyav(
                     chunks.append(arr)
 
                 if max_samples is not None and total_samples > max_samples:
-                    raise ValueError(
+                    raise AudioDurationExceededError(
                         f"Audio exceeds maximum allowed duration of "
                         f"{max_duration_s}s (decoded {total_samples} "
                         f"samples at {sr}Hz). Set "
@@ -167,7 +171,7 @@ def load_audio_soundfile(
         if max_duration_s is not None:
             file_duration_s = f.frames / native_sr
             if file_duration_s > max_duration_s:
-                raise ValueError(
+                raise AudioDurationExceededError(
                     f"Audio exceeds maximum allowed duration of "
                     f"{max_duration_s}s (file contains "
                     f"{file_duration_s:.1f}s at {native_sr}Hz). Set "
@@ -215,6 +219,8 @@ def load_audio(
         return load_audio_pyav(path, sr=sr, mono=mono, max_duration_s=max_duration_s)
     except ImportError:
         raise  # Let PlaceholderModule's message ("install vllm[audio]") propagate.
+    except AudioDurationExceededError:
+        raise
     except Exception as pyav_exc:
         raise ValueError("Invalid or unsupported audio file.") from pyav_exc
 
