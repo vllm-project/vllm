@@ -10,28 +10,33 @@ Limitations:
 1. Composition with CPU offloading has not been implemented
 2. Tied parameters will only reflect processing from one of the parent layers (for
    example, only processing from embed_tokens will have an effect)
-3. This design assumes that the number of weights loaded from disk is the same as the
-   number of weights created at model init time. This is not true for quant methods
-   which (1) pad weights or (2) load qkv weights into the same parameter. Both of these
-   cases are non-issues for today's quant methods, but future quantizations may cause
-   reloading to fail
+3. Strict reload requires the initial checkpoint and runtime updates to use the same
+   canonical loader-application schema.
 """
 
 __all__ = [
     "record_metadata_for_reloading",
+    "freeze_load_plan",
     "initialize_layerwise_reload",
+    "validate_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
     "set_torchao_reload_attrs",
     "support_quantized_model_reload_from_hp_weights",
+    "LoadProbeError",
+    "LoadProbeReport",
+    "probe_model_load",
 ]
 
 from .layerwise import (
     finalize_layerwise_processing,
     finalize_layerwise_reload,
+    freeze_load_plan,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
+    validate_layerwise_reload,
 )
+from .probe import LoadProbeError, LoadProbeReport, probe_model_load
 from .torchao_decorator import (
     set_torchao_reload_attrs,
     support_quantized_model_reload_from_hp_weights,

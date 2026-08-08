@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
-import inspect
 from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_processing,
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     initialize_online_processing,
@@ -19,14 +20,21 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 )
 from vllm.model_executor.model_loader.reload.meta import (
     capture_layer_to_meta,
-    get_numel_loaded,
     materialize_layer,
     materialize_meta_tensor,
     restore_layer_on_meta,
     to_meta_tensor,
 )
+from vllm.model_executor.model_loader.reload.plan import (
+    freeze_load_plan,
+    get_load_plan,
+    load_source,
+)
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
-from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+from vllm.model_executor.model_loader.reload.utils import (
+    get_layer_tensors,
+    get_loadable_layer_tensors,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
@@ -99,6 +107,7 @@ class _NonPersistentBufferLayer(torch.nn.Module):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(2, 2))
         self.register_buffer("scale", torch.tensor(0.25), persistent=False)
+        self.scale.weight_loader = default_weight_loader
 
 
 def test_move_metatensors():
@@ -465,35 +474,6 @@ def test_model_cleanup(dist_init, default_vllm_config):
     assert len(mock_info_dict) == 0
 
 
-def test_get_numel_loaded():
-    param = torch.empty(10, device="meta")
-    loaded_weight = torch.empty(10)
-
-    def complex_weight_loader(param, loaded_weight):
-        param[:3] = loaded_weight[:3]
-        param[5:8] = loaded_weight[5:8]
-        return "value"
-
-    args = inspect.signature(complex_weight_loader).bind(param, loaded_weight)
-    num_loaded, ret = get_numel_loaded(complex_weight_loader, args)
-    assert num_loaded == 6
-    assert ret == "value"
-
-
-def test_get_numel_loaded_caps_at_param_size():
-    # composed_weight_loader copies into the param twice (the load and the
-    # in-place post-load transform), but only param.numel() distinct elements
-    # are loaded. get_numel_loaded must not double-count, otherwise a layer's
-    # loaded-element total can be reached early and trailing params get dropped.
-    param = torch.empty(10)
-    loaded_weight = torch.ones(10)
-    loader = composed_weight_loader(default_weight_loader, lambda x: x + 1)
-
-    args = inspect.signature(loader).bind(param, loaded_weight)
-    num_loaded, _ = get_numel_loaded(loader, args)
-    assert num_loaded == 10
-
-
 class _ComposedLoaderLayer(torch.nn.Module):
     """Mimics a Mamba2 mixer's equal-numel direct params (A, D, dt_bias).
 
@@ -543,13 +523,19 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
     }
 
     record_metadata_for_reloading(model)
+    for name in ("A", "dt_bias", "D"):
+        param = getattr(layer, name)
+        with load_source(name):
+            param.weight_loader(param, torch.zeros_like(param))
+    freeze_load_plan(model)
     initialize_layerwise_reload(model)
     # Mimic real load_weights: resolve params once, then load in checkpoint
     # order with D last (the param that was dropped).
     params = dict(layer.named_parameters())
     for name in ("A", "dt_bias", "D"):
         param = params[name]
-        param.weight_loader(param, loaded[name])
+        with load_source(name):
+            param.weight_loader(param, loaded[name])
     finalize_layerwise_reload(model, model_config=None)
 
     assert torch.equal(layer.A, -torch.exp(loaded["A"]))
@@ -630,9 +616,13 @@ def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypat
         reload_meta, "materialize_meta_tensor", materialize_with_sentinel
     )
 
-    record_metadata_for_reloading(model)
+    _initial_load(
+        model,
+        lambda: layer.weight.weight_loader(layer.weight, layer.weight.detach().clone()),
+    )
     initialize_layerwise_reload(model)
-    layer.weight.weight_loader(layer.weight, loaded_weight)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, loaded_weight)
     finalize_layerwise_reload(model, model_config=None)
 
     assert torch.equal(layer.weight, loaded_weight)
@@ -674,9 +664,18 @@ def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):
     )
 
     record_metadata_for_reloading(model)
+    with load_source("conv1d.weight"):
+        layer.conv1d.weight.weight_loader(
+            layer.conv1d.weight, layer.conv1d.weight.detach().clone()
+        )
+    with load_source("scale"):
+        layer.scale.weight_loader(layer.scale, layer.scale.detach().clone())
+    freeze_load_plan(model)
     initialize_layerwise_reload(model)
-    layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
-    layer.scale.weight_loader(layer.scale, loaded_scale)
+    with load_source("conv1d.weight"):
+        layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
+    with load_source("scale"):
+        layer.scale.weight_loader(layer.scale, loaded_scale)
     finalize_layerwise_reload(model, model_config=None)
 
     assert torch.equal(layer.conv1d.weight, loaded_conv)
@@ -709,9 +708,15 @@ def test_layerwise_reload_restores_alias_buffer_on_zero_size_layer(monkeypatch):
         reload_meta, "materialize_meta_tensor", materialize_with_sentinel
     )
 
-    record_metadata_for_reloading(model)
+    _initial_load(
+        model,
+        lambda: layer.conv1d.weight.weight_loader(
+            layer.conv1d.weight, layer.conv1d.weight.detach().clone()
+        ),
+    )
     initialize_layerwise_reload(model)
-    layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
+    with load_source("test.weight"):
+        layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
     finalize_layerwise_reload(model, model_config=None)
 
     assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
@@ -744,9 +749,13 @@ def test_layerwise_reload_preserves_unloaded_non_persistent_buffers(monkeypatch)
         reload_meta, "materialize_meta_tensor", materialize_with_sentinel
     )
 
-    record_metadata_for_reloading(model)
+    _initial_load(
+        model,
+        lambda: layer.weight.weight_loader(layer.weight, layer.weight.detach().clone()),
+    )
     initialize_layerwise_reload(model)
-    layer.weight.weight_loader(layer.weight, loaded_weight)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, loaded_weight)
     finalize_layerwise_reload(model, model_config=None)
 
     assert torch.equal(layer.weight, loaded_weight)
@@ -778,9 +787,16 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
     )
 
     record_metadata_for_reloading(model)
+    with load_source("weight"):
+        layer.weight.weight_loader(layer.weight, layer.weight.detach().clone())
+    with load_source("scale"):
+        layer.scale.weight_loader(layer.scale, layer.scale.detach().clone())
+    freeze_load_plan(model)
     initialize_layerwise_reload(model)
-    layer.weight.weight_loader(layer.weight, loaded_weight)
-    layer.scale.weight_loader(layer.scale, loaded_scale)
+    with load_source("weight"):
+        layer.weight.weight_loader(layer.weight, loaded_weight)
+    with load_source("scale"):
+        layer.scale.weight_loader(layer.scale, loaded_scale)
     finalize_layerwise_reload(model, model_config=None)
 
     assert torch.equal(layer.weight, loaded_weight)
@@ -951,3 +967,527 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+class _PaddedDerivedLayer(torch.nn.Module):
+    """Mirrors Kimi GDN, whose padding row and loader-derived buffer are storage
+    no checkpoint tensor can write, putting an element count out of reach."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(4, 2))
+        self.register_buffer("derived", torch.zeros(5), persistent=False)
+        derived = self.derived
+
+        def loader(param, loaded_weight, loaded_shard_id=None):
+            param.data[:3].copy_(loaded_weight)
+            derived.fill_(float(loaded_weight.sum()))
+
+        self.weight.weight_loader = loader
+
+
+def _initial_load(model, apply_weights, source="test.weight"):
+    """Run the recorded initial load and freeze the contract, as load_model does."""
+    record_metadata_for_reloading(model)
+    with load_source(source):
+        apply_weights()
+    freeze_load_plan(model)
+
+
+class _ShardedExpertLayer(torch.nn.Module):
+    """Stand-in for vLLM's shared MoE loader, which declines a non-local expert
+    via `return_success` without touching storage."""
+
+    def __init__(self, local_experts: list[int]):
+        super().__init__()
+        self.local_experts = local_experts
+        self.w = torch.nn.Parameter(torch.zeros(len(local_experts), 2))
+
+        def loader(param, loaded_weight, expert_id, return_success=False):
+            if expert_id not in self.local_experts:
+                return False if return_success else None
+            param.data[self.local_experts.index(expert_id)].copy_(loaded_weight)
+            return True if return_success else None
+
+        self.w.weight_loader = loader
+
+
+def _load_experts(layer, expert_ids, value, *, return_success=False):
+    """Offer one application per expert, as a broadcasting sender does."""
+    # Omitted rather than passed as False, so a loader predating the protocol
+    # can be driven by the same helper.
+    kwargs = {"return_success": True} if return_success else {}
+    results = []
+    for expert_id in expert_ids:
+        with load_source(f"experts.{expert_id}.w"):
+            results.append(
+                layer.w.weight_loader(
+                    layer.w, torch.full((2,), float(value)), expert_id, **kwargs
+                )
+            )
+    return results
+
+
+def test_non_local_expert_applications_are_absorbed():
+    """A broadcast expert that is not local to this rank writes nothing, so it
+    must not fail the update whether it lands before or after publish."""
+    layer = _ShardedExpertLayer(local_experts=[0, 1])
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    _load_experts(layer, [0, 1, 2, 3], 1.0, return_success=True)
+    freeze_load_plan(model)
+
+    initialize_layerwise_reload(model)
+    # A contiguous expert map puts this rank's experts first.
+    _load_experts(layer, [0, 1], 5.0, return_success=True)
+    assert not layer.w.is_meta, "layer must publish on its own expected set"
+
+    # So the trailing non-local applications land on a published layer.
+    assert _load_experts(layer, [2, 3], 5.0, return_success=True) == [False, False]
+    assert torch.equal(layer.w, torch.full((2, 2), 5.0))
+
+    finalize_layerwise_reload(model, model_config=None)
+    assert torch.equal(layer.w, torch.full((2, 2), 5.0))
+
+
+def test_published_layer_absorbs_without_invoking_the_loader():
+    """A published layer's storage is the live kernel tensors, so a decline
+    must be decided from the contract rather than by running the loader to see
+    what it returns."""
+    layer = _ShardedExpertLayer(local_experts=[0, 1])
+    invocations: list[int] = []
+    inner = layer.w.weight_loader
+
+    def counting_loader(param, loaded_weight, expert_id, return_success=False):
+        invocations.append(expert_id)
+        return inner(param, loaded_weight, expert_id, return_success=return_success)
+
+    layer.w.weight_loader = counting_loader
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    _load_experts(layer, [0, 1, 2, 3], 1.0, return_success=True)
+    freeze_load_plan(model)
+
+    initialize_layerwise_reload(model)
+    _load_experts(layer, [0, 1], 5.0, return_success=True)
+    assert not layer.w.is_meta, "layer must publish on its own expected set"
+
+    invocations.clear()
+    assert _load_experts(layer, [2, 3], 5.0, return_success=True) == [False, False]
+    assert invocations == [], "the loader must not run against live storage"
+
+    finalize_layerwise_reload(model, model_config=None)
+    assert torch.equal(layer.w, torch.full((2, 2), 5.0))
+
+
+class _QuietExpertLayer(torch.nn.Module):
+    """An expert loader predating `return_success`, which can only ignore a
+    non-local expert rather than report it."""
+
+    def __init__(self, local_experts: list[int]):
+        super().__init__()
+        self.local_experts = local_experts
+        self.w = torch.nn.Parameter(torch.zeros(len(local_experts), 2))
+
+        def loader(param, loaded_weight, expert_id):
+            if expert_id in self.local_experts:
+                param.data[self.local_experts.index(expert_id)].copy_(loaded_weight)
+
+        self.w.weight_loader = loader
+
+
+def test_extra_applications_before_publish_do_not_fail_validation():
+    """Completion is a lower bound, so an application counted outside the
+    contract must be absorbed rather than fail the update."""
+    layer = _QuietExpertLayer(local_experts=[0, 1])
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    _load_experts(layer, [0, 1], 1.0)  # rank-filtered, as from disk
+    freeze_load_plan(model)
+
+    initialize_layerwise_reload(model)
+    # Expert 2 is interleaved so it lands while the layer is still incomplete.
+    _load_experts(layer, [0, 2, 1], 5.0)
+    assert not layer.w.is_meta, "the expected set alone must publish the layer"
+
+    finalize_layerwise_reload(model, model_config=None)
+    assert torch.equal(layer.w, torch.full((2, 2), 5.0))
+
+
+def test_declined_startup_application_stays_off_the_contract():
+    """The startup load is offered every expert, not a rank-filtered subset.
+
+    Recording an expert this rank declines would demand it on every reload,
+    where the same loader declines it again and it is never observed.
+    """
+    layer = _ShardedExpertLayer(local_experts=[0, 1])
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    _load_experts(layer, [0, 1, 2, 3], 1.0, return_success=True)
+    freeze_load_plan(model)
+
+    assert sum(get_load_plan(layer).values()) == 2, "only local experts wrote"
+
+    initialize_layerwise_reload(model)
+    _load_experts(layer, [0, 1, 2, 3], 5.0, return_success=True)
+    finalize_layerwise_reload(model, model_config=None)
+    assert torch.equal(layer.w, torch.full((2, 2), 5.0))
+
+
+def test_loader_return_value_reaches_the_caller():
+    """14 MoE models branch on `return_success`; the wrapper must not swallow it."""
+    layer = _ShardedExpertLayer(local_experts=[0])
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    _load_experts(layer, [0], 1.0)
+    freeze_load_plan(model)
+
+    initialize_layerwise_reload(model)
+    assert _load_experts(layer, [0, 1], 5.0, return_success=True) == [True, False]
+
+
+def test_write_after_publish_without_decline_protocol_raises():
+    """A loader that cannot decline has no business writing to a published layer."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    layer.weight.weight_loader = default_weight_loader
+    model = torch.nn.Sequential(layer)
+
+    _initial_load(
+        model, lambda: layer.weight.weight_loader(layer.weight, torch.ones(4))
+    )
+
+    initialize_layerwise_reload(model)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, torch.full((4,), 5.0))
+    assert not layer.weight.is_meta, "single-source layer publishes immediately"
+
+    with (
+        load_source("other.weight"),
+        pytest.raises(RuntimeError, match="after the layer completed"),
+    ):
+        layer.weight.weight_loader(layer.weight, torch.full((4,), 9.0))
+
+
+def test_load_plan_records_shard_selectors():
+    """The contract is a multiset of loader applications keyed by destination
+    and selector, so one packed parameter fanning in from N checkpoint tensors
+    requires all N on reload."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    calls = []
+    layer.weight.weight_loader = lambda param, w, loaded_shard_id=None: calls.append(
+        loaded_shard_id
+    )
+    model = torch.nn.Sequential(layer)
+
+    _initial_load(
+        model,
+        lambda: [
+            layer.weight.weight_loader(layer.weight, torch.ones(2), shard)
+            for shard in ("q", "k", "q")
+        ],
+    )
+
+    plan = get_load_plan(layer)
+    assert plan == {
+        ("test.weight", "weight", (("loaded_shard_id", "q"),)): 2,
+        ("test.weight", "weight", (("loaded_shard_id", "k"),)): 1,
+    }
+    assert calls == ["q", "k", "q"]
+
+
+def test_payload_dtype_does_not_change_the_contract():
+    """An fp32 payload where the checkpoint held bf16 is the same loader
+    application, so it must satisfy the contract rather than read as missing."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
+    layer.weight.weight_loader = lambda param, w: param.data.copy_(w)
+    model = torch.nn.Sequential(layer)
+
+    _initial_load(
+        model,
+        lambda: layer.weight.weight_loader(
+            layer.weight, torch.ones(4, dtype=torch.bfloat16)
+        ),
+    )
+
+    initialize_layerwise_reload(model)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, torch.full((4,), 5.0))
+
+    assert reload_layerwise.get_layerwise_info(layer).is_complete()
+    assert not layer.weight.is_meta
+
+
+def test_freeze_load_plan_removes_recorders():
+    """Recorders must not survive into serving: a leaked wrapper would keep
+    recording and would shadow the real loader identity."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    original = lambda param, w: param.data.copy_(w)  # noqa: E731
+    layer.weight.weight_loader = original
+    layer.no_loader = torch.nn.Parameter(torch.zeros(2))
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    assert layer.weight.weight_loader is not original
+
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, torch.ones(4))
+    freeze_load_plan(model)
+
+    assert layer.weight.weight_loader is original
+    # A tensor that never had a loader must not acquire one.
+    assert not hasattr(layer.no_loader, "weight_loader")
+
+
+def test_padded_derived_layer_completes_online_without_annotation():
+    """A layer with padding and a derived buffer must complete during the stream
+    with no model-side declaration, or it stays buffered through finalize."""
+    layer = _PaddedDerivedLayer()
+    model = torch.nn.Sequential(layer)
+    initial = torch.full((3, 2), 7.0)
+    _initial_load(model, lambda: layer.weight.weight_loader(layer.weight, initial))
+
+    initialize_layerwise_reload(model)
+    reloaded = torch.full((3, 2), 9.0)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, reloaded)
+
+    # Processed during the stream, not deferred: materialized and buffers freed.
+    assert not layer.weight.is_meta
+    assert not reload_layerwise.get_layerwise_info(layer).loaded_weights
+    assert torch.equal(layer.weight[:3], reloaded)
+    assert torch.equal(layer.weight[3], torch.zeros(2))
+    assert torch.equal(layer.derived, torch.full_like(layer.derived, 54.0))
+
+    finalize_layerwise_processing(model, model_config=None)
+    assert torch.equal(layer.weight[:3], reloaded)
+
+
+def test_runtime_only_buffers_are_not_loadable_destinations():
+    """Completion must ignore non-persistent buffers without a loader."""
+    layer = _PaddedDerivedLayer()
+
+    assert set(get_loadable_layer_tensors(layer)) == {"weight"}
+    assert "derived" in get_layer_tensors(layer)
+
+
+def test_incomplete_update_defers_then_fails_closed():
+    """A partial update must not publish the layer, and must not commit."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    layer.weight.weight_loader = lambda param, w, loaded_shard_id=None: (
+        param.data.copy_(w)
+    )
+    model = torch.nn.Sequential(layer)
+
+    _initial_load(
+        model,
+        lambda: [
+            layer.weight.weight_loader(layer.weight, torch.ones(4), shard)
+            for shard in ("q", "k")
+        ],
+    )
+
+    initialize_layerwise_reload(model)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, torch.full((4,), 5.0), "q")
+
+    info = reload_layerwise.get_layerwise_info(layer)
+    assert not info.is_complete()
+    assert layer.weight.is_meta, "layer must stay deferred until finalization"
+
+    with pytest.raises(RuntimeError, match="'k'"):
+        finalize_layerwise_processing(model, model_config=None)
+
+
+def test_reload_without_contract_fails_closed():
+    """An update without a startup contract must not guess or mutate meta data."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    layer.weight.weight_loader = default_weight_loader
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    freeze_load_plan(model)  # nothing was loaded, so no contract is recorded
+    assert get_load_plan(layer) is None
+
+    initialize_layerwise_reload(model)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, torch.full((4,), 5.0))
+
+    # No contract means no completion, so the transaction must not commit.
+    with pytest.raises(RuntimeError, match="no startup contract"):
+        finalize_layerwise_reload(model, model_config=None)
+
+
+def test_load_plan_distinguishes_canonical_sources():
+    """A duplicate source cannot substitute for another source with the same I/O."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    layer.weight.weight_loader = default_weight_loader
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    for source in ("source_a.weight", "source_b.weight"):
+        with load_source(source):
+            layer.weight.weight_loader(layer.weight, torch.ones(4))
+    freeze_load_plan(model)
+
+    initialize_layerwise_reload(model)
+    for value in (2.0, 3.0):
+        with load_source("source_b.weight"):
+            layer.weight.weight_loader(layer.weight, torch.full((4,), value))
+
+    # Sending one source twice is absorbed rather than rejected, but it cannot
+    # stand in for the source that never arrived, so the layer stays deferred.
+    info = reload_layerwise.get_layerwise_info(layer)
+    assert not info.is_complete()
+    assert layer.weight.is_meta
+
+
+def test_load_source_reaches_a_nested_custom_loader():
+    """`AutoWeightsLoader` hands a derived iterator to a child's `load_weights`,
+    so one tag at the model boundary is still active when the child loads."""
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+
+    class Child(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(4))
+            self.weight.weight_loader = default_weight_loader
+
+        def load_weights(self, weights):
+            loaded = set()
+            for name, weight in weights:
+                self.weight.weight_loader(self.weight, weight)
+                loaded.add(name)
+            return loaded
+
+    class Parent(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.child = Child()
+
+        def load_weights(self, weights):
+            return AutoWeightsLoader(self).load_weights(weights)
+
+    model = Parent()
+    record_metadata_for_reloading(model)
+    model.load_weights([("child.weight", torch.ones(4))])
+    freeze_load_plan(model)
+
+    assert get_load_plan(model.child) == {("child.weight", "weight", ()): 1}
+
+
+def test_model_load_weights_propagates_source_to_direct_custom_loader():
+    """The root input stream covers models that do not use AutoWeightsLoader."""
+
+    class DirectModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(4))
+            self.weight.weight_loader = default_weight_loader
+
+        def load_weights(self, weights):
+            for _, loaded_weight in weights:
+                self.weight.weight_loader(self.weight, loaded_weight)
+
+    model = DirectModel()
+    record_metadata_for_reloading(model)
+    model.load_weights([("canonical.weight", torch.ones(4))])
+    freeze_load_plan(model)
+
+    plan = get_load_plan(model)
+    assert plan is not None
+    assert {key[0] for key in plan} == {"canonical.weight"}
+
+    initialize_layerwise_reload(model)
+    model.load_weights([("canonical.weight", torch.full((4,), 7.0))])
+    finalize_layerwise_reload(model, model_config=None)
+    assert torch.equal(model.weight, torch.full((4,), 7.0))
+
+
+def test_applied_layer_rejects_trailing_application_until_finish():
+    """Online copy-back must not remove the transaction guard."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    layer.weight.weight_loader = default_weight_loader
+    model = torch.nn.Sequential(layer)
+    _initial_load(
+        model,
+        lambda: layer.weight.weight_loader(layer.weight, torch.ones(4)),
+    )
+
+    initialize_layerwise_reload(model)
+    staged_param = layer.weight
+    staged_loader = staged_param.weight_loader
+    with load_source("test.weight"):
+        staged_loader(staged_param, torch.full((4,), 5.0))
+
+    info = reload_layerwise.get_layerwise_info(layer)
+    assert info.applied
+    assert torch.equal(layer.weight, torch.full((4,), 5.0))
+
+    with (
+        load_source("test.weight"),
+        pytest.raises(RuntimeError, match="after the layer completed"),
+    ):
+        layer.weight.weight_loader(layer.weight, torch.full((4,), 9.0))
+    with (
+        load_source("test.weight"),
+        pytest.raises(RuntimeError, match="after the layer completed"),
+    ):
+        staged_loader(staged_param, torch.full((4,), 9.0))
+    assert torch.equal(layer.weight, torch.full((4,), 5.0))
+
+    finalize_layerwise_reload(model, model_config=None)
+    assert not reload_layerwise.get_layerwise_info(layer).can_load()
+
+
+def test_frozen_plan_is_reused_across_transactions():
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    layer.weight.weight_loader = default_weight_loader
+    model = torch.nn.Sequential(layer)
+    _initial_load(
+        model,
+        lambda: layer.weight.weight_loader(layer.weight, torch.ones(4)),
+    )
+
+    for value in (3.0, 7.0):
+        initialize_layerwise_reload(model)
+        with load_source("test.weight"):
+            layer.weight.weight_loader(layer.weight, torch.full((4,), value))
+        finalize_layerwise_reload(model, model_config=None)
+        assert torch.equal(layer.weight, torch.full((4,), value))
+
+
+def test_online_processing_armed_before_the_recorder_still_gets_a_plan():
+    """Online quantization arms a layer before the recorder is installed, and
+    the recording must still reach it or every reload falls back to finalize."""
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4))
+    layer.weight.weight_loader = default_weight_loader
+    model = torch.nn.Sequential(layer)
+
+    initialize_online_processing(layer)
+    record_metadata_for_reloading(model)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, torch.ones(4))
+    freeze_load_plan(model)
+
+    assert get_load_plan(layer)
+
+    initialize_layerwise_reload(model)
+    with load_source("test.weight"):
+        layer.weight.weight_loader(layer.weight, torch.full((4,), 5.0))
+    finalize_layerwise_reload(model, model_config=None)
+    assert torch.equal(layer.weight, torch.full((4,), 5.0))
