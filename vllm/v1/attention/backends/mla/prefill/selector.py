@@ -109,10 +109,12 @@ def get_mla_prefill_backend(
 
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
+        # flash-attn is not installable on CPU, so use the CPU-native SDPA
+        # MLA prefill backend instead.
         logger.info_once(
-            "Device capability not available, using FlashAttention MLA prefill backend."
+            "Device capability not available, using CPU SDPA MLA prefill backend."
         )
-        return MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+        return MLAPrefillBackendEnum.CPU.get_class()
 
     attention_config = vllm_config.attention_config
 
