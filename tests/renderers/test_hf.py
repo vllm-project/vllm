@@ -4,6 +4,7 @@
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.entrypoints import chat_utils
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers.hf import (
@@ -18,6 +19,7 @@ from vllm.renderers.hf import (
     safe_apply_chat_template,
 )
 from vllm.tokenizers import get_tokenizer
+from vllm.transformers_utils.chat_templates import registry
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
@@ -91,6 +93,31 @@ def test_load_chat_template():
         == """{% for message in messages %}{{'<|im_start|>' + message['role'] + '\\n' + message['content']}}{% if (loop.last and add_generation_prompt) or not loop.last %}{{ '<|im_end|>' + '\\n'}}{% endif %}{% endfor %}
 {% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""  # noqa: E501
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_load_chat_template_from_installed_examples(tmp_path, monkeypatch):
+    installed_examples_dir = tmp_path / "share" / "vllm" / "examples"
+    installed_examples_dir.mkdir(parents=True)
+    installed_template = installed_examples_dir / "tool_chat_template_gemma4.jinja"
+    installed_template.write_text("{{ messages }} <|tool>", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        registry,
+        "EXAMPLES_CHAT_TEMPLATES_DIR",
+        installed_examples_dir,
+    )
+    chat_utils._cached_load_chat_template.cache_clear()
+
+    try:
+        template_content = load_chat_template(
+            chat_template="examples/tool_chat_template_gemma4.jinja"
+        )
+
+        assert template_content == "{{ messages }} <|tool>"
+    finally:
+        chat_utils._cached_load_chat_template.cache_clear()
 
 
 def test_no_load_chat_template_filelike():
