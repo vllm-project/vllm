@@ -1446,6 +1446,20 @@ class GPUModelRunner(
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
 
+            # A streaming re-feed can grow this request's prompt in place; see
+            # `_refresh_grown_prompt_state`. Compare against the stored prompt
+            # length rather than the M-RoPE tensor width: implementations whose
+            # `get_mrope_input_positions` also covers decode positions return a
+            # tensor wider than the prompt, which would mask the growth.
+            if self.uses_mrope and req_state.mrope_positions is not None:
+                num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+                    req_state.prompt_token_ids, req_state.prompt_embeds
+                )
+                if num_prompt_tokens > req_state.num_prompt_tokens:
+                    self._refresh_grown_prompt_state(
+                        req_state, req_index, num_prompt_tokens
+                    )
+
             if not is_last_rank:
                 if not req_data.new_token_ids:
                     # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
@@ -1698,6 +1712,53 @@ class GPUModelRunner(
             self._init_mrope_positions(req_state)
 
         return req_state
+
+    def _refresh_grown_prompt_state(
+        self,
+        req_state: CachedRequestState,
+        req_index: int | None,
+        num_prompt_tokens: int,
+    ) -> None:
+        """Re-derive the state that a request's prompt length feeds.
+
+        A streaming re-feed grows `prompt_token_ids` in place, and under
+        `uniproc_executor` the scheduler shares that list object with the runner
+        (multiproc serializes it, so this never runs there). Re-feeds routed
+        through WAITING are repaired by `_update_streaming_request`; one that
+        grows while the request stays RUNNING lands here instead.
+
+        Args:
+            req_state: Request whose prompt grew since it was last admitted.
+            req_index: Its slot in the persistent batch, or None if absent.
+            num_prompt_tokens: Post-growth prompt length.
+        """
+        prev_num_prompt_tokens = req_state.num_prompt_tokens
+        # Re-derived rather than extended: `get_mrope_input_positions` is not
+        # incremental, and the re-feed can add multimodal features.
+        self._init_mrope_positions(req_state)
+        req_state.num_prompt_tokens = num_prompt_tokens
+        if req_index is None:
+            # Not resident; `add_request` rebuilds the whole row further down.
+            return
+
+        self.input_batch.num_prompt_tokens[req_index] = num_prompt_tokens
+        if req_state.prompt_token_ids is not None:
+            # The leading part of this span rewrites the output tokens the
+            # scheduler folded into the prompt with identical values; the rest
+            # is prompt the batch has never seen. The prefill continuation
+            # gathers `input_ids` over exactly this span.
+            grown = slice(prev_num_prompt_tokens, num_prompt_tokens)
+            self.input_batch.token_ids_cpu[req_index, grown] = (
+                req_state.prompt_token_ids[grown]
+            )
+            self.input_batch.is_token_ids[req_index, grown] = True
+        # Growth folds prior outputs into the prompt, so the new prompt length
+        # is never below the previous count. Repaired here because the
+        # realignment below only runs when output tokens were dropped, while
+        # this is the write index for sampled and draft tokens.
+        self.input_batch.num_tokens_no_spec[req_index] = max(
+            int(self.input_batch.num_tokens_no_spec[req_index]), num_prompt_tokens
+        )
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
