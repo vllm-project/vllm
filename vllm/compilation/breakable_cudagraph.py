@@ -152,8 +152,10 @@ class BreakableCUDAGraphCapture:
         self.segments: list[Callable[[], Any]] = []
         self._num_graphs: int = 0
         self._num_eager_breaks: int = 0
+        self._num_bucketed_eager_breaks: int = 0
         self._current_graph: torch.cuda.CUDAGraph | None = None
         self._capturing: bool = False
+        self._runtime_bucket_target: int | None = None
 
     # --- context manager protocol ----------------------------------------
 
@@ -207,6 +209,39 @@ class BreakableCUDAGraphCapture:
         self._begin_segment()
         return result
 
+    def add_bucketed_eager(
+        self,
+        fn: Callable[[int], Any],
+        buckets: tuple[int, ...],
+    ) -> Any:
+        """Replay an eager op with a runtime-selected static bucket."""
+        if not buckets or tuple(sorted(set(buckets))) != buckets:
+            raise ValueError(f"buckets must be sorted and unique, got {buckets}")
+
+        self._end_segment()
+        result = fn(buckets[0])
+        for bucket in buckets[1:]:
+            fn(bucket)
+        torch.cuda.current_stream().synchronize()
+
+        def replay_selected() -> None:
+            target = self._runtime_bucket_target
+            if target is None:
+                target = buckets[0]
+            assert target in buckets, f"runtime bucket {target} not in {buckets}"
+            fn(target)
+
+        self.segments.append(replay_selected)
+        self._num_eager_breaks += 1
+        self._num_bucketed_eager_breaks += 1
+        self._begin_segment()
+        return result
+
+    def set_runtime_bucket_target(self, target: int) -> None:
+        if target < 1:
+            raise ValueError(f"runtime bucket target must be positive, got {target}")
+        self._runtime_bucket_target = target
+
     # --- replay ----------------------------------------------------------
 
     def replay(self) -> None:
@@ -220,12 +255,25 @@ class BreakableCUDAGraphCapture:
         return self._num_graphs
 
     @property
+    def is_capturing(self) -> bool:
+        return self._capturing
+
+    @property
+    def num_bucketed_eager_breaks(self) -> int:
+        return self._num_bucketed_eager_breaks
+
+    @property
+    def has_runtime_buckets(self) -> bool:
+        return self._num_bucketed_eager_breaks > 0
+
+    @property
     def num_eager_breaks(self) -> int:
         return self._num_eager_breaks
 
     def __repr__(self) -> str:
         return (
             f"BreakableCUDAGraphCapture(graphs={self.num_graphs}, "
+            f"bucketed_eager_breaks={self.num_bucketed_eager_breaks}, "
             f"eager_breaks={self.num_eager_breaks})"
         )
 
@@ -281,6 +329,7 @@ class BreakableCUDAGraphWrapper:
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.runtime_bucket_target: int | None = None
 
         self.entries: dict[BatchDescriptor, _BreakableEntry] = {}
         BreakableCUDAGraphWrapper._all_instances.add(self)
@@ -304,6 +353,11 @@ class BreakableCUDAGraphWrapper:
 
     def clear_graphs(self) -> None:
         self.entries.clear()
+
+    def set_runtime_bucket_target(self, target: int) -> None:
+        if target < 1:
+            raise ValueError(f"runtime bucket target must be positive, got {target}")
+        self.runtime_bucket_target = target
 
     # --- dispatch --------------------------------------------------------
 
@@ -394,11 +448,18 @@ class BreakableCUDAGraphWrapper:
         entry.capture = capture
         entry.output = weak_ref_tensors(output)
 
-        logger.debug(
-            "Captured breakable cudagraph for %s: %r",
-            entry.batch_descriptor,
-            capture,
-        )
+        if capture.has_runtime_buckets:
+            logger.info(
+                "Captured bucketed breakable cudagraph for %s: %r",
+                entry.batch_descriptor,
+                capture,
+            )
+        else:
+            logger.debug(
+                "Captured breakable cudagraph for %s: %r",
+                entry.batch_descriptor,
+                capture,
+            )
         # Return the (already-weak) output from the captured run so the
         # caller of model(...) gets a tensor pointing at the cudagraph pool's memory
         return output
@@ -420,5 +481,8 @@ class BreakableCUDAGraphWrapper:
         # dependencies from pre-capture prefetches are satisfied.
         get_offloader().sync_prev_onload()
         assert entry.capture is not None
+        if entry.capture.has_runtime_buckets:
+            assert self.runtime_bucket_target is not None
+            entry.capture.set_runtime_bucket_target(self.runtime_bucket_target)
         entry.capture.replay()
         return entry.output
