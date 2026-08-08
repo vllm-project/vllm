@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -348,6 +349,13 @@ class CpuPlatform(Platform):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
+
+    @classmethod
+    def block_size_without_user_flag(cls, backend_cls: type["AttentionBackend"]) -> int:
+        # check_and_update_config sets this above, and the override below skips
+        # the backend-preference phase entirely, so the backend preference is
+        # not what an omitted --block-size resolves to here.
+        return 128
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
