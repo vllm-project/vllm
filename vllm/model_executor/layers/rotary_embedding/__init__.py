@@ -271,6 +271,10 @@ def get_rope(
                 **extra_kwargs,
             )
         else:
+            # Forward HF's `attention_factor` (the final YaRN mscale) when set.
+            attention_factor = rope_parameters.get("attention_factor")
+            if attention_factor is not None:
+                extra_kwargs["attention_factor"] = attention_factor
             rotary_emb = YaRNScalingRotaryEmbedding(
                 head_size,
                 rotary_dim,
