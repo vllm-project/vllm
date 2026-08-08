@@ -2785,6 +2785,90 @@ class TestForcedChoiceKeepsUnpromotedText:
         assert not content
 
 
+class TestPathologicalArgumentsDoNotEscape:
+    """Adversarial argument payloads must fail closed, not fail the request.
+
+    Model output is attacker-influenced in any agent that feeds tool results
+    back to the model, so a shape that raises out of the parser or spins is
+    worth guarding even when it is degenerate.  Legacy caught everything with
+    a blanket ``except Exception`` and returned content; the engine path is
+    narrower and had two holes.
+    """
+
+    TOOLS = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "f",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "array", "items": {"type": "integer"}}
+                    },
+                },
+            },
+        )
+    ]
+
+    @staticmethod
+    def _request():
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=TestPathologicalArgumentsDoNotEscape.TOOLS,
+            tool_choice="auto",
+        )
+
+    @pytest.mark.parametrize(
+        ("depth", "coerced"),
+        [(3, True), (20_000, False)],
+        ids=["shallow-still-coerces", "deep-does-not-raise"],
+    )
+    def test_deeply_nested_string_value_does_not_raise(
+        self, mock_tokenizer, depth, coerced
+    ):
+        """``_coerce_value`` re-enters ``json.loads`` on the decoded string.
+
+        The guard around this function's own ``json.loads`` does not cover
+        that second parse, and RecursionError is a RuntimeError -- so it
+        escaped both ``except`` clauses and failed the request with a 500
+        non-streaming, or an error event mid-stream.  The shallow case is the
+        control: coercion must still happen for ordinary values.
+        """
+        cls = ParserManager.get_parser(
+            tool_parser_name="llama3_json",
+            reasoning_parser_name=None,
+            enable_auto_tools=True,
+        )
+        nest = "[" * depth + "]" * depth
+        text = '{"name": "f", "parameters": {"a": "' + nest + '"}}'
+
+        calls, _ = cls(mock_tokenizer)._extract_tool_calls(
+            text, self._request(), enable_auto_tools=True
+        )
+
+        assert [c.name for c in calls or []] == ["f"]
+        # Shallow: the string is coerced to a real array. Deep: left as the
+        # verbatim string, which is what legacy produced.
+        assert (json.loads(calls[0].arguments)["a"] != nest) is coerced
+
+    # Without the guard this spins instead of failing, which would wedge CI
+    # rather than report; cap it so the regression shows up as a failure.
+    @pytest.mark.timeout(10)
+    def test_array_scan_terminates_on_a_mismatched_closer(self):
+        """``_scan_json_value`` counts ``{[`` and ``}]`` alike.
+
+        A closer at an element position (``[1}``) therefore scans as a
+        complete value of length zero, and ``_array_items`` advanced to the
+        same index forever while appending, so the request hung and leaked
+        memory rather than returning.
+        """
+        from vllm.parser.llama_json import _array_items, _splice_types
+
+        assert _array_items("[1}", 0, 3) == [(1, 2)]
+        assert _splice_types("[1}", 0, 3, {"items": {"type": "integer"}}) == "[1}"
+
+
 class TestMarkersAbsentFromTheVocabStayAsText:
     """A marker the tokenizer cannot produce is prose, not markup.
 
