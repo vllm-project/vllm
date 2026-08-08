@@ -26,7 +26,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -269,17 +269,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
 
-        # MTP/deepseek_mtp verification runs decode with qlen = num_spec + 1;
-        # any other config (including no spec) stays at single-token decode.
-        speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.method in ("mtp", "deepseek_mtp")
-            and speculative_config.num_speculative_tokens is not None
-        ):
-            self._mtp_decode_qlen = int(speculative_config.num_speculative_tokens) + 1
-        else:
-            self._mtp_decode_qlen = 1
+        # Size the metadata from reorder_batch_threshold, the largest query
+        # length decode can be handed (MLACommonMetadataBuilder asserts
+        # max_query_len <= reorder_batch_threshold); it already accounts for the
+        # drafting scheme. A method-name whitelist instead leaves drafters not on
+        # it -- DSpark, the eagle family -- sized for qlen=1 while the router
+        # still admits up to 1 + 2 * num_spec. The persistent gate below then
+        # never opens and aiter indexes get_block_n_fp8[num_heads * qlen], a
+        # table holding only {8, 16, 24, 32, 48, 64, 128, 256, 384, 512}: at 16
+        # heads every qlen in 5..7 and 9..15 is a KeyError, raised mid-run rather
+        # than at startup.
+        self._mtp_decode_qlen = self.reorder_batch_threshold or 1
 
         # Store the kernel block size from the spec. When kernel_block_size=1
         # (no spec-dec), behavior is identical to the original. When > 1
@@ -327,6 +327,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 torch.float16: dtypes.fp16,
                 torch.bfloat16: dtypes.bf16,
             }[kv_cache_spec.dtype]
+        # _build_decode needs the cache dtype to pick the decode kernel; keep
+        # the normalized string instead of dropping it at the end of __init__.
+        self._kv_cache_dtype_str = kv_cache_dtype_str
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
         q_dtype = (
@@ -624,7 +627,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             ]
         )
         use_gluon_decode = AiterMLAHelper.use_gluon_decode(
-            self.num_heads, int(max_qo_len)
+            self.num_heads, int(max_qo_len), self._kv_cache_dtype_str
         )
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -694,12 +697,24 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     qo_indptr = query_start_loc_device[: 1 + num_kernel_reqs]
 
         # Pass persistent metadata for every uniform decode we sized buffers for
-        # (normal qlen==1 through MTP verification qlen==K): the fp8 nhead=32 fold
-        # path breaks without it. qlen>K falls back to kernel-internal metadata.
-        # Small-head (<16) decode takes the Gluon paths and never consumes it.
+        # (qlen==1 through verification qlen==K); qlen>K falls back to
+        # kernel-internal metadata. Only the asm decode consumes the schedule, so
+        # gate on the routing and not on the raw head count: a non-divisor rank is
+        # padded to 16 and runs the same asm kernels as a native 16-head rank, yet
+        # `num_heads >= 16` reads as False for it and denies it the schedule. The
+        # kernel then falls back on its internal metadata, which bf16 tolerates
+        # and fp8 does not, and which the fp8 fold path rejects once qlen > 4:
+        #
+        #   asm_mla.cu:903 mla_decode_stage1_asm_fwd: only support gqa_ratio=16
+        #   fp8 mla decoding with qo_len <= 4 and qo_len > 4 in persistent mode
         has_persistent_metadata = False
         use_persistent_metadata = (
-            self.num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+            not AiterMLAHelper.use_gluon_decode(
+                self.num_heads, max_qo_len, self._kv_cache_dtype_str
+            )
+            and not AiterMLAHelper.use_gluon_verify(
+                self.num_heads, max_qo_len, self._kv_cache_dtype_str
+            )
             and max_qo_len >= 1
             and max_qo_len <= self._mtp_decode_qlen
         )
@@ -888,7 +903,7 @@ class AiterMLAHelper:
         return o[:, :num_heads, :]
 
     @staticmethod
-    def use_gluon_decode(num_heads: int, max_qo_len: int) -> bool:
+    def use_gluon_decode(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
         # Small-head (<16) single-token decode can use either the Gluon kernel
         # or the padded asm persistent decode, selected by
         # VLLM_ROCM_AITER_MLA_ASM_PADDING (see _aiter_mla_small_head_mode) and
@@ -899,6 +914,15 @@ class AiterMLAHelper:
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         if num_heads >= m or max_qo_len != 1:
             return False
+        # Gluon has exactly one fp8-KV regime, bh16bn128. It is a bf16-query
+        # kernel that upcasts the cache in registers with a hardcoded scale of
+        # 1.0, and it asserts batch_size == 1, so it cannot serve a real decode
+        # batch at any head count. A quantized cache always goes to the asm
+        # decode, which ships true fp8 kernels for gqa=16
+        # (mla_a8w8_qh16_qseqlen*_gqaratio16*.co). This precedes the mode knob:
+        # an explicit "gluon" request under fp8 would assert immediately.
+        if is_quantized_kv_cache(kv_cache_dtype):
+            return False
         mode = _aiter_mla_small_head_mode()
         if mode == "asm":
             return False
@@ -906,6 +930,30 @@ class AiterMLAHelper:
         if mode == "gluon":
             return gluon_supported
         return m % num_heads == 0 and gluon_supported
+
+    @staticmethod
+    def use_gluon_verify(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
+        """Whether a small-head multi-token verify is flattened onto Gluon.
+
+        The bf16 asm kernels have no gqa < 16, qseqlen > 1 entry, so a small-head
+        verify is flattened into per-token qseqlen=1 Gluon decodes. fp8 does have
+        one, reached by the q-row fold (16 heads x qlen 8 folds onto the
+        nhead=32, qseqlen=4 kernel, which ships in the package), and must not
+        come here: the flatten hands Gluon a batch of exactly the size that its
+        fp8 regime asserts against.
+
+        This lives next to use_gluon_decode rather than inline in forward_mqa so
+        that the builder, which has to know whether the asm decode will run, sees
+        the same answer the impl acts on.
+        """
+        if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS or max_qo_len <= 1:
+            return False
+        if is_quantized_kv_cache(kv_cache_dtype):
+            return False
+        # Same arch and mode gating as use_gluon_decode: Gluon only has a gfx950
+        # build, and VLLM_ROCM_AITER_MLA_ASM_PADDING=asm forces the asm path,
+        # which pads to 16 heads and handles qlen>1 verify directly.
+        return _aiter_mla_small_head_mode() != "asm" and _gluon_mla_decode_supported()
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
@@ -1191,15 +1239,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # target is checking draft tokens, so position t must not see t+1 --
         # and attention rows are independent, so giving row t the KV range
         # [0, context + t] is exactly causal multi-token attention.
-        # Gluon only has a gfx950 build, so gate on the arch (mirrors
-        # use_gluon_decode). VLLM_ROCM_AITER_MLA_ASM_PADDING=asm also forces the
-        # asm path here. Otherwise this falls through to the asm decode, which
-        # pads to 16 heads and handles qlen>1 verify directly.
-        if (
-            self.num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
-            and int(decode.max_qo_len) > 1
-            and _aiter_mla_small_head_mode() != "asm"
-            and _gluon_mla_decode_supported()
+        # Arch, mode and dtype gating all live in use_gluon_verify, so that the
+        # builder -- which has to know whether the asm decode will run -- sees
+        # the same answer as this branch.
+        if AiterMLAHelper.use_gluon_verify(
+            self.num_heads, int(decode.max_qo_len), self.kv_cache_dtype
         ):
             qlen = int(decode.max_qo_len)
             if type(q) is tuple:
