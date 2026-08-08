@@ -1,17 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused MTP-input RMSNorm: enorm (with mask-zero at position 0) + hnorm.
+"""Fused MTP-input RMSNorm: enorm + hnorm.
 
 Replaces the eager sequence at the top of the MTP draft forward:
-    inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
     inputs_embeds = self.enorm(inputs_embeds)
     previous_hidden_states = previous_hidden_states.view(-1, hc_mult, H)
     previous_hidden_states = self.hnorm(previous_hidden_states)
-
-which lowers to ~6 small kernels (CompareEq, where, Fill, enorm rms_norm,
-hnorm rms_norm, plus aten elementwise helpers) on the breakable-cudagraph
-path. Math is preserved: positions==0 → masked row → zero RMS output
-regardless of weight.
 
 A single grid (T, hc_mult+1) drives both norms: task 0 is enorm on
 inputs_embeds[token, :], task k+1 is hnorm on previous_hidden_states[token, k, :].
@@ -43,7 +37,6 @@ def _rmsnorm_row(
 @triton.jit
 def _fused_mtp_input_rmsnorm_kernel(
     inputs_embeds_ptr,
-    positions_ptr,
     prev_hidden_ptr,
     enorm_weight_ptr,
     hnorm_weight_ptr,
@@ -63,15 +56,10 @@ def _fused_mtp_input_rmsnorm_kernel(
     mask = block < HIDDEN
 
     if pid_task == 0:
-        # enorm path: load inputs_embeds[token, :] then zero-mask at pos==0.
-        # Math is preserved: pos==0 → x=0 → variance=0 → RMSNorm output is 0
-        # regardless of weight, matching torch.where(pos==0, 0, x) + RMSNorm.
-        pos = tl.load(positions_ptr + token_idx)
-        keep = pos != 0
+        # enorm path: load inputs_embeds[token, :].
         x = tl.load(
             inputs_embeds_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0
         )
-        x = tl.where(keep, x, 0.0)
         _rmsnorm_row(
             x,
             enorm_weight_ptr,
@@ -152,7 +140,6 @@ def mtp_shared_head_rmsnorm(
 
 def fused_mtp_input_rmsnorm(
     inputs_embeds: torch.Tensor,
-    positions: torch.Tensor,
     previous_hidden_states: torch.Tensor,
     enorm_weight: torch.Tensor,
     hnorm_weight: torch.Tensor,
@@ -189,7 +176,6 @@ def fused_mtp_input_rmsnorm(
     block_size = triton.next_power_of_2(hidden)
     _fused_mtp_input_rmsnorm_kernel[(num_tokens, hc_mult + 1)](
         inputs_embeds,
-        positions,
         previous_hidden_states,
         enorm_weight,
         hnorm_weight,
