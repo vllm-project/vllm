@@ -27,7 +27,7 @@ pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub use hy_v3::HyV3ToolParser;
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
-    MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
+    MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser, XlamToolParser,
 };
 pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
