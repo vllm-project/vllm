@@ -118,6 +118,18 @@ When batch invariance is enabled, vLLM:
 1. Uses deterministic kernel implementations for attention and other operations
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism (such as custom all-reduce operations in tensor parallel mode)
+4. Disables asynchronous scheduling, which is otherwise on by default
+
+!!! warning
+    Batch invariance pins the *kernels*, so a row's result no longer depends on batch
+    size or composition. It does not by itself control **which** batch the scheduler
+    places a request in. Asynchronous scheduling composes the next step's batch before
+    the current step has retired, so batch membership depends on wall-clock timing and
+    outputs are not reproducible.
+
+    vLLM therefore disables async scheduling automatically when
+    `VLLM_BATCH_INVARIANT=1`, and rejects the combination if you pass
+    `--async-scheduling` explicitly. Expect a small throughput cost for this.
 
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
