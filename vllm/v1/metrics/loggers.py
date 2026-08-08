@@ -11,6 +11,7 @@ from prometheus_client import Counter, Gauge, Histogram
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphLogging
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
     KVConnectorProm,
@@ -468,6 +469,29 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
+
+        parallel_config = vllm_config.parallel_config
+        self.eplb_metrics_enabled = (
+            parallel_config.enable_eplb and parallel_config.pipeline_parallel_size == 1
+        )
+        if parallel_config.enable_eplb and not self.eplb_metrics_enabled:
+            logger.warning_once(
+                "EPLB Prometheus metrics are not available with pipeline "
+                "parallelism because each pipeline stage has a separate EP group."
+            )
+        if self.eplb_metrics_enabled:
+            eplb_labelnames = ["model_name"]
+            self.gauge_eplb_rebalancing = self._gauge_cls(
+                name="vllm:eplb_rebalancing",
+                documentation="Whether EPLB is currently rebalancing.",
+                multiprocess_mode="mostrecent",
+                labelnames=eplb_labelnames,
+            ).labels(model_name=model_name)
+            self.counter_eplb_rebalance_events = self._counter_cls(
+                name="vllm:eplb_rebalance_events_total",
+                documentation="Total number of EPLB rebalancing operations.",
+                labelnames=eplb_labelnames,
+            ).labels(model_name=model_name)
 
         self.per_engine_labelvalues: dict[int, list[object]] = {
             idx: [model_name, str(idx)] for idx in engine_indexes
@@ -1097,6 +1121,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             metrics_info["engine"] = str(engine_index)
             info_gauge.labels(**metrics_info).set(1)
 
+    def _record_eplb_metrics(self, snapshot: EplbMetricsSnapshot) -> None:
+        self.gauge_eplb_rebalancing.set(int(snapshot.rebalancing))
+        if snapshot.rebalance_events:
+            self.counter_eplb_rebalance_events.inc(snapshot.rebalance_events)
+
     def record(
         self,
         scheduler_stats: SchedulerStats | None,
@@ -1121,6 +1150,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+
+            if (
+                self.eplb_metrics_enabled
+                and engine_idx == 0
+                and scheduler_stats.eplb_metrics is not None
+            ):
+                self._record_eplb_metrics(scheduler_stats.eplb_metrics)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

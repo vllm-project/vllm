@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from copy import copy
 from functools import wraps
 from typing import Any
 
@@ -10,10 +11,13 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,
 )
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 
 logger = init_logger(__name__)
 
@@ -29,7 +33,18 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
                 return result
 
             is_profile = kwargs.get("is_profile", False) if is_dummy else False
-            self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
+            eplb_metrics = self.eplb.step(
+                is_dummy=is_dummy,
+                is_profile=is_profile,
+            )
+            if eplb_metrics is None:
+                return result
+            if isinstance(result, ModelRunnerOutput):
+                if result is EMPTY_MODEL_RUNNER_OUTPUT:
+                    result = copy(result)
+                result.eplb_metrics = eplb_metrics
+            elif isinstance(result, (AsyncOutput, AsyncPoolingOutput)):
+                result.model_runner_output.eplb_metrics = eplb_metrics
             return result
 
         return wrapper
@@ -114,16 +129,16 @@ class EPLBController:
         self,
         is_dummy: bool = False,
         is_profile: bool = False,
-    ) -> None:
+    ) -> EplbMetricsSnapshot | None:
         if (
             not self.parallel_config.enable_eplb
             or self.suppressed
             or self.state is None
             or not self._has_registered_models
         ):
-            return
+            return None
 
-        self.state.step(
+        return self.state.step(
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
