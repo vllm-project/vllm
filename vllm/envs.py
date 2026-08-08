@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
-    VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT: int = 0
+    VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT: int | None = None
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
@@ -651,7 +651,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DeepSeek-V4 uses -- does not. Defers such a reader by one scheduling step.
     # 0 = off, 1 = upstream semantics (gated on use_eagle), 2 = every group.
     #
-    # SHIPPED DEFAULT IS 0, matching upstream, because 11 tests in
+    # UNSET (None) means "let the engine decide": KVCacheCoordinator turns the
+    # guard on for any group when prefix caching AND speculative decoding are both
+    # active, which is the only configuration where the race can bite. An explicit
+    # 0/1/2 always wins, so `=0` remains a real escape hatch.
+    #
+    # It resolves to OFF for a manager constructed directly, which is what keeps
+    # the upstream suite green: 11 tests in
     # tests/v1/core/test_prefix_caching.py call allocate_slots repeatedly to
     # represent SUCCESSIVE scheduling steps without ever calling
     # new_step_starts() (the whole file calls it once). With the guard on they
@@ -669,8 +675,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # It also lifts the default V1 runner from 20.7 to 23.0, so this is not a
     # V2-only fix. Mode 1 is upstream's gate, which covers only 2 of 5 managers
     # on this model and leaves the main MLA path unguarded -- hence 2.
-    "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT": lambda: int(
-        os.getenv("VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", "0")
+    "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT": lambda: (
+        None
+        if os.getenv("VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT") is None
+        else int(os.environ["VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT"])
     ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on

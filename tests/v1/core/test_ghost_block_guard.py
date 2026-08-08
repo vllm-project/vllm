@@ -69,19 +69,16 @@ def _mla_manager(block_pool):
     )
 
 
-def test_the_shipped_default_stays_0():
-    """The default itself, not the property logic with a patched value.
+def test_unset_env_resolves_to_the_engine_supplied_default():
+    """Unset must mean "let the engine decide", not "off".
 
-    It stays 0 to match upstream. tests/v1/core/test_prefix_caching.py calls
-    allocate_slots repeatedly to represent successive scheduling steps without
-    calling new_step_starts (the whole file calls it once), so with the guard on
-    those hits are treated as same-step and correctly deferred, and 11 of those
-    tests fail. Flipping the default here would fork them and break every future
-    test written the same way. Deployments turn it on instead --
-    scripts/dgx_spark_start_mp_serve.sh in the harness sets 2.
+    The env resolves to None when unset. A manager constructed directly keeps
+    _guard_default_mode = 0 and is therefore OFF -- that is what keeps the
+    step-agnostic tests in test_prefix_caching.py green. KVCacheCoordinator
+    raises it to 2 when prefix caching and speculative decoding are both on.
 
-    If this assertion ever fails because someone flipped the default, run
-    tests/v1/core/test_prefix_caching.py before deciding they were right.
+    Without this, the shipped default configuration would be V2 + guard off,
+    which is the combination measured at arthur c=12 mean 11.5, floor 3/24.
     """
     import os
 
@@ -90,7 +87,33 @@ def test_the_shipped_default_stays_0():
     )
     import vllm.envs as envs
 
-    assert envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT == 0
+    assert envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT is None
+
+    manager = _mla_manager(_pool())
+    manager.use_eagle = True
+    assert manager._guard_default_mode == 0
+    assert manager._ghost_block_guard_enabled is False, (
+        "a directly-constructed manager must stay off"
+    )
+
+    manager._guard_default_mode = 2      # what the coordinator does
+    assert manager._ghost_block_guard_enabled is True
+
+
+@pytest.mark.parametrize("make", [_full_manager, _mla_manager])
+def test_explicit_zero_beats_the_engine_default(make, monkeypatch):
+    """The escape hatch must survive the engine turning the guard on.
+
+    If `=0` stopped working once the coordinator raised the default, there would
+    be no way to rule the guard out as the cause of a problem in production.
+    """
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", 0, raising=False
+    )
+    manager = make(_pool())
+    manager.use_eagle = True
+    manager._guard_default_mode = 2
+    assert manager._ghost_block_guard_enabled is False
 
 
 @pytest.mark.parametrize("make", [_full_manager, _mla_manager])

@@ -125,6 +125,12 @@ class SingleTypeKVCacheManager(ABC):
         # admitted later in the SAME step must not be allowed to hit them.
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
 
+        # Mode used when VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT is UNSET.
+        # KVCacheCoordinator raises this to 2 when prefix caching and speculative
+        # decoding are both on. It stays 0 for a manager constructed directly,
+        # which is what keeps the step-agnostic upstream tests passing.
+        self._guard_default_mode: int = 0
+
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -150,6 +156,10 @@ class SingleTypeKVCacheManager(ABC):
         guard. ``MambaManager`` overrides this to always-on (PR #29387).
         """
         mode = envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT
+        if mode is None:
+            # unset: the engine decides (see KVCacheCoordinator). An explicit
+            # value -- including 0 -- always wins over this.
+            mode = self._guard_default_mode
         # 2 = every group, ignoring use_eagle. Upstream gates on use_eagle
         # because it framed this as a spec-decode issue, but the race is in
         # block publication and applies to any group with prefix caching on.

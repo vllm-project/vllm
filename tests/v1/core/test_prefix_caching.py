@@ -597,6 +597,12 @@ def test_prefill_hybrid_model_eagle():
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [6] * 5
     all_token_ids = common_token_ids + unique_token_ids
+    # A request may only hit blocks another request published in an EARLIER
+    # scheduling step -- within the same step the GPU has not written their
+    # KV yet (vllm-project/vllm#42359). Mark the boundary so this exercises
+    # the cache hit rather than the race the guard exists to prevent.
+    manager.new_step_starts()
+
     req1 = make_request("1", all_token_ids, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == num_full_blocks
@@ -987,6 +993,12 @@ def test_prefill_hybrid_model_combinations_eagle(
 
     # Second request: should hit cached blocks for common prefix
     all_token_ids = common_token_ids + [6] * 5
+    # A request may only hit blocks another request published in an EARLIER
+    # scheduling step -- within the same step the GPU has not written their
+    # KV yet (vllm-project/vllm#42359). Mark the boundary so this exercises
+    # the cache hit rather than the race the guard exists to prevent.
+    manager.new_step_starts()
+
     req1 = make_request("1", all_token_ids, block_size, hash_fn)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
 

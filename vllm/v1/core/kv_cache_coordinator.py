@@ -125,6 +125,25 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
 
+        # Same-step ghost-block guard default (PR #42359). The race needs prefix
+        # caching to publish a block hash before the forward writes its KV, and a
+        # second request admitted in the same step to match it; speculative
+        # decoding is what makes that overlap routine. When both are on and the
+        # operator has expressed no preference, default the guard ON -- otherwise
+        # the shipped default configuration (V2 runner + prefix caching + DSpark)
+        # is exactly the one measured at arthur c=12 mean 11.5 with 3 of 4 serves
+        # degraded and a floor of 3/24.
+        #
+        # Set here, in the base __init__, so every coordinator subclass inherits
+        # it and both flags are genuinely in scope. Deliberately NOT in envs.py:
+        # a manager constructed directly must still resolve to OFF, which is what
+        # keeps the step-agnostic tests in tests/v1/core/test_prefix_caching.py
+        # passing. An explicit VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT --
+        # including 0 -- overrides this.
+        if enable_caching and use_eagle:
+            for manager in self.single_type_managers:
+                manager._guard_default_mode = 2
+
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
