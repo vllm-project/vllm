@@ -916,11 +916,30 @@ def test_store_sending_thread_releases_pin_on_batch_put_failure():
     store.batch_is_exist.return_value = [0, 0]
     store.batch_put_from_multi_buffers.side_effect = RuntimeError("rdma error")
     thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
 
     thread.add_stored_request("req-a")
     thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
 
     assert thread.stored_requests["req-a"] == 0
+    assert thread.get_kv_events() == []
+
+
+def test_store_sending_thread_publishes_events_only_for_successful_puts():
+    from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, -5]
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    events = thread.get_kv_events()
+    assert len(events) == 1
+    assert events[0].block_hashes == [maybe_convert_block_hash(BlockHash(b"a0"))]
 
 
 def test_store_recving_thread_reports_failed_block_ids():
@@ -2141,17 +2160,19 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     )
 
     full_event, swa_event = thread.get_kv_events()
+    edge_hash = maybe_convert_block_hash(BlockHash(hs[3]))
+    parent_hash = maybe_convert_block_hash(BlockHash(hs[2]))
     assert full_event.group_idx == 0
-    assert full_event.block_size == 32
-    assert full_event.token_ids == list(range(32))
-    # block_size=32 over hash_block_size=8 (scale 4): the chunk is keyed by its
-    # last sub-hash, not the concatenation of all four.
-    assert full_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
+    assert full_event.block_size == 8
+    assert full_event.token_ids == list(range(24, 32))
+    assert full_event.block_hashes == [edge_hash]
+    assert full_event.parent_block_hash == parent_hash
 
     assert swa_event.group_idx == 1
     assert swa_event.block_size == 8
     assert swa_event.token_ids == list(range(24, 32))
-    assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
+    assert swa_event.block_hashes == [edge_hash]
+    assert swa_event.parent_block_hash == parent_hash
 
 
 def _auto_set_ready_event(*args, **kwargs):

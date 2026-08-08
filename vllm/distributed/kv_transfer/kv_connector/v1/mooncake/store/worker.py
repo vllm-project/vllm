@@ -886,7 +886,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # parent_block_hash chains live within a group, not across.
             if self.enable_kv_event:
-                prev_key_per_group: dict[int, Any] = {}
                 new_block_hashes = [
                     maybe_convert_block_hash(bh) for bh in kv_event_block_hashes
                 ]
@@ -896,23 +895,30 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ):
                 db = self.token_databases[g_idx]
                 if self.enable_kv_event:
+                    hash_block_size = db.hash_block_size
+                    hash_idx = e // hash_block_size - 1
+                    edge_start = e - hash_block_size
                     token_ids = (
-                        req_meta.token_ids[s:e]
+                        req_meta.token_ids[edge_start:e]
                         if req_meta.token_ids is not None
+                        else None
+                    )
+                    parent_block_hash = (
+                        maybe_convert_block_hash(req_meta.block_hashes[hash_idx - 1])
+                        if hash_idx > 0
                         else None
                     )
                     stored_event = BlockStored(
                         block_hashes=[new_block_hashes[idx]],
-                        parent_block_hash=prev_key_per_group.get(g_idx),
+                        parent_block_hash=parent_block_hash,
                         token_ids=token_ids,
-                        block_size=db.block_size,
+                        block_size=hash_block_size,
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
                         group_idx=g_idx,
                     )
                     stored_events.append(stored_event)
-                    prev_key_per_group[g_idx] = new_block_hashes[idx]
 
             if current_event is not None:
                 current_event.synchronize()
@@ -930,7 +936,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     sizes,
                     self.replicate_config,
                 )
-                failed = [i for i, v in enumerate(res) if v < 0]
+                failed = [i for i in range(len(keys)) if i >= len(res) or res[i] < 0]
                 self._record_operation(
                     "save_put",
                     put_start,
@@ -940,7 +946,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     num_failed_keys=len(failed),
                 )
                 if failed:
-                    failed_codes = set(res[i] for i in failed)
+                    failed_codes = {res[i] for i in failed if i < len(res)}
+                    if len(res) < len(keys):
+                        failed_codes.add("missing_result")
                     logger.warning(
                         "batch_put failed: %d/%d keys failed "
                         "(codes=%s, batch_bytes=%d, num_keys=%d), "
@@ -950,7 +958,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         failed_codes,
                         batch_bytes,
                         len(keys),
-                        keys[0] if keys else "N/A",
+                        keys[0],
                     )
                     if (
                         MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
@@ -970,6 +978,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             "Mooncake CPU/disk offloading pressure cleared "
                             "after a successful store batch"
                         )
+                if self.enable_kv_event:
+                    successful_events = [
+                        event
+                        for event_idx, event in enumerate(stored_events)
+                        if event_idx < len(res) and res[event_idx] >= 0
+                    ]
+                    if successful_events:
+                        self.update_kv_event(successful_events)
             except Exception as e:
                 self._record_operation(
                     "save_put",
@@ -979,10 +995,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     status="error",
                     num_failed_keys=len(keys),
                 )
-                logger.error("Failed to put key %s, error: %s", keys, e)
+                logger.error(
+                    "Failed to put Mooncake batch "
+                    "(num_keys=%d, batch_bytes=%d, first_key=%s): %s",
+                    len(keys),
+                    batch_bytes,
+                    keys[0],
+                    e,
+                )
 
-            if self.enable_kv_event and stored_events:
-                self.update_kv_event(stored_events)
         finally:
             self.dec_stored_request(req_id)
             self.request_queue.task_done()
