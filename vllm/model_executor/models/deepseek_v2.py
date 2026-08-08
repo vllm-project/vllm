@@ -93,10 +93,13 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import _encode_layer_name, direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
+)
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    aiter_indexer_qk_fused_kernel,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
@@ -704,16 +707,6 @@ class Indexer(nn.Module):
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
-        self.indexer_op = SparseAttnIndexer(
-            self.k_cache,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
-        )
 
         self.is_inplace_rope = is_inplace_rope
         self.n_head_scale = self.n_head**-0.5
@@ -724,6 +717,28 @@ class Indexer(nn.Module):
             and self.rope_dim == 64
             and self.scale_fmt is not None
         )
+        # Static: it selects skip_k_cache_insert, and nothing else writes the cache.
+        self.use_fused_indexer_qk = (
+            rocm_aiter_ops.is_enabled()
+            and aiter_indexer_qk_fused_kernel() is not None
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and self.quant_block_size == self.head_dim
+            and self.head_dim == 128
+            and self.rope_dim == 64
+            and self.scale_fmt == "ue8m0"
+        )
+
+        self.indexer_op = SparseAttnIndexer(
+            self.k_cache,
+            self.quant_block_size,
+            self.scale_fmt,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
+            skip_k_cache_insert=self.use_fused_indexer_qk,
+        )
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
@@ -731,7 +746,28 @@ class Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
-        if current_platform.is_rocm() and self.is_inplace_rope:
+        if self.use_fused_indexer_qk:
+            kw, _ = self.wk_weights_proj(hidden_states)
+
+            q_fp8, weights = torch.ops.vllm.rocm_aiter_indexer_qk_rope_quant_cache(
+                q,
+                kw[:, : self.head_dim],
+                kw[:, self.head_dim :],
+                positions,
+                self.k_cache.kv_cache,
+                _encode_layer_name(self.k_cache.prefix),
+                self.k_norm.weight,
+                self.k_norm.bias,
+                rotary_emb.cos_sin_cache,
+                self.k_norm.eps,
+                self.quant_block_size,
+                self.scale_fmt,
+                self.softmax_scale * self.n_head_scale,
+                rotary_emb.is_neox_style,
+            )
+            # k is None: indexer_op was built with skip_k_cache_insert=True.
+            return self.indexer_op(hidden_states, q_fp8, None, weights)
+        elif current_platform.is_rocm() and self.is_inplace_rope:
             # This path should works on all platform, will remove extra
             # branches in the future
             # This fast path relies on rotary_emb mutating q and k inplace.
