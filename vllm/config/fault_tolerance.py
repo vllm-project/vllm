@@ -16,3 +16,10 @@ class FaultToleranceConfig:
     instructions on how to handle the error and then recover from the fault.
     If vLLM does not recover during this time, the original error is raised.
     """
+
+    auto_recovery: bool = False
+    """When enabled, the engine automatically recovers from faults
+    without waiting for external orchestrator commands. On fault,
+    it queries the worker's all2all mask: if all zeros, it retries; 
+    if non-zero, it performs scale-down.
+    """
