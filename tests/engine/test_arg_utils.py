@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import typing
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from typing import Annotated, Literal
@@ -11,6 +12,7 @@ from pydantic import Field
 
 from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
 from vllm.engine.arg_utils import (
+    AsyncEngineArgs,
     EngineArgs,
     _expand_json_human_readable_numbers,
     contains_type,
@@ -165,6 +167,16 @@ def test_is_not_builtin(type_hint, expected):
 )
 def test_get_type_hints(type_hint, expected):
     assert get_type_hints(type_hint) == expected
+
+
+@pytest.mark.parametrize("cls", [EngineArgs, AsyncEngineArgs])
+def test_engine_args_typing_get_type_hints(cls):
+    # All field annotations on EngineArgs / AsyncEngineArgs must be
+    # resolvable at runtime. Forward references that name a symbol only
+    # imported under TYPE_CHECKING raise NameError here, which breaks
+    # downstream consumers (e.g. Ray Serve LLM) that introspect the
+    # dataclass with typing.get_type_hints.
+    typing.get_type_hints(cls)
 
 
 def test_get_kwargs():
