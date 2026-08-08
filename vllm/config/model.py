@@ -1427,11 +1427,9 @@ class ModelConfig:
             # replicates KV heads when tensor_parallel_size exceeds the
             # number of KV heads, and PCP always replicates the full KV
             # cache across every PCP rank. DCP can reclaim either.
-            max_dcp_size = (
-                max(1, tensor_parallel_size // total_num_kv_heads)
-                * prefill_context_parallel_size
-            )
-            if max_dcp_size <= 1:
+            if tensor_parallel_size <= total_num_kv_heads and (
+                prefill_context_parallel_size <= 1
+            ):
                 raise ValueError(
                     "Decode context parallelism for GQA/MQA requires "
                     f"`--tensor-parallel-size` ({tensor_parallel_size}) to be "
@@ -1443,6 +1441,11 @@ class ModelConfig:
                     "`--prefill-context-parallel-size`, or set "
                     "`--decode-context-parallel-size 1`."
                 )
+
+            max_dcp_size = (
+                max(1, tensor_parallel_size // total_num_kv_heads)
+                * prefill_context_parallel_size
+            )
 
             if decode_context_parallel_size > max_dcp_size:
                 raise ValueError(
