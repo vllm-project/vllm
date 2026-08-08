@@ -192,6 +192,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         return quant_method
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        # No active LoRA in this batch: skip the LoRA wrapper entirely and
+        # return the base layer output (eager mode only, see above).
+        if self._can_skip_empty_lora():
+            return self._get_quant_method().apply(self.base_layer, x, bias)
         # is_forward_context_available for tower modules
         if self._enable_aux_cuda_stream and is_forward_context_available():
             output_size = sum(self.output_slices)
