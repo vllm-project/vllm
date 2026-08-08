@@ -578,15 +578,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "full-attention and Mamba groups, got: "
                     f"{type(g.kv_cache_spec).__name__}."
                 )
-        # Partial hash hits are limited to full-attention + mamba ("align")
-        # without context parallelism.
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
+        self.verify_and_split_kv_cache_groups()
+
+        # TP needs hashing finer than the Mamba block. DCP accepts equality
+        # because it scales the effective full-attention block instead.
+        self.enable_partial_hash_hits = any(
             isinstance(g.kv_cache_spec, MambaSpec)
             and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
+            and (
+                (dcp_world_size == 1 and g.kv_cache_spec.block_size > hash_block_size)
+                or (
+                    dcp_world_size > 1 and g.kv_cache_spec.block_size >= hash_block_size
+                )
+            )
             for g in kv_cache_config.kv_cache_groups
         )
-        self.verify_and_split_kv_cache_groups()
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:

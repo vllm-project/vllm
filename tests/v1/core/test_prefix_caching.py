@@ -2499,7 +2499,7 @@ def test_emit_cached_block_events():
 
     pool.emit_cached_block_events(
         request=req,
-        num_cached_blocks=num_cached_blocks,
+        num_cached_tokens=num_cached_blocks * block_size,
         block_size=block_size,
         kv_cache_group_id=kv_cache_group_id,
     )
@@ -2529,6 +2529,50 @@ def test_emit_cached_block_events():
     assert event.lora_name is None
 
 
+def test_emit_cached_block_events_sparse_run_and_partial_preserve_mm_keys():
+    hash_block_size = 2
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_emit_sparse_mm",
+        prompt_token_ids=list(range(12)),
+        block_size=hash_block_size,
+        hash_fn=sha256,
+        mm_positions=[
+            PlaceholderRange(offset=0, length=2),
+            PlaceholderRange(offset=5, length=2),
+            PlaceholderRange(offset=8, length=2),
+        ],
+    )
+    cached_blocks = [
+        KVCacheBlock(block_id=-1, is_null=True),
+        KVCacheBlock(block_id=1),
+        KVCacheBlock(block_id=2),
+    ]
+
+    pool.emit_cached_block_events(
+        request=req,
+        num_cached_tokens=10,
+        block_size=block_size,
+        kv_cache_group_id=1,
+        cached_blocks=cached_blocks,
+    )
+
+    full_event, partial_event = pool.take_events()
+    assert isinstance(full_event, BlockStored)
+    assert full_event.token_ids == [4, 5, 6, 7]
+    assert full_event.extra_keys == [(("hash_1", 1),)]
+    assert isinstance(partial_event, BlockStored)
+    assert partial_event.token_ids == [8, 9]
+    assert partial_event.block_size == hash_block_size
+    assert partial_event.extra_keys == [(("hash_2", 0),)]
+
+
 def test_emit_cached_block_events_disabled():
     """No events are emitted when enable_kv_cache_events is False."""
     block_size = 4
@@ -2547,7 +2591,7 @@ def test_emit_cached_block_events_disabled():
 
     pool.emit_cached_block_events(
         request=req,
-        num_cached_blocks=3,
+        num_cached_tokens=3 * block_size,
         block_size=block_size,
         kv_cache_group_id=0,
     )
@@ -2573,7 +2617,7 @@ def test_emit_cached_block_events_zero_cached():
 
     pool.emit_cached_block_events(
         request=req,
-        num_cached_blocks=0,
+        num_cached_tokens=0,
         block_size=block_size,
         kv_cache_group_id=0,
     )

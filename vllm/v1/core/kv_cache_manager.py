@@ -273,15 +273,16 @@ class KVCacheManager:
             and getattr(request, "kv_cache_report_mode", "incremental") == "full"
         ):
             for group_idx, group_blocks in enumerate(computed_blocks):
-                num_blocks = len(group_blocks)
-                if num_blocks > 0:
-                    group = self.kv_cache_config.kv_cache_groups[group_idx]
-                    block_size = group.kv_cache_spec.block_size
+                if group_blocks:
+                    block_size = self.coordinator.single_type_managers[
+                        group_idx
+                    ].block_size
                     self.block_pool.emit_cached_block_events(
                         request,
-                        num_blocks,
+                        num_new_computed_tokens,
                         block_size,
                         group_idx,
+                        group_blocks,
                     )
 
         # The junction to pin is where the lagging sparse-retention group stops
