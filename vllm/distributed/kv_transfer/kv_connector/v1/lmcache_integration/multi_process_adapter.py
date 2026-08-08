@@ -664,6 +664,12 @@ class LMCacheMPWorkerAdapter:
 
         ret_stores = set()
         for req_id in finished_req_ids_from_engine:
+            # FIX: Filter out aborted requests from finished_retrieves
+            # to prevent AssertionError in the scheduler
+            if req_id in finished_retrieves:
+                finished_retrieves.remove(req_id)
+            self.retrieve_futures.pop(req_id, None)
+
             if req_id in self.finished_stores or req_id in self.store_futures:
                 self.previously_finished.add(req_id)
             else:
