@@ -114,7 +114,6 @@ class Fp8BlockScaledMMLinearKernel(
 
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], weight.shape[0]]
 
         if self.apply_input_quant:
             q_input, input_scale = self.quant_fp8(
@@ -138,6 +137,7 @@ class Fp8BlockScaledMMLinearKernel(
 
         if bias is not None:
             output = output + bias
+        output_shape = [*x.shape[:-1], output.shape[-1]]
         return output.to(dtype=out_dtype).view(*output_shape)
 
     @abstractmethod

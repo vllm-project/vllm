@@ -212,8 +212,37 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         scale_kn = scale.data.t().contiguous()  # [k_blocks, n_blocks]
         replace_parameter(layer, scale_attr, scale_kn.t())  # view: [n_blocks, k_blocks]
 
+        # oneDNN indexes the weight in block_n-sized tiles, one per scale block
+        # along N, so the weight must span exactly n_blocks * block_n rows.
+        # The scale is the source of truth for the required N -- no ceil needed.
+        block_n = self.weight_group_shape.row
+        n_blocks = scale_kn.shape[1]
+        n = layer.weight.shape[0]
+        # Unpadded N. Recorded unconditionally so apply_block_scaled_mm can slice
+        # back to it regardless of which branch below runs.
+        self._output_size = n
+
         if getattr(layer, "is_bmm", False):
+            # Grouped fp8_bmm slices both weight and scale per group, so every
+            # group must start on a block boundary. Padding a group tail would
+            # need interleaved (not trailing) padding, which is not implemented,
+            # so fail loudly rather than silently misaligning scales to weights.
+            batch = layer.bmm_batch_size
+            if n_blocks % batch or (n_blocks // batch) * block_n != n // batch:
+                raise ValueError(
+                    f"fp8_bmm requires N per group to be a multiple of block_n "
+                    f"({block_n}); got N={n}, n_blocks={n_blocks}, batch={batch}"
+                )
             self._prepare_bmm_params(layer, scale_kn)
+        elif n_blocks * block_n != n:
+            # Pad the N boundary so oneDNN's trailing block is fully backed.
+            replace_parameter(
+                layer,
+                "weight",
+                torch.nn.functional.pad(
+                    layer.weight.data, (0, 0, 0, n_blocks * block_n - n)
+                ).contiguous(),
+            )
 
     def _prepare_bmm_params(
         self, layer: torch.nn.Module, scale_kn: torch.Tensor
@@ -246,7 +275,7 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # B is [N, K]; .t() gives [K, N] view (no copy).
         # Bs is stored as [n_blocks, k_blocks] view; .t() recovers the
         # contiguous [k_blocks, n_blocks] buffer that oneDNN expects.
-        return torch.ops._xpu_C.fp8_gemm(
+        output = torch.ops._xpu_C.fp8_gemm(
             A,
             B.t(),
             self.config.out_dtype,
@@ -254,3 +283,4 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs.t(),
             torch.Tensor(),
         )
+        return output[..., : self._output_size]
