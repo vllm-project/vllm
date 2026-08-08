@@ -88,6 +88,75 @@ MONO_AUDIO_SPEC = AudioSpec(target_channels=1, channel_reduction=ChannelReductio
 PASSTHROUGH_AUDIO_SPEC = AudioSpec(target_channels=None)
 
 
+def reduce_channels_to_mono(
+    audio: npt.NDArray[np.floating] | torch.Tensor,
+    reduction: ChannelReduction = ChannelReduction.MEAN,
+) -> npt.NDArray[np.floating] | torch.Tensor:
+    """Combine the channels of channel-first audio into a 1-D waveform.
+
+    Equivalent to the matching NumPy/torch reduction over the channel axis,
+    but computed by combining the channel slices. A reduction over a 2-element
+    axis spends most of its time in the generic reduction machinery rather
+    than on the arithmetic, so slicing is an order of magnitude faster for
+    identical results.
+
+    Args:
+        audio: Channel-first audio. Leading dimensions are flattened into the
+            channel axis; 1-D audio is returned unchanged.
+        reduction: How to combine the channels.
+
+    Returns:
+        1-D audio of the same type and dtype as the input, freshly allocated
+        except for ``FIRST``, which returns a view of the first channel.
+    """
+    if audio.ndim == 1:
+        return audio
+    if audio.ndim > 2:
+        audio = audio.reshape(-1, audio.shape[-1])
+
+    if reduction == ChannelReduction.FIRST:
+        return audio[0]
+    if reduction not in (
+        ChannelReduction.MEAN,
+        ChannelReduction.SUM,
+        ChannelReduction.MAX,
+    ):
+        raise ValueError(f"Unknown reduction method: {reduction}")
+
+    is_numpy = isinstance(audio, np.ndarray)
+    is_float = (
+        np.issubdtype(audio.dtype, np.floating)
+        if is_numpy
+        else audio.dtype.is_floating_point
+    )
+    if not is_float and reduction != ChannelReduction.MAX:
+        # The generic reductions widen the accumulator for integer input,
+        # which accumulating in place would not.
+        if reduction == ChannelReduction.SUM:
+            return np.sum(audio, axis=0) if is_numpy else audio.sum(dim=0)
+        return np.mean(audio, axis=0) if is_numpy else audio.mean(dim=0)
+
+    num_channels = audio.shape[0]
+    if num_channels == 1:
+        return audio[0].copy() if is_numpy else audio[0].clone()
+
+    # Seeding the accumulator with the first combination rather than a copy of
+    # channel 0 saves a pass over the samples. The loop runs once for stereo.
+    if reduction == ChannelReduction.MAX:
+        maximum = np.maximum if is_numpy else torch.maximum
+        out = maximum(audio[0], audio[1])
+        for channel in audio[2:]:
+            maximum(out, channel, out=out)
+        return out
+
+    out = audio[0] + audio[1]
+    for channel in audio[2:]:
+        out += channel
+    if reduction == ChannelReduction.MEAN:
+        out /= num_channels
+    return out
+
+
 def normalize_audio(
     audio: npt.NDArray[np.floating] | torch.Tensor,
     spec: AudioSpec,
@@ -145,21 +214,8 @@ def normalize_audio(
         )
 
     # Reduce channels
-    is_numpy = isinstance(audio, np.ndarray)
-
     if spec.target_channels == 1:
-        # Reduce to mono
-        if spec.channel_reduction == ChannelReduction.MEAN:
-            result = np.mean(audio, axis=0) if is_numpy else audio.mean(dim=0)
-        elif spec.channel_reduction == ChannelReduction.FIRST:
-            result = audio[0]
-        elif spec.channel_reduction == ChannelReduction.MAX:
-            result = np.max(audio, axis=0) if is_numpy else audio.max(dim=0).values
-        elif spec.channel_reduction == ChannelReduction.SUM:
-            result = np.sum(audio, axis=0) if is_numpy else audio.sum(dim=0)
-        else:
-            raise ValueError(f"Unknown reduction method: {spec.channel_reduction}")
-        return result
+        return reduce_channels_to_mono(audio, spec.channel_reduction)
     else:
         # Reduce to N channels (take first N and apply reduction if needed)
         # For now, just take first N channels
