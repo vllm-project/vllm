@@ -251,8 +251,13 @@ class PyNvVideoCodecDecoderSlot:
         self.decoder = None
         self.source_path: str | None = None
 
+    def invalidate(self) -> None:
+        self.decoder = None
+        self.source_path = None
+
     def _construct(self, file_path: str, nvc, device_index: int) -> None:
-        self.decoder = nvc.SimpleDecoder(
+        self.invalidate()
+        decoder = nvc.SimpleDecoder(
             file_path,
             output_color_type=nvc.OutputColorType.RGB,
             use_device_memory=True,
@@ -261,6 +266,7 @@ class PyNvVideoCodecDecoderSlot:
             cuda_stream=self.stream.cuda_stream,
             decoder_cache_size=PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
         )
+        self.decoder = decoder
         self.source_path = file_path
 
     def get_decoder(self, file_path: str, nvc, device_index: int):
@@ -737,9 +743,13 @@ class PyNvVideoCodecVideoBackendMixin:
                     cls._decoder_slot_cond.notify()
                 raise
 
+        borrow_succeeded = False
         try:
             yield slot
+            borrow_succeeded = True
         finally:
+            if not borrow_succeeded:
+                slot.invalidate()
             with cls._decoder_slot_cond:
                 cls._decoder_slots.append(slot)
                 cls._decoder_slot_cond.notify()
