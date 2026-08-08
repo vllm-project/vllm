@@ -23,6 +23,7 @@ const TOOL_CALL_START: &str = "<|tool_call>";
 const TOOL_CALL_END: &str = "<tool_call|>";
 const STRING_DELIM: &str = "<|\"|>";
 const CALL_PREFIX: &str = "call:";
+const MAX_GEMMA4_NESTING_DEPTH: usize = 128;
 
 type Gemma4Input<'i> = Partial<&'i str>;
 
@@ -378,8 +379,94 @@ fn safe_scan_len(text: &str, start: usize, markers: &[&str]) -> usize {
 
 /// Parse complete Gemma4 custom key-value arguments.
 fn parse_gemma4_args(args: &str) -> ModalResult<Map<String, Value>> {
+    if !gemma4_nesting_is_within_limit(args) {
+        return Err(ErrMode::Cut(ContextError::new()));
+    }
+
     let mut input = args;
     terminated(gemma4_args, eof).parse_next(&mut input)
+}
+
+/// Check that nested Gemma4 containers stay within the parser's stack budget.
+fn gemma4_nesting_is_within_limit(mut input: &str) -> bool {
+    enum Container {
+        Args,
+        Array,
+    }
+
+    let mut depth = 0;
+    let mut containers = vec![Container::Args];
+
+    while let Some(container) = containers.last() {
+        input = input.trim_start();
+        if let Some(rest) = input.strip_prefix(',') {
+            input = rest;
+            continue;
+        }
+
+        match container {
+            Container::Args if input.strip_prefix('}').is_some() => {
+                if containers.len() > 1 {
+                    depth -= 1;
+                }
+                containers.pop();
+                input = &input[1..];
+                continue;
+            }
+            Container::Array if input.strip_prefix(']').is_some() => {
+                if containers.len() > 1 {
+                    depth -= 1;
+                }
+                containers.pop();
+                input = &input[1..];
+                continue;
+            }
+            Container::Args => {
+                let Some(key_end) = input.find(':') else {
+                    return true;
+                };
+                input = &input[key_end + 1..];
+            }
+            Container::Array => {}
+        }
+
+        input = input.trim_start();
+        if let Some(rest) = input.strip_prefix(STRING_DELIM) {
+            let Some(string_end) = rest.find(STRING_DELIM) else {
+                return true;
+            };
+            input = &rest[string_end + STRING_DELIM.len()..];
+            continue;
+        }
+
+        match input.chars().next() {
+            Some('{') => {
+                depth += 1;
+                if depth > MAX_GEMMA4_NESTING_DEPTH {
+                    return false;
+                }
+                containers.push(Container::Args);
+                input = &input[1..];
+            }
+            Some('[') => {
+                depth += 1;
+                if depth > MAX_GEMMA4_NESTING_DEPTH {
+                    return false;
+                }
+                containers.push(Container::Array);
+                input = &input[1..];
+            }
+            Some(_) => {
+                let Some(value_end) = input.find([',', '}', ']']) else {
+                    return true;
+                };
+                input = &input[value_end..];
+            }
+            None => return true,
+        }
+    }
+
+    true
 }
 
 /// Parse Gemma4's custom key-value argument object content.
@@ -715,6 +802,67 @@ mod tests {
     }
 
     #[test]
+    fn gemma4_nesting_limit_accepts_128_and_rejects_129() {
+        let nested_value = format!(
+            "value:{}1{}",
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH),
+            "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH),
+        );
+        assert!(super::gemma4_nesting_is_within_limit(&nested_value));
+
+        assert!(!super::gemma4_nesting_is_within_limit(&format!(
+            "value:{}1{}",
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+        )));
+    }
+
+    #[test]
+    fn gemma4_parse_args_rejects_excessive_nesting() {
+        let nested_value = format!(
+            "{}1{}",
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+        );
+
+        assert!(matches!(
+            parse_gemma4_args(&format!("value:{nested_value}")),
+            Err(ErrMode::Cut(_))
+        ));
+    }
+
+    #[test]
+    fn gemma4_parse_args_ignores_brackets_inside_strings_for_nesting_limit() {
+        let value = "{".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1);
+        let parsed = parse_gemma4_args(&format!("value:<|\"|>{value}<|\"|>")).unwrap();
+
+        assert_eq!(Value::Object(parsed), json!({ "value": value }));
+    }
+
+    #[test]
+    fn gemma4_nesting_limit_ignores_string_delimiters_inside_keys() {
+        let args = format!(
+            "key{}:{}1{}{}",
+            super::STRING_DELIM,
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            super::STRING_DELIM,
+        );
+
+        assert!(!super::gemma4_nesting_is_within_limit(&args));
+    }
+
+    #[test]
+    fn gemma4_nesting_limit_allows_many_sibling_containers() {
+        let args = std::iter::repeat("value:{}")
+            .take(super::MAX_GEMMA4_NESTING_DEPTH + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        assert!(super::gemma4_nesting_is_within_limit(&args));
+    }
+
+    #[test]
     fn gemma4_parse_array_handles_bare_values() {
         let parsed = parse_gemma4_array("42,true,114.514").unwrap();
         assert_eq!(Value::Array(parsed), json!([42, true, 114.514]));
@@ -744,6 +892,20 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_report_string().contains("incomplete Gemma4 tool call"));
+    }
+
+    #[test]
+    fn gemma4_parse_complete_rejects_excessive_nesting() {
+        let nested_value = format!(
+            "{}1{}",
+            "{nested:".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+            "}".repeat(super::MAX_GEMMA4_NESTING_DEPTH + 1),
+        );
+        let input = format!("<|tool_call>call:tool{{value:{nested_value}}}<tool_call|>");
+        let mut parser = test_parser();
+
+        assert!(parser.parse_complete(&input).is_err());
+        assert_eq!(parser.reset(), input);
     }
 
     #[test]
