@@ -1215,6 +1215,11 @@ class SupportsTranscription(Protocol):
     """
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
+    supports_word_timestamp: ClassVar[bool] = False
+    """
+    Enables word-level timestamps (cross-attention DTW) for supported models by
+    setting this to `True`.
+    """
 
     supports_diarized_transcription: ClassVar[bool] = False
     """Enables the ``diarized_json`` response format for the model."""
