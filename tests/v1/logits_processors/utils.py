@@ -226,11 +226,6 @@ def register_fake_entrypoint(monkeypatch) -> str:
     return str(tmpdir)
 
 
-def fake_entry_points(group: str) -> EntryPoints:
-    """Fake version of importlib.metadata.entry_points."""
-    return EntryPoints(group)
-
-
 def setup_fake_entrypoint(monkeypatch) -> None:
     """Expose the dummy logitproc entrypoint for the current platform."""
     if requires_spawn_multiprocessing():
@@ -239,6 +234,14 @@ def setup_fake_entrypoint(monkeypatch) -> None:
         return
 
     import importlib.metadata
+
+    original_entry_points = importlib.metadata.entry_points
+
+    def fake_entry_points(**kwargs):
+        group = kwargs.get("group")
+        if group == LOGITSPROCS_GROUP:
+            return EntryPoints(group)
+        return original_entry_points(**kwargs)
 
     monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points)
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
