@@ -297,6 +297,9 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
+    # Opt into slow PyTorch attention when an XPU FA2 shape is missing.
+    # Default (unset/0) is fail-closed in vllm-xpu-kernels.
+    VLLM_XPU_ATTN_ALLOW_FALLBACK: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
@@ -2043,6 +2046,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
+    ),
+    # Opt into PyTorch reference attention when an XPU FA2 AOT shape is
+    # missing. Default is fail-closed (raise). Eager debug only; ignored
+    # under XPUGraph capture. Read by vllm-xpu-kernels at runtime.
+    "VLLM_XPU_ATTN_ALLOW_FALLBACK": lambda: bool(
+        int(os.getenv("VLLM_XPU_ATTN_ALLOW_FALLBACK", "0"))
     ),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
