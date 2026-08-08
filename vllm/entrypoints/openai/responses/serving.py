@@ -295,6 +295,28 @@ class OpenAIServingResponses(GenerateBaseServing):
     def _validate_create_responses_input(
         self, request: ResponsesRequest
     ) -> ErrorResponse | None:
+        tool_parser_cls = (
+            self.parser.tool_parser_cls if self.parser is not None else None
+        )
+        is_named_tool_choice = getattr(request.tool_choice, "type", None) == "function"
+        is_forced_tool_choice = (
+            request.tool_choice == "required" or is_named_tool_choice
+        )
+        if (
+            not self.use_harmony
+            and is_forced_tool_choice
+            and tool_parser_cls is not None
+            and not tool_parser_cls.supports_required_and_named
+        ):
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "The configured tool parser does not support required or named "
+                    "tool_choice."
+                ),
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="tool_choice",
+            )
         if self.use_harmony and request.is_include_output_logprobs():
             return self.create_error_response(
                 err_type="invalid_request_error",

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
+from http import HTTPStatus
 from unittest.mock import MagicMock
 
 import pytest
@@ -291,6 +292,51 @@ class TestInitializeToolSessions:
         error = serving_responses_instance._validate_create_responses_input(request)
         assert error is not None
         assert error.error.type == "invalid_request_error"
+
+    @pytest.mark.parametrize(
+        ("supports_required_and_named", "tool_choice", "expect_error"),
+        [
+            (False, "auto", False),
+            (False, "required", True),
+            (False, {"type": "function", "name": "get_weather"}, True),
+            (True, "required", False),
+            (True, {"type": "function", "name": "get_weather"}, False),
+        ],
+    )
+    def test_validates_forced_tool_choice_for_parser(
+        self,
+        serving_responses_instance,
+        supports_required_and_named,
+        tool_choice,
+        expect_error,
+    ):
+        tool_parser_cls = type(
+            "TestToolParser",
+            (),
+            {"supports_required_and_named": supports_required_and_named},
+        )
+        serving_responses_instance.parser = MagicMock(tool_parser_cls=tool_parser_cls)
+        request = ResponsesRequest(
+            input="What is the weather?",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {},
+                }
+            ],
+            tool_choice=tool_choice,
+        )
+
+        error = serving_responses_instance._validate_create_responses_input(request)
+
+        if expect_error:
+            assert error is not None
+            assert error.error.type == "invalid_request_error"
+            assert error.error.param == "tool_choice"
+            assert error.error.code == HTTPStatus.BAD_REQUEST
+        else:
+            assert error is None
 
 
 class TestValidateGeneratorInput:
