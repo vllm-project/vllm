@@ -2,9 +2,415 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for sparse MLA backends."""
 
+from dataclasses import dataclass
+
 import torch
 
 from vllm.triton_utils import tl, triton
+
+
+@dataclass(frozen=True)
+class TopologyIndexConfig:
+    """Opt-in shadow policy for sparse MLA logical token indices."""
+
+    enabled: bool = False
+    learned_fraction: float = 0.5
+    max_segments: int = 8
+    barrier_strength: float = 0.0
+    diversity_strength: float = 0.0
+    max_replacements: int | None = None
+
+
+@dataclass(frozen=True)
+class TopologyIndexResult:
+    indices: torch.Tensor
+    applied: bool
+    fallback_reason: str | None
+    learned_retained: int = 0
+    structural_inserted: int = 0
+
+
+def apply_topology_tail_index_policy(
+    learned_indices: torch.Tensor,
+    scores: torch.Tensor,
+    segment_ids: torch.Tensor,
+    config: TopologyIndexConfig = TopologyIndexConfig(),
+) -> TopologyIndexResult:
+    """Inject topology witnesses into a sparse MLA logical-token index.
+
+    The coordinate contract is the same as sparse MLA ``topk_indices_buffer``:
+    ``torch.int32`` with shape ``[num_tokens, topk]``, logical request-local
+    token offsets, and ``-1`` sentinels for padding. The disabled and fallback
+    paths return ``learned_indices`` unchanged.
+
+    This is a CPU shadow helper. It is not wired into sparse MLA kernels and
+    intentionally falls back for CUDA tensors to avoid unbenchmarked Python
+    synchronization in an attention hot path.
+    """
+    if not config.enabled:
+        return TopologyIndexResult(
+            indices=learned_indices,
+            applied=False,
+            fallback_reason="disabled",
+        )
+
+    fallback_reason = _validate_topology_index_inputs(
+        learned_indices, scores, segment_ids
+    )
+    if fallback_reason is not None:
+        return TopologyIndexResult(
+            indices=learned_indices,
+            applied=False,
+            fallback_reason=fallback_reason,
+        )
+
+    num_rows, topk = learned_indices.shape
+    if topk == 0:
+        return TopologyIndexResult(
+            indices=learned_indices,
+            applied=False,
+            fallback_reason="empty_budget",
+        )
+
+    learned_keep = round(topk * config.learned_fraction)
+    learned_keep = max(1, min(topk, learned_keep))
+    replacement_budget = topk - learned_keep
+    if config.max_replacements is not None:
+        replacement_budget = min(replacement_budget, max(0, config.max_replacements))
+
+    out = torch.full_like(learned_indices, -1)
+    learned_retained = 0
+    structural_inserted = 0
+    max_context = scores.shape[1]
+    active_segments = _active_topology_segments(segment_ids, config.max_segments)
+
+    for row_idx in range(num_rows):
+        row = learned_indices[row_idx]
+        learned = _valid_unique_indices(row, max_context)
+        selected = learned[:learned_keep]
+        inserted_for_row = 0
+
+        while len(selected) < topk and inserted_for_row < replacement_budget:
+            candidate = _best_topology_tail_candidate(
+                scores=scores,
+                row_idx=row_idx,
+                segment_ids=segment_ids,
+                selected=selected,
+                active_segments=active_segments,
+                config=config,
+            )
+            if candidate is None:
+                break
+            selected.append(candidate)
+            inserted_for_row += 1
+
+        for index in learned[learned_keep:]:
+            if len(selected) >= topk:
+                break
+            if index not in selected:
+                selected.append(index)
+
+        if selected:
+            out[row_idx, : len(selected)] = torch.tensor(
+                selected,
+                dtype=torch.int32,
+                device=learned_indices.device,
+            )
+        learned_retained += min(len(learned), learned_keep)
+        structural_inserted += inserted_for_row
+
+    return TopologyIndexResult(
+        indices=out,
+        applied=True,
+        fallback_reason=None,
+        learned_retained=learned_retained,
+        structural_inserted=structural_inserted,
+    )
+
+
+def _validate_topology_index_inputs(
+    learned_indices: torch.Tensor,
+    scores: torch.Tensor,
+    segment_ids: torch.Tensor,
+) -> str | None:
+    if learned_indices.device.type != "cpu":
+        return "cuda_not_supported"
+    if (
+        scores.device != learned_indices.device
+        or segment_ids.device != learned_indices.device
+    ):
+        return "device_mismatch"
+    if learned_indices.dtype != torch.int32:
+        return "dtype"
+    if learned_indices.ndim != 2:
+        return "index_shape"
+    if scores.ndim != 2 or scores.shape[0] != learned_indices.shape[0]:
+        return "scores_shape"
+    if segment_ids.dtype != torch.int32:
+        return "segment_dtype"
+    if segment_ids.ndim != 1 or segment_ids.shape[0] != scores.shape[1]:
+        return "segment_shape"
+    if torch.any(learned_indices < -1) or torch.any(learned_indices >= scores.shape[1]):
+        return "index_bounds"
+    return None
+
+
+def _valid_unique_indices(row: torch.Tensor, max_context: int) -> list[int]:
+    selected: list[int] = []
+    seen: set[int] = set()
+    for value in row.tolist():
+        index = int(value)
+        if index < 0 or index >= max_context or index in seen:
+            continue
+        selected.append(index)
+        seen.add(index)
+    return selected
+
+
+def _active_topology_segments(segment_ids: torch.Tensor, max_segments: int) -> set[int]:
+    segments = torch.unique(segment_ids, sorted=True)
+    if max_segments > 0:
+        segments = segments[:max_segments]
+    return {int(segment) for segment in segments.tolist()}
+
+
+def _best_topology_tail_candidate(
+    scores: torch.Tensor,
+    row_idx: int,
+    segment_ids: torch.Tensor,
+    selected: list[int],
+    active_segments: set[int],
+    config: TopologyIndexConfig,
+) -> int | None:
+    selected_set = set(selected)
+    selected_segments = {int(segment_ids[index]) for index in selected}
+    best_candidate = None
+    best_score = None
+
+    for candidate in range(scores.shape[1]):
+        if candidate in selected_set:
+            continue
+        segment = int(segment_ids[candidate])
+        if segment not in active_segments:
+            continue
+        barrier = 1.0 if segment not in selected_segments else 0.0
+        diversity = _topology_diversity_score(scores, candidate, selected)
+        value = (
+            float(scores[row_idx, candidate])
+            + config.barrier_strength * barrier
+            + config.diversity_strength * diversity
+        )
+        if best_score is None or value > best_score:
+            best_score = value
+            best_candidate = candidate
+    return best_candidate
+
+
+def _topology_diversity_score(
+    scores: torch.Tensor,
+    candidate: int,
+    selected: list[int],
+) -> float:
+    if not selected:
+        return 1.0
+    candidate_profile = scores[:, candidate].float()
+    selected_profiles = scores[:, selected].float()
+    candidate_norm = torch.linalg.vector_norm(candidate_profile).clamp_min(1e-12)
+    selected_norms = torch.linalg.vector_norm(selected_profiles, dim=0).clamp_min(1e-12)
+    similarities = torch.matmul(candidate_profile, selected_profiles) / (
+        candidate_norm * selected_norms
+    )
+    return float((1.0 - similarities.max()).clamp_min(0.0))
+
+
+def merge_topology_tail_indices_reference(
+    learned_indices: torch.Tensor,
+    topology_indices: torch.Tensor,
+    learned_keep: int,
+    max_replacements: int,
+) -> torch.Tensor:
+    """Reference bounded tail replacement for sparse MLA topology witnesses."""
+    _validate_topology_tail_merge_inputs(
+        learned_indices,
+        topology_indices,
+        learned_keep,
+        max_replacements,
+    )
+    out = learned_indices.clone()
+    topk = learned_indices.shape[1]
+
+    for row_idx in range(learned_indices.shape[0]):
+        selected: set[int] = set()
+        for value in learned_indices[row_idx].tolist():
+            index = int(value)
+            if index >= 0:
+                selected.add(index)
+
+        inserted = 0
+        for value in topology_indices[row_idx].tolist():
+            index = int(value)
+            if inserted >= max_replacements or learned_keep + inserted >= topk:
+                break
+            if index < 0 or index in selected:
+                continue
+            out[row_idx, learned_keep + inserted] = index
+            selected.add(index)
+            inserted += 1
+    return out
+
+
+def merge_topology_tail_indices(
+    learned_indices: torch.Tensor,
+    topology_indices: torch.Tensor,
+    learned_keep: int,
+    max_replacements: int,
+) -> torch.Tensor:
+    """Replace a bounded learned sparse MLA tail with topology witnesses."""
+    _validate_topology_tail_merge_inputs(
+        learned_indices,
+        topology_indices,
+        learned_keep,
+        max_replacements,
+    )
+    if learned_indices.device.type != "cuda":
+        return merge_topology_tail_indices_reference(
+            learned_indices,
+            topology_indices,
+            learned_keep,
+            max_replacements,
+        )
+
+    topk = learned_indices.shape[1]
+    topology_width = topology_indices.shape[1]
+    out = torch.empty_like(learned_indices)
+    block_topk = _next_power_of_2(topk)
+    block_topology = _next_power_of_2(topology_width)
+
+    _merge_topology_tail_indices_kernel[(learned_indices.shape[0],)](
+        learned_indices.contiguous(),
+        topology_indices.contiguous(),
+        out,
+        topk,
+        topology_width,
+        learned_keep,
+        max_replacements,
+        learned_indices.stride(0),
+        learned_indices.stride(1),
+        topology_indices.stride(0),
+        topology_indices.stride(1),
+        out.stride(0),
+        out.stride(1),
+        BLOCK_TOPK=block_topk,
+        BLOCK_TOPOLOGY=block_topology,
+    )
+    return out
+
+
+def _validate_topology_tail_merge_inputs(
+    learned_indices: torch.Tensor,
+    topology_indices: torch.Tensor,
+    learned_keep: int,
+    max_replacements: int,
+) -> None:
+    if learned_indices.dtype != torch.int32 or topology_indices.dtype != torch.int32:
+        raise ValueError("learned_indices and topology_indices must be torch.int32")
+    if learned_indices.ndim != 2 or topology_indices.ndim != 2:
+        raise ValueError("learned_indices and topology_indices must be 2D tensors")
+    if learned_indices.device != topology_indices.device:
+        raise ValueError("learned_indices and topology_indices must share a device")
+    if learned_indices.shape[0] != topology_indices.shape[0]:
+        raise ValueError("learned_indices and topology_indices rows must match")
+    if learned_indices.shape[1] == 0:
+        raise ValueError("learned_indices must have a non-empty top-k dimension")
+    if topology_indices.shape[1] == 0:
+        raise ValueError("topology_indices must have a non-empty candidate dimension")
+    if learned_keep < 0 or learned_keep > learned_indices.shape[1]:
+        raise ValueError("learned_keep must fit within the learned top-k dimension")
+    if max_replacements < 0:
+        raise ValueError("max_replacements must be non-negative")
+
+
+def _next_power_of_2(value: int) -> int:
+    return 1 << (value - 1).bit_length()
+
+
+@triton.jit
+def _merge_topology_tail_indices_kernel(
+    learned_ptr,
+    topology_ptr,
+    out_ptr,
+    TOPK: tl.constexpr,
+    TOPOLOGY_WIDTH: tl.constexpr,
+    LEARNED_KEEP: tl.constexpr,
+    MAX_REPLACEMENTS: tl.constexpr,
+    learned_stride0,
+    learned_stride1,
+    topology_stride0,
+    topology_stride1,
+    out_stride0,
+    out_stride1,
+    BLOCK_TOPK: tl.constexpr,
+    BLOCK_TOPOLOGY: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    topk_offsets = tl.arange(0, BLOCK_TOPK)
+    topology_offsets = tl.arange(0, BLOCK_TOPOLOGY)
+
+    learned = tl.load(
+        learned_ptr + row_idx * learned_stride0 + topk_offsets * learned_stride1,
+        mask=topk_offsets < TOPK,
+        other=-1,
+    )
+    topology = tl.load(
+        topology_ptr
+        + row_idx * topology_stride0
+        + topology_offsets * topology_stride1,
+        mask=topology_offsets < TOPOLOGY_WIDTH,
+        other=-1,
+    )
+
+    tl.store(
+        out_ptr + row_idx * out_stride0 + topk_offsets * out_stride1,
+        learned,
+        mask=topk_offsets < TOPK,
+    )
+
+    insert_count = 0
+    for topology_pos in tl.static_range(0, BLOCK_TOPOLOGY):
+        candidate = tl.load(
+            topology_ptr
+            + row_idx * topology_stride0
+            + topology_pos * topology_stride1,
+            mask=topology_pos < TOPOLOGY_WIDTH,
+            other=-1,
+        )
+        duplicate_learned = tl.sum(
+            tl.where((topk_offsets < TOPK) & (learned == candidate), 1, 0),
+            axis=0,
+        ) > 0
+        duplicate_topology = tl.sum(
+            tl.where(
+                (topology_offsets < topology_pos) & (topology == candidate),
+                1,
+                0,
+            ),
+            axis=0,
+        ) > 0
+        valid = (
+            (candidate >= 0)
+            & (insert_count < MAX_REPLACEMENTS)
+            & (LEARNED_KEEP + insert_count < TOPK)
+            & ~duplicate_learned
+            & ~duplicate_topology
+        )
+        tl.store(
+            out_ptr
+            + row_idx * out_stride0
+            + (LEARNED_KEEP + insert_count) * out_stride1,
+            candidate,
+            mask=valid,
+        )
+        insert_count += valid.to(tl.int32)
 
 
 # Kernel with prefill workspace support and valid count tracking
