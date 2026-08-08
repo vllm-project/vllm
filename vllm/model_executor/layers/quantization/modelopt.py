@@ -2235,7 +2235,10 @@ class FormatScheme:
 
 
 class _DropInputScale(FormatScheme):
-    """Interim: register then drop a W4A16 checkpoint's on-disk input_scale."""
+    """Interim: register then drop a W4A16 checkpoint's on-disk input_scale.
+
+    Kept for backward compat with previously-exported ModelOpt checkpoints.
+    """
 
     def extra_weights(self, layer, shapes, ctx, wl) -> None:
         data = torch.full((shapes.num_partitions,), torch.nan)
