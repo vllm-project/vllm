@@ -730,6 +730,53 @@ def test_get_block_descs_ids_hybrid_ssm():
 
 
 @pytest.mark.cpu_test
+def test_get_block_descs_ids_selects_attention_regions_by_group():
+    """Each attention group's blocks address only that group's regions."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=3,
+        has_mamba=False,
+        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
+        block_len_per_layer=[100, 100, 100],
+    )
+    worker.region_group_ids = [0, 0, 1]
+
+    result = worker._compute_desc_ids(
+        block_ids=([1, 2], [7]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
+
+    assert result.tolist() == [1, 2, 11, 12, 27]
+
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_uses_per_region_pool_capacity():
+    """Independent host and device pools use cumulative descriptor offsets."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=2,
+        has_mamba=False,
+        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
+        block_len_per_layer=[100, 100],
+    )
+    worker.region_group_ids = [0, 1]
+
+    result = worker._compute_desc_ids(
+        block_ids=([4], [8]),
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_num_blocks=[5, 10],
+    )
+
+    assert result.tolist() == [4, 13]
+
+
+@pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _compute_desc_ids uses different strides for FA
     (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
@@ -1523,6 +1570,97 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
 
 
 @pytest.mark.cpu_test
+def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
+    from unittest.mock import MagicMock
+
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupRole,
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+    )
+
+    host_num_blocks = 4
+    gpu_num_blocks = 9
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=gpu_num_blocks,
+        num_blocks_by_pool=[gpu_num_blocks],
+        hisparse_host_num_blocks=host_num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=host_num_blocks * spec.page_size_bytes,
+                shared_by=["mla.host"],
+                host_resident=True,
+                block_pool_id=None,
+            ),
+            KVCacheTensor(
+                size=gpu_num_blocks * spec.page_size_bytes,
+                shared_by=["mla.device"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["mla.host"],
+                spec,
+                block_pool_id=None,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(["mla.device"], spec),
+        ],
+    )
+    vllm_config = create_vllm_config(block_size=16)
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [16]
+    fake_backend.get_name.return_value = "FLASHMLA"
+    fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
+    fake_backend.get_kv_cache_shape.return_value = (1, 16, 1, 1)
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+
+    with (
+        patch.object(bw, "NixlWrapper"),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "current_platform", fake_platform),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, "test-engine", kv_cache_config)
+        worker.use_mla = True
+        worker.nixl_wrapper.get_agent_metadata.return_value = b"metadata"
+        worker.register_kv_caches(
+            {
+                "mla.host": torch.zeros(
+                    host_num_blocks, spec.page_size_bytes, dtype=torch.uint8
+                ),
+                "mla.device": torch.zeros(
+                    gpu_num_blocks, spec.page_size_bytes, dtype=torch.uint8
+                ),
+            }
+        )
+
+    assert worker.num_blocks == gpu_num_blocks
+    assert dict(zip(worker.region_group_ids, worker.region_num_blocks)) == {
+        0: host_num_blocks,
+        1: gpu_num_blocks,
+    }
+
+
+@pytest.mark.cpu_test
 def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     """Hybrid MLA+KDA registration: HMA tensors shared by both layer types
     must be flagged as MLA regions even when a KDA layer registers them
@@ -1539,6 +1677,9 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     kv_cache_config = _make_hybrid_mla_kv_cache_config()
     unified_page = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
     vllm_config = create_vllm_config(block_size=12)
+    # The engine rewrites this global value to the smallest scheduler-group
+    # block size. NIXL must retain the transferable groups' 12-token geometry.
+    vllm_config.cache_config.block_size = 4
     # kv_buffer_device defaults to the *real* platform's device type, which on
     # a CPU-only test host would make this a host-buffer worker: host xfer
     # buffers are per-layer, so the HMA shared tensors would not be

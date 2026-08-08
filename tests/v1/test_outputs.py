@@ -4,7 +4,10 @@ from unittest import TestCase
 
 import torch
 
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import (
+    LogprobsLists,
+    LogprobsTensors,
+)
 
 
 def test_logprobs_tensors_cat():

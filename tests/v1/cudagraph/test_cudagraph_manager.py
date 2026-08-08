@@ -17,6 +17,7 @@ from vllm.config import (
 )
 from vllm.distributed.device_communicators import pynccl_allocator
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 pytestmark = pytest.mark.cpu_test
@@ -109,3 +110,82 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         manager.capture(create_forward_fn)
 
     mock_cuda_graph.assert_called_once()
+
+
+def _create_hybrid_kv_manager(monkeypatch):
+    compilation_config = CompilationConfig(
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[4],
+    )
+    compilation_config.max_cudagraph_capture_size = 4
+    compilation_config.post_init_cudagraph_sizes()
+    vllm_config = _create_vllm_config()
+    vllm_config.compilation_config = compilation_config
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: None,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=1,
+        capture_hybrid_kv=True,
+    )
+    manager._graphs_captured = True
+    return manager
+
+
+def test_kv_residency_cases_dispatch_independently(monkeypatch):
+    manager = _create_hybrid_kv_manager(monkeypatch)
+
+    resident = manager.dispatch(3, 3, 1, num_active_loras=0)
+    hybrid = manager.dispatch(3, 3, 1, num_active_loras=0, fully_resident_kv=False)
+
+    assert resident.cg_mode == CUDAGraphMode.FULL
+    assert resident.fully_resident_kv
+    assert hybrid.cg_mode == CUDAGraphMode.FULL
+    assert not hybrid.fully_resident_kv
+    assert resident.num_tokens == hybrid.num_tokens == 4
+
+    unsupported_mixed = manager.dispatch(
+        2, 3, None, num_active_loras=0, fully_resident_kv=False
+    )
+    assert unsupported_mixed.cg_mode == CUDAGraphMode.NONE
+    assert not unsupported_mixed.fully_resident_kv
+
+
+def test_dp_padding_preserves_local_kv_residency(monkeypatch):
+    manager = _create_hybrid_kv_manager(monkeypatch)
+    hybrid = manager.dispatch(3, 3, 1, num_active_loras=0, fully_resident_kv=False)
+
+    monkeypatch.setattr(
+        dp_utils,
+        "get_dp_group",
+        lambda: SimpleNamespace(cpu_group=None),
+    )
+
+    def add_peer_rank(tensor, group):
+        tensor[:, 1] = torch.tensor([3, CUDAGraphMode.FULL.value, 1])
+
+    monkeypatch.setattr(dp_utils.dist, "all_reduce", add_peer_rank)
+    synced, num_tokens_across_dp = dp_utils.sync_cudagraph_and_dp_padding(
+        manager,
+        hybrid,
+        num_tokens=3,
+        num_reqs=3,
+        uniform_token_count=1,
+        dp_size=2,
+        dp_rank=0,
+    )
+    assert synced.cg_mode == CUDAGraphMode.FULL
+    assert not synced.fully_resident_kv
+    assert num_tokens_across_dp is not None
+    assert num_tokens_across_dp.tolist() == [4, 4]

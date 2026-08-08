@@ -301,6 +301,14 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def prepare_step(self, scheduler_output: SchedulerOutput) -> None:
+        """Prepare connector work needed before input and graph selection."""
+        return
+
+    def finish_forward(self) -> None:
+        """Notify the connector that this step's model forward is enqueued."""
+        return
+
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """

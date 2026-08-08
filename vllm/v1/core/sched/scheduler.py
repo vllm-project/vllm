@@ -23,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_connector import (
+    attach_hisparse_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -289,6 +292,16 @@ class Scheduler(SchedulerInterface):
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
         )
+        if self.kv_cache_config.hisparse_host_num_blocks is not None:
+            hisparse_coordinator = self.kv_cache_manager.hisparse_coordinator
+            self.connector = attach_hisparse_connector(
+                self.connector,
+                self.vllm_config,
+                KVConnectorRole.SCHEDULER,
+                self.kv_cache_config,
+                hisparse_coordinator,
+            )
+            self.requires_kv_delivery = self.connector.requires_kv_delivery
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
         if self.connector is not None:
@@ -584,6 +597,14 @@ class Scheduler(SchedulerInterface):
 
                     if new_blocks is not None:
                         # The request can be scheduled.
+                        break
+
+                    # HiSparse reclamation is stream ordered and becomes
+                    # allocatable after the worker acknowledges the spill.
+                    # Yield this scheduling iteration instead of preempting a
+                    # request whose resident pages are already being reclaimed.
+                    hisparse_coordinator = self.kv_cache_manager.hisparse_coordinator
+                    if hisparse_coordinator.has_pending_reclamation():
                         break
 
                     # The request cannot be scheduled.
@@ -971,13 +992,18 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks = 0
+                reserved_blocks: int | tuple[int, ...] = 0
+                reserved_host_blocks = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    if self.kv_cache_manager.hisparse_coordinator.has_host_cache:
+                        reserved_host_blocks = (
+                            self._inflight_prefill_reserved_host_blocks()
+                        )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -990,6 +1016,7 @@ class Scheduler(SchedulerInterface):
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
+                    reserved_host_blocks=reserved_host_blocks,
                     has_scheduled_reqs=bool(self.running),
                 )
 
@@ -2380,7 +2407,7 @@ class Scheduler(SchedulerInterface):
         pool while the step that runs the copy may still be in flight.
         """
         if not self.defer_block_free or fence_seq <= self.processed_step_seq:
-            self.kv_cache_manager.block_pool.free_blocks(blocks)
+            self.kv_cache_manager.free_blocks(blocks)
             return
         self.deferred_frees.append((fence_seq, blocks[::-1]))
 
@@ -2397,7 +2424,7 @@ class Scheduler(SchedulerInterface):
                 break
             _, blocks = self.deferred_frees.popleft()
             # Free in reverse order so that the tail blocks are evicted first.
-            self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+            self.kv_cache_manager.free_blocks(reversed(blocks))
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
@@ -2498,8 +2525,7 @@ class Scheduler(SchedulerInterface):
         if self.connector.reset_cache() is False:
             return False
 
-        if self.log_stats:
-            assert self.connector_prefix_cache_stats is not None
+        if self.connector_prefix_cache_stats is not None:
             self.connector_prefix_cache_stats.reset = True
 
         return True
@@ -2603,7 +2629,7 @@ class Scheduler(SchedulerInterface):
         Returns optional kv transfer parameters to be included with the
         request outputs.
         """
-        if self.connector is None:
+        if self.connector is None or self.vllm_config.kv_transfer_config is None:
             return False, None
 
         # Free any out-of-window prefix blocks before we hand the block table to
@@ -2631,10 +2657,10 @@ class Scheduler(SchedulerInterface):
 
         return self.connector.request_finished_all_groups(request, block_ids)
 
-    def _request_remaining_blocks(self, request: Request) -> int:
-        """Blocks `request` still needs to allocate to hold its full sequence."""
+    def _request_remaining_blocks(self, request: Request) -> tuple[int, ...]:
+        """Per-pool blocks needed to hold the request's full sequence."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate_by_pool(
             request_id=request.request_id,
             num_tokens=full_num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
@@ -2645,11 +2671,34 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
         )
 
-    def _inflight_prefill_reserved_blocks(self) -> int:
-        """Num blocks in-flight prefills still need to finish (their reservation)."""
+    def _request_remaining_host_blocks(self, request: Request) -> int:
+        """HiSparse host blocks needed to hold the request's full sequence."""
+        full_num_tokens = min(request.num_tokens, self.max_model_len)
+        return (
+            self.kv_cache_manager.hisparse_coordinator.get_num_host_blocks_to_allocate(
+                request_id=request.request_id,
+                num_tokens=full_num_tokens,
+                new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
+                total_computed_tokens=request.num_computed_tokens,
+                num_local_computed_tokens=request.num_computed_tokens,
+                num_tokens_main_model=full_num_tokens,
+                apply_admission_cap=True,
+            )
+        )
 
+    def _inflight_prefill_reserved_blocks(self) -> tuple[int, ...]:
+        """Per-pool reservations needed by all in-flight prefills."""
+        reserved = [0] * len(self.kv_cache_manager.block_pools)
+        for request in self._inflight_prefills:
+            for pool_id, count in enumerate(self._request_remaining_blocks(request)):
+                reserved[pool_id] += count
+        return tuple(reserved)
+
+    def _inflight_prefill_reserved_host_blocks(self) -> int:
+        """HiSparse host reservation needed by all in-flight prefills."""
         return sum(
-            self._request_remaining_blocks(req) for req in self._inflight_prefills
+            self._request_remaining_host_blocks(request)
+            for request in self._inflight_prefills
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:

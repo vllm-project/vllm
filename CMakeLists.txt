@@ -446,6 +446,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    # CUDA cache-policy intrinsics in the row copy: CUDA-only.
+    # The op declarations and registrations are guarded by USE_ROCM.
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/hisparse_kernels.cu")
+
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
     # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.

@@ -64,6 +64,10 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+    HiSparseCacheHandle,
+    create_hisparse_cache_handle,
+)
 
 logger = init_logger(__name__)
 
@@ -132,6 +136,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     deepseek_v4 model module. The base is never instantiated directly.
     """
 
+    supports_hisparse: ClassVar[bool] = False
     # Provided by the platform subclass.
     backend_cls: ClassVar[type[AttentionBackend]]
     # KV-cache per-token block format (both layouts are paged). True (default)
@@ -331,6 +336,35 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if prefix:
             compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])
+        self.hisparse_cache: HiSparseCacheHandle | None = None
+        if (
+            vllm_config.attention_config.hisparse_config is not None
+            and self.compress_ratio == 4
+        ):
+            if not self.supports_hisparse:
+                raise NotImplementedError(
+                    "DeepSeek V4 HiSparse currently requires the FlashMLA backend; "
+                    f"got {type(self).__name__}."
+                )
+            if self.kv_cache_dtype != "fp8_ds_mla":
+                raise ValueError(
+                    "DeepSeek V4 HiSparse requires the fp8_ds_mla cache layout."
+                )
+            self.hisparse_cache = create_hisparse_cache_handle(
+                vllm_config,
+                config.index_topk,
+                index_group_scope=(
+                    self.topk_indices_buffer
+                    if self.topk_indices_buffer is not None
+                    else vllm_config
+                ),
+                is_index_group_leader=True,
+                row_width=584,
+                kv_dtype=torch.uint8,
+                storage_block_size=cache_config.block_size // self.compress_ratio,
+                row_value_bytes=576,
+            )
+            assert self.hisparse_cache is not None
 
         # Create the compressor for layers with compress_ratio > 1; after the
         # attention setup above so its KV-cache prefix (self.prefix) is set.
@@ -346,6 +380,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 k_cache_prefix=self.prefix,
                 eager_scratch_pool=eager_scratch_pool,
             )
+
+    def prepare_hisparse_for_batch(self, attn_metadata: Any | None) -> None:
+        if self.hisparse_cache is None or attn_metadata is None:
+            return
+        self.hisparse_cache.decode_batch = (
+            attn_metadata.max_query_len == 1
+            and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
+        )
 
     def forward(
         self,
@@ -472,6 +514,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
+        if self.hisparse_cache is not None:
+            layer_metadata = (
+                attn_metadata.get(self.prefix)
+                if isinstance(attn_metadata, dict)
+                else None
+            )
+            self.prepare_hisparse_for_batch(layer_metadata)
 
         # wq_b + kv_insert (+ MLA compressor when an indexer is present) ride
         # on the default stream so q stays on its consumer stream (forward_mqa

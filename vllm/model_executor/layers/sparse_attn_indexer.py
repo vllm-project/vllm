@@ -35,6 +35,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.kv_offload.sparse.hisparse_runtime import get_indexer_source
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -404,6 +405,20 @@ def sparse_attn_indexer(
             quant_block_size,
             scale_fmt,
         )
+        source = get_indexer_source(k_cache_prefix)
+        if source is not None:
+            host_cache, source_slot_mapping = source
+            if use_pcp:
+                raise NotImplementedError(
+                    "HiSparse indexer source backup does not support PCP."
+                )
+            torch.ops._C_cache_ops.hisparse_backup_indexer(
+                kv_cache,
+                slot_mapping_for_cache,
+                host_cache,
+                source_slot_mapping[: slot_mapping_for_cache.numel()],
+                head_dim,
+            )
 
     # The indexer and main MLA may classify the same short extend differently
     # because they use independent decode thresholds. Only the main MLA route

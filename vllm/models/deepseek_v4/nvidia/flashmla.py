@@ -35,6 +35,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4 (CUDA)."""
 
     backend_cls = DeepseekV4FlashMLABackend
+    supports_hisparse = True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -170,17 +171,31 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                    self.topk_indices_buffer[:num_decode_tokens],
-                    swa_metadata.token_to_req_indices,
-                    attn_metadata.block_table[:num_decodes],
-                    block_size,
-                    is_valid,
-                    output_buffers=self._global_topk_output_buffers(
-                        self.topk_indices_buffer[:num_decode_tokens]
-                    ),
-                )
-                topk_indices = global_indices.view(num_decode_tokens, 1, -1)
+                if self.hisparse_cache is not None:
+                    hisparse_cache = self.hisparse_cache
+                    kv_cache, global_indices, topk_lens = cast(
+                        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+                        hisparse_cache.resolve_topk(
+                            attn_metadata.req_id_per_token[:num_decode_tokens],
+                            block_table=attn_metadata.block_table[:num_decodes],
+                            topk_indices=self.topk_indices_buffer[:num_decode_tokens],
+                            block_size=block_size,
+                            return_valid_counts=True,
+                        ),
+                    )
+                    topk_indices = global_indices.view(num_decode_tokens, 1, -1)
+                else:
+                    global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                        self.topk_indices_buffer[:num_decode_tokens],
+                        swa_metadata.token_to_req_indices,
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                        output_buffers=self._global_topk_output_buffers(
+                            self.topk_indices_buffer[:num_decode_tokens]
+                        ),
+                    )
+                    topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
                 # C128A: pre-computed during metadata build.
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
@@ -305,13 +320,24 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             if not swa_only:
                 # Gather compressed KV
                 assert attn_metadata is not None
-                block_table = attn_metadata.block_table[num_decodes:]
+                block_table = attn_metadata.block_table[num_decodes:][
+                    chunk_start:chunk_end
+                ]
+                cache = compressed_k_cache
+                if self.hisparse_cache is not None:
+                    cache, block_table = (
+                        self.hisparse_cache.runtime.stage_prefill_cache(
+                            compressed_k_cache,
+                            block_table,
+                            seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                        )
+                    )
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
-                    compressed_k_cache,
+                    cache,
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,
-                    block_table=block_table[chunk_start:chunk_end],
+                    block_table=block_table,
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
                 )

@@ -34,6 +34,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_offload.sparse.hisparse_runtime import get_indexer_source
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -365,6 +366,13 @@ class DeepseekV32Attention(MLAAttention):
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
+        indexer_slot = (
+            slot_mapping[self.indexer.k_cache.prefix]
+            if self.indexer is not None
+            else None
+        )
+        hisparse_cache = self.hisparse_cache
+        self.impl.prepare_for_batch(attn_metadata)
 
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
@@ -390,8 +398,9 @@ class DeepseekV32Attention(MLAAttention):
             mla_k_scale = None
             indexer_k_cache = None
             mla_slot = None
+            indexer_slot = None
         else:
-            mla_kv_cache = self.kv_cache
+            mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
 
         q_c = fused_norm_rope(
@@ -411,13 +420,37 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_rope_cos_sin_cache,
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
+            indexer_slot_mapping=indexer_slot,
             indexer_k_cache=indexer_k_cache,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
+            write_kv_output=hisparse_cache is not None,
         )
+
+        if hisparse_cache is not None and mla_slot is not None:
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                kv_c,
+                k_pe,
+                self.kv_cache,
+                mla_slot,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
+
+        if self.indexer is not None and indexer_slot is not None:
+            source = get_indexer_source(self.indexer.k_cache.prefix)
+            if source is not None:
+                host_cache, source_slot_mapping = source
+                torch.ops._C_cache_ops.hisparse_backup_indexer(
+                    self.indexer.k_cache.kv_cache,
+                    indexer_slot,
+                    host_cache,
+                    source_slot_mapping[: indexer_slot.numel()],
+                    self.indexer.head_dim,
+                )
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)

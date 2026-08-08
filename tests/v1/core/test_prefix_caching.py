@@ -42,7 +42,10 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpecKind,
     MambaSpec,
@@ -128,6 +131,476 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
                 ),
             )
         ],
+    )
+
+
+def test_independent_block_pool_domains():
+    block_size = 16
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        num_blocks_by_pool=[4, 3],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["host"], spec, block_pool_id=0),
+            KVCacheGroupSpec(["device"], spec, block_pool_id=1),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    reserved = make_request("reserved", list(range(16)), block_size, sha256)
+    assert (
+        manager.allocate_slots(
+            reserved,
+            num_new_tokens=16,
+            reserved_blocks=(2, 0),
+        )
+        is not None
+    )
+    manager.free(reserved)
+
+    request = make_request("r", list(range(48)), block_size, sha256)
+
+    blocks = manager.allocate_slots(request, num_new_tokens=32)
+    assert blocks is not None
+    block_ids = blocks.get_block_ids()
+    assert [len(ids) for ids in block_ids] == [2, 2]
+    assert all(len(set(ids)) == 2 for ids in block_ids)
+    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [1, 0]
+
+    request.num_computed_tokens = 32
+    assert manager.allocate_slots(request, num_new_tokens=16) is None
+
+    request_blocks = manager.pop_blocks_for_free(request)
+    assert {block.pool_id for block in request_blocks} == {0, 1}
+    manager.free_blocks(request_blocks)
+    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [3, 2]
+
+
+def test_hisparse_ephemeral_pool_skips_caching_without_disabling_zeroing():
+    block_size = 16
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mamba = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 4),),
+        dtypes=(torch.float32,),
+    )
+    hot = HiSparseHotSpec(
+        block_size=block_size,
+        page_size=block_size * 4,
+        blocks_per_request=2,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        num_blocks_by_pool=[4, 4],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full, block_pool_id=0),
+            KVCacheGroupSpec(["mamba"], mamba, block_pool_id=0),
+            KVCacheGroupSpec(
+                ["hot"],
+                hot,
+                block_pool_id=1,
+                enable_prefix_caching=False,
+            ),
+        ],
+    )
+    assert config.needs_kv_cache_zeroing
+    assert config.zeroing_block_pool_ids == {0}
+
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    assert [pool.enable_caching for pool in manager.block_pools] == [True, False]
+    assert [
+        group_manager.enable_caching
+        for group_manager in manager.coordinator.single_type_managers
+    ] == [True, True, False]
+    assert [
+        group_manager._record_new_block_ids
+        for group_manager in manager.coordinator.single_type_managers
+    ] == [True, False, False]
+
+
+def test_prefix_cache_source_rebuilds_ephemeral_groups():
+    block_size = 16
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    config = KVCacheConfig(
+        num_blocks=20,
+        num_blocks_by_pool=[20],
+        hisparse_host_num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=None,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                full,
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                    blocks_per_request=2,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    assert config.transfer_group_ids == (0,)
+    assert config.transfer_groups == (config.kv_cache_groups[0],)
+    source_blocks = [0]
+    assert config.select_transfer_block_ids((source_blocks, [1], [2])) == (
+        source_blocks,
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    assert [pool.enable_caching for pool in manager.block_pools] == [False]
+    host_pool = manager.hisparse_coordinator.get_host_block_pool()
+    assert host_pool is not None
+    assert host_pool not in manager.block_pools
+    assert host_pool.enable_caching
+    assert [
+        group_manager.enable_caching
+        for group_manager in manager.coordinator.single_type_managers
+    ] == [True, False, False]
+    assert [g.enable_kv_transfer for g in config.kv_cache_groups] == [
+        True,
+        False,
+        False,
+    ]
+    tokens = list(range(32))
+    request = make_request("source", tokens, block_size, sha256)
+    assert manager.allocate_slots(request, num_new_tokens=32) is not None
+    source_block = manager.get_blocks(request.request_id).blocks[0][0]
+    assert source_block.pool_id is None
+    assert manager.hisparse_coordinator.owns_block(source_block)
+    source_block_id = manager.get_block_ids(request.request_id)[0][0]
+    manager.free(request)
+
+    reused = make_request("reused", list(range(2 * block_size)), block_size, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(reused)
+    assert num_computed == block_size
+    assert computed.get_block_ids() == ([source_block_id], [], [])
+
+    new_blocks = manager.allocate_slots(
+        reused,
+        num_new_tokens=block_size,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+    assert new_blocks is not None
+    assert [len(group) for group in new_blocks.blocks] == [1, 2, 2]
+    assert manager.get_block_ids(reused.request_id)[0][0] == source_block_id
+
+    reserved = host_pool.get_num_free_blocks()
+    blocked = make_request("blocked", list(range(100, 116)), block_size, sha256)
+    assert (
+        manager.allocate_slots(
+            blocked,
+            num_new_tokens=block_size,
+            reserved_host_blocks=reserved,
+        )
+        is None
+    )
+
+
+def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
+    block_size = 16
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    config = KVCacheConfig(
+        num_blocks=18,
+        num_blocks_by_pool=[18],
+        hisparse_host_num_blocks=18,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=None,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                full,
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                    blocks_per_request=2,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=160,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    first = make_request("first", list(range(128)), block_size, sha256)
+    assert manager.allocate_slots(first, num_new_tokens=128) is not None
+    assert manager.hisparse_coordinator.are_requests_fully_resident(["first"])
+    assert manager.block_pools[0].get_num_free_blocks() == 1
+
+    second = make_request("second", list(range(16)), block_size, sha256)
+    assert manager.allocate_slots(second, num_new_tokens=16) is None
+    assert manager.hisparse_coordinator.has_pending_reclamation()
+    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
+    assert len(spills) == 4
+    manager.hisparse_coordinator.complete_spills(
+        [transfer.transfer_id for transfer in spills]
+    )
+    assert not manager.hisparse_coordinator.has_pending_reclamation()
+    assert not manager.hisparse_coordinator.are_requests_fully_resident(["first"])
+    assert manager.allocate_slots(second, num_new_tokens=16) is not None
+
+    first_blocks = manager.get_block_ids("first")
+    assert first_blocks[2][:4] == [0, 0, 0, 0]
+    assert all(block_id != 0 for block_id in first_blocks[2][4:])
+    assert len(first_blocks[3]) == 2
+    command = manager.hisparse_coordinator.build_offload_command([])
+    assert command.block_table_updates == {"first": first_blocks}
+
+    first.num_computed_tokens = 128
+    assert manager.allocate_slots(first, num_new_tokens=16) is None
+    assert manager.hisparse_coordinator.has_pending_reclamation()
+    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
+    assert len(spills) == 2
+    manager.hisparse_coordinator.complete_spills(
+        [transfer.transfer_id for transfer in spills]
+    )
+    assert not manager.hisparse_coordinator.has_pending_reclamation()
+    assert manager.allocate_slots(first, num_new_tokens=16) is not None
+
+
+def test_hisparse_reclamation_caps_each_worker_spill_batch():
+    block_size = 16
+    max_model_len = 160
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    config = KVCacheConfig(
+        num_blocks=34,
+        num_blocks_by_pool=[34],
+        hisparse_host_num_blocks=34,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=None,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                full,
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                    blocks_per_request=2,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=max_model_len,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    for request_id in ("first", "second"):
+        request = make_request(request_id, list(range(128)), block_size, sha256)
+        assert manager.allocate_slots(request, num_new_tokens=128) is not None
+
+    manager.hisparse_coordinator.reclaim_resident_blocks(0, 100)
+    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
+    assert len(spills) * block_size == max_model_len
+    assert manager.hisparse_coordinator.has_pending_reclamation()
+
+    manager.hisparse_coordinator.complete_spills(
+        [transfer.transfer_id for transfer in spills]
+    )
+    assert not manager.hisparse_coordinator.has_pending_reclamation()
+
+
+def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
+    block_size = 16
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    config = KVCacheConfig(
+        num_blocks=32,
+        num_blocks_by_pool=[32],
+        hisparse_host_num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                full,
+                block_pool_id=None,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                full,
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                    blocks_per_request=2,
+                ),
+                block_pool_id=0,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    tokens = list(range(block_size))
+    request = make_request("resident", tokens, block_size, sha256)
+    assert manager.allocate_slots(request, num_new_tokens=block_size) is not None
+    blocks = manager.get_block_ids(request.request_id)
+    assert len(blocks[2]) == 1
+    assert blocks[3] == []
+    assert manager.hisparse_coordinator.are_requests_fully_resident(
+        [request.request_id]
+    )
+
+    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
+    assert len(spills) == 1
+    assert spills[0].after_forward
+    manager.hisparse_coordinator.complete_spills([spills[0].transfer_id])
+    blocks = manager.get_block_ids(request.request_id)
+    assert len(blocks[2]) == 1
+    assert blocks[3] == []
+
+    manager.free(request)
+    reused = make_request("reused", list(range(2 * block_size)), block_size, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(reused)
+    assert num_computed == block_size
+    assert (
+        manager.allocate_slots(
+            reused,
+            num_new_tokens=1,
+            num_new_computed_tokens=num_computed,
+            new_computed_blocks=computed,
+        )
+        is not None
+    )
+    reused_blocks = manager.get_block_ids(reused.request_id)
+    assert reused_blocks[2][0] == 0
+    assert len(reused_blocks[3]) == 2
+    assert not manager.hisparse_coordinator.are_requests_fully_resident(
+        [reused.request_id]
     )
 
 

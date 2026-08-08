@@ -3,7 +3,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from math import prod
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -23,11 +23,21 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
     KVQuantMode,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+)
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+    allocate_pinned_host_pool,
+    check_hisparse_host_memory,
+)
+from vllm.v1.kv_offload.sparse.hisparse_worker import (
+    HiSparseWorker,
+    init_hisparse_worker,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
@@ -36,6 +46,9 @@ from vllm.v1.worker.utils import (
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.block_table import BlockTables
 
 logger = init_logger(__name__)
 
@@ -74,7 +87,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 # get_kv_cache_layout() needs the current vLLM config.
                 with set_current_vllm_config(vllm_config):
                     indexes = backend.indexes_kv_by_block_stride()
-                spec = replace(spec, indexes_kv_by_block_stride=indexes)
+                spec = replace(
+                    spec,
+                    indexes_kv_by_block_stride=indexes,
+                    supported_kernel_block_sizes=tuple(
+                        backend.get_supported_kernel_block_sizes()
+                    ),
+                )
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
 
@@ -108,6 +127,12 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
+        if isinstance(
+            kv_cache_group_spec.kv_cache_spec,
+            (HiSparseHotSpec, HiSparseResidentSpec),
+        ):
+            attn_groups.append([])
+            continue
         if active_layer_names is not None:
             layer_names = list(active_layer_names.intersection(layer_names))
 
@@ -117,7 +142,7 @@ def init_attn_backend(
         group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
         group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
 
-        for layer_name in layer_names:
+        for layer_name in attn_layers:
             attn_backend = attn_layers[layer_name].get_attn_backend()
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
@@ -181,17 +206,32 @@ def init_attn_backend(
 
 
 def _allocate_kv_cache(
-    kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
+    kv_cache_config: KVCacheConfig,
+    shared_layers: dict[str, str],
+    device: torch.device,
 ):
+    host_bytes = sum(
+        tensor.size
+        for tensor in kv_cache_config.kv_cache_tensors
+        if tensor.host_resident
+    )
+    if host_bytes:
+        check_hisparse_host_memory(host_bytes)
+
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-    packed_backing: torch.Tensor | None = None
+    packed_backings: dict[int, torch.Tensor] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        if kv_cache_tensor.block_stride > 0:
+        if kv_cache_tensor.host_resident:
+            tensor = allocate_pinned_host_pool(kv_cache_tensor.size)
+        elif kv_cache_tensor.block_stride > 0:
+            assert kv_cache_tensor.block_pool_id is not None
             # Allocate once; all packed tensors alias the same backing.
+            packed_backing = packed_backings.get(kv_cache_tensor.block_pool_id)
             if packed_backing is None:
                 packed_backing = torch.zeros(
                     kv_cache_tensor.size, dtype=torch.int8, device=device
                 )
+                packed_backings[kv_cache_tensor.block_pool_id] = packed_backing
             tensor = packed_backing
         else:
             tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
@@ -460,7 +500,8 @@ def init_kv_cache(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
-) -> dict[str, Any]:
+    block_tables: "BlockTables",
+) -> tuple[dict[str, Any], "HiSparseWorker | None"]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     kv_cache_raw_tensors = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device
@@ -474,6 +515,19 @@ def init_kv_cache(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_config=kv_cache_config,
     )
+    hisparse_worker = None
+    if vllm_config.attention_config.hisparse_config is not None:
+        hisparse_worker = init_hisparse_worker(
+            forward_context=forward_context,
+            kv_cache_config=kv_cache_config,
+            raw_tensors=kv_cache_raw_tensors,
+            kv_caches=kv_caches,
+            block_tables=block_tables,
+            max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+            max_model_len=vllm_config.model_config.max_model_len,
+            max_concurrent_batches=vllm_config.max_concurrent_batches,
+            device=device,
+        )
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
     # decoder layer, so a layer name carries two integers (layer + module index).
     num_attn_module = (
@@ -482,8 +536,14 @@ def init_kv_cache(
         in ("longcat_flash", "longcat_flash_ngram")
         else 1
     )
-    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
-    return kv_caches
+    bindable_caches = {
+        name: cache for name, cache in kv_caches.items() if name in forward_context
+    }
+    bind_kv_cache(bindable_caches, forward_context, runner_kv_caches, num_attn_module)
+    runner_kv_caches.extend(
+        cache for name, cache in kv_caches.items() if name not in forward_context
+    )
+    return kv_caches, hisparse_worker
 
 
 def build_slot_mappings_by_layer(

@@ -12,6 +12,7 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -46,6 +47,8 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -65,6 +68,269 @@ from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_hisparse_memory_usage_keeps_indexer_source_on_host():
+    class FixedMemorySpec:
+        def __init__(self, size: int):
+            self.size = size
+
+        def max_memory_usage_bytes(self, _vllm_config):
+            return self.size
+
+    specs = {
+        "model.layers.0.self_attn": FixedMemorySpec(300),
+        "model.layers.0.self_attn.indexer": FixedMemorySpec(50),
+    }
+    group = KVCacheGroupSpec(
+        layer_names=list(specs),
+        kv_cache_spec=UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs=specs,  # type: ignore[arg-type]
+        ),
+    )
+    config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=object()))
+
+    assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == 50
+
+
+@pytest.mark.parametrize(
+    ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
+    [
+        (64, (64,), (64,), 64),
+        (128, (64,), (64,), 64),
+        (256, (64,), (64,), 64),
+        (64, (32, 64), (16, 32), 32),
+    ],
+)
+def test_hisparse_hma_uses_backend_gpu_block_size(
+    block_size, main_sizes, indexer_sizes, gpu_block_size
+):
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            supported_kernel_block_sizes=main_sizes,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            supported_kernel_block_sizes=indexer_sizes,
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    group = KVCacheGroupSpec(list(specs), group_spec)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+
+    cache_config = kv_cache_utils._get_hisparse_hma_config(
+        config,
+        group,
+        available_memory=2**30,
+        host_budget=2**30,
+        log_layout=False,
+    )
+
+    host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
+    assert cache_config.num_blocks_by_pool == [7]
+    assert cache_config.hisparse_host_num_blocks == 7
+    assert host_group.block_pool_id is None
+    assert indexer_group.block_pool_id == 0
+    assert host_group.kv_cache_spec.block_size == block_size
+    assert indexer_group.kv_cache_spec.block_size == gpu_block_size
+    resident_groups = [
+        group
+        for group in auxiliary_groups
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+    ]
+    hot_groups = [
+        group
+        for group in auxiliary_groups
+        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+    ]
+    assert resident_groups
+    assert all(isinstance(group.kv_cache_spec, HiSparseHotSpec) for group in hot_groups)
+    assert len(resident_groups) == len(hot_groups)
+    assert all(
+        group.kv_cache_spec.block_size == gpu_block_size for group in resident_groups
+    )
+    assert all(group.kv_cache_spec.block_size == gpu_block_size for group in hot_groups)
+    assert all(
+        group.kv_cache_spec.blocks_per_request == 256 // gpu_block_size
+        for group in hot_groups
+    )
+
+
+def test_hisparse_hma_rejects_mixed_hot_page_sizes():
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            supported_kernel_block_sizes=(64,),
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            supported_kernel_block_sizes=(64,),
+        ),
+        "model.layers.1.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=640,
+            dtype=torch.bfloat16,
+            supported_kernel_block_sizes=(64,),
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    group = KVCacheGroupSpec(list(specs), group_spec)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+
+    with pytest.raises(ValueError, match="require one page size"):
+        kv_cache_utils._get_hisparse_hma_config(
+            config,
+            group,
+            available_memory=2**30,
+            host_budget=2**30,
+            log_layout=False,
+        )
+
+
+def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
+    c4_main = "model.layers.2.attn"
+    c4_indexer = f"{c4_main}.indexer.k_cache"
+    c128_main = "model.layers.3.attn"
+    c128_indexer = f"{c128_main}.indexer.k_cache"
+    full_specs = {
+        c4_main: MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            compress_ratio=4,
+            model_version="deepseek_v4",
+            alignment=576,
+            supported_kernel_block_sizes=(256,),
+        ),
+        c4_indexer: MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            compress_ratio=4,
+            supported_kernel_block_sizes=(256,),
+        ),
+        c128_main: MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            compress_ratio=128,
+            model_version="deepseek_v4",
+            alignment=576,
+            supported_kernel_block_sizes=(256,),
+        ),
+        c128_indexer: MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            compress_ratio=128,
+            supported_kernel_block_sizes=(256,),
+        ),
+    }
+    full_uniform = UniformTypeKVCacheSpecs.from_specs(full_specs)
+    assert full_uniform is not None
+    swa_spec = SlidingWindowMLASpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        sliding_window=128,
+    )
+    groups = [
+        KVCacheGroupSpec(list(full_specs), full_uniform),
+        KVCacheGroupSpec(["model.layers.2.attn.swa_cache"], swa_spec),
+    ]
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+
+    cache_config = kv_cache_utils._get_hisparse_hma_config(
+        config,
+        groups,
+        available_memory=2**30,
+        host_budget=2**30,
+        log_layout=False,
+    )
+
+    source, indexer, *other_groups = cache_config.kv_cache_groups
+    assert source.layer_names == [
+        c4_main,
+        f"{c4_indexer}.hisparse_source",
+        c128_main,
+        c128_indexer,
+    ]
+    assert indexer.layer_names == [c4_indexer]
+    assert indexer.kv_cache_spec.block_size == 256
+    assert source.block_pool_id is None
+    hisparse_gpu_groups = [
+        group for group in other_groups if not group.enable_kv_transfer
+    ]
+    assert all(group.block_pool_id == 0 for group in hisparse_gpu_groups)
+    regular_groups = [group for group in other_groups if group.enable_kv_transfer]
+    assert all(group.block_pool_id == 0 for group in regular_groups)
+    assert {name for group in regular_groups for name in group.layer_names} == {
+        "model.layers.2.attn.swa_cache"
+    }
+    host_layers = {
+        name
+        for tensor in cache_config.kv_cache_tensors
+        if tensor.host_resident
+        for name in tensor.shared_by
+    }
+    assert host_layers == {c4_main, f"{c4_indexer}.hisparse_source"}
+    device_layers = {
+        name
+        for tensor in cache_config.kv_cache_tensors
+        if not tensor.host_resident
+        for name in tensor.shared_by
+    }
+    assert {c128_main, c128_indexer} <= device_layers
+    hot = next(
+        group
+        for group in other_groups
+        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+    )
+    assert all(name.startswith(f"{c4_main}.") for name in hot.layer_names)
+    assert hot.kv_cache_spec.block_size == 256
+    assert hot.kv_cache_spec.blocks_per_request == 16
 
 
 @pytest.fixture(autouse=True)

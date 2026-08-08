@@ -16,7 +16,9 @@ import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    AttentionConfig,
     CompilationConfig,
+    HiSparseConfig,
     KernelConfig,
     ModelConfig,
     ParallelConfig,
@@ -64,6 +66,34 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+def test_hisparse_requires_v2_model_runner():
+    config = object.__new__(VllmConfig)
+    config.attention_config = AttentionConfig(
+        hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+    )
+
+    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
+        assert config.use_v2_model_runner
+    with (
+        patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", False),
+        pytest.raises(ValueError, match="requires Model Runner V2"),
+    ):
+        _ = config.use_v2_model_runner
+
+
+def test_hisparse_rejects_decode_context_parallelism():
+    with pytest.raises(ValueError, match="decode context parallelism"):
+        VllmConfig(
+            attention_config=AttentionConfig(
+                hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+            ),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+            ),
+        )
 
 
 @pytest.mark.parametrize(
