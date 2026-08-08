@@ -479,6 +479,16 @@ class Gemma4Parser(ParserEngine):
                 return True
         return True
 
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        # Deliberately keeps the full-sequence scan. Unlike the other engines,
+        # this predicate defaults to True when the sequence holds no marker at
+        # all, and <|turn>/<tool_response> flip meaning with _thinking_enabled,
+        # so a delta-scoped answer cannot tell "no marker yet in this step" from
+        # "no marker anywhere" without carrying state across steps.
+        return self.is_reasoning_end(list(input_ids))
+
     def _prompt_ends_in_open_reasoning(self, prompt_token_ids: Sequence[int]) -> bool:
         """Whether the prompt tail is inside an open ``<|channel>`` block.
 

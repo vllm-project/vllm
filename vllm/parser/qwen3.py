@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -273,4 +274,36 @@ class Qwen3Parser(ParserEngine):
                     ):
                         continue
                     return True
+        return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        if not delta_ids:
+            return self.is_reasoning_end(list(input_ids))
+        end_id = self._reasoning_end_token_id
+        start_id = self._reasoning_start_token_id
+        tool_call_id = self._tool_call_token_id
+        tool_call_end_id = self._tool_call_end_token_id
+        for i in range(len(delta_ids) - 1, -1, -1):
+            token_id = delta_ids[i]
+            if end_id is not None and token_id == end_id:
+                return True
+            # An open <tool_call> ends reasoning; one already closed later in this
+            # step does not. Tokens after i within the step are all the sequence
+            # has past this point.
+            if (
+                tool_call_id is not None
+                and token_id == tool_call_id
+                and (
+                    tool_call_end_id is None
+                    or not any(
+                        delta_ids[j] == tool_call_end_id
+                        for j in range(i + 1, len(delta_ids))
+                    )
+                )
+            ):
+                return True
+            if start_id is not None and token_id == start_id:
+                return False
         return False

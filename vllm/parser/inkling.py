@@ -349,6 +349,23 @@ class InklingParser(ParserEngine):
                 return True
         return False
 
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        if not delta_ids:
+            return self.is_reasoning_end(list(input_ids))
+        vocab = self.vocab
+        thinking_id = vocab.get(CONTENT_THINKING)
+        text_id = vocab.get(CONTENT_TEXT)
+        model_id = vocab.get(MESSAGE_MODEL)
+        end_sampling_id = vocab.get(CONTENT_MODEL_END_SAMPLING)
+        for token_id in reversed(delta_ids):
+            if token_id in (thinking_id, model_id):
+                return False
+            if token_id in (text_id, end_sampling_id):
+                return True
+        return False
+
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         vocab = self.vocab
         thinking_id = vocab.get(CONTENT_THINKING)

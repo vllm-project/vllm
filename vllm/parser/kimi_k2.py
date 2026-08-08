@@ -254,6 +254,25 @@ class KimiK2Parser(ParserEngine):
                 return True
         return False
 
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        if not self.thinking_enabled:
+            return True
+        if not delta_ids:
+            return self.is_reasoning_end(list(input_ids))
+        start_id = self._start_token_id
+        end_id = self._end_token_id
+        tool_section_id = self._tool_section_start_token_id
+        for token_id in reversed(delta_ids):
+            if start_id is not None and token_id == start_id:
+                return False
+            if end_id is not None and token_id == end_id:
+                return True
+            if tool_section_id is not None and token_id == tool_section_id:
+                return True
+        return False
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self.thinking_enabled:
             return input_ids
