@@ -16,18 +16,23 @@ __global__ void expandInputRowsKernel(
   int64_t expanded_dest_row = blockIdx.x;
   int64_t const expanded_source_row =
       expanded_dest_row_to_expanded_source_row[expanded_dest_row];
+  int64_t const num_expanded_source_rows = num_rows * k;
+  bool const valid_source_row =
+      expanded_source_row >= 0 && expanded_source_row < num_expanded_source_rows;
+  bool const valid_dest_row =
+      !CHECK_SKIPPED || expanded_dest_row < *num_dest_rows;
 
-  if (threadIdx.x == 0) {
+  if (threadIdx.x == 0 && valid_source_row) {
     assert(expanded_dest_row <= INT32_MAX);
     expanded_source_row_to_expanded_dest_row[expanded_source_row] =
         static_cast<int>(expanded_dest_row);
     // skip non local expert token
-    if (!CHECK_SKIPPED || blockIdx.x < *num_dest_rows) {
+    if (valid_dest_row) {
       permuted_idx[expanded_dest_row] = expanded_source_row;
     }
   }
 
-  if (!CHECK_SKIPPED || blockIdx.x < *num_dest_rows) {
+  if (valid_source_row && valid_dest_row) {
     // Load 128-bits per thread
     constexpr int64_t ELEM_PER_THREAD = 128 / cutlass::sizeof_bits<T>::value;
     using DataElem = cutlass::Array<T, ELEM_PER_THREAD>;
