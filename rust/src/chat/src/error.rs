@@ -67,6 +67,8 @@ pub enum Error {
          but the prompt contains {prompt_len} input tokens"
     )]
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error("truncate_prompt_tokens is not supported for multimodal requests")]
+    TruncateUnsupportedWithMultimodal,
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
@@ -90,7 +92,8 @@ impl Error {
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedModality { .. }
-            | Self::MmLimitExceeded { .. } => true,
+            | Self::MmLimitExceeded { .. }
+            | Self::TruncateUnsupportedWithMultimodal => true,
 
             _ => false,
         }

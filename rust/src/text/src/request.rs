@@ -151,6 +151,20 @@ impl Default for SamplingParams {
     }
 }
 
+/// Which side of the prompt to discard when `truncate_prompt_tokens` is active.
+///
+/// Mirrors the Python `truncation_side` option on `TokenizeParams`:
+/// `Right` keeps the first N tokens (truncates from the end); `Left` keeps
+/// the last N tokens (truncates from the start).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TruncationSide {
+    /// Keep the last N tokens, discarding the prompt prefix.
+    Left,
+    /// Keep the first N tokens, discarding the prompt suffix.
+    Right,
+}
+
 /// One raw text-generation request ready to be tokenized or sent directly to
 /// the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,6 +192,17 @@ pub struct TextRequest {
     pub priority: i32,
     /// Salt for prefix cache isolation in multi-user environments.
     pub cache_salt: Option<String>,
+    /// Number of tokens to keep:
+    /// - `None` means no truncation.
+    /// - `< 0` (e.g. -1) maps to `max_model_len - max_tokens`.
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    ///
+    /// Defaults to [`TruncationSide::Left`] (drop prompt prefix) when unset,
+    /// matching the `generate` / `draft` default in
+    /// `vllm/tokenizers/registry.py`.
+    #[serde(default)]
+    pub truncation_side: Option<TruncationSide>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
     /// Override data parallel rank.
@@ -213,6 +238,8 @@ impl TextRequest {
             intermediate: true,
             priority: 0,
             cache_salt: None,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             add_special_tokens: false,
             data_parallel_rank: None,
             session_id: None,
@@ -238,6 +265,17 @@ impl TextRequest {
             return Err(Error::EmptyStopString {
                 request_id: self.request_id.clone(),
             });
+        }
+        if let Some(n) = self.truncate_prompt_tokens
+            && n < -1
+        {
+            return Err(Error::InvalidTruncatePromptTokens {
+                request_id: self.request_id.clone(),
+                value: n,
+            });
+        }
+        if self.mm_features.is_some() && self.truncate_prompt_tokens.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
         }
         Ok(())
     }

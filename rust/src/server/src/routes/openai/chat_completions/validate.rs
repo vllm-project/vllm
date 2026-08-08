@@ -82,11 +82,20 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    reject_non_default(
-        request.truncate_prompt_tokens.as_ref(),
-        "truncate_prompt_tokens",
-        "truncate_prompt_tokens is not supported.",
-    )?;
+    if let Some(t) = request.truncate_prompt_tokens
+        && t < -1
+    {
+        bail_invalid_request!(
+            param = "truncate_prompt_tokens",
+            "truncate_prompt_tokens must be >= -1."
+        );
+    }
+    if request.echo && request.truncate_prompt_tokens.is_some() {
+        bail_invalid_request!(
+            param = "echo",
+            "`echo=true` is not supported with `truncate_prompt_tokens`."
+        );
+    }
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",

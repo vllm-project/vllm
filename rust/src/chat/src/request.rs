@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 pub use vllm_parser::tool::Tool as ChatTool;
-pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
+pub use vllm_text::{SamplingParams, TruncationSide};
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
@@ -479,6 +479,12 @@ pub struct ChatRequest {
     /// output. If `true`, callers may receive zero or more incremental
     /// content events before the final terminal one.
     pub intermediate: bool,
+    /// Number of tokens to keep:
+    /// - `None` means no truncation.
+    /// - `< 0` (e.g. -1) maps to `max_model_len - max_tokens`.
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    pub truncation_side: Option<TruncationSide>,
     /// Request scheduling priority (lower means earlier handling; default 0).
     pub priority: i32,
     /// Documents for RAG (retrieval-augmented generation), passed to the chat
@@ -512,6 +518,8 @@ impl ChatRequest {
             parallel_tool_calls: true,
             decode_options: TextDecodeOptions::default(),
             intermediate: true,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             priority: 0,
             documents: None,
             cache_salt: None,
@@ -537,6 +545,17 @@ impl ChatRequest {
             }
             (GenerationPromptMode::NoGenerationPrompt, _)
             | (GenerationPromptMode::StartNewAssistant, _) => {}
+        }
+        if let Some(n) = self.truncate_prompt_tokens
+            && n < -1
+        {
+            return Err(Error::Text(vllm_text::Error::InvalidTruncatePromptTokens {
+                request_id: self.request_id.clone(),
+                value: n,
+            }));
+        }
+        if self.has_multimodal() && self.truncate_prompt_tokens.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
         }
         Ok(())
     }

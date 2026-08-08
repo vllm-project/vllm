@@ -171,6 +171,11 @@ pub fn to_text_request(
         sampling_params,
         decode_options,
         intermediate: stream,
+        // The gRPC generate_request proto defines truncate_prompt_tokens as
+        // uint32, so we cannot pass the -1 sentinel value through gRPC.
+        // Truncation is rejected above until the proto supports it.
+        truncate_prompt_tokens: None,
+        truncation_side: None,
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
