@@ -28,6 +28,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
+from vllm.model_executor.warmup.fused_moe_warmup import fused_moe_wna16_warmup
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
@@ -128,6 +129,9 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         fa4_cutedsl_warmup(worker)
+        fused_moe_wna16_warmup(
+            worker.get_model(), worker.scheduler_config.max_num_batched_tokens
+        )
         sparse_mla_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
