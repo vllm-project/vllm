@@ -39,7 +39,7 @@ DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
-All2AllBackend = Literal[
+BuiltinAll2AllBackend = Literal[
     "naive",
     "pplx",
     "deepep_high_throughput",
@@ -53,6 +53,16 @@ All2AllBackend = Literal[
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
 ]
+# Preserve built-in CLI choices while accepting OOT backends.
+All2AllBackend = BuiltinAll2AllBackend | str
+SEQUENCE_PARALLEL_MOE_BACKENDS = {
+    "allgather_reducescatter",
+    "deepep_high_throughput",
+    "deepep_low_latency",
+    "mori_high_throughput",
+    "mori_low_latency",
+    "nixl_ep",
+}
 
 
 @config
@@ -672,15 +682,7 @@ class ParallelConfig:
     @property
     def use_sequence_parallel_moe(self) -> bool:
         return (
-            self.all2all_backend
-            in (
-                "allgather_reducescatter",
-                "deepep_high_throughput",
-                "deepep_low_latency",
-                "mori_high_throughput",
-                "mori_low_latency",
-                "nixl_ep",
-            )
+            self.all2all_backend in SEQUENCE_PARALLEL_MOE_BACKENDS
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
             and self.data_parallel_size > 1
