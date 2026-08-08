@@ -326,3 +326,52 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
                 assert desc.num_tokens == num_tokens
                 assert desc.num_reqs is None
             assert desc.num_active_loras == 0
+
+
+def test_dynamic_sd_skips_zero_draft_tokens_in_cudagraph_schedule(monkeypatch):
+    """K=0 in the DSD schedule must not produce decode_query_len=0.
+
+    DSpark (anchor-as-first) passes ``num_query_per_req == num_speculative_tokens``
+    to the draft CudaGraphManager, so ``num_new_sampled_tokens_per_step`` recovers
+    as 0. A schedule entry with K=0 would otherwise crash during candidate init.
+    """
+
+    max_num_seqs = 128
+    max_spec_tokens = 5
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=max_num_seqs,
+        max_spec_tokens=max_spec_tokens,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        use_dynamic_sd=True,
+        num_spec_per_batch_size=[
+            (1, 32, 5),
+            (33, 64, 3),
+            (65, 96, 1),
+            (97, 128, 0),
+        ],
+    )
+    draft_decode_query_len = max_spec_tokens
+
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=draft_decode_query_len,
+    )
+
+    scheduled_query_lens = {5, 3, 1}
+    captured_query_lens = {
+        desc.uniform_token_count
+        for descs in manager._candidates.values()
+        for desc in descs
+        if desc.cg_mode == CUDAGraphMode.FULL
+        and desc.uniform_token_count is not None
+    }
+    assert captured_query_lens == scheduled_query_lens
