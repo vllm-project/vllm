@@ -456,6 +456,17 @@ class ModelConfig:
         # here early.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
+            # Setting a modality's limit to 0 disables that modality exactly the
+            # way `language_model_only` disables all of them (see
+            # `MultiModalRegistry.supports_multimodal_inputs`), so it likewise
+            # affects the language model's computation graph. Only which
+            # modalities are disabled matters; the non-zero counts bound request
+            # validation rather than the graph and stay ignored.
+            factors["disabled_mm_modalities"] = sorted(
+                modality
+                for modality, options in self.multimodal_config.limit_per_prompt.items()
+                if options.count == 0
+            )
         return hash_factors(factors)
 
     def _update_nested(
