@@ -68,6 +68,8 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
+    ResponsesCountTokensRequest,
+    ResponsesCountTokensResponse,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
@@ -338,6 +340,49 @@ class OpenAIServingResponses(GenerateBaseServing):
             self._create_responses(request, raw_request), request, raw_request
         )
 
+    async def count_tokens(
+        self,
+        request: ResponsesCountTokensRequest,
+        raw_request: Request | None = None,
+    ) -> ResponsesCountTokensResponse | ErrorResponse:
+        """
+        Count the number of tokens in the input payload without running inference.
+        This mirrors the Anthropic /v1/messages/count_tokens endpoint.
+        """
+        # 1. Check if the model is loaded and valid
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        # 2. Resolve previous_response_id if provided to include context tokens
+        prev_response = None
+        if request.previous_response_id is not None:
+            async with self.response_store_lock:
+                prev_response = self.response_store.get(request.previous_response_id)
+            if prev_response is None:
+                return self._make_not_found_error(request.previous_response_id)
+
+        # 3. Preprocess the request to get the engine inputs (tokenized prompts)
+        # This reuses the exact same logic as create_responses, but stops
+        # before inference.
+        if self.use_harmony:
+            _, engine_inputs = self._make_request_with_harmony(
+                request, prev_response
+            )
+        else:
+            _, engine_inputs = await self._make_request(request, prev_response)
+
+        total_input_tokens = sum(  # type: ignore
+            len(engine_input["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
+            for engine_input in engine_inputs
+            if "prompt_token_ids" in engine_input
+        )
+
+        return ResponsesCountTokensResponse(input_tokens=total_input_tokens)
+    
+     
+    
+    
     async def _create_responses(
         self, request: ResponsesRequest, raw_request: Request | None = None
     ) -> (

@@ -632,6 +632,25 @@ class ResponsesRequest(OpenAIBaseModel):
 
         return data
 
+class ResponsesCountTokensRequest(ResponsesRequest):
+    """
+    Request model for the /v1/responses/input_tokens endpoint.
+    
+    Inherits from ResponsesRequest to ensure full compatibility with clients 
+    that send the exact same JSON payload as a standard /v1/responses request. 
+    Inference-specific fields (e.g., temperature, max_output_tokens, stream) 
+    are accepted but will be ignored during the token counting process.
+    """
+    pass
+
+
+class ResponsesCountTokensResponse(OpenAIBaseModel):
+    """
+    Response model for the /v1/responses/input_tokens endpoint.
+    Returns the number of tokens in the input payload.
+    """
+    input_tokens: int
+
 
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
