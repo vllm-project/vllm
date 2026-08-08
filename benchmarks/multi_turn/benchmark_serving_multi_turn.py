@@ -555,13 +555,14 @@ async def send_turn(
     return rs
 
 
-async def poisson_sleep(request_rate: float, verbose: bool = False) -> None:
+async def poisson_sleep(mean_interval: float, verbose_header: str = None) -> None:
     # Generate a random time interval from the Poisson distribution
-    assert request_rate > 0
+    if mean_interval <= 0:
+        return
 
-    interval = np.random.exponential(1.0 / request_rate)
-    if verbose:
-        logger.info(f"Sleeping for {interval:.3f} seconds...")
+    interval = np.random.exponential(mean_interval)
+    if verbose_header is not None:
+        logger.info(f"{verbose_header} sleeping for {interval:.3f} seconds...{Color.RESET}")
     await asyncio.sleep(interval)
 
 
@@ -703,17 +704,17 @@ async def client_main(
                 f" that has only {len(messages)} messages"
             )
 
+            time_before_request_sec: float = time.perf_counter()
             if args.verbose:
-                curr_time_sec: float = time.perf_counter()
                 time_since_last_turn: str | float = "N/A"
                 if conv_id in time_of_last_turn:
                     time_since_last_turn = round(
-                        curr_time_sec - time_of_last_turn[conv_id], 3
+                        time_before_request_sec - time_of_last_turn[conv_id], 3
                     )
                 logger.info(
                     f"Client {client_id} using conversation ID {conv_id} (turn: {current_turn}, time since last turn [sec]: {time_since_last_turn})"  # noqa: E501
                 )
-                time_of_last_turn[conv_id] = curr_time_sec
+                time_of_last_turn[conv_id] = time_before_request_sec
 
             success = False
             for attempt_cnt in range(args.max_retries + 1):
@@ -797,7 +798,9 @@ async def client_main(
 
             # Sleep between requests (if lambda is positive)
             if args.request_rate > 0:
-                await poisson_sleep(args.request_rate, args.verbose)
+                request_duration_sec = time.perf_counter() - time_before_request_sec
+                await poisson_sleep(1.0 / args.request_rate - request_duration_sec,
+                                    f"{Color.GREEN}Client {client_id}" if args.verbose else None)
 
     # Send indication that the client is done
     conv_queue.put((TERM_SIGNAL, TERM_SIGNAL))
