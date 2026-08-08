@@ -223,7 +223,7 @@ def do_expand_kernel(
     offset_cm = tl.arange(0, BLOCK_M)
     c_ptr = (
         out_ptr
-        + ram[:, None] * output_d0_stride
+        + ram[:, None].to(tl.int64) * output_d0_stride
         + offset_cn[None, :] * output_d1_stride
     )
     c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < (cur_slice_start + N))
@@ -327,7 +327,7 @@ def do_shrink_kernel(
     cur_out_ptr = out_ptr if SLICE_NUM == 1 else out_ptr + slice_id * output_d0_stride
     c_ptr = (
         cur_out_ptr
-        + ram[:, None] * output_d1_stride
+        + ram[:, None].to(tl.int64) * output_d1_stride
         + offset_cn[None, :] * output_d2_stride
     )
     c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < N)
