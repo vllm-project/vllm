@@ -556,10 +556,20 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
                 assert non_spec_state_indices_tensor is not None
                 assert has_initial_state is not None
-                initial_state = gather_initial_states(
-                    recurrent_state,
-                    non_spec_state_indices_tensor,
-                    has_initial_state,
+                # Chunk KDA initializes its recurrence to zero when no initial
+                # state is supplied. On ROCm it can also store final states
+                # directly into their cache rows.
+                direct_final_state = (
+                    current_platform.is_rocm() and m.all_initial_states_fresh
+                )
+                initial_state = (
+                    None
+                    if direct_final_state
+                    else gather_initial_states(
+                        recurrent_state,
+                        non_spec_state_indices_tensor,
+                        has_initial_state,
+                    )
                 )
                 (
                     core_attn_out_non_spec,
@@ -577,9 +587,21 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     cu_seqlens=non_spec_query_start_loc,
+                    final_state_cache=(
+                        recurrent_state if direct_final_state else None
+                    ),
+                    final_state_indices=(
+                        non_spec_state_indices_tensor if direct_final_state else None
+                    ),
                 )
-                # Init cache
-                recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
+                if direct_final_state:
+                    assert last_recurrent_state is None
+                else:
+                    # Init cache
+                    assert last_recurrent_state is not None
+                    recurrent_state[non_spec_state_indices_tensor] = (
+                        last_recurrent_state
+                    )
 
             else:
                 # pure-decode non-spec batch

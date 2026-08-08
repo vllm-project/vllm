@@ -15,6 +15,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_upd
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    chunk_kda_with_fused_gate as amd_chunk_kda_with_fused_gate,
+)
 from vllm.models.kimi_k3.nvidia.kda import (
     is_flashkda_supported,
     is_fused_kda_decode_supported,
@@ -268,6 +271,84 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
 
     assert_close("o", old_o, new_o, 1e-3, err_atol=1e-3)
     assert_close("ht", old_ht, new_ht, 1e-3, err_atol=1e-3)
+
+
+@torch.inference_mode()
+def test_chunk_kda_none_matches_zero_initial_state():
+    H, D = 2, 128
+    cu_seqlens = torch.tensor([0, 17, 49], dtype=torch.int32, device=DEVICE)
+    T = 49
+    N = cu_seqlens.numel() - 1
+    torch.manual_seed(123)
+
+    kwargs = {
+        "q": torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE),
+        "k": torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE),
+        "v": torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE),
+        "raw_g": torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE),
+        "raw_beta": torch.randn(1, T, H, dtype=torch.bfloat16, device=DEVICE),
+        "A_log": torch.randn(H, dtype=torch.float32, device=DEVICE),
+        "g_bias": torch.randn(H * D, dtype=torch.float32, device=DEVICE),
+        "output_final_state": True,
+        "cu_seqlens": cu_seqlens,
+        "use_qk_l2norm_in_kernel": True,
+    }
+    zero_state = torch.zeros(
+        N,
+        H,
+        D,
+        D,
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+
+    def run(initial_state: torch.Tensor | None, **extra_kwargs):
+        return amd_chunk_kda_with_fused_gate(
+            **{
+                key: value.clone() if isinstance(value, torch.Tensor) else value
+                for key, value in kwargs.items()
+            },
+            initial_state=initial_state,
+            **extra_kwargs,
+        )
+
+    output_with_zero, state_with_zero = run(zero_state)
+    output_without_state, state_without_state = run(None)
+
+    torch.testing.assert_close(output_without_state, output_with_zero)
+    torch.testing.assert_close(state_without_state, state_with_zero)
+
+    num_cache_rows = 5
+    row_stride = H * D * D + 17
+    cache_storage = torch.full(
+        (num_cache_rows * row_stride,),
+        torch.nan,
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    final_state_cache = torch.as_strided(
+        cache_storage,
+        (num_cache_rows, H, D, D),
+        (row_stride, D * D, D, 1),
+    )
+    final_state_indices = torch.tensor(
+        [3, 1],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    output_direct, returned_state = run(
+        None,
+        final_state_cache=final_state_cache,
+        final_state_indices=final_state_indices,
+    )
+
+    assert returned_state is None
+    torch.testing.assert_close(output_direct, output_with_zero)
+    torch.testing.assert_close(
+        final_state_cache[final_state_indices.long()],
+        state_with_zero,
+    )
+    assert torch.isnan(final_state_cache[[0, 2, 4]]).all()
 
 
 @pytest.mark.parametrize("num_seqs", [1, 8, 32])

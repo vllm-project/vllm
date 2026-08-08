@@ -188,6 +188,45 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
     _assert_matches_shared_gdn(reference, actual)
 
 
+@pytest.mark.parametrize(
+    ("batch", "expected"),
+    [
+        pytest.param(
+            BatchSpec(seq_lens=[16, 32], query_lens=[16, 32]),
+            True,
+            id="all-fresh",
+        ),
+        pytest.param(
+            BatchSpec(seq_lens=[20, 32], query_lens=[4, 32]),
+            False,
+            id="one-resumed",
+        ),
+        pytest.param(
+            BatchSpec(seq_lens=[16, 0], query_lens=[16, 0]),
+            False,
+            id="zero-length-padding",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "builder_cls",
+    [GDNAttentionMetadataBuilder, KimiK3KDAMetadataBuilder],
+)
+def test_kda_metadata_marks_all_fresh_prefills(
+    batch: BatchSpec,
+    expected: bool,
+    builder_cls: type[AttentionMetadataBuilder],
+):
+    common_attn_metadata = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    metadata = _make_builder(
+        builder_cls,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+    ).build(0, common_attn_metadata)
+
+    assert metadata.all_initial_states_fresh is expected
+
+
 def test_mixed_regular_and_spec_decode_uses_packed_decode_metadata():
     batch = BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3])
     common_attn_metadata = create_common_attn_metadata(
