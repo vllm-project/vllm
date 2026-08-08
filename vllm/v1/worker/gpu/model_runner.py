@@ -128,7 +128,10 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import (
+    BaseSpeculator,
+    DraftModelSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -344,8 +347,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
-            if isinstance(self.speculator, DraftModelSpeculator):
+            if isinstance(self.speculator, BaseSpeculator):
                 self.speculator.load_model(self.model)
+            if isinstance(self.speculator, DraftModelSpeculator):
                 eplb_models_added = self.eplb.maybe_register_speculator(
                     self.speculator, self.speculative_config, load_dummy_weights
                 )

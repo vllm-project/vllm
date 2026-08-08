@@ -8,6 +8,7 @@
 # https://github.com/vllm-project/vllm/blob/v0.10.2/vllm/model_executor/models/bart.py
 
 import math
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
@@ -33,7 +34,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    download_weights_from_hf,
+    maybe_download_from_modelscope,
+    safetensors_weights_iterator,
+)
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -59,6 +65,13 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backend import AttentionType
 
 logger = init_logger(__name__)
+
+_AUXILIARY_WEIGHTS_FILE = "auxiliary_prediction_heads.safetensors.extra"
+_AUXILIARY_DECODER_WEIGHT_NAMES = frozenset(
+    f"{module}.0.{parameter}"
+    for module in ("extra_proj", "extra_heads")
+    for parameter in ("weight", "bias")
+)
 
 
 class BartScaledWordEmbedding(VocabParallelEmbedding):
@@ -233,6 +246,7 @@ class MBartDecoderNoPos(nn.Module):
         quant_config: QuantizationConfig | None = None,
         lora_config: LoRAConfig | None = None,
         embed_tokens: nn.Embedding | None = None,
+        num_extra_heads: int = 0,
         prefix: str = "",
     ):
         super().__init__()
@@ -262,6 +276,16 @@ class MBartDecoderNoPos(nn.Module):
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
         self.layer_norm = nn.LayerNorm(config.d_model)
+
+        self.num_extra_heads = num_extra_heads
+        self.extra_proj = nn.ModuleList(
+            nn.Linear(config.d_model, config.d_model, bias=True)
+            for _ in range(num_extra_heads)
+        )
+        self.extra_heads = nn.ModuleList(
+            nn.Linear(config.d_model, config.d_model, bias=True)
+            for _ in range(num_extra_heads)
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -327,8 +351,13 @@ class MBartDecoderNoPos(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                # Skip weights with no destination parameter. In the baseline
+                # model (num_extra_heads=0) the auxiliary-head sidecar tensors
+                # (decoder.extra_proj/extra_heads.*) have no module to load into,
+                # so shipping the loadable sidecar in the public checkpoint must
+                # never break the baseline load path. (Also skips extra GPTQ
+                # bias.)
+                if name not in params_dict:
                     continue
 
                 param = params_dict[name]
@@ -490,6 +519,7 @@ class RadioWithNeck(nn.Module):
         self.sum_proj = ColumnParallelLinear(
             3840,
             last_hidden_state,
+            gather_output=True,
             quant_config=quant_config,
             prefix=f"{prefix}.sum_proj",
         )
@@ -549,8 +579,8 @@ class RadioWithNeck(nn.Module):
                 model_encoder_weights.append((".".join(name.split(".")[1:]), w))
             else:
                 param = adaptor_dict[name]
-                with torch.no_grad():
-                    default_weight_loader(param, w)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, w)
 
         self.model_encoder.load_weights(model_encoder_weights)
 
@@ -575,21 +605,51 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
                 config=config, quant_config=quant_config, prefix=f"{prefix}.encoder"
             )
 
+        speculative_config = vllm_config.speculative_config
+        self.num_extra_heads = int(
+            speculative_config is not None
+            and speculative_config.use_nemotron_parse_mtp()
+        )
+
         with self._mark_language_model(vllm_config):
             self.decoder = MBartDecoderNoPos(
                 config.decoder,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                num_extra_heads=self.num_extra_heads,
                 prefix=f"{prefix}.decoder",
             )
+        # Single source of truth for the MTP embedding scale: read the value the
+        # decoder's scaled word embedding already stores (BartScaledWordEmbedding.
+        # embed_scale = sqrt(d_model) when scale_embedding, else 1.0) instead of
+        # re-deriving it from config. Read AFTER the decoder is constructed.
+        self.mtp_embed_scale = self.decoder.embed_tokens.embed_scale
 
         self.vocab_size = config.decoder.vocab_size
         self.lm_head = ParallelLMHead(
             config.decoder.vocab_size, config.decoder.d_model, quant_config=quant_config
         )
+        self.tie_word_embeddings = bool(
+            getattr(config, "tie_word_embeddings", False)
+            or getattr(config.decoder, "tie_word_embeddings", False)
+        )
+        if self.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.decoder.embed_tokens)
+        elif self.num_extra_heads > 0:
+            # The MTP auxiliary head projects through the decoder embedding via
+            # lm_head, so an untied lm_head (compact checkpoints ship no
+            # lm_head.weight, leaving it uninitialized) would silently produce
+            # invalid draft tokens. Fail loudly instead.
+            raise ValueError(
+                "Nemotron Parse MTP (num_extra_heads > 0) requires tied word "
+                "embeddings so lm_head shares the decoder embedding weight."
+            )
         self.logits_processor = LogitsProcessor(
             self.vocab_size, config.decoder.vocab_size
         )
+        self.model_name_or_path = vllm_config.model_config.model
+        self.revision = vllm_config.model_config.revision
+        self.load_config = vllm_config.load_config
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -672,6 +732,75 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def has_mtp_heads(self) -> bool:
+        return self.num_extra_heads > 0
+
+    def _mtp_head_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        d1_token_ids: torch.Tensor,
+        head_index: int = 0,
+    ) -> torch.Tensor:
+        if not self.has_mtp_heads():
+            raise RuntimeError("Nemotron Parse auxiliary heads are not loaded")
+        d1_embeds = self.decoder.embed_tokens(d1_token_ids.long())
+        return self.decoder.extra_heads[head_index](
+            hidden_states + self.decoder.extra_proj[head_index](d1_embeds)
+        )
+
+    def extra_head_logits(
+        self,
+        hidden_states: torch.Tensor,
+        d1_token_ids: torch.Tensor,
+        head_index: int = 0,
+    ) -> torch.Tensor:
+        hidden = self._mtp_head_hidden_states(
+            hidden_states, d1_token_ids, head_index
+        )
+        logits = self.logits_processor(self.lm_head, hidden)
+        if logits is None:
+            raise RuntimeError(
+                "Nemotron Parse MTP head logits are unavailable on this rank"
+            )
+        return logits
+
+    def propose_draft_token_ids(
+        self,
+        hidden_states: torch.Tensor,
+        d1_token_ids: torch.Tensor,
+        head_index: int = 0,
+    ) -> torch.Tensor:
+        """Propose one verified ``d2`` using the trained scaled-embedding head."""
+        hidden = self._mtp_head_hidden_states(
+            hidden_states, d1_token_ids, head_index
+        )
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden)
+
+    def _auxiliary_weights(self) -> Iterable[tuple[str, torch.Tensor]]:
+        model_name_or_path = (
+            maybe_download_from_modelscope(self.model_name_or_path, self.revision)
+            or self.model_name_or_path
+        )
+        if os.path.isdir(model_name_or_path):
+            model_folder = model_name_or_path
+        else:
+            model_folder = download_weights_from_hf(
+                model_name_or_path,
+                self.load_config.download_dir,
+                [_AUXILIARY_WEIGHTS_FILE],
+                self.revision,
+                ignore_patterns=self.load_config.ignore_patterns,
+            )
+
+        auxiliary_path = os.path.join(model_folder, _AUXILIARY_WEIGHTS_FILE)
+        if not os.path.isfile(auxiliary_path):
+            return
+        yield from safetensors_weights_iterator(
+            [auxiliary_path],
+            self.load_config.use_tqdm_on_load,
+            self.load_config.safetensors_load_strategy,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         lm_head_dict = dict(self.lm_head.named_parameters())
 
@@ -687,19 +816,43 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         # Separate weights by component
         encoder_weights = []
         decoder_weights = []
+        loaded_auxiliary_weights: set[str] = set()
+
+        def add_decoder_weight(name: str, w: torch.Tensor) -> None:
+            trimmed_name = ".".join(name.split(".")[1:])
+            decoder_weights.append((trimmed_name, w))
+            if trimmed_name in _AUXILIARY_DECODER_WEIGHT_NAMES:
+                loaded_auxiliary_weights.add(trimmed_name)
 
         for name, w in weights:
             if is_encoder(name):
                 encoder_weights.append((".".join(name.split(".")[1:]), w))
             elif is_decoder(name):
-                decoder_weights.append((".".join(name.split(".")[1:]), w))
+                add_decoder_weight(name, w)
             elif is_lm_head(name):
+                if self.tie_word_embeddings:
+                    continue
                 trimmed_name = ".".join(name.split(".")[1:])
                 param = lm_head_dict[trimmed_name]
                 with torch.no_grad():
                     default_weight_loader(param, w)
             else:
                 logger.info("Found unexpected weight: %s", name)
+
+        if self.has_mtp_heads():
+            missing = _AUXILIARY_DECODER_WEIGHT_NAMES - loaded_auxiliary_weights
+            if missing:
+                for name, w in self._auxiliary_weights():
+                    if is_decoder(name):
+                        add_decoder_weight(name, w)
+                missing = _AUXILIARY_DECODER_WEIGHT_NAMES - loaded_auxiliary_weights
+            if missing:
+                raise ValueError(
+                    "Nemotron Parse MTP requires NVIDIA-Nemotron-Parse-2.0 or "
+                    "later with trained auxiliary weights. The checkpoint is "
+                    f"missing weights from {_AUXILIARY_WEIGHTS_FILE}: "
+                    + ", ".join(sorted(missing))
+                )
 
         # Load encoder weights
         self.encoder.load_weights(encoder_weights)

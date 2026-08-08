@@ -257,6 +257,10 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.use_nemotron_parse_mtp():
+                # Lightweight auxiliary-head MTP: schedule the lookahead slot but
+                # stay off the eagle path (no shifted computed tokens / draft KV).
+                self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.use_dflash():
