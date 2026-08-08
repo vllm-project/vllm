@@ -747,7 +747,10 @@ class TestStreaming:
         text = '{"x": 1}; {"name": "save", "parameters": {"y": 2}}'
         results = _stream(parser, mock_request, text, chunk_size=4)
         content, calls = _accumulate(results)
-        assert content == '{"x": 1}; '
+        # No trailing space: the whitespace run before the envelope is held
+        # and dropped when the call completes, which is what non-streaming
+        # does. Pinning ' ' here pinned the divergence.
+        assert content == '{"x": 1};'
         assert [c["index"] for c in calls] == [0]
         assert calls[0]["name"] == "save"
         assert calls[0]["args"] == '{"y": 2}'
@@ -2061,9 +2064,9 @@ class TestLlama4PythonMarkers:
         "text",
         [
             "<|python_start|>{}<|python_end|>".format('{"items": [1, 2]}'),
-            "<|python_tag|>print('hello')",
+            "<|python_start|>print('hello')<|python_end|>",
         ],
-        ids=["wrapped-prose-json", "ipython-content"],
+        ids=["wrapped-prose-json", "wrapped-ipython-content"],
     )
     def test_the_parser_cleans_markers_but_the_serving_path_still_leaks(
         self, tokenizer, mock_request, text
@@ -2534,6 +2537,32 @@ class TestBareArgsArmingRespectsTheSchema:
                 id="typed-properties",
             ),
             pytest.param(None, id="no-parameters-key"),
+            # Every one of these returned NO tool call at all: they carry no
+            # literal "properties" key, so arming keyed on that refused, the
+            # object was not an envelope either, and a request that named the
+            # tool it wanted got content back.  They all constrain the object,
+            # so guided decoding does forbid the envelope.
+            pytest.param(
+                {"type": "object", "additionalProperties": {"type": "string"}},
+                id="additionalProperties",
+            ),
+            pytest.param(
+                {"anyOf": [{"type": "object", "properties": {"code": {}}}]},
+                id="anyOf",
+            ),
+            pytest.param(
+                {"oneOf": [{"type": "object", "properties": {"code": {}}}]},
+                id="oneOf",
+            ),
+            pytest.param(
+                {"allOf": [{"type": "object", "properties": {"code": {}}}]},
+                id="allOf",
+            ),
+            pytest.param(
+                {"$ref": "#/$defs/X", "$defs": {"X": {"type": "object"}}},
+                id="ref",
+            ),
+            pytest.param({"type": "object", "required": ["code"]}, id="required-only"),
         ],
     )
     def test_bare_parameters_still_work_when_the_schema_constrains_keys(
@@ -2754,3 +2783,67 @@ class TestForcedChoiceKeepsUnpromotedText:
 
         assert [c.name for c in calls or []] == ["run_cmd"]
         assert not content
+
+
+class TestMarkersAbsentFromTheVocabStayAsText:
+    """A marker the tokenizer cannot produce is prose, not markup.
+
+    ``<|python_start|>`` / ``<|python_end|>`` are absent from Llama 3
+    vocabularies and ``<|python_tag|>`` from Llama 4 ones.  Declaring all
+    three as text terminals regardless meant a model that merely *wrote*
+    one -- in an explanation, a code sample, a quoted transcript -- had it
+    silently deleted from the reply.  Legacy returned all of them verbatim.
+    """
+
+    LLAMA3_ONLY = {"<|python_tag|>": 128010, "<|eot_id|>": 128009}
+    LLAMA4_ONLY = {"<|python_start|>": 200016, "<|python_end|>": 200017}
+
+    @staticmethod
+    def _request():
+        return ChatCompletionRequest(
+            model="llama",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                ChatCompletionToolsParam(
+                    type="function",
+                    function={
+                        "name": "f",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"a": {"type": "string"}},
+                        },
+                    },
+                )
+            ],
+            tool_choice="auto",
+        )
+
+    @pytest.mark.parametrize(
+        ("vocab_name", "text"),
+        [
+            ("LLAMA3_ONLY", "The marker is <|python_start|> ok"),
+            ("LLAMA3_ONLY", "Use <|python_end|> to close"),
+            ("LLAMA4_ONLY", "The tag is <|python_tag|> ok"),
+        ],
+        ids=["l3-sees-py-start", "l3-sees-py-end", "l4-sees-py-tag"],
+    )
+    def test_a_marker_outside_the_vocab_survives(self, vocab_name, text):
+        vocab = getattr(self, vocab_name)
+        parser = LlamaJsonParser(make_mock_tokenizer(vocab, special_tokens=[]))
+
+        result = parser.extract_tool_calls_from_content(text, self._request())
+
+        assert not result.tool_calls
+        assert result.content == text
+
+    def test_a_marker_inside_the_vocab_is_still_consumed(self):
+        """The control: gating must not disable the markers that apply."""
+        parser = LlamaJsonParser(
+            make_mock_tokenizer(self.LLAMA4_ONLY, special_tokens=[])
+        )
+        text = '<|python_start|>{"name": "f", "parameters": {"a": "x"}}<|python_end|>'
+
+        result = parser.extract_tool_calls_from_content(text, self._request())
+
+        assert [tc.function.name for tc in result.tool_calls] == ["f"]
+        assert "<|python_" not in (result.content or "")
