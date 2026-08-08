@@ -374,3 +374,48 @@ def test_deep_sleep_fp8_kvcache():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="Host-access regression only affects ROCm large-BAR")
+def test_cumem_host_read_scalar():
+    """Verify that .item() works on scalars residing in VMM-allocated memory.
+
+    On ROCm with large-BAR GPUs, PyTorch reads scalar values by directly
+    dereferencing the device pointer from the host side.  If the VMM mapping
+    does not include CU_MEM_LOCATION_TYPE_HOST access, this causes a SEGFAULT
+    with no Python traceback.
+
+    This test exercises the fix in create_and_map() that grants host access.
+    """
+    allocator = get_mem_allocator_instance()
+
+    with allocator.use_memory_pool():
+        # Allocate a tensor in the cumem (VMM) pool
+        x = torch.ones(1024, device=DEVICE_TYPE, dtype=torch.float32)
+        x *= 3.0
+
+        # .sum() produces a scalar tensor still backed by VMM memory
+        scalar = x.sum()
+
+        # .item() triggers host-side pointer dereference on large-BAR ROCm.
+        # Without the host-access fix this line segfaults.
+        value = scalar.item()
+
+    assert value == pytest.approx(3072.0), (
+        f"Expected 3072.0, got {value}. "
+        "Host read from VMM-backed scalar returned wrong value."
+    )
+
+    # Also verify after sleep/wake cycle
+    allocator.sleep()
+    allocator.wake_up()
+
+    with allocator.use_memory_pool():
+        y = torch.full((256,), -1.0, device=DEVICE_TYPE)
+        result = y.min().item()
+
+    assert result == pytest.approx(-1.0), (
+        f"Expected -1.0 after sleep/wake, got {result}."
+    )
