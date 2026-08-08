@@ -5,6 +5,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
+from dataclasses import replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -513,11 +514,43 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> EmbedsPrompt: ...
 
+    @cached_property
+    def _model_pad_prompt_tokens(self) -> int | None:
+        mm_processor = self.mm_processor
+        if mm_processor is None:
+            return None
+
+        return mm_processor.info.default_tok_params.pad_prompt_tokens
+
+    def _apply_default_padding(
+        self,
+        prompt: SingletonDictPrompt,
+        params: TokenizeParams,
+    ) -> TokenizeParams:
+        """Fall back to the model's padding requirement when none was requested.
+
+        Frontends that build [`TokenizeParams`][vllm.renderers.TokenizeParams]
+        from a request do not inherit model-level defaults, so a model that is
+        only correct with padded inputs (such as SigLIP) would otherwise be
+        served unpadded. Multi-modal prompts are left alone: their text is
+        replaced by placeholder tokens during processing.
+        """
+        if params.pad_prompt_tokens is not None or prompt.get("multi_modal_data"):
+            return params
+
+        pad_prompt_tokens = self._model_pad_prompt_tokens
+        if pad_prompt_tokens is None:
+            return params
+
+        return replace(params, pad_prompt_tokens=pad_prompt_tokens)
+
     def _tokenize_singleton_prompt(
         self,
         prompt: SingletonDictPrompt,
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
+        params = self._apply_default_padding(prompt, params)
+
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
                 raise TypeError(
@@ -554,6 +587,8 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonDictPrompt,
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
+        params = self._apply_default_padding(prompt, params)
+
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
                 raise TypeError(
