@@ -320,7 +320,7 @@ class Step3TextModel(nn.Module):
         self.config = config
 
         if get_pp_group().is_first_rank or (
-            config.tie_word_embeddings and get_pp_group().is_last_rank
+            getattr(config, "tie_word_embeddings", False) and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
