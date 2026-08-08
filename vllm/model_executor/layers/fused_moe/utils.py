@@ -273,6 +273,28 @@ def _mxfp6_e2m3_quantize(
     return A, None
 
 
+def uses_whole_tensor_dynamic_scale(
+    quant_dtype: None | torch.dtype | str,
+    A_scale: torch.Tensor | None,
+    per_act_token_quant: bool,
+    block_shape: list[int] | None = None,
+) -> bool:
+    """Whether `moe_kernel_quantize_input` will derive a single scale by
+    reducing over every element of `A`.
+
+    Callers whose `A` can contain rows that are not real routed tokens
+    (worst-case-allocated all2all buffers, unwritten workspace rows) must zero
+    those rows first: an amax is shared across the whole tensor, so one garbage
+    row sets the scale for every real token.
+    """
+    return (
+        quant_dtype in (current_platform.fp8_dtype(), torch.int8)
+        and A_scale is None
+        and not per_act_token_quant
+        and block_shape is None
+    )
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: torch.Tensor | None,

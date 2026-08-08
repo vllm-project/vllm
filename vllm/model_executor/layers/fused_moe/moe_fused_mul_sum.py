@@ -16,6 +16,7 @@ def moe_fused_mul_sum_kernel(
     expert_map_ptr,
     num_tokens,
     stride_m,
+    has_topk_ids: tl.constexpr,
     has_expert_map: tl.constexpr,
     top_k: tl.constexpr,
     size: tl.constexpr,
@@ -39,20 +40,28 @@ def moe_fused_mul_sum_kernel(
 
     for n in tl.static_range(top_k):
         b_val = tl.load(b_base + n, mask=m_mask, other=0.0).to(tl.float32)
-        if has_expert_map:
-            id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=0)
-            expert_mask = tl.load(expert_map_ptr + id_val) >= 0
-            a_vec = tl.load(
-                a_base + n * size,
-                mask=mask & expert_mask[:, None],
-                other=0.0,
-            ).to(tl.float32)
+        if has_topk_ids:
+            # -1 marks a slot the expert GEMM skipped (non-local expert under
+            # EP, or an all2all padding row), so `inputs` was never written
+            # there. Both the map lookup and the value load must be masked off:
+            # indexing the map with -1 reads out of bounds.
+            id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=-1)
+            valid = id_val >= 0
+            if has_expert_map:
+                local_id = tl.load(
+                    expert_map_ptr + tl.where(valid, id_val, 0),
+                    mask=valid,
+                    other=-1,
+                )
+                valid = valid & (local_id >= 0)
+            row_mask = mask & valid[:, None]
         else:
-            a_vec = tl.load(
-                a_base + n * size,
-                mask=mask,
-                other=0.0,
-            ).to(tl.float32)
+            row_mask = mask
+        a_vec = tl.load(
+            a_base + n * size,
+            mask=row_mask,
+            other=0.0,
+        ).to(tl.float32)
         acc += a_vec * b_val[:, None]
 
     out_ptrs = outputs_ptr + (offs_m * size)[:, None] + offs_k[None, :]
@@ -150,8 +159,10 @@ def moe_fused_mul_sum(
             Shape: (num_tokens, top_k).
         outputs: Optional pre-allocated output tensor.
             Shape: (num_tokens, hidden_size).
-        topk_ids: Optional indices of the top-k experts. Used when
-            `expert_map` is provided. Shape: (num_tokens, top_k).
+        topk_ids: Optional indices of the top-k experts. Shape:
+            (num_tokens, top_k). A value of -1 marks a slot the expert GEMM
+            skipped; those slots are excluded from the sum. Required when
+            `expert_map` is provided.
         expert_map: Optional mapping for Expert Parallelism. A value < 0
             indicates an invalid token/expert pair that will be skipped.
 
@@ -173,6 +184,9 @@ def moe_fused_mul_sum(
 
     assert outputs.shape == output_shape
     assert topk_weights.shape == (num_tokens, top_k)
+    assert expert_map is None or topk_ids is not None, (
+        "topk_ids is required to interpret expert_map"
+    )
 
     if not isinstance(inputs, FakeTensor):
         BLOCK_M, BLOCK_K, num_warps, num_stages = _heuristic_config(
@@ -190,6 +204,7 @@ def moe_fused_mul_sum(
             expert_map,
             num_tokens,
             top_k * size,
+            topk_ids is not None,
             expert_map is not None,
             top_k,
             size,

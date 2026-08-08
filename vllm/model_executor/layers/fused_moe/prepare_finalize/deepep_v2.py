@@ -12,7 +12,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+    uses_whole_tensor_dynamic_scale,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
@@ -29,10 +32,13 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     **Decode mode (use_cudagraph=True):**
       - do_expand=False, do_cpu_sync=False
       - Tokens returned in original order with recv_topk_idx (global IDs)
-      - Worst-case tensor allocation; padding rows zeroed via
-        handle.psum_num_recv_tokens_per_scaleup_rank
+      - Worst-case tensor allocation; rows beyond the real token count are left
+        UNINITIALIZED by the dispatch. They are marked invalid by forcing their
+        recv_topk_idx to -1 (see `_globalize_recv_topk_idx`), which is what
+        keeps expert kernels from treating them as routed tokens.
       - Fully cudagraph-capturable
-      - Expert kernel sorts internally (expert_tokens_meta=None)
+      - Expert kernel sorts internally (expert_tokens_meta=None, since DeepEP
+        only reports per-expert counts when the dispatch does a CPU sync)
 
     **Prefill mode (use_cudagraph=False):**
       - do_expand=True, do_cpu_sync=True
@@ -243,14 +249,35 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            recv_expert_num_tokens,
-            device=expert_x.device,
+        # DeepEP only fills num_recv_tokens_per_expert_list when the dispatch
+        # does a CPU sync; in decode mode (do_cpu_sync=False) it comes back
+        # empty. Building metadata from it would hand experts zero-length
+        # per-expert counts, which silently collapse downstream sizing (e.g.
+        # DeepGemmExperts derives M_sum from it and would compute nothing).
+        # Leave it unset so experts recover the counts from topk_ids instead.
+        expert_tokens_meta = (
+            mk.ExpertTokensMetadata.make_from_list(
+                recv_expert_num_tokens,
+                device=expert_x.device,
+            )
+            if recv_expert_num_tokens
+            else None
         )
 
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None
             if expert_x.numel() != 0:
+                if uses_whole_tensor_dynamic_scale(
+                    quant_config.quant_dtype,
+                    a1_scale,
+                    per_act_token_quant=False,
+                    block_shape=quant_config.block_shape,
+                ):
+                    # The scale is an amax over *every* row, so uninitialized
+                    # padding rows would set it for the real tokens too. Their
+                    # topk_idx is already -1, so zero them out first.
+                    expert_x = expert_x * (recv_topk_idx >= 0)
+
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
                     a1_scale,
