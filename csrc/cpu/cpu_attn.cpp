@@ -99,6 +99,13 @@ void cpu_attn_reshape_and_cache(
   TORCH_CHECK_EQ(value.dim(), 3);
   TORCH_CHECK_EQ(key_cache.dim(), 4);
   TORCH_CHECK_EQ(value_cache.dim(), 4);
+  TORCH_CHECK_EQ(key_cache.stride(0), value_cache.stride(0));
+  TORCH_CHECK_EQ(key_cache.stride(1), value_cache.stride(1));
+  TORCH_CHECK_EQ(key_cache.stride(2), value_cache.stride(2));
+  TORCH_CHECK_EQ(key_cache.stride(2), key_cache.size(3));
+  TORCH_CHECK_EQ(key_cache.stride(3), 1);
+  TORCH_CHECK_EQ(value_cache.stride(2), value_cache.size(3));
+  TORCH_CHECK_EQ(value_cache.stride(3), 1);
   TORCH_CHECK_EQ(key.stride(2), 1);
   TORCH_CHECK_EQ(value.stride(2), 1);
 
@@ -191,6 +198,13 @@ void cpu_attention_with_kv_cache(
   TORCH_CHECK_EQ(query.stride(2), 1);
   TORCH_CHECK_EQ(key_cache.dim(), 4);
   TORCH_CHECK_EQ(value_cache.dim(), 4);
+  TORCH_CHECK_EQ(key_cache.stride(0), value_cache.stride(0));
+  TORCH_CHECK_EQ(key_cache.stride(1), value_cache.stride(1));
+  TORCH_CHECK_EQ(key_cache.stride(2), value_cache.stride(2));
+  TORCH_CHECK_EQ(key_cache.stride(2), key_cache.size(3));
+  TORCH_CHECK_EQ(key_cache.stride(3), 1);
+  TORCH_CHECK_EQ(value_cache.stride(2), value_cache.size(3));
+  TORCH_CHECK_EQ(value_cache.stride(3), 1);
 
   const int64_t kv_cache_idx =
       static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
