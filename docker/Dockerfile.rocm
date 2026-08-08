@@ -464,7 +464,8 @@ ARG DEEPEP_NIC="cx7"
 # quantization bound with vLLM's own clamp
 # (vllm/model_executor/layers/quantization/utils/fp8_utils.py): 224 for E4M3FNUZ
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    export PYTORCH_ROCM_ARCH="gfx942;gfx950" \
+    python3 -c "import sysconfig,pathlib;[f.write_text(f.read_text().replace('-fcf-protection','')) for f in pathlib.Path(sysconfig.get_paths()['stdlib']).glob('_sysconfigdata*.py')]" \
+ && export PYTORCH_ROCM_ARCH="gfx942;gfx950" \
  && git clone ${DEEPEP_REPO} \
  && cd DeepEP \
  && git checkout ${DEEPEP_BRANCH} \
