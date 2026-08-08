@@ -92,6 +92,35 @@ def test_missing_required_argument(parser):
         parser.parse_args([])
 
 
+def test_deprecated_arg_warns_for_own_subcommand(caplog_vllm, disable_log_dedup):
+    parser = FlexibleArgumentParser()
+    subparsers = parser.add_subparsers(dest="cmd")
+
+    old_parser = subparsers.add_parser("old")
+    old_parser.add_argument("--url", default="0.0.0.0", deprecated=True)
+
+    parser.parse_args(["old", "--url", "127.0.0.1"])
+
+    assert "argument 'url' is deprecated" in caplog_vllm.text
+
+
+def test_deprecated_arg_does_not_leak_between_subcommands(
+    caplog_vllm, disable_log_dedup
+):
+    parser = FlexibleArgumentParser()
+    subparsers = parser.add_subparsers(dest="cmd")
+
+    old_parser = subparsers.add_parser("old")
+    old_parser.add_argument("--url", default="0.0.0.0", deprecated=True)
+
+    chat_parser = subparsers.add_parser("chat")
+    chat_parser.add_argument("--url", default="http://localhost:8000/v1")
+
+    parser.parse_args(["chat", "--url", "http://127.0.0.1:8000/v1"])
+
+    assert "argument 'url' is deprecated" not in caplog_vllm.text
+
+
 def test_cli_override_to_config(parser_with_config, cli_config_file):
     args = parser_with_config.parse_args(
         ["serve", "mymodel", "--config", cli_config_file, "--tensor-parallel-size", "3"]
