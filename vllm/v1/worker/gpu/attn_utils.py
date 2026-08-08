@@ -76,7 +76,10 @@ def get_attention_kv_cache_shape_and_stride_order(
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     layer_cache_dtype = _get_attention_layer_cache_dtype(kv_cache_spec, cache_dtype)
     head_size_v = None
-    if layer_cache_dtype == "nvfp4" and attn_backend.get_name() == "FLASHINFER":
+    if (
+        layer_cache_dtype.startswith("nvfp4")
+        and attn_backend.get_name() == "FLASHINFER"
+    ):
         head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
 
     if head_size_v is None:

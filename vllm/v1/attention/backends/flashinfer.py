@@ -534,6 +534,29 @@ class FlashInferBackend(AttentionBackend):
             raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
 
     @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        # Plain "nvfp4" runs on any FlashInfer-capable device: the KV cache
+        # update falls back to the FlashInfer slot-mapping writer when the
+        # trtllm-gen native store path is unavailable.
+        #
+        # NVFP4 variants that only differ in the store-time scale search
+        # (e.g. "nvfp4_4over6") are implemented exclusively in the trtllm-gen
+        # native store kernel. The FlashInfer writer would silently record
+        # plain max/6 scales, so require the native path instead of quietly
+        # degrading the requested quantization.
+        if (
+            kv_cache_dtype is not None
+            and kv_cache_dtype.startswith("nvfp4")
+            and kv_cache_dtype != "nvfp4"
+        ):
+            return (
+                supports_trtllm_attention(is_prefill=True)
+                and supports_trtllm_attention(is_prefill=False)
+                and super().supports_kv_cache_dtype(kv_cache_dtype)
+            )
+        return super().supports_kv_cache_dtype(kv_cache_dtype)
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256, 512]
@@ -1720,6 +1743,22 @@ class FlashInferImpl(AttentionImpl):
             self.use_native_nvfp4_kv_cache_update = can_use_trtllm_attention(
                 num_heads, num_kv_heads, is_prefill=True
             ) and can_use_trtllm_attention(num_heads, num_kv_heads, is_prefill=False)
+        if (
+            self.is_kvcache_nvfp4
+            and not self.use_native_nvfp4_kv_cache_update
+            and kv_cache_dtype != "nvfp4"
+        ):
+            # NVFP4 variants only differ in the store-time scale search, which
+            # lives in the trtllm-gen native store kernel. The FlashInfer
+            # slot-mapping writer records plain max/6 scales, so it cannot
+            # honor the requested search. Fail instead of silently changing
+            # the KV cache quantization.
+            raise ValueError(
+                f"--kv-cache-dtype {kv_cache_dtype} requires the trtllm-gen "
+                "native NVFP4 KV cache update path; the FlashInfer "
+                "slot-mapping writer only records max/6 scales and cannot "
+                "perform the requested scale search."
+            )
         self._nvfp4_slot_writer: Callable[..., None] | None = None
         self._nvfp4_paged_dequant: Callable[..., None] | None = None
         if self.is_kvcache_nvfp4 and not self.use_native_nvfp4_kv_cache_update:
