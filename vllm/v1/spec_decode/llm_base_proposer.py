@@ -362,11 +362,7 @@ class SpecDecodeBaseProposer:
         elif hasattr(model_hf_config, "ptd_token_id"):
             self.parallel_drafting_token_id = model_hf_config.ptd_token_id
         else:
-            raise ValueError(
-                "For parallel drafting, the draft model config must have "
-                "`pard_token`, `ptd_token_id`, or "
-                "`dflash_config.mask_token_id` specified in its config.json."
-            )
+            self.parallel_drafting_token_id = 0
 
         if self.pass_hidden_states_to_model:
             self.parallel_drafting_hidden_state_tensor = torch.empty(
@@ -526,7 +522,7 @@ class SpecDecodeBaseProposer:
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash", "dspark"):
             model = self.model
             if isinstance(model, BreakableCUDAGraphWrapper):
                 model = model.unwrap()
@@ -1015,7 +1011,7 @@ class SpecDecodeBaseProposer:
             return bool(
                 {"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures)
             )
-        return self.method not in ("mtp", "draft_model", "dflash")
+        return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def prepare_next_token_ids_cpu(
         self,
