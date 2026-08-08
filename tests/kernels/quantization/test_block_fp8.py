@@ -3,6 +3,7 @@
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
+import types
 
 import pytest
 import torch
@@ -194,6 +195,65 @@ def test_w8a8_block_fp8_cutlass_matmul():
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
     out = cutlass_scaled_mm(A_fp8_cutlass, B_fp8, As_cutlass, Bs, block_size, out_dtype)
 
+    rel_diff = torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
+    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
+    assert rel_diff < 0.001
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
+    reason="torch._scaled_mm DeepSeek-style block scaling only supports SM90.",
+)
+def test_w8a8_block_fp8_torch_scaled_mm_matmul():
+    # BlockWiseTorchFP8ScaledMMLinearKernel: 1x128 activation + 128x128 weight
+    # block scaling routed through torch._scaled_mm. M=83 is not a multiple of
+    # 4 so this also exercises the M-padding path.
+    from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+        BlockWiseTorchFP8ScaledMMLinearKernel,
+    )
+
+    M = 83
+    N = 576
+    K = 7168
+    block_size = [128, 128]
+    out_dtype = torch.bfloat16
+    seed = 0
+
+    torch.manual_seed(seed)
+    factor_for_scale = 1e-2
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    fp8_max, fp8_min = fp8_info.max, fp8_info.min
+
+    A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+    B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+    B_fp8 = B_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+
+    block_n, block_k = block_size[0], block_size[1]
+    n_tiles = (N + block_n - 1) // block_n
+    k_tiles = (K + block_k - 1) // block_k
+    Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
+
+    # Reference uses row-major activation scales.
+    A_fp8, As = per_token_group_quant_fp8(
+        A_fp32, block_size[1], column_major_scales=False
+    )
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
+
+    # The kernel expects column-major activation scales on CUDA.
+    A_fp8_cuda, As_cuda = per_token_group_quant_fp8(
+        A_fp32, block_size[1], column_major_scales=True
+    )
+
+    stub = BlockWiseTorchFP8ScaledMMLinearKernel.__new__(
+        BlockWiseTorchFP8ScaledMMLinearKernel
+    )
+    stub.config = types.SimpleNamespace(out_dtype=out_dtype)
+    out = stub.apply_block_scaled_mm(
+        A_fp8_cuda.cuda(), B_fp8.cuda(), As_cuda.cuda(), Bs.cuda()
+    )
+
+    ref_out = ref_out.cuda()
     rel_diff = torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))

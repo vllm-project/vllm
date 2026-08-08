@@ -76,6 +76,7 @@ from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheSpec,
     KVQuantMode,
     UniformTypeKVCacheSpecs,
 )
@@ -349,6 +350,7 @@ class FlashInferBackend(AttentionBackend):
         "fp8_e4m3",
         "fp8_e5m2",
         "nvfp4",
+        "nvfp4_4over6",
     ]
 
     @staticmethod
@@ -401,7 +403,7 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        if cache_dtype_str == "nvfp4":
+        if cache_dtype_str.startswith("nvfp4"):
             full_dim = nvfp4_kv_cache_full_dim(head_size)
             return (num_blocks, 2 * num_kv_heads, block_size, full_dim)
         # Pack K and V in the content dim (B, H, N, 2*hs).
@@ -437,14 +439,14 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
-        elif kv_cache_dtype == "nvfp4":
+        elif kv_cache_dtype.startswith("nvfp4"):
             return torch.uint8
         else:
             raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
-        if kv_cache_dtype == "nvfp4":
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("nvfp4"):
             return (
                 current_platform.is_device_capability_family(100)
                 and supports_trtllm_attention(is_prefill=True)
@@ -617,6 +619,7 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
+    kv_cache_spec: AttentionSpec
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -707,7 +710,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype = self.cache_config.cache_dtype
             # Cannot use self.kv_cache_spec.dtype here because kv_cache_spec
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
-            self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
+            self.is_kvcache_nvfp4 = self.cache_dtype.startswith("nvfp4")
             if self.is_kvcache_nvfp4:
                 if (
                     force_use_trtllm_attention() is False
@@ -715,12 +718,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     or not supports_trtllm_attention(is_prefill=False)
                 ):
                     raise ValueError(
-                        "--kv-cache-dtype nvfp4 requires the SM100 trtllm-gen "
+                        f"--kv-cache-dtype {self.cache_dtype} requires the "
+                        "SM100 trtllm-gen "
                         "FlashInfer path."
                     )
-                # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
-                # which is passed to FlashInferImpl
-                self.kv_cache_dtype = self.cache_dtype
+                # The scale search only affects the store kernel. FlashInfer
+                # reads both variants using the same NVFP4 layout.
+                self.kv_cache_dtype = "nvfp4"
             else:
                 self.kv_cache_dtype = FlashInferBackend.get_dtype_for_flashinfer(
                     self.cache_dtype
@@ -873,7 +877,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             ) or current_platform.is_device_capability_family(100):
                 return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
             return self.model_config.dtype
-        if cache_dtype == "nvfp4":
+        if cache_dtype.startswith("nvfp4"):
             return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
         return self.kv_cache_spec.dtype
 
@@ -893,7 +897,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def get_cudagraph_support(
         cls: type["FlashInferMetadataBuilder"],
         vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
         """Get the cudagraph support level for FlashInfer attention.
 
@@ -1556,8 +1560,9 @@ class FlashInferImpl(AttentionImpl):
         self.window_left = (
             self.sliding_window[0] if self.sliding_window is not None else -1
         )
-        self.kv_cache_dtype = kv_cache_dtype
-        self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
+        self.cache_dtype = kv_cache_dtype
+        self.is_kvcache_nvfp4 = kv_cache_dtype.startswith("nvfp4")
+        self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -2282,7 +2287,7 @@ class FlashInferImpl(AttentionImpl):
                 k_cache,
                 v_cache,
                 slot_mapping,
-                self.kv_cache_dtype,
+                self.cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
             )

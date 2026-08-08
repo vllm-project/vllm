@@ -14,13 +14,10 @@
       "default": "2.30.7"
     },
     "BUILD_BASE_IMAGE": {
-      "default": "nvidia/cuda:13.0.3-devel-ubuntu22.04"
+      "default": "pytorch/manylinux2_28-builder:cuda13.0"
     },
     "FINAL_BASE_IMAGE": {
       "default": "nvidia/cuda:13.0.3-base-ubuntu22.04"
-    },
-    "BUILD_OS": {
-      "default": "ubuntu"
     },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"

@@ -117,6 +117,7 @@ class XPUPlatform(Platform):
         "auto_gptq",
         "inc",
         "fp8",
+        "deepseek_v4_fp8",
         "mxfp4",
         "mxfp8",
         "fp8_per_tensor",
@@ -300,13 +301,8 @@ class XPUPlatform(Platform):
             )
         else:
             logger.warning_once(
-                "XPU Graph support is experimental and has known limitations: "
-                "(1) only single-GPU execution is supported; "
-                "(2) FLASH_ATTN supports PIECEWISE mode only; use TRITON_ATTN "
-                "for FULL mode; "
-                "(3) XPU Graph may increase device memory usage, "
-                "potentially causing OOM errors or leaving less memory "
-                "for the KV cache and reducing performance."
+                "XPU Graph support is experimental and currently only supports "
+                "single-GPU execution."
             )
 
         # Disable fusion passes not yet supported on XPU.
@@ -464,7 +460,7 @@ class XPUPlatform(Platform):
         # use fused kernels where available when no codegen
         cc = vllm_config.compilation_config
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
-        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
 
         return IrOpPriorityConfig.with_default(default)
 

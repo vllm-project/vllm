@@ -41,7 +41,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -182,7 +182,7 @@ class BailingMLP(nn.Module):
         intermediate_size: int,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        reduce_results: bool | None = True,
+        reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -279,7 +279,7 @@ class BailingMoE(nn.Module):
             else:
                 intermediate_size = config.moe_intermediate_size
             intermediate_size *= config.num_shared_experts
-            self.shared_experts = BailingMLP(
+            self.shared_experts: BailingMLP | None = BailingMLP(
                 intermediate_size=intermediate_size,
                 config=config,
                 quant_config=quant_config,
@@ -289,7 +289,7 @@ class BailingMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,

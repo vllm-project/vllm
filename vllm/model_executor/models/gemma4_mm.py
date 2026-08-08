@@ -40,6 +40,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import (
     _GEMMA4_EXPERT_PARENT_MAPPER,
     Gemma4ForCausalLM,
@@ -750,9 +751,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         if "input_features" in processed_outputs:
             # Unpad per-item so each item's cache entry is
             # self-contained. The batched() field config in
-            # _get_mm_fields_config will re-pad all fields to the
-            # batch's max length at batch time, ensuring consistent
-            # padding regardless of cache history.
+            # _get_mm_fields_config stacks equal-length items and leaves
+            # the rest as a list; _process_audio_input re-pads that list
+            # to the batch's max length.
             masks = processed_outputs["input_features_mask"]
             unpadded_features = [
                 f[mask]
@@ -1487,8 +1488,10 @@ class Gemma4ForConditionalGeneration(
         self,
         audio_input: Gemma4AudioInputs,
     ) -> list[torch.Tensor]:
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features, input_features_mask = batch_audio_features(
+            audio_input["input_features_padded"],
+            audio_input["input_features_mask"],
+        )
 
         # Run audio tower — mask convention: True=valid, False=padding.
         audio_outputs = self.audio_tower(input_features, input_features_mask)
@@ -2075,6 +2078,8 @@ class Gemma4ForConditionalGeneration(
                         metadata.mm_prefix_range = None
                     if hasattr(metadata, "mm_prefix_range_tensor"):
                         metadata.mm_prefix_range_tensor = None
+                    if hasattr(metadata, "mm_prefix_query_range_tensor"):
+                        metadata.mm_prefix_query_range_tensor = None
 
         if isinstance(attn_metadata, list):
             for ub_metadata in attn_metadata:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,9 +10,10 @@ import torch
 from torch import nn
 
 from vllm.config import ParallelConfig
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.models.common.ops import sequence_parallel as sp_ops
 from vllm.models.kimi_k3.nvidia import model as kimi_model
 from vllm.models.kimi_k3.nvidia import mtp as kimi_mtp
-from vllm.models.kimi_k3.nvidia.ops import sequence_parallel as sp_ops
 from vllm.platforms import current_platform
 
 
@@ -264,6 +266,81 @@ def test_kimi_mtp_restores_sequence_parallel_output(monkeypatch):
     torch.testing.assert_close(final_norm.call_args.args[0], expected_hidden_states)
 
 
+@pytest.mark.parametrize(
+    ("enabled", "use_sequence_parallel", "tp_size", "expected"),
+    [
+        (True, True, 8, True),
+        (False, True, 8, False),  # opt-in only
+        (True, False, 8, False),  # replication only exists under SP
+        (True, True, 1, False),  # nothing to shard
+        (True, True, 5, False),  # 6144 % 5 -- would fail divide()
+    ],
+)
+def test_shard_sequence_parallel_mlp_gating(
+    monkeypatch,
+    enabled: bool,
+    use_sequence_parallel: bool,
+    tp_size: int,
+    expected: bool,
+):
+    monkeypatch.setattr(kimi_model.envs, "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", enabled)
+    monkeypatch.setattr(
+        kimi_model, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+
+    assert (
+        kimi_model.shard_sequence_parallel_mlp(
+            hidden_size=7168,
+            intermediate_size=6144,
+            use_sequence_parallel=use_sequence_parallel,
+        )
+        is expected
+    )
+
+
+def test_sharded_sequence_parallel_mlp_matches_replicated(default_vllm_config):
+    """Sharded SP MLP must reproduce the replicated result for every token.
+
+    Each rank owns a *disjoint* token shard, so a weight shard alone cannot
+    finish a rank's own tokens: the ranks must gather the full token set,
+    compute partial sums over their intermediate shard, and reduce-scatter.
+    Splicing per-rank feature slices together instead silently mixes different
+    tokens and produces plausible-looking garbage.
+    """
+    tp_size, hidden, intermediate, tokens_per_rank = 4, 16, 12, 3
+    torch.manual_seed(0)
+    num_tokens = tp_size * tokens_per_rank
+    x = torch.randn(num_tokens, hidden)
+    gate_weight = torch.randn(intermediate, hidden)
+    up_weight = torch.randn(intermediate, hidden)
+    down_weight = torch.randn(hidden, intermediate)
+    act_fn = SiluAndMul()
+
+    replicated = act_fn(x @ torch.cat([gate_weight, up_weight]).T) @ down_weight.T
+
+    shard = intermediate // tp_size
+    # Every rank all-gathers the full token set, then computes its partial.
+    partials = [
+        act_fn(
+            x
+            @ torch.cat(
+                [
+                    gate_weight[r * shard : (r + 1) * shard],
+                    up_weight[r * shard : (r + 1) * shard],
+                ]
+            ).T
+        )
+        @ down_weight[:, r * shard : (r + 1) * shard].T
+        for r in range(tp_size)
+    ]
+    reduced = torch.stack(partials).sum(0)
+    # Reduce-scatter: rank r keeps only its own token shard.
+    for r in range(tp_size):
+        mine = reduced[r * tokens_per_rank : (r + 1) * tokens_per_rank]
+        expected = replicated[r * tokens_per_rank : (r + 1) * tokens_per_rank]
+        torch.testing.assert_close(mine, expected, atol=1e-5, rtol=1e-5)
+
+
 def test_sp_all_gather_uses_custom_kernel(monkeypatch):
     hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
     expected = torch.cat([hidden_states, hidden_states])
@@ -314,6 +391,23 @@ def test_sp_reduce_scatter_uses_custom_kernel_after_padding(monkeypatch):
     torch.testing.assert_close(padded[:3], hidden_states)
     torch.testing.assert_close(padded[3], torch.zeros(2))
     fallback.assert_not_called()
+
+
+@pytest.mark.parametrize("shape", [(3,), (3, 2, 2)])
+def test_sp_shard_pads_only_the_token_axis(monkeypatch, shape):
+    hidden_states = torch.arange(math.prod(shape), dtype=torch.float32).view(shape)
+    monkeypatch.setattr(
+        sp_ops,
+        "get_tensor_model_parallel_world_size",
+        lambda: 2,
+    )
+    monkeypatch.setattr(sp_ops, "get_tensor_model_parallel_rank", lambda: 1)
+
+    output = sp_ops.sp_shard(hidden_states)
+
+    padding = hidden_states.new_zeros((1, *shape[1:]))
+    expected = torch.cat([hidden_states, padding])[2:]
+    torch.testing.assert_close(output, expected)
 
 
 def test_sp_collectives_fall_back_without_custom_kernel(monkeypatch):

@@ -62,13 +62,9 @@ class MoERunnerInterface(PluggableLayer, ABC):
 
     ########################################################################
     #
-    # FusedMoE layer methods
+    # FusedMoEFactory layer methods
     #
     ########################################################################
-
-    @abstractmethod
-    def maybe_init_modular_kernel(self) -> None:
-        raise NotImplementedError
 
     @property
     @abstractmethod
