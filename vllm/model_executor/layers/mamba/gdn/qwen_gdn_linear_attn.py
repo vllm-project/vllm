@@ -50,6 +50,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.third_party.flash_linear_attention.ops import (
     fused_post_conv_prep,
+    fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
     fused_sigmoid_gating_delta_rule_update,
 )
@@ -212,6 +213,55 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
+def _recurrent_gdn_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Run GDN prefill with the recurrent kernel.
+
+    The in-place kernel stores a state after every token. Repeating each pool
+    index across a row makes those stores update one state slot per sequence.
+    """
+    num_sequences = q.shape[0] if cu_seqlens is None else cu_seqlens.shape[0] - 1
+    if initial_state.shape[0] != num_sequences:
+        raise ValueError(
+            f"Expected {num_sequences} initial states, got {initial_state.shape[0]}."
+        )
+    state_pool = torch.cat((torch.empty_like(initial_state[:1]), initial_state), dim=0)
+    state_indices = (
+        torch.arange(
+            1,
+            num_sequences + 1,
+            dtype=torch.int32,
+            device=initial_state.device,
+        )
+        .unsqueeze(1)
+        .expand(-1, q.shape[1])
+        .contiguous()
+    )
+    output, state_pool = fused_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=state_pool,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+    )
+    final_state = state_pool[1:] if output_final_state else None
+    return output, final_state
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -235,6 +285,42 @@ class ChunkGatedDeltaRule(CustomOp):
         else:
             self._forward_method = self.forward_native
 
+    def _forward_float32(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None,
+        use_qk_l2norm_in_kernel: bool,
+        core_attn_out: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
+        if q.dtype != torch.float32:
+            return None
+
+        logger.warning_once(
+            "Chunked GDN prefill kernels do not support torch.float32. "
+            "Falling back to the slower recurrent GDN prefill kernel."
+        )
+        output, final_state = _recurrent_gdn_prefill(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+        if core_attn_out is not None:
+            output_flat = output.squeeze(0).reshape(-1)
+            core_attn_out.reshape(-1)[: output_flat.numel()].copy_(output_flat)
+        return output, final_state
+
     def forward_cuda(
         self,
         q: torch.Tensor,
@@ -250,6 +336,21 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
     ):
+        float32_output = self._forward_float32(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state,
+            output_final_state,
+            cu_seqlens,
+            use_qk_l2norm_in_kernel,
+            core_attn_out,
+        )
+        if float32_output is not None:
+            return float32_output
+
         o, final_state = fi_chunk_gated_delta_rule(
             q=q,
             k=k,
@@ -282,6 +383,21 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
     ):
+        float32_output = self._forward_float32(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state,
+            output_final_state,
+            cu_seqlens,
+            use_qk_l2norm_in_kernel,
+            core_attn_out,
+        )
+        if float32_output is not None:
+            return float32_output
+
         return fla_chunk_gated_delta_rule(
             q=q,
             k=k,
@@ -312,6 +428,21 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
     ):
+        float32_output = self._forward_float32(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state,
+            output_final_state,
+            cu_seqlens,
+            use_qk_l2norm_in_kernel,
+            core_attn_out,
+        )
+        if float32_output is not None:
+            return float32_output
+
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             chunk_gated_delta_rule_cutedsl,
         )
