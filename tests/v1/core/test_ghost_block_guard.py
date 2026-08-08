@@ -22,7 +22,11 @@ import pytest
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    make_block_hash_with_group_id,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     MambaManager,
@@ -134,8 +138,13 @@ def test_defers_only_when_the_tail_was_published_this_step(make, monkeypatch):
     manager = make(pool)
     manager.use_eagle = True
 
+    # block_hash is a read-only property; the group id is folded into the key,
+    # which is why the guard's set is typed BlockHashWithGroupId.
     tail = KVCacheBlock(block_id=7)
-    tail.block_hash = BlockHash(b"tail")
+    tail.set_block_hash(
+        make_block_hash_with_group_id(BlockHash(b"tail"), group_id=0),
+        num_tokens=BLOCK_SIZE,
+    )
 
     def num_blocks(**kw):
         return manager.get_num_blocks_to_allocate(
