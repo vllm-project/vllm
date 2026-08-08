@@ -237,6 +237,7 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
     "H_Q,H_KV,D_QK,D_V,is_mla",
     [
         (16, 1, 576, 512, True),  # MLA path (grouped kernel, v = trans(k))
+        (16, 1, 576, 128, True),  # MLA path (grouped kernel, reload v)
         (32, 8, 128, 128, False),  # GQA path (grouped kernel)
         (32, 32, 128, 128, False),  # MHA path (normal kernel)
     ],
