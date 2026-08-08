@@ -797,6 +797,11 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         Note: This implementation covers most cases. However, if experts
         require a specialized implementation, like MarlinExperts, they are free
         to override this function.
+
+        Returns:
+            The local expert count, token count, intermediate size, hidden
+            size, and top-k count. Overrides may report expert metadata owned
+            by the backend rather than derived from the source weights.
         """
         assert len(w1.shape) == 3 and len(w2.shape) == 3
         E, N, _ = w1.shape
@@ -1273,13 +1278,12 @@ class FusedMoEKernelModularImpl:
         topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
-        local_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
         output_alias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
+        local_num_experts, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
         )
 
@@ -1458,9 +1462,8 @@ class FusedMoEKernelModularImpl:
         """
         output = torch.empty_like(hidden_states)
 
-        local_num_experts = w1.shape[0]
         if global_num_experts == -1:
-            global_num_experts = local_num_experts
+            global_num_experts = w1.shape[0]
 
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
@@ -1488,7 +1491,6 @@ class FusedMoEKernelModularImpl:
             topk_ids=topk_ids,
             activation=activation,
             global_num_experts=global_num_experts,
-            local_num_experts=local_num_experts,
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
