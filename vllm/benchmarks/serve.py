@@ -34,6 +34,7 @@ from collections.abc import AsyncGenerator, Iterable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Literal
 
@@ -57,6 +58,7 @@ from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+PEAK_TOKEN_THROUGHPUT_WINDOW_SECONDS = 1.0
 
 
 def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
@@ -365,6 +367,79 @@ class EmbedBenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
+def _calculate_peak_concurrency(
+    outputs: list[RequestFuncOutput],
+) -> tuple[int, list[float], list[int]]:
+    """Return exact peak concurrency and its event-based step series.
+
+    Each request occupies the half-open interval ``[start_time, end_time)``.
+    Outputs without a positive measured latency cannot define an interval and
+    are ignored.
+    """
+    events: list[tuple[float, int]] = []
+    for output in outputs:
+        if output.latency <= 0:
+            continue
+        events.append((output.start_time, 1))
+        events.append((output.start_time + output.latency, -1))
+
+    events.sort(key=lambda event: (event[0], event[1]))
+
+    concurrent = 0
+    peak = 0
+    event_times: list[float] = []
+    concurrency: list[int] = []
+    for event_time, grouped_events in groupby(events, key=lambda event: event[0]):
+        concurrent += sum(delta for _, delta in grouped_events)
+        peak = max(peak, concurrent)
+        event_times.append(event_time)
+        concurrency.append(concurrent)
+
+    return peak, event_times, concurrency
+
+
+def _calculate_peak_output_tokens_per_s_approx(
+    outputs: list[RequestFuncOutput],
+    window_seconds: float = PEAK_TOKEN_THROUGHPUT_WINDOW_SECONDS,
+) -> tuple[float, list[float], list[float]]:
+    """Return approximate output throughput over a sliding window.
+
+    ``RequestFuncOutput.itl`` measures intervals between streamed response
+    chunks, not individual tokens. This calculation assumes one stream chunk
+    equals one output token. Each chunk contributes to the half-open interval
+    ``[chunk_time, chunk_time + window_seconds)`` in the returned step series.
+    """
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be positive")
+
+    events: list[tuple[float, int]] = []
+    for output in outputs:
+        if not output.success:
+            continue
+
+        chunk_time = output.start_time + output.ttft
+        events.append((chunk_time, 1))
+        events.append((chunk_time + window_seconds, -1))
+        for itl_value in output.itl:
+            chunk_time += itl_value
+            events.append((chunk_time, 1))
+            events.append((chunk_time + window_seconds, -1))
+
+    events.sort(key=lambda event: (event[0], event[1]))
+
+    chunks_in_window = 0
+    peak_chunks = 0
+    event_times: list[float] = []
+    rolling_rates: list[float] = []
+    for event_time, grouped_events in groupby(events, key=lambda event: event[0]):
+        chunks_in_window += sum(delta for _, delta in grouped_events)
+        peak_chunks = max(peak_chunks, chunks_in_window)
+        event_times.append(event_time)
+        rolling_rates.append(chunks_in_window / window_seconds)
+
+    return peak_chunks / window_seconds, event_times, rolling_rates
+
+
 def _get_current_request_rate(
     ramp_up_strategy: Literal["linear", "exponential"] | None,
     ramp_up_start_rps: int | None,
@@ -651,11 +726,6 @@ def calculate_metrics(
             stacklevel=2,
         )
 
-    # Calculate max output tokens per second metric
-    max_output_tokens_per_s = 0.0
-    max_concurrent_requests = 0
-
-    # Find the time range across all successful requests
     successful_outputs = [output for output in outputs if output.success]
     failed_outputs = [output for output in outputs if not output.success]
 
@@ -664,61 +734,36 @@ def calculate_metrics(
         for i, err in enumerate(failed_outputs[:10]):
             print(f"Error {i}: {err.error}")
 
+    max_output_tokens_per_s, throughput_times, rolling_throughput = (
+        _calculate_peak_output_tokens_per_s_approx(successful_outputs)
+    )
+    max_concurrent_requests, concurrency_times, concurrency = (
+        _calculate_peak_concurrency(successful_outputs)
+    )
+
     if successful_outputs:
-        min_start_time = min(output.start_time for output in successful_outputs)
-        max_end_time = max(
-            output.start_time + output.latency for output in successful_outputs
-        )
-
-        # Create second buckets (ceiling to ensure we capture all time)
-        duration_seconds = int(np.ceil(max_end_time - min_start_time)) + 1
-        tokens_per_second = np.zeros(duration_seconds)
-        concurrent_requests_per_second = np.zeros(duration_seconds)
-
-        for i, output in enumerate(successful_outputs):
-            # Calculate token generation timestamp using
-            # start_time, ttft, and itl
-            token_times = [output.start_time + output.ttft]
-            current_time = token_times[0]
-            for itl_value in output.itl:
-                current_time += itl_value
-                token_times.append(current_time)
-
-            # Add tokens to second buckets
-            for token_time in token_times:
-                second_bucket = int(token_time - min_start_time)
-                if 0 <= second_bucket < duration_seconds:
-                    tokens_per_second[second_bucket] += 1
-
-            # Track concurrent requests for each second this request was active
-            request_start_second = int(output.start_time - min_start_time)
-            request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
-            )
-
-            for second in range(request_start_second, request_end_second + 1):
-                concurrent_requests_per_second[second] += 1
-
-        # Find the maximum tokens per second and corresponding
-        # concurrent requests
-        if len(tokens_per_second) > 0:
-            max_output_tokens_per_s = float(np.max(tokens_per_second))
-            max_concurrent_requests = int(np.max(concurrent_requests_per_second))
-
         if TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
 
+            min_start_time = min(output.start_time for output in successful_outputs)
             fig = tpl.figure()
             fig.plot(
-                np.arange(len(tokens_per_second)),
-                tokens_per_second,
-                title="Output tokens per second",
+                [timestamp - min_start_time for timestamp in throughput_times],
+                rolling_throughput,
+                title="Output tokens per second (1s sliding window)",
+                xlabel="Time since first request (s)",
+                ylim=(0, max_output_tokens_per_s + 0.5),
+                plot_command="plot '-' with steps",
             )
-            fig.plot(
-                np.arange(len(concurrent_requests_per_second)),
-                concurrent_requests_per_second,
-                title="Concurrent requests per second",
-            )
+            if concurrency_times:
+                fig.plot(
+                    [timestamp - min_start_time for timestamp in concurrency_times],
+                    concurrency,
+                    title="Concurrent requests",
+                    xlabel="Time since first request (s)",
+                    ylim=(0, max_concurrent_requests + 0.5),
+                    plot_command="plot '-' with steps",
+                )
             fig.show()
         else:
             print("tip: install termplotlib and gnuplot to plot the metrics")
