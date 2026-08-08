@@ -366,6 +366,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "max_num_scheduled_tokens",
                 "kv_cache_memory_bytes",
                 "safetensors_prefetch_block_size",
+                "max_model_len_cap",
             }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
@@ -449,6 +450,7 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed
     max_model_len: int = ModelConfig.max_model_len
+    max_model_len_cap: int | None = ModelConfig.max_model_len_cap
     cudagraph_capture_sizes: list[int] | None = (
         CompilationConfig.cudagraph_capture_sizes
     )
@@ -855,6 +857,9 @@ class EngineArgs:
             "--tokenizer-revision", **model_kwargs["tokenizer_revision"]
         )
         model_group.add_argument("--max-model-len", **model_kwargs["max_model_len"])
+        model_group.add_argument(
+            "--max-model-len-cap", **model_kwargs["max_model_len_cap"]
+        )
         model_group.add_argument("--quantization", "-q", **model_kwargs["quantization"])
         model_group.add_argument(
             "--quantization-config", **model_kwargs["quantization_config"]
@@ -1734,6 +1739,7 @@ class EngineArgs:
             model_class_overrides=self.model_class_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
+            max_model_len_cap=self.max_model_len_cap,
             quantization=self.quantization,
             quantization_config=self.quantization_config,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
