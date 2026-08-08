@@ -466,6 +466,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             norm_before_gate=True,
             activation=output_gate_type,
             device=current_platform.current_device(),
+            dtype=torch.float32,  # 与 HF checkpoint 的 fp32 保持一致
         )
 
         self.out_proj = RowParallelLinear(
