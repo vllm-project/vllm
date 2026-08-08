@@ -9,6 +9,7 @@ from tests.kernels.quantization.nvfp4_utils import (
     dequantize_nvfp4_to_dtype,
     get_nvfp4_global_scale,
 )
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
@@ -99,7 +100,7 @@ def make_nvfp4_kv_cache(
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=kv_bf16_hnd.device)
 
-    torch.ops._C_cache_ops.reshape_and_cache_flash(
+    ops.reshape_and_cache_flash(
         k_tokens,
         v_tokens,
         k_view_nhd,

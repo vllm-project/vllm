@@ -741,6 +741,73 @@ void reshape_and_cache(
           reinterpret_cast<const float*>(v_scale.data_ptr()),                \
           kv_scale_stride);
 
+// Integer codes for CacheDType strings. Keep in sync with
+// vllm/_custom_ops.py::KV_CACHE_DTYPE_TO_CODE.
+// Using int across the stable ABI avoids a per-call host leak when unboxing
+// str→std::string (pytorch#191340 / vllm#50150). The string is rebuilt only
+// on the C++ stack for the existing dispatch helpers.
+namespace {
+constexpr int64_t kKvCacheDtypeAuto = 0;
+constexpr int64_t kKvCacheDtypeFloat16 = 1;
+constexpr int64_t kKvCacheDtypeBFloat16 = 2;
+constexpr int64_t kKvCacheDtypeFp8 = 3;
+constexpr int64_t kKvCacheDtypeFp8E4M3 = 4;
+constexpr int64_t kKvCacheDtypeFp8E5M2 = 5;
+constexpr int64_t kKvCacheDtypeFp8Inc = 6;
+constexpr int64_t kKvCacheDtypeFp8DsMla = 7;
+constexpr int64_t kKvCacheDtypeTurboquantK8V4 = 8;
+constexpr int64_t kKvCacheDtypeTurboquant4bitNc = 9;
+constexpr int64_t kKvCacheDtypeTurboquantK3V4Nc = 10;
+constexpr int64_t kKvCacheDtypeTurboquant3bitNc = 11;
+constexpr int64_t kKvCacheDtypeInt4PerTokenHead = 12;
+constexpr int64_t kKvCacheDtypeInt8PerTokenHead = 13;
+constexpr int64_t kKvCacheDtypeFp8PerTokenHead = 14;
+constexpr int64_t kKvCacheDtypeNvfp4 = 15;
+constexpr int64_t kKvCacheDtypeNvfp4_4over6 = 16;
+
+const char* kv_cache_dtype_code_to_cstr(int64_t code) {
+  switch (code) {
+    case kKvCacheDtypeAuto:
+      return "auto";
+    case kKvCacheDtypeFloat16:
+      return "float16";
+    case kKvCacheDtypeBFloat16:
+      return "bfloat16";
+    case kKvCacheDtypeFp8:
+      return "fp8";
+    case kKvCacheDtypeFp8E4M3:
+      return "fp8_e4m3";
+    case kKvCacheDtypeFp8E5M2:
+      return "fp8_e5m2";
+    case kKvCacheDtypeFp8Inc:
+      return "fp8_inc";
+    case kKvCacheDtypeFp8DsMla:
+      return "fp8_ds_mla";
+    case kKvCacheDtypeTurboquantK8V4:
+      return "turboquant_k8v4";
+    case kKvCacheDtypeTurboquant4bitNc:
+      return "turboquant_4bit_nc";
+    case kKvCacheDtypeTurboquantK3V4Nc:
+      return "turboquant_k3v4_nc";
+    case kKvCacheDtypeTurboquant3bitNc:
+      return "turboquant_3bit_nc";
+    case kKvCacheDtypeInt4PerTokenHead:
+      return "int4_per_token_head";
+    case kKvCacheDtypeInt8PerTokenHead:
+      return "int8_per_token_head";
+    case kKvCacheDtypeFp8PerTokenHead:
+      return "fp8_per_token_head";
+    case kKvCacheDtypeNvfp4:
+      return "nvfp4";
+    case kKvCacheDtypeNvfp4_4over6:
+      return "nvfp4_4over6";
+    default:
+      STD_TORCH_CHECK(false, "Unsupported kv_cache_dtype code: ", code);
+      return "auto";  // unreachable
+  }
+}
+}  // namespace
+
 void reshape_and_cache_flash(
     torch::stable::Tensor& key,    // [num_tokens, num_heads, head_size]
     torch::stable::Tensor& value,  // [num_tokens, num_heads, head_size]
@@ -749,9 +816,12 @@ void reshape_and_cache_flash(
     torch::stable::Tensor&
         value_cache,  // [num_blocks, block_size, num_heads, head_size]
     torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
-    const std::string& kv_cache_dtype,
+    int64_t kv_cache_dtype_code,
     torch::stable::Tensor& k_scale,    // [1] or [num_heads]
     torch::stable::Tensor& v_scale) {  // [1] or [num_heads]
+  // Stack-local string for existing dispatch macros — not an ABI unbox leak.
+  const std::string kv_cache_dtype(
+      kv_cache_dtype_code_to_cstr(kv_cache_dtype_code));
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -770,6 +840,8 @@ void reshape_and_cache_flash(
       key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
+  // Prefer the stack-local string so both nvfp4 layouts stay covered after
+  // int→str conversion (main added nvfp4_4over6 after this PR started).
   if (kv_cache_dtype == "nvfp4" || kv_cache_dtype == "nvfp4_4over6") {
 #if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
     // NVFP4 dispatch is compiled separately for SM100+.

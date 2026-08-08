@@ -314,7 +314,7 @@ def test_reshape_and_cache_flash(
                     key_cache,
                     value_cache,
                     slot_mapping,
-                    kv_cache_dtype,
+                    ops.kv_cache_dtype_to_code(kv_cache_dtype),
                     k_scale,
                     v_scale,
                 ),

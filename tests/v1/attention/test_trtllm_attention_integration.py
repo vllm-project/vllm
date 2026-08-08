@@ -14,6 +14,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -270,7 +271,7 @@ def _create_nvfp4_hnd_kv_cache(
         intra_offsets = token_offsets % block_size
         slots = block_table[i, block_indices] * block_size + intra_offsets
         # reshape_and_cache_flash expects (B, N, H, D) cache views.
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
+        ops.reshape_and_cache_flash(
             k_ctx,
             v_ctx,
             k_cache.transpose(1, 2),

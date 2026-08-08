@@ -894,12 +894,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                  Tensor k_scale, Tensor v_scale) -> ()");
 
   // Reshape the key and value tensors and cache them.
+  // kv_cache_dtype is an int code (not str) to avoid stable-ABI host leaks
+  // when this op is dispatched eagerly (issue #50150).
   ops.def(
       "reshape_and_cache_flash(Tensor key, Tensor value,"
       "                        Tensor! key_cache,"
       "                        Tensor! value_cache,"
       "                        Tensor slot_mapping,"
-      "                        str kv_cache_dtype,"
+      "                        int kv_cache_dtype,"
       "                        Tensor k_scale, Tensor v_scale) -> ()");
 
   // Concat kv_c and k_pe and cache them.
