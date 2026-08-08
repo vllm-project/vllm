@@ -118,3 +118,28 @@ steps:
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
+  mirror:
+    amd:
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - rust/
+      - vllm/distributed/
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/v1/engine/
+      - vllm/v1/worker/
+      - tests/utils.py
+      - tests/v1/distributed/test_external_lb_dp.py
+      - tests/v1/distributed/test_hybrid_lb_dp.py
+      - tests/v1/distributed/test_internal_lb_dp.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_USE_RUST_FRONTEND=1
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
+      - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"

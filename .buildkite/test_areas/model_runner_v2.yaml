@@ -99,6 +99,24 @@ steps:
     - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray"
     - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
     - pytest -v -s v1/distributed/test_pp_dp_v2.py
+  mirror:
+    amd:
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/worker/gpu/
+      - vllm/v1/worker/gpu_worker.py
+      - tests/distributed/test_pipeline_parallel.py
+      - tests/distributed/test_pp_cudagraph.py
+      - vllm/platforms/rocm.py
+      commands:
+      - set -x
+      - export VLLM_USE_V2_MODEL_RUNNER=1
+      - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+      - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
 
 - label: Model Runner V2 Spec Decode
   device: h200_35gb
