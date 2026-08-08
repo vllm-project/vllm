@@ -10,7 +10,22 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.attention.ops.fp8e4nv import (
+    FP8E4NV_EXTERN_LIBS,
+    convert_to_fp8e4m3,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
+
+
+def use_fp8e4m3_software_conversion(kv_cache_dtype: str) -> bool:
+    """Whether to software-convert an fp8e4m3 KV cache on this device."""
+    return (
+        kv_cache_dtype in ("fp8", "fp8_e4m3")
+        and current_platform.is_cuda()
+        and current_platform.has_device_capability(75)
+        and not current_platform.has_device_capability(89)
+    )
+
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 
@@ -23,6 +38,12 @@ def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
         or is_quantized_kv_cache(kv_cache_dtype)
     ):
         return False
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        return (
+            use_fp8e4m3_software_conversion(kv_cache_dtype)
+            or current_platform.has_device_capability(89)
+            or current_platform.is_xpu()
+        )
     if kv_cache_dtype.startswith("fp8"):
         return current_platform.has_device_capability(89) or current_platform.is_xpu()
     if kv_cache_dtype == "bfloat16":
@@ -54,6 +75,8 @@ def reshape_and_cache_kernel_flash(
     USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
     # FP8 flags
     FP8_KV_CACHE: tl.constexpr,
+    # software fp8e4nv emulation (pre-SM89): cache is uint8, encode explicitly
+    FP8_SOFTWARE_CONV: tl.constexpr,
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
@@ -127,16 +150,31 @@ def reshape_and_cache_kernel_flash(
     else:
         value_tile = value_load
 
-    tl.store(
-        key_cache_ptr + tgt_idx_k,
-        key_tile,
-        mask=tile_pos < (num_heads * head_size),
-    )
-    tl.store(
-        value_cache_ptr + tgt_idx_v,
-        value_tile,
-        mask=tile_pos < (num_heads * head_size),
-    )
+    if FP8_SOFTWARE_CONV:
+        # Pre-SM89: no native fp8e4nv cast. Encode to fp8e4nv bits in software (RNE)
+        # and store into the uint8 cache. Keep the scaled tile in fp32 so software
+        # conversion has the same rounding as the native fp32-to-fp8 store.
+        tl.store(
+            key_cache_ptr + tgt_idx_k,
+            convert_to_fp8e4m3(key_tile),
+            mask=tile_pos < (num_heads * head_size),
+        )
+        tl.store(
+            value_cache_ptr + tgt_idx_v,
+            convert_to_fp8e4m3(value_tile),
+            mask=tile_pos < (num_heads * head_size),
+        )
+    else:
+        tl.store(
+            key_cache_ptr + tgt_idx_k,
+            key_tile,
+            mask=tile_pos < (num_heads * head_size),
+        )
+        tl.store(
+            value_cache_ptr + tgt_idx_v,
+            value_tile,
+            mask=tile_pos < (num_heads * head_size),
+        )
     return
 
 
@@ -396,8 +434,8 @@ def triton_reshape_and_cache_flash(
 
     assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
         f"Triton reshape-and-cache cannot store kv_cache_dtype={kv_cache_dtype} "
-        f"on this device: an FP8 KV cache needs native fp8e4nv (SM89+). Use "
-        f"--kv-cache-dtype bfloat16 (or float16 on SM75)."
+        f"on this device: fp8/fp8_e4m3 use software conversion on SM75-88 or "
+        f"native conversion on SM89+; other FP8 formats need native support."
     )
     kv_cache_torch_dtype = (
         current_platform.fp8_dtype()
@@ -405,13 +443,18 @@ def triton_reshape_and_cache_flash(
         else key_cache.dtype
     )
 
-    if key_cache.dtype != kv_cache_torch_dtype and is_quantized_kv_cache(
-        kv_cache_dtype
+    fp8_software_conv = use_fp8e4m3_software_conversion(kv_cache_dtype)
+    if (
+        key_cache.dtype != kv_cache_torch_dtype
+        and is_quantized_kv_cache(kv_cache_dtype)
+        and not fp8_software_conv
     ):
         # to avoid erounous implicit cast in triton kernel (tl.store to uint8)
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         key_cache = key_cache.view(kv_cache_torch_dtype)
         value_cache = value_cache.view(kv_cache_torch_dtype)
+    # On the software path the cache stays uint8 and the kernel encodes to
+    # fp8e4nv bits explicitly.
     FP8_KV_CACHE = is_quantized_kv_cache(kv_cache_dtype)
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
@@ -430,6 +473,7 @@ def triton_reshape_and_cache_flash(
         slot_mapping.shape[0],
         triton.cdiv(n, meta["TILE_SIZE"]),
     )
+    launch_kwargs = {"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}
 
     reshape_and_cache_kernel_flash[grid](
         key_ptr=key,
@@ -453,10 +497,12 @@ def triton_reshape_and_cache_flash(
         x=x,
         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
         FP8_KV_CACHE=FP8_KV_CACHE,
+        FP8_SOFTWARE_CONV=fp8_software_conv,
         # autotune parameters
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,
         num_stages=num_stages,
+        **launch_kwargs,
     )
 
 
