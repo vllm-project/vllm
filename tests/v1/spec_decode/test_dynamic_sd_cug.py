@@ -16,6 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 pytestmark = pytest.mark.cpu_test
 
@@ -147,6 +148,56 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
             assert desc.num_tokens == num_tokens
             assert desc.num_reqs == num_reqs
             assert desc.num_active_loras == 0
+
+
+def test_dynamic_sd_autoregressive_draft_decode_uses_fixed_query_len(monkeypatch):
+    max_num_seqs = 8
+    # The runtime schedule need not contain the configured upper-bound K;
+    # draft decode capture must still use fixed query length 1.
+    max_spec_tokens = 4
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=max_num_seqs,
+        max_spec_tokens=max_spec_tokens,
+        num_spec_per_batch_size=[(1, 2, 3), (3, 4, 1), (5, 8, 0)],
+    )
+
+    speculator = object.__new__(MTPSpeculator)
+    speculator.vllm_config = vllm_config
+    speculator.device = torch.device("cpu")
+    speculator.num_speculative_steps = max_spec_tokens
+    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_AND_PIECEWISE)
+
+    prefill_manager = speculator.prefill_cudagraph_manager
+    assert prefill_manager is not None
+    prefill_descs = prefill_manager._capture_descs[CUDAGraphMode.FULL]
+    assert {desc.uniform_token_count for desc in prefill_descs} == {1, 2, 4}
+
+    decode_manager = speculator.decode_cudagraph_manager
+    assert decode_manager is not None
+    decode_descs = decode_manager._capture_descs[CUDAGraphMode.FULL]
+    assert {desc.uniform_token_count for desc in decode_descs} == {1}
+
+    decode_manager._graphs_captured = True
+    for num_reqs in range(1, max_num_seqs + 1):
+        desc = decode_manager.dispatch(
+            num_reqs=num_reqs,
+            num_tokens=num_reqs,
+            uniform_token_count=1,
+            num_active_loras=0,
+        )
+        assert desc == gpu_cudagraph_utils.BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL,
+            num_tokens=num_reqs,
+            num_reqs=num_reqs,
+            uniform_token_count=1,
+            num_active_loras=0,
+        )
 
 
 def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
