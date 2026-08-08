@@ -21,6 +21,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "CheersConfig": "vllm.transformers_utils.configs.cheers",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
+    "GigaChat35Config": "vllm.transformers_utils.configs.gigachat3_5",
     "ColModernVBertConfig": "vllm.transformers_utils.configs.colmodernvbert",
     "ColPaliConfig": "vllm.transformers_utils.configs.colpali",
     "ColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
@@ -106,6 +107,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 }
 
 __all__ = [
+    "GigaChat35Config",
     "AfmoeConfig",
     "ArcticConfig",
     "AXK1Config",
