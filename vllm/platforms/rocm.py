@@ -30,6 +30,7 @@ try:
         AmdSmiException,
         AmdSmiMemoryType,
         amdsmi_get_gpu_asic_info,
+        amdsmi_get_gpu_device_bdf,
         amdsmi_get_gpu_device_uuid,
         amdsmi_get_gpu_memory_total,
         amdsmi_get_processor_handles,
@@ -1134,3 +1135,15 @@ class RocmPlatform(Platform):
         except Exception as e:
             logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
             return None
+
+    @classmethod
+    @with_amdsmi_context
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Query amdsmi for GPU index -> PCI bus ID mapping."""
+        handles = amdsmi_get_processor_handles()
+        if not handles:
+            raise RuntimeError("amdsmi returned no GPU processor handles")
+        out: dict[int, str] = {}
+        for idx, handle in enumerate(handles):
+            out[idx] = amdsmi_get_gpu_device_bdf(handle)
+        return out
