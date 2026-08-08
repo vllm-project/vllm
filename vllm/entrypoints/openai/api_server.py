@@ -464,6 +464,13 @@ async def init_app_state(
 
         init_scale_out_state(state, args, engine_client, request_logger)
 
+    from vllm.entrypoints.openai.streaming.api_router import init_streaming_state
+
+    init_streaming_state(engine_client, state, args, request_logger, supported_tasks)
+
+    if state.video_streaming_serving is not None:
+        await state.video_streaming_serving.prewarm()
+
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
 

@@ -68,6 +68,34 @@ from vllm.utils.collection_utils import as_list
 logger = init_logger(__name__)
 
 
+_RTSP_SCHEMES = ("rtsp://", "rtsps://", "rtmp://")
+
+
+def _find_rtsp_video_url(messages) -> str | None:
+    """Return the first rtsp/rtsps/rtmp video_url found in user messages."""
+    for msg in messages:
+        content = (
+            msg.get("content")
+            if isinstance(msg, dict)
+            else getattr(msg, "content", None)
+        )
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            url = None
+            if isinstance(part, dict):
+                if part.get("type") == "video_url":
+                    vu = part.get("video_url") or {}
+                    url = vu.get("url") if isinstance(vu, dict) else None
+            else:
+                if getattr(part, "type", None) == "video_url":
+                    vu = getattr(part, "video_url", None)
+                    url = getattr(vu, "url", None) if vu is not None else None
+            if isinstance(url, str) and url.startswith(_RTSP_SCHEMES):
+                return url
+    return None
+
+
 def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
     """Sum per-modality placeholder tokens from ``mm_placeholders``.
 
@@ -228,6 +256,38 @@ class OpenAIServingChat(GenerateBaseServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        # Streaming requests carrying a stream-scheme video_url are served by
+        # the streaming layer, which owns the DeepStream RTSP pipeline.
+        if request.stream and raw_request is not None:
+            rtsp_url = _find_rtsp_video_url(request.messages)
+            if rtsp_url is not None:
+                streaming_serving = getattr(
+                    raw_request.app.state, "video_streaming_serving", None
+                )
+                if streaming_serving is None:
+                    try:
+                        from vllm.entrypoints.openai.streaming.serving import (
+                            VideoStreamingServing,
+                        )
+
+                        streaming_serving = VideoStreamingServing(
+                            self.engine_client,
+                            self.models,
+                            request_logger=None,
+                        )
+                        raw_request.app.state.video_streaming_serving = (
+                            streaming_serving
+                        )
+                    except Exception as e:
+                        return self.create_error_response(
+                            f"Failed to initialize RTSP streaming: {e}"
+                        )
+                return await streaming_serving.create_video_chat_stream(
+                    request,
+                    raw_request,
+                    rtsp_url=rtsp_url,
+                )
+
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )
