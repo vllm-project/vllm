@@ -189,6 +189,9 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DCP_Q_REPLICATE: bool = False
+    VLLM_USE_DIRECT_DCP_A2A: bool | None = None
+    VLLM_USE_DIRECT_DCP_Q_GATHER: bool | None = None
+    VLLM_USE_DIRECT_DCP_KV_GATHER: bool | None = None
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -2047,6 +2050,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
+    ),
+    # Direct DCP ops default on when applicable; set to 1 to enforce or 0 to disable.
+    "VLLM_USE_DIRECT_DCP_A2A": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_A2A")
+    ),
+    "VLLM_USE_DIRECT_DCP_Q_GATHER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_Q_GATHER")
+    ),
+    "VLLM_USE_DIRECT_DCP_KV_GATHER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_DIRECT_DCP_KV_GATHER")
     ),
     # Whether to enable dual cuda streams for LoRA computation
     # (used by both BaseLinearLayerWithLoRA and FusedMoEWithLoRA to

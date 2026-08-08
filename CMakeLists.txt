@@ -446,6 +446,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_kv_gather.cu"
+      "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_q_gather.cu")
+
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
     # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
