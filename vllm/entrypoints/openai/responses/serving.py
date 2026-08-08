@@ -1392,6 +1392,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     request=request,
                     prompt_token_ids=ctx.last_output.prompt_token_ids,
                     finished=output.finish_reason is not None,
+                    finish_reason=output.finish_reason,
                 )
             else:
                 delta_message = DeltaMessage(content=output.text)

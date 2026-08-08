@@ -242,6 +242,7 @@ class HarmonyParser(DelegatingParser):
         prompt_token_ids: list[int] | None = None,
         *,
         finished: bool,
+        finish_reason: str | None = None,
     ) -> DeltaMessage | None:
         prev_recipient = self._normalize_recipient(
             self._harmony_parser.current_recipient

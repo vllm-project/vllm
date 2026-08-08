@@ -101,6 +101,7 @@ class KimiK3Parser(DelegatingParser):
         prompt_token_ids: list[int] | None = None,
         *,
         finished: bool,
+        finish_reason: str | None = None,
     ) -> DeltaMessage | None:
         state = self._stream_state
         previous_content = state.previous_text if state.reasoning_ended else ""
@@ -110,6 +111,7 @@ class KimiK3Parser(DelegatingParser):
             request,
             prompt_token_ids,
             finished=finished,
+            finish_reason=finish_reason,
         )
 
         if (

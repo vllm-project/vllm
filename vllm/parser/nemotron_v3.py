@@ -93,7 +93,11 @@ class NemotronV3Parser(Qwen3Parser):
         self,
         text: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        finish_reason: str | None = None,
     ) -> str | None:
+        # Nemotron's opt-in fallback is not gated on finish_reason: unlike
+        # DeepSeek V4 (see vllm/parser/deepseek_v4.py, #48645), this
+        # precedent predates that gate and is left unchanged here.
         if not self._should_force_content(request):
             return None
         return "".join(self._streamed_reasoning) or None

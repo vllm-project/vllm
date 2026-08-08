@@ -962,3 +962,333 @@ class TestDelegatingParserLargeDelta:
         assert eos_text not in output.reasoning
         assert output.content == ""
         assert output.tool_calls == []
+
+
+# ── #48645: force_nonempty_content -- surface unterminated reasoning as
+# content ─────────────────────────────────────────────────────────────
+#
+# Ports the Nemotron V3 pattern (PR #39091, vllm/parser/nemotron_v3.py) to
+# deepseek_v4, per bbrowning's guidance on #48645 (2026-07-15): opt-in via
+# a chat_template_kwargs flag, never touching a properly closed </think>.
+# See DeepSeekV4Parser.get_streaming_fallback_content / .extract_reasoning
+# for the implementation these tests exercise.
+
+
+class TestForceNonemptyContentNonStreaming:
+    """Non-streaming: DeepSeekV4Parser.extract_reasoning() swap."""
+
+    def test_misroute_flushed(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        mock_request.chat_template_kwargs = {"force_nonempty_content": True}
+        text = "Good morning! How can I help you today?"
+
+        reasoning, content = parser.extract_reasoning(text, mock_request)
+
+        assert reasoning is None
+        assert content == text
+
+    def test_no_flush_without_opt_in(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        mock_request.chat_template_kwargs = None
+        text = "Good morning! How can I help you today?"
+
+        reasoning, content = parser.extract_reasoning(text, mock_request)
+
+        assert reasoning == text
+        assert content is None
+
+    def test_end_token_seen_not_flushed(self, mock_tokenizer, mock_request):
+        """``</think>`` WAS seen: real, deliberate CoT -- never promoted,
+        even though nothing followed it.
+
+        Deliberately narrower than the Nemotron V3 precedent, whose gate
+        is only "content ended up empty" and promotes in this case too;
+        see PR description for the rationale.
+        """
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        mock_request.chat_template_kwargs = {"force_nonempty_content": True}
+        text = f"Deliberate reasoning.{DSML_THINK_END}"
+
+        reasoning, content = parser.extract_reasoning(text, mock_request)
+
+        assert reasoning == "Deliberate reasoning."
+        assert content is None
+
+    def test_tool_call_not_flushed(self, mock_tokenizer, mock_request):
+        """A tool call started directly from reasoning (no ``</think>``)
+        structurally ends reasoning via the ``(REASONING, TOOL_START)``
+        transition, so it is never flushed here -- it's real deliberation
+        that led to a real tool call, not a misroute.
+        """
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        mock_request.chat_template_kwargs = {"force_nonempty_content": True}
+        text = "Let me check the weather.\n\n" + _tool_calls(
+            _invoke("get_weather", ("location", "true", "NYC"))
+        )
+
+        reasoning, content = parser.extract_reasoning(text, mock_request)
+
+        assert reasoning == "Let me check the weather."
+        assert content is None
+
+    def test_non_streaming_has_no_finish_reason_gate(
+        self, mock_tokenizer, mock_request
+    ):
+        """Documents an accepted gap (see PR description): ``extract_reasoning``
+        is a shared abstract method with no ``finish_reason`` parameter, so
+        unlike the streaming path (below) the non-streaming swap cannot
+        distinguish a natural stop from a length-truncated generation. An
+        opted-in request with a truncated, never-closed trace *is*
+        promoted here.
+        """
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        mock_request.chat_template_kwargs = {"force_nonempty_content": True}
+        text = "This trace got cut off mid-sent"
+
+        reasoning, content = parser.extract_reasoning(text, mock_request)
+
+        assert reasoning is None
+        assert content == text
+
+
+def _word_tokens(text: str, start_id: int = 100) -> list[tuple[int, str]]:
+    tokens: list[tuple[int, str]] = []
+    tid = start_id
+    for word in text.split(" "):
+        prefix = " " if tokens else ""
+        tokens.append((tid, prefix + word))
+        tid += 1
+    return tokens
+
+
+class TestForceNonemptyContentStreaming:
+    """Streaming: ``DelegatingParser.finalize_generation`` ->
+    ``DeepSeekV4Parser.get_streaming_fallback_content``, through the same
+    reasoning+tool adapter split serving wires up for
+    ``--reasoning-parser deepseek_v4 --tool-call-parser deepseek_v4``
+    (see vllm/parser/engine/registered_adapters.py).
+    """
+
+    @pytest.mark.parametrize(
+        "chunk_size", [1, 2, 3, 5, None], ids=lambda c: f"chunk={c}"
+    )
+    def test_misroute_flushed(self, chunk_size):
+        text = "Good morning! How can I help you today?"
+        tokens = _word_tokens(text)
+        tokenizer = MockTokenizer(vocab=dict(_DSV4_FULL_VOCAB), tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            finish_reason="stop",
+            chat_template_kwargs={"force_nonempty_content": True},
+        )
+        output = collect_output(deltas)
+
+        assert output.reasoning == text
+        assert output.content == text
+
+    @pytest.mark.parametrize(
+        "chunk_size", [1, 2, 3, 5, None], ids=lambda c: f"chunk={c}"
+    )
+    def test_no_flush_without_opt_in(self, chunk_size):
+        text = "Good morning! How can I help you today?"
+        tokens = _word_tokens(text)
+        tokenizer = MockTokenizer(vocab=dict(_DSV4_FULL_VOCAB), tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            finish_reason="stop",
+        )
+        output = collect_output(deltas)
+
+        assert output.reasoning == text
+        assert output.content == ""
+
+    @pytest.mark.parametrize(
+        "chunk_size", [1, 2, 3, 5, None], ids=lambda c: f"chunk={c}"
+    )
+    def test_length_truncation_not_flushed(self, chunk_size):
+        """``finish_reason="length"``: generation was cut off by the token
+        budget, not a natural stop. Truncated, mid-sentence CoT must never
+        become a user-facing "answer".
+        """
+        text = "This is a very long chain of thought that got cut off"
+        tokens = _word_tokens(text)
+        tokenizer = MockTokenizer(vocab=dict(_DSV4_FULL_VOCAB), tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            finish_reason="length",
+            chat_template_kwargs={"force_nonempty_content": True},
+        )
+        output = collect_output(deltas)
+
+        assert output.reasoning == text
+        assert output.content == ""
+
+    @pytest.mark.parametrize(
+        "chunk_size", [1, 2, 3, 5, None], ids=lambda c: f"chunk={c}"
+    )
+    def test_no_finish_reason_not_flushed(self, chunk_size):
+        """``finish_reason`` unset (``None``) is treated the same as "not
+        confirmed stop": deny, not allow. A caller that doesn't thread
+        ``finish_reason`` through gets the pre-existing (no-flush)
+        behavior, never a silently-unsafe default.
+        """
+        text = "Good morning! How can I help you today?"
+        tokens = _word_tokens(text)
+        tokenizer = MockTokenizer(vocab=dict(_DSV4_FULL_VOCAB), tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            chat_template_kwargs={"force_nonempty_content": True},
+        )
+        output = collect_output(deltas)
+
+        assert output.reasoning == text
+        assert output.content == ""
+
+    @pytest.mark.parametrize(
+        "chunk_size", [1, 2, 3, 5, None], ids=lambda c: f"chunk={c}"
+    )
+    def test_end_token_seen_not_flushed(self, chunk_size):
+        """``</think>`` WAS closed (even though nothing followed): real
+        CoT, never promoted."""
+        tokens = _word_tokens("Deliberate reasoning.") + [
+            (_DSV4_FULL_VOCAB[DSML_THINK_END], DSML_THINK_END)
+        ]
+        tokenizer = MockTokenizer(vocab=dict(_DSV4_FULL_VOCAB), tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            finish_reason="stop",
+            chat_template_kwargs={"force_nonempty_content": True},
+        )
+        output = collect_output(deltas)
+
+        assert output.reasoning == "Deliberate reasoning."
+        assert output.content == ""
+
+    def test_tool_call_not_flushed(self):
+        """Tool call started directly from reasoning (no ``</think>``):
+        ``(REASONING, TOOL_START)`` flips ``reasoning_ended`` True before
+        any tool event, so this is never flushed even though ``</think>``
+        was never seen.
+        """
+        # DSML_TOOL_START/END must carry their real vocab token IDs (as
+        # _dsv4_tokens does) rather than _word_tokens' arbitrary sequential
+        # IDs: once any real special-token ID has been seen, the engine
+        # only accepts a *token-ID-confirmed* TOOL_START as a state
+        # transition, treating literal "looks like a marker" text as
+        # ordinary content instead (the same safety net that keeps a
+        # user's prose mentioning "<tool_call>" from being misparsed).
+        tokens = _word_tokens("Let me check the weather")
+        tid = 900
+        tokens.append((tid, "\n\n"))
+        tid += 1
+        tokens.append((_DSV4_FULL_VOCAB[DSML_TOOL_START], DSML_TOOL_START))
+        tokens.append((tid, f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}"))
+        tid += 1
+        tokens.append((tid, "\n"))
+        tid += 1
+        tokens.append((tid, _param("location", "true", "NYC")))
+        tid += 1
+        tokens.append((tid, "\n"))
+        tid += 1
+        tokens.append((tid, DSML_INVOKE_END))
+        tid += 1
+        tokens.append((_DSV4_FULL_VOCAB[DSML_TOOL_END], DSML_TOOL_END))
+
+        tokenizer = MockTokenizer(vocab=dict(_DSV4_FULL_VOCAB), tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=None,
+            finished_on_last=True,
+            finish_reason="stop",
+            chat_template_kwargs={"force_nonempty_content": True},
+            tools=DUMMY_TOOLS,
+        )
+        output = collect_output(deltas)
+
+        assert "Let me check the weather" in output.reasoning
+        assert output.content == ""
+        assert len(output.tool_calls) == 1
+        assert output.tool_calls[0]["name"] == "get_weather"
+
+    def test_flushed_content_has_no_trailing_eos(self):
+        """The flushed content is built from the same already-EOS-stripped
+        reasoning chunks validated by
+        ``TestDelegatingParserLargeDelta.test_eos_not_leaked_when_reasoning_never_ends``
+        (fixed upstream by #48748) -- so promoting them to content must
+        not reintroduce the EOS text there either.
+        """
+        eos_text = "<｜end▁of▁sentence｜>"
+        eos_id = 128801
+        vocab = {**_DSV4_FULL_VOCAB, eos_text: eos_id}
+
+        reasoning_text = "Good morning! How can I help you today?"
+        tokens = _word_tokens(reasoning_text) + [(eos_id, eos_text)]
+        tokenizer = MockTokenizer(vocab=vocab, tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=None,
+            finished_on_last=True,
+            finish_reason="stop",
+            chat_template_kwargs={"force_nonempty_content": True},
+        )
+        output = collect_output(deltas)
+
+        assert output.reasoning == reasoning_text
+        assert eos_text not in output.reasoning
+        assert output.content == reasoning_text
+        assert eos_text not in output.content
