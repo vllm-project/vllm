@@ -23,6 +23,7 @@ class SpanAttributes:
     # Attribute names copied from OTel semantic conventions to avoid version conflicts
     GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
     GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens"
     GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
     GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
     GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
