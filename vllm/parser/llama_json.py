@@ -645,6 +645,13 @@ def _array_items(raw: str, start: int, end: int) -> list[tuple[int, int]]:
         value_end = _scan_json_value(raw, i)
         if value_end is None or value_end > end:
             break
+        if value_end <= i:
+            # No progress: _scan_json_value counts "{[" and "}]" alike, so a
+            # closer at an element position (``[1}``) scans as a complete
+            # value of length zero and the loop would spin.  Unreachable
+            # while every caller sanitises through _closeable_prefix; the
+            # guard costs one comparison and bounds the primitive anyway.
+            break
         items.append((i, value_end))
         i = value_end
     return items
@@ -799,7 +806,16 @@ def _collect_type_edits(
         return
     if _is_valid_for_schema_type(value, schema):
         return
-    coerced, changed = ParserEngine._coerce_value(value, schema)
+    try:
+        coerced, changed = ParserEngine._coerce_value(value, schema)
+    except RecursionError:
+        # The guarded json.loads above only covers this span; _coerce_value
+        # re-enters json.loads on the decoded *string* via
+        # coerce_to_schema_type, and deeply nested content there raises
+        # RecursionError -- a RuntimeError, so neither guard catches it and
+        # it escapes the parser and fails the request.  Leaving the value
+        # uncoerced is what the legacy parser did.
+        return
     if changed:
         edits.append((start, end, json.dumps(coerced, ensure_ascii=False)))
 
