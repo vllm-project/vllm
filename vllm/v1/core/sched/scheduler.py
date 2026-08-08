@@ -2356,6 +2356,7 @@ class Scheduler(SchedulerInterface):
         return self._pause_state
 
     def set_pause_state(self, pause_state: PauseState) -> None:
+        logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
 
     def _free_request_blocks(self, request: Request):

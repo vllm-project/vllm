@@ -15,7 +15,7 @@ from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, get_args
 
 import msgspec
 import zmq
@@ -838,7 +838,7 @@ class EngineCore:
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
-        if mode not in ("keep", "abort", "wait"):
+        if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
@@ -1845,7 +1845,7 @@ class EngineCoreProc(EngineCore):
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
-        if mode not in ("keep", "abort", "wait"):
+        if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
