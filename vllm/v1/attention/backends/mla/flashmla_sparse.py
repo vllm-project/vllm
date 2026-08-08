@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -59,6 +60,14 @@ logger = init_logger(__name__)
 # so when the per-rank head count is below MIN_HEADS_FOR_BF16_PREFILL we use the mixed
 # batch mode (#1).
 MIN_HEADS_FOR_BF16_PREFILL = 32
+
+# Max tokens the FP8 sparse decode kernel (flash_mla_cuda.sparse_decode_fwd)
+# processes per call in mixed-batch mode.
+# ref. https://github.com/vllm-project/FlashMLA/blob/a8f794d1251cbfd88a5011445dd5582289c727e4/csrc/api/sparse_decode.h#L463-L466
+MAX_SCRATCH_CHUNK_TOKENS = max(
+    1,
+    (envs.VLLM_FLASHMLA_SPARSE_MAX_SCRATCH_MB * 1024 * 1024) // (2 * 64 * 512 * 4),
+)
 
 """
 NOTE: FlashMLA Sparse uses an fp8 cache with the following format
@@ -215,7 +224,12 @@ class FlashMLASparseMetadata(AttentionMetadata):
         decode: Decode | None = None
         prefill: Prefill | None = None
 
-    fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
+    fp8_extra_metadata: (
+        FP8SeparatePrefillDecode
+        | FP8KernelMetadata
+        | list[tuple[slice, FP8KernelMetadata]]  # For mixed-batch subchunks
+        | None
+    ) = None
     fp8_use_mixed_batch: bool = False
 
 
@@ -227,6 +241,13 @@ def get_prefill_workspace_size(max_model_len: int):
     #            5 * 163840 * 576 * 2 = ~900 MB
     # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
     return max_model_len * 5
+
+
+def fp8_mixed_batch_chunk_slices(num_tokens: int) -> list[slice]:
+    return [
+        slice(start, min(start + MAX_SCRATCH_CHUNK_TOKENS, num_tokens))
+        for start in range(0, num_tokens, MAX_SCRATCH_CHUNK_TOKENS)
+    ]
 
 
 class FlashMLASparseMetadataBuilder(
@@ -316,35 +337,47 @@ class FlashMLASparseMetadataBuilder(
     def _build_fp8_mixed_decode_prefill(
         self,
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> "FlashMLASparseMetadata.FP8KernelMetadata":
+        metadata: FlashMLASparseMetadata,
+    ) -> list[tuple[slice, "FlashMLASparseMetadata.FP8KernelMetadata"]]:
         """Build FP8 metadata treating MQA tokens as one batch.
 
         The scheduler initializes lazily from the runtime query shape, which may
         be the full batch or only decodes when prefills use dense MHA. This avoids
         the BF16 prefill kernel's head-padding overhead at high TP.
+
+        The batch is split into chunks so the kernel's internal o_accum scratch stays
+        bounded regardless of the actual query token count.
         """
-        num_tokens = common_attn_metadata.num_actual_tokens
+        num_tokens = (
+            metadata.num_decode_tokens
+            if bool(getattr(metadata.prefill, "use_dense_mha", False))
+            else common_attn_metadata.num_actual_tokens
+        )
 
         # Use padded head count since that's what the kernel will see
         padded_heads = self.fp8_decode_padded_heads
 
         # Build metadata for all tokens as a single batch
-        scheduler_metadata, _ = get_mla_metadata(
-            cache_seqlens=self.topk_tokens_tensor[:1],  # Single batch
-            num_q_tokens_per_head_k=num_tokens * padded_heads,
-            topk=self.topk_tokens,
-            num_heads_q=padded_heads,
-            num_heads_k=1,
-            is_fp8_kvcache=True,
-        )
+        chunks = []
+        for token_slice in fp8_mixed_batch_chunk_slices(num_tokens):
+            chunk_num_tokens = token_slice.stop - token_slice.start
+            scheduler_metadata, _ = get_mla_metadata(
+                cache_seqlens=self.topk_tokens_tensor[:1],  # Single batch
+                num_q_tokens_per_head_k=chunk_num_tokens * padded_heads,
+                topk=self.topk_tokens,
+                num_heads_q=padded_heads,
+                num_heads_k=1,
+                is_fp8_kvcache=True,
+            )
 
-        fp8_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
-            scheduler_metadata=scheduler_metadata,
-            cache_lens=self.max_model_len_tensor[:1],
-            dummy_block_table=self.dummy_block_table[:1],
-        )
+            fp8_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
+                scheduler_metadata=scheduler_metadata,
+                cache_lens=self.max_model_len_tensor[:1],
+                dummy_block_table=self.dummy_block_table[:1],
+            )
+            chunks.append((token_slice, fp8_metadata))
 
-        return fp8_metadata
+        return chunks
 
     def _build_fp8_separate_prefill_decode(
         self,
@@ -501,7 +534,7 @@ class FlashMLASparseMetadataBuilder(
         if self.use_fp8_kv_cache:
             if fp8_use_mixed_batch:
                 metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(
-                    common_attn_metadata
+                    common_attn_metadata, metadata
                 )
             else:
                 metadata.fp8_extra_metadata = self._build_fp8_separate_prefill_decode(
@@ -745,20 +778,23 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         )
 
         assert attn_metadata.fp8_extra_metadata is not None
-        assert isinstance(
-            attn_metadata.fp8_extra_metadata, FlashMLASparseMetadata.FP8KernelMetadata
-        )
-        fp8_metadata = attn_metadata.fp8_extra_metadata
+        assert isinstance(attn_metadata.fp8_extra_metadata, list)
+        attn_out = q.new_empty((*q.shape[:-1], 512))
 
-        _attn_out, _ = self._fp8_flash_mla_kernel(
-            q=q.unsqueeze(0),  # unsqueeze to add batch_dim: (T, H, D) -> (1, T, H, D)
-            kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
-            topk_indices=topk_indices.unsqueeze(0),  # (T, topk) -> (1, T, topk)
-            kernel_metadata=fp8_metadata,
-        )
+        for token_slice, fp8_metadata in attn_metadata.fp8_extra_metadata:
+            _attn_out, _ = self._fp8_flash_mla_kernel(
+                # unsqueeze to add batch_dim: (T_i, H, D) -> (1, T_i, H, D)
+                q=q[token_slice].unsqueeze(0),
+                kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
+                # (T_i, topk) -> (1, T_i, topk)
+                topk_indices=topk_indices[token_slice].unsqueeze(0),
+                kernel_metadata=fp8_metadata,
+            )
 
-        # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
-        return _attn_out.squeeze(0)
+            # Output is (1, T_i, H, D_v), squeeze back to (T_i, H, D_v)
+            attn_out[token_slice] = _attn_out.squeeze(0)
+
+        return attn_out
 
     def _fp8_flash_mla_kernel(
         self,
