@@ -189,11 +189,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         uniform_token_count = get_uniform_decode_token_count(
-            num_reqs,
-            num_tokens,
-            max_query_len,
-            input_batch.num_computed_prefill_tokens_np,
-            input_batch.prefill_len_np,
+            num_reqs, num_tokens, max_query_len, input_batch.has_prefill
         )
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,

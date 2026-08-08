@@ -5,7 +5,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 import torch
 
@@ -201,12 +200,9 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
 def test_prompt_chunks_shaped_like_spec_decode_miss_the_full_graph(monkeypatch):
     """A batch holding K+1-token prompt chunks must not replay a decode graph.
 
-    The FULL spec-verify graph is selected on the batch shape alone
-    (num_reqs * (K + 1) tokens), which prompt chunks of exactly K + 1 tokens
-    satisfy by coincidence. Replaying it over prompt tokens corrupts every
-    request in the batch, not just the chunks, because the captured kernels
-    read per-request state that a batch containing prefills never refreshes.
-    See https://github.com/vllm-project/vllm/issues/49918.
+    Prompt chunks of exactly K + 1 tokens give the batch a spec-decode shape
+    by coincidence; replaying the FULL graph over them corrupts every request
+    in the batch. See https://github.com/vllm-project/vllm/issues/49918.
     """
 
     max_spec_tokens = 7
@@ -234,12 +230,6 @@ def test_prompt_chunks_shaped_like_spec_decode_miss_the_full_graph(monkeypatch):
     num_decodes, num_chunks = 6, 2
     num_reqs = num_decodes + num_chunks
     num_tokens = num_reqs * decode_query_len
-    # The six decoding requests have their prompts fully computed; the two
-    # chunks are decode_query_len tokens into a longer, unfinished prompt.
-    prefill_lens = np.array([16] * num_decodes + [40] * num_chunks, dtype=np.int32)
-    num_computed = np.array(
-        [16] * num_decodes + [decode_query_len] * num_chunks, dtype=np.int32
-    )
 
     # The batch shape is indistinguishable from a full batch of spec decodes.
     assert (
@@ -249,8 +239,9 @@ def test_prompt_chunks_shaped_like_spec_decode_miss_the_full_graph(monkeypatch):
         == decode_query_len
     )
 
+    # Two of the requests are decode_query_len tokens into a longer prompt.
     uniform_tok_count = get_uniform_decode_token_count(
-        num_reqs, num_tokens, decode_query_len, num_computed, prefill_lens
+        num_reqs, num_tokens, decode_query_len, has_prefill=True
     )
     assert uniform_tok_count is None
     desc = manager.dispatch(
@@ -264,7 +255,7 @@ def test_prompt_chunks_shaped_like_spec_decode_miss_the_full_graph(monkeypatch):
 
     # The same shape with every request decoding still gets its FULL graph.
     uniform_tok_count = get_uniform_decode_token_count(
-        num_reqs, num_tokens, decode_query_len, prefill_lens, prefill_lens
+        num_reqs, num_tokens, decode_query_len, has_prefill=False
     )
     assert uniform_tok_count == decode_query_len
     desc = manager.dispatch(

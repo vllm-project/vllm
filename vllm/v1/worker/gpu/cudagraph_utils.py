@@ -90,18 +90,15 @@ def _is_compatible(
 
 
 def get_uniform_token_count(
-    num_reqs: int,
-    num_tokens: int,
-    max_query_len: int,
+    num_reqs: int, num_tokens: int, max_query_len: int
 ) -> int | None:
     """
     Return the uniform token count if batch is uniform, else None.
     A batch is uniform if all requests have the same number of tokens.
 
-    This is a shape test, so it is only valid for batches whose requests are
-    known to be decoding by construction (e.g. dummy runs, or a drafter step
-    that emits a fixed number of tokens per request). Batches coming from a
-    scheduler step must go through `get_uniform_decode_token_count`.
+    Shape test only, valid for batches known to be decoding by construction
+    (e.g. dummy runs). Scheduled batches must use
+    `get_uniform_decode_token_count`.
     """
     if is_uniform_query_len(num_reqs, num_tokens, max_query_len):
         return max_query_len

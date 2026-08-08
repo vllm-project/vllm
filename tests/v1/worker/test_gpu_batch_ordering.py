@@ -47,11 +47,14 @@ def _make_common_attn_metadata(query_lens: list[int]) -> CommonAttentionMetadata
     )
 
 
-def _make_runner(req_states: dict[str, tuple[int, int]]) -> Any:
+def _make_runner(
+    req_states: dict[str, tuple[int, int]], decode_query_len: int = 8
+) -> Any:
     """Build a runner stub from {req_id: (num_computed_tokens, prefill_len)}."""
     prefill_lens = np.array([s[1] for s in req_states.values()], dtype=np.int32)
     num_computed = np.array([s[0] for s in req_states.values()], dtype=np.int32)
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
+    runner.decode_query_len = decode_query_len
     runner.req_states = SimpleNamespace(
         req_id_to_index={req_id: i for i, req_id in enumerate(req_states)},
         # The runner keeps this as min(num_computed_tokens, prefill_len).
@@ -66,18 +69,14 @@ def _uniform_token_count(
     query_len: int,
     dummy_run: bool = False,
 ) -> int | None:
+    """Classify via the runner's pre-dispatch gather, as execute_model does."""
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={req_id: query_len for req_id in req_states},
         total_num_scheduled_tokens=query_len * len(req_states),
     )
-    return GPUModelRunner._get_uniform_token_count(
-        _make_runner(req_states),
-        scheduler_output,
-        len(req_states),
-        query_len * len(req_states),
-        query_len,
-        dummy_run,
-    )
+    runner = _make_runner(req_states, decode_query_len=query_len)
+    _, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, dummy_run)
+    return uniform_tok_count
 
 
 def test_spec_decode_batch_is_uniform_decode():
@@ -87,37 +86,31 @@ def test_spec_decode_batch_is_uniform_decode():
 
 
 def test_prompt_chunk_of_decode_query_len_is_not_uniform_decode():
-    # Two requests are 8 tokens into a 40-token prompt, so their query length
-    # only coincides with the K+1 spec-decode query length. Replaying the
-    # decode graph here corrupts the six decodes as well, so the whole batch
-    # must be rejected. See https://github.com/vllm-project/vllm/issues/49918.
+    # Two prompt chunks whose query length coincides with the K+1 spec-decode
+    # query length must reject the batch (issue #49918).
     batch = {f"d{i}": (16, 16) for i in range(6)}
     batch.update({f"p{i}": (8, 40) for i in range(2)})
     assert _uniform_token_count(batch, 8) is None
 
-    # Same collision without spec decoding: a 1-token prompt looks like a
-    # 1-token decode step.
+    # Same collision without spec decoding: 1-token prompt vs 1-token decode.
     assert _uniform_token_count({"p0": (0, 1)}, 1) is None
 
-    # A fresh prompt that happens to be exactly decode_query_len tokens long.
+    # A fresh prompt of exactly decode_query_len tokens.
     assert _uniform_token_count({"p0": (0, 8)}, 8) is None
 
 
 def test_dummy_batches_stay_uniform_decode():
-    # Dummy batches (DP padding, profiling, warmup) are uniform by
-    # construction and their requests have no state to consult, so they must be
-    # classified without one: looking one up would raise KeyError here, and
-    # rejecting them would make graph capture and replay disagree.
+    # Dummy batches have no request state to consult and must stay classified
+    # by shape alone; rejecting them would make capture and replay disagree.
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={f"_dummy_req_{i}": 8 for i in range(4)},
         total_num_scheduled_tokens=32,
     )
-    assert (
-        GPUModelRunner._get_uniform_token_count(
-            _make_runner({}), scheduler_output, 4, 32, 8, True
-        )
-        == 8
+    state, uniform_tok_count = _make_runner({}).gather_batch_req_state(
+        scheduler_output, True
     )
+    assert state is None
+    assert uniform_tok_count == 8
 
 
 def test_sort_batch_req_ids_no_spec():
@@ -154,15 +147,14 @@ def test_spec_decodes_lead_short_prefill_tail():
 
 
 def test_uniform_decode_uses_state_index_not_batch_position():
-    """The predicate must read each request's own state, not its batch slot.
+    """The gather must read each request's own state, not its batch slot.
 
-    `req_id_to_index` is a persistent map into the runner's state arrays, so a
-    request's batch position and its state index diverge as requests come and
-    go. Here the only prefilling request sits at state index 0 while the two
-    scheduled decodes sit at 1 and 2, so a gather that used batch position
-    would read the prefilling row and wrongly reject the batch.
+    Batch position and state index diverge as requests come and go; here the
+    only prefilling request sits at state index 0, so a gather keyed on batch
+    position would read its row and wrongly reject the two decodes.
     """
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
+    runner.decode_query_len = 8
     # State arrays in state-index order: a prefilling request, then two decodes.
     runner.req_states = SimpleNamespace(
         req_id_to_index={"prefilling": 0, "decode_a": 1, "decode_b": 2},
@@ -174,12 +166,9 @@ def test_uniform_decode_uses_state_index_not_batch_position():
         total_num_scheduled_tokens=16,
     )
 
-    assert (
-        GPUModelRunner._get_uniform_token_count(
-            runner, scheduler_output, 2, 16, 8, False
-        )
-        == 8
-    )
+    state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
+    assert not state.has_prefill
+    assert uniform_tok_count == 8
 
     # Scheduling the prefilling request alongside them must reject the batch.
     scheduler_output.num_scheduled_tokens = {
@@ -188,78 +177,25 @@ def test_uniform_decode_uses_state_index_not_batch_position():
         "decode_b": 8,
     }
     scheduler_output.total_num_scheduled_tokens = 24
-    assert (
-        GPUModelRunner._get_uniform_token_count(
-            runner, scheduler_output, 3, 24, 8, False
-        )
-        is None
-    )
+    state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
+    assert state.has_prefill
+    assert uniform_tok_count is None
 
 
-def test_predicate_agrees_with_is_prefilling():
-    """The drafter's call site passes `InputBatch`'s two arrays directly.
-
-    `InputBatch.is_prefilling_np` is documented as
-    `num_computed_prefill_tokens_np < prefill_len_np`, so the shared predicate
-    must reject a batch exactly when that flag is set for any request. This
-    pins the contract the drafter relies on without standing up a speculator.
-    """
-    cases = [
-        (np.array([16, 16], dtype=np.int32), np.array([16, 16], dtype=np.int32)),
-        (np.array([8, 16], dtype=np.int32), np.array([40, 16], dtype=np.int32)),
-        (np.array([0], dtype=np.int32), np.array([1], dtype=np.int32)),
-        (np.array([5, 5, 5], dtype=np.int32), np.array([5, 5, 5], dtype=np.int32)),
-    ]
-    for num_computed_prefill_tokens, prefill_lens in cases:
-        num_reqs = len(prefill_lens)
-        is_prefilling = num_computed_prefill_tokens < prefill_lens
-        result = get_uniform_decode_token_count(
-            num_reqs,
-            8 * num_reqs,
-            8,
-            num_computed_prefill_tokens,
-            prefill_lens,
-        )
-        assert (result is None) == bool(is_prefilling.any()), (
-            f"{num_computed_prefill_tokens} vs {prefill_lens} -> {result}"
-        )
-
-
-def test_non_uniform_shape_is_rejected_without_request_state():
-    """The shape test must decide on its own, ahead of any state lookup.
-
-    Most batches are mixed prefill/decode and fail on shape alone, so the O(1)
-    shape test runs before the per-request prefill state is gathered. A token
-    count that is not `num_reqs * max_query_len` has to be rejected even when
-    every request has finished prefilling, as they have here.
-    """
-    num_computed_prefill_tokens = np.array([16, 16], dtype=np.int32)
-    prefill_lens = np.array([16, 16], dtype=np.int32)
-    assert (
-        get_uniform_decode_token_count(
-            2,
-            12,  # No shared query length over 2 requests produces 12 tokens.
-            8,
-            num_computed_prefill_tokens,
-            prefill_lens,
-        )
-        is None
-    )
+def test_uniform_decode_predicate():
+    # Shape and prefill state must both pass.
+    assert get_uniform_decode_token_count(2, 16, 8, False) == 8
+    assert get_uniform_decode_token_count(2, 16, 8, True) is None
+    # 12 tokens over 2 requests is no shared query length.
+    assert get_uniform_decode_token_count(2, 12, 8, False) is None
 
 
 def test_no_speculator_dispatches_on_query_length_alone():
-    """No speculator may pick its cudagraph from a shape test.
+    """No speculator may pick its cudagraph from a shape-only test.
 
-    `get_uniform_token_count` and `is_uniform_query_len` both answer a question
-    about batch shape, which a prompt chunk satisfies by coincidence whenever it
-    happens to be `1 + num_speculative_tokens` tokens wide. Dispatching on
-    either replays a decode-captured graph over prompt tokens.
-
-    This is written over the whole package rather than over the one speculator
-    that had the bug, because speculators are added by copying an existing one:
-    the shape-only call reappeared verbatim, comment included, in a speculator
-    added after the original two call sites were fixed. A per-file test would
-    pass again the next time that happens.
+    Written over the whole package because speculators are added by copying an
+    existing one: the shape-only call already reappeared verbatim in a
+    speculator added after the original call sites were fixed.
     """
     import vllm.v1.worker.gpu.spec_decode as spec_decode
 
