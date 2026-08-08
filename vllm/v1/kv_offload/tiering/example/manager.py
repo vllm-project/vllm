@@ -11,12 +11,13 @@ TieringOffloadingManager without requiring actual storage or network backends.
 
 import logging
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    Medium,
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
@@ -41,6 +42,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     - Stores blocks in a dictionary (key -> True)
     - Completes transfers immediately (synchronous)
     """
+
+    medium: ClassVar[Medium] = Medium.CPU
 
     def __init__(
         self,

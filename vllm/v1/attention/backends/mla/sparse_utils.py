@@ -154,6 +154,11 @@ def triton_convert_req_index_to_global_index(
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
+    assert req_id.shape[0] == token_indices.shape[0], (
+        f"req_id ({req_id.shape[0]}) and token_indices ({token_indices.shape[0]}) "
+        "must cover the same tokens; the grid is sized by req_id but the output "
+        "is allocated like token_indices, so a longer req_id writes out of bounds"
+    )
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
     assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
         f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"

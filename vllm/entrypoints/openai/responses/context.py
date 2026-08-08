@@ -200,6 +200,7 @@ class SimpleContext(ConversationContext):
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -210,6 +211,8 @@ class SimpleContext(ConversationContext):
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+        if output.ec_transfer_params is not None:
+            self.ec_transfer_params = output.ec_transfer_params
 
         # Accumulate text, token_ids, and logprobs for streaming mode
         delta_output = output.outputs[0]
@@ -310,7 +313,9 @@ class ParsableContext(ConversationContext):
         self.finish_reason: str | None = None
         self.enable_auto_tools = enable_auto_tools
 
-        self.response_parser = response_parser
+        self.response_parser = response_parser or (
+            parser_cls(tokenizer, request.tools) if parser_cls is not None else None
+        )
         self.parser_cls = parser_cls
         self.request = request
 
@@ -326,6 +331,7 @@ class ParsableContext(ConversationContext):
         self.output_messages: list[ResponseRawMessageAndToken] = []
         self._accumulated_token_ids: list[int] = []
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
@@ -333,6 +339,9 @@ class ParsableContext(ConversationContext):
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+
+        if output.ec_transfer_params is not None:
+            self.ec_transfer_params = output.ec_transfer_params
 
         completion = output.outputs[0]
         self.finish_reason = completion.finish_reason
@@ -344,6 +353,8 @@ class ParsableContext(ConversationContext):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=completion.token_ids,
             )
+            if not self.request.include_reasoning:
+                reasoning = None
             self.response_messages.extend(
                 build_response_output_items(
                     reasoning=reasoning,
@@ -626,6 +637,7 @@ class HarmonyContext(ConversationContext):
         self.is_first_turn = True
         self.first_tok_of_message = True
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
         if self.first_tok_of_message:
@@ -641,6 +653,8 @@ class HarmonyContext(ConversationContext):
         self._update_decode_token_usage(output)
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+        if output.ec_transfer_params is not None:
+            self.ec_transfer_params = output.ec_transfer_params
 
         if output.finished:
             self.finish_reason = output.outputs[0].finish_reason

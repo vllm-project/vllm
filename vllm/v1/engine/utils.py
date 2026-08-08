@@ -5,10 +5,10 @@ import contextlib
 import os
 import threading
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from multiprocessing import Process, connection
+from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
 from typing import TYPE_CHECKING, cast
@@ -32,7 +32,7 @@ from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
-from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
+from vllm.v1.utils import _SubprocessWrapper, get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -234,9 +234,6 @@ class CoreEngineProcManager:
                 if exitcode != 0 and not self.manager_stopped.is_set():
                     self.failed_proc_name = proc.name
             if died_sentinels:
-                # Any engine exit currently triggers a shutdown. Future
-                # work (e.g., Elastic and fault-tolerant EP) will add finer-grained
-                # handling for different exit scenarios.
                 break
 
         self.shutdown()
@@ -824,7 +821,10 @@ class CoreEngineActorManager:
         return placement_groups, local_dp_ranks
 
     def scale_up_elastic_ep(
-        self, cur_vllm_config: VllmConfig, new_data_parallel_size: int
+        self,
+        cur_vllm_config: VllmConfig,
+        new_data_parallel_size: int,
+        num_redundant_experts: int,
     ) -> None:
         import copy
 
@@ -867,6 +867,9 @@ class CoreEngineActorManager:
             if new_data_parallel_size > 1:
                 _apply_dp_identity_suffix(dp_vllm_config, rank)
             dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+            dp_vllm_config.parallel_config.eplb_config.num_redundant_experts = (
+                num_redundant_experts
+            )
             dp_vllm_config.parallel_config.placement_group = pg
 
             # Check if this placement group is on the head node
@@ -909,38 +912,17 @@ class CoreEngineActorManager:
             self.created_placement_groups.append(pg)
             self.placement_group_is_local.append(local_client)
 
-        ray.get(
-            [
-                actor.wait_for_init.remote()
-                for actor in (
-                    self.local_engine_actors[-new_local_engines:]
-                    if new_local_engines > 0
-                    else []
-                )
-                + self.remote_engine_actors[
-                    -(len(placement_groups) - new_local_engines) :
-                ]
-            ]
-        )
-
         actors = (
             self.local_engine_actors[-new_local_engines:]
             if new_local_engines > 0
             else []
         ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
 
+        ray.get([actor.wait_for_init.remote() for actor in actors])
         for actor in actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)
             self.actor_run_ref_dict[actor] = ref
-
-        cur_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        # Update old_vllm_config with new data_parallel_size_local if any new
-        # local engines were added
-        if new_local_engines > 0:
-            cur_vllm_config.parallel_config.data_parallel_size_local += (
-                new_local_engines
-            )
 
     def scale_down_elastic_ep(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
@@ -1068,21 +1050,29 @@ def get_engine_zmq_addresses(
     )
 
 
+FrontendProcess = BaseProcess | _SubprocessWrapper
+
+
+@dataclass
+class CoreEngineLaunch:
+    """Resources and startup barrier for launched engine processes."""
+
+    engine_manager: CoreEngineProcManager | CoreEngineActorManager | None
+    coordinator: DPCoordinator | None
+    addresses: EngineZmqAddresses
+    tensor_queue: Queue | None
+    # Frontend processes to watch during engine startup; may be assigned by
+    # the caller before the startup barrier runs on context manager exit.
+    watched_frontend_processes: Sequence[FrontendProcess] = ()
+
+
 @contextlib.contextmanager
 def launch_core_engines(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
     log_stats: bool,
     addresses: EngineZmqAddresses,
-    num_api_servers: int = 1,
-) -> Iterator[
-    tuple[
-        CoreEngineProcManager | CoreEngineActorManager | None,
-        DPCoordinator | None,
-        EngineZmqAddresses,
-        Queue | None,
-    ]
-]:
+) -> Iterator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
 
     parallel_config = vllm_config.parallel_config
@@ -1138,7 +1128,9 @@ def launch_core_engines(
             log_stats=log_stats,
         )
 
-        yield engine_actor_manager, coordinator, addresses, tensor_queue
+        yield CoreEngineLaunch(
+            engine_actor_manager, coordinator, addresses, tensor_queue
+        )
         return
 
     if offline_mode:
@@ -1207,30 +1199,27 @@ def launch_core_engines(
         else:
             local_engine_manager = None
 
-        yield local_engine_manager, coordinator, addresses, tensor_queue
-
-        # Now wait for engines to start.
+        launch = CoreEngineLaunch(
+            local_engine_manager, coordinator, addresses, tensor_queue
+        )
+        yield launch
         wait_for_engine_startup(
             handshake_socket,
-            addresses,
             engines_to_handshake,
             parallel_config,
             dp_size > 1 and vllm_config.model_config.is_moe,
             vllm_config.cache_config,
-            local_engine_manager,
-            coordinator.proc if coordinator else None,
+            launch,
         )
 
 
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
-    addresses: EngineZmqAddresses,
     core_engines: list[CoreEngine],
     parallel_config: ParallelConfig,
     coordinated_dp: bool,
     cache_config: CacheConfig,
-    proc_manager: CoreEngineProcManager | None,
-    coord_process: Process | None,
+    launch: CoreEngineLaunch,
 ):
     # Wait for engine core process(es) to send ready messages.
     local_count = parallel_config.data_parallel_size_local
@@ -1245,11 +1234,21 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
-    if proc_manager is not None:
-        for sentinel in proc_manager.sentinels():
+    # 1. Engine processes
+    if isinstance(launch.engine_manager, CoreEngineProcManager):
+        for sentinel in launch.engine_manager.sentinels():
             poller.register(sentinel, zmq.POLLIN)
+    # 2. DP Coordinator process, if present
+    coord_process = launch.coordinator.proc if launch.coordinator else None
     if coord_process is not None:
         poller.register(coord_process.sentinel, zmq.POLLIN)
+    # 3. Watched frontend processes, if any
+    frontend_process_by_fd: dict[int, FrontendProcess] = {}
+    for proc in launch.watched_frontend_processes:
+        fd = proc.sentinel if isinstance(proc.sentinel, int) else proc.sentinel.fileno()
+        frontend_process_by_fd[fd] = proc
+        poller.register(fd, zmq.POLLIN)
+
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
         if not events:
@@ -1265,14 +1264,34 @@ def wait_for_engine_startup(
                 )
             continue
         if len(events) > 1 or events[0][0] != handshake_socket:
-            # One of the local core processes exited.
-            finished = proc_manager.finished_procs() if proc_manager else {}
+            # One of the local core, coordinator, or watched frontend processes exited.
+            if isinstance(launch.engine_manager, CoreEngineProcManager):
+                finished = launch.engine_manager.finished_procs()
+            else:
+                finished = {}
             if coord_process is not None and coord_process.exitcode is not None:
                 finished[coord_process.name] = coord_process.exitcode
+            failed_frontend_procs = {
+                proc.name: proc.exitcode
+                for fd, proc in frontend_process_by_fd.items()
+                if proc.exitcode is not None
+                or any(event_fd == fd for event_fd, _ in events)
+            }
+            if failed_frontend_procs and not finished:
+                raise RuntimeError(
+                    "Frontend process failed during engine core initialization. "
+                    "See root cause above. "
+                    f"Failed frontend proc(s): {failed_frontend_procs}"
+                )
             raise RuntimeError(
                 "Engine core initialization failed. "
                 "See root cause above. "
                 f"Failed core proc(s): {finished}"
+                + (
+                    f", failed frontend proc(s): {failed_frontend_procs}"
+                    if failed_frontend_procs
+                    else ""
+                )
             )
 
         # Receive HELLO and READY messages from the input socket.
@@ -1312,7 +1331,7 @@ def wait_for_engine_startup(
             # Send init message with DP config info.
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
-                    addresses=addresses,
+                    addresses=launch.addresses,
                     parallel_config={
                         k: getattr(parallel_config, k)
                         for k in (
