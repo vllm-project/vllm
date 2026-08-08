@@ -33,15 +33,18 @@ def _fused_q_kv_rmsnorm_kernel(
     pid_task = tl.program_id(1)
 
     if pid_task == 0:
-        SIZE = Q_SIZE
-        row_in = q_ptr + token_idx * q_in_stride
-        weight_ptr = q_weight_ptr
-        row_out = q_out_ptr + token_idx * q_out_stride
+        SIZE, base_in, base_out, weight_ptr = Q_SIZE, q_ptr, q_out_ptr, q_weight_ptr
+        in_stride, out_stride = q_in_stride, q_out_stride
     else:
-        SIZE = KV_SIZE
-        row_in = kv_ptr + token_idx * kv_in_stride
-        weight_ptr = kv_weight_ptr
-        row_out = kv_out_ptr + token_idx * kv_out_stride
+        SIZE, base_in, base_out, weight_ptr = KV_SIZE, kv_ptr, kv_out_ptr, kv_weight_ptr
+        in_stride, out_stride = kv_in_stride, kv_out_stride
+
+    # addptr must stay outside the branch: per-arm offsets make the two scf.if
+    # results fat pointers with mismatched canNarrow, tripping an assert in
+    # Triton's TritonAMDGPUCanonicalizePointers on gfx908. Do not re-inline.
+    # https://github.com/vllm-project/vllm/issues/50679
+    row_in = base_in + token_idx * in_stride
+    row_out = base_out + token_idx * out_stride
 
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
