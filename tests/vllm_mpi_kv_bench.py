@@ -22,6 +22,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("baseline", "dram", "legomem"), required=True)
     parser.add_argument("--tp", type=int, default=16)
     parser.add_argument("--input-tokens", type=int, default=512)
+    parser.add_argument(
+        "--cases",
+        help=(
+            "comma-separated INPUT_TOKENS:DISTRACTORS cases "
+            "(for example 128:8,256:4,512:2)"
+        ),
+    )
     parser.add_argument("--output-tokens", type=int, default=1)
     parser.add_argument("--distractors", type=int, default=8)
     parser.add_argument("--kv-cache-mib", type=int, default=32)
@@ -33,6 +40,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--require-amx", action="store_true")
     return parser.parse_args()
+
+
+def parse_cases(args: argparse.Namespace) -> list[tuple[int, int]]:
+    if not args.cases:
+        return [(args.input_tokens, args.distractors)]
+    cases = []
+    for item in args.cases.split(","):
+        input_tokens_text, separator, distractors_text = item.partition(":")
+        if not separator:
+            raise ValueError(
+                f"invalid benchmark case {item!r}; expected TOKENS:DISTRACTORS"
+            )
+        input_tokens = int(input_tokens_text)
+        distractors = int(distractors_text)
+        if input_tokens <= 0 or distractors < 0:
+            raise ValueError(f"invalid benchmark case {item!r}")
+        cases.append((input_tokens, distractors))
+    return cases
 
 
 def timed_generate(
@@ -63,6 +88,8 @@ def make_prompt(seed: int, length: int, vocab_size: int) -> list[int]:
 
 def main() -> None:
     args = parse_args()
+    cases = parse_cases(args)
+    max_input_tokens = max(input_tokens for input_tokens, _ in cases)
     rank = int(os.environ.get("RANK", os.environ.get("OMPI_COMM_WORLD_RANK", "0")))
     world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("OMPI_COMM_WORLD_SIZE", "1")))
     if world_size != args.tp:
@@ -115,8 +142,8 @@ def main() -> None:
         dtype=args.dtype,
         tensor_parallel_size=args.tp,
         distributed_executor_backend="external_launcher",
-        max_model_len=args.input_tokens + args.output_tokens,
-        max_num_batched_tokens=args.input_tokens + args.output_tokens,
+        max_model_len=max_input_tokens + args.output_tokens,
+        max_num_batched_tokens=max_input_tokens + args.output_tokens,
         max_num_seqs=1,
         kv_cache_memory_bytes=args.kv_cache_mib * MIB,
         block_size=args.block_size,
@@ -135,45 +162,58 @@ def main() -> None:
     )
 
     # Warm kernels without polluting the measured cache state.
-    timed_generate(llm, make_prompt(9001, min(32, args.input_tokens), vocab_size), params)
-    if not llm.reset_prefix_cache(reset_connector=True):
-        raise RuntimeError("failed to reset vLLM prefix caches before measurement")
+    timed_generate(
+        llm, make_prompt(9001, min(32, max_input_tokens), vocab_size), params
+    )
 
-    target = make_prompt(1, args.input_tokens, vocab_size)
-    cold_seconds, cold_cached_tokens = timed_generate(llm, target, params)
+    for case_index, (input_tokens, distractors) in enumerate(cases):
+        if not llm.reset_prefix_cache(reset_connector=True):
+            raise RuntimeError("failed to reset vLLM prefix caches before measurement")
 
-    eviction_seconds = 0.0
-    for index in range(args.distractors):
-        distractor_seconds, _ = timed_generate(
-            llm, make_prompt(100 + index, args.input_tokens, vocab_size), params
-        )
-        eviction_seconds += distractor_seconds
+        target = make_prompt(1, input_tokens, vocab_size)
+        cold_seconds, cold_cached_tokens = timed_generate(llm, target, params)
 
-    replay_seconds, replay_cached_tokens = timed_generate(llm, target, params)
-    result = {
-        "model": args.model,
-        "mode": args.mode,
-        "ranks": world_size,
-        "input_tokens": args.input_tokens,
-        "output_tokens": args.output_tokens,
-        "distractors": args.distractors,
-        "kv_cache_mib_per_rank": args.kv_cache_mib,
-        "block_size": args.block_size,
-        "offload_mib_per_rank": 0 if args.mode == "baseline" else args.offload_mib,
-        "offload_policy": args.offload_policy if args.mode != "baseline" else "none",
-        "cold_seconds": cold_seconds,
-        "cold_cached_tokens": cold_cached_tokens,
-        "eviction_seconds": eviction_seconds,
-        "replay_seconds": replay_seconds,
-        "replay_cached_tokens": replay_cached_tokens,
-        "replay_speedup_vs_cold": cold_seconds / replay_seconds,
-        "estimated_ttft_seconds": replay_seconds,
-        "amx_required": args.require_amx,
-        "amx_tile_supported": amx_supported,
-        "vllm_cpu_int4_w4a8": int4_w4a8_enabled,
-    }
-    if rank == 0:
-        print("VLLM_MPI_KV_RESULT=" + json.dumps(result, sort_keys=True), flush=True)
+        eviction_seconds = 0.0
+        for index in range(distractors):
+            distractor_seconds, _ = timed_generate(
+                llm, make_prompt(100 + index, input_tokens, vocab_size), params
+            )
+            eviction_seconds += distractor_seconds
+
+        replay_seconds, replay_cached_tokens = timed_generate(llm, target, params)
+        result = {
+            "model": args.model,
+            "mode": args.mode,
+            "ranks": world_size,
+            "case_index": case_index,
+            "case_count": len(cases),
+            "input_tokens": input_tokens,
+            "output_tokens": args.output_tokens,
+            "distractors": distractors,
+            "kv_cache_mib_per_rank": args.kv_cache_mib,
+            "block_size": args.block_size,
+            "offload_mib_per_rank": (
+                0 if args.mode == "baseline" else args.offload_mib
+            ),
+            "offload_policy": (
+                args.offload_policy if args.mode != "baseline" else "none"
+            ),
+            "cold_seconds": cold_seconds,
+            "cold_cached_tokens": cold_cached_tokens,
+            "eviction_seconds": eviction_seconds,
+            "replay_seconds": replay_seconds,
+            "replay_cached_tokens": replay_cached_tokens,
+            "replay_speedup_vs_cold": cold_seconds / replay_seconds,
+            "estimated_ttft_seconds": replay_seconds,
+            "amx_required": args.require_amx,
+            "amx_tile_supported": amx_supported,
+            "vllm_cpu_int4_w4a8": int4_w4a8_enabled,
+        }
+        if rank == 0:
+            print(
+                "VLLM_MPI_KV_RESULT=" + json.dumps(result, sort_keys=True),
+                flush=True,
+            )
 
 
 if __name__ == "__main__":
