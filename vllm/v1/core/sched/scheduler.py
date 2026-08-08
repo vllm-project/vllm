@@ -895,6 +895,10 @@ class Scheduler(SchedulerInterface):
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
+                        # Not on the initial external-KV-load step: the remote
+                        # sent only prompt KV, so a padded spec block has no
+                        # remote counterpart (connector asserts local<=remote).
+                        and num_external_computed_tokens == 0
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
                         if (
@@ -951,10 +955,13 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         break
 
-                # During async KV load, no forward pass is run yet.
-                # Allocate speculative lookahead slots later to avoid
-                # mismatching local and remote block counts.
-                limit_lookahead_tokens = load_kv_async and self.num_lookahead_tokens > 0
+                # During async KV load, no forward pass is run yet. The same
+                # local/remote block-count mismatch also occurs on the first
+                # step of a synchronous connector read (load_kv_async=False,
+                # num_external_computed_tokens > 0), so limit lookahead there too.
+                limit_lookahead_tokens = (
+                    load_kv_async or num_external_computed_tokens > 0
+                ) and self.num_lookahead_tokens > 0
                 effective_lookahead_tokens = (
                     0 if limit_lookahead_tokens else self.num_lookahead_tokens
                 )
