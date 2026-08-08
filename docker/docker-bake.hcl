@@ -5,6 +5,7 @@
 # Usage:
 #   cd docker && docker buildx bake        # Build default target (openai)
 #   cd docker && docker buildx bake test   # Build test target
+#   cd docker && docker buildx bake rust-renderer
 #   docker buildx bake --print             # Show resolved config
 #
 # Reference: https://docs.docker.com/build/bake/reference/
@@ -43,6 +44,10 @@ variable "VLLM_IMAGE_TAG" {
   default = "local/vllm-openai:dev"
 }
 
+variable "RUST_RENDERER_IMAGE_TAG" {
+  default = "local/vllm-rust-renderer:dev"
+}
+
 # Groups
 
 group "default" {
@@ -50,7 +55,7 @@ group "default" {
 }
 
 group "all" {
-  targets = ["openai", "openai-ubuntu2404"]
+  targets = ["openai", "openai-ubuntu2404", "rust-renderer"]
 }
 
 # Base targets
@@ -66,6 +71,17 @@ target "_common" {
     VLLM_BUILD_PIPELINE  = VLLM_BUILD_PIPELINE
     VLLM_BUILD_URL       = VLLM_BUILD_URL
     VLLM_IMAGE_TAG       = VLLM_IMAGE_TAG
+  }
+}
+
+target "_rust_renderer_common" {
+  dockerfile = "docker/Dockerfile.rust"
+  context    = "."
+  args = {
+    VLLM_BUILD_COMMIT   = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
+    VLLM_BUILD_PIPELINE = VLLM_BUILD_PIPELINE
+    VLLM_BUILD_URL      = VLLM_BUILD_URL
+    VLLM_IMAGE_TAG      = RUST_RENDERER_IMAGE_TAG
   }
 }
 
@@ -89,6 +105,23 @@ target "_labels" {
   ]
 }
 
+target "_rust_renderer_labels" {
+  labels = {
+    "org.opencontainers.image.source"      = "https://github.com/vllm-project/vllm"
+    "org.opencontainers.image.vendor"      = "vLLM"
+    "org.opencontainers.image.title"       = "vLLM Rust Renderer"
+    "org.opencontainers.image.description" = "Standalone Rust frontend renderer for vLLM request preprocessing"
+    "org.opencontainers.image.licenses"    = "Apache-2.0"
+    "org.opencontainers.image.revision"    = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
+    "org.opencontainers.image.version"     = RUST_RENDERER_IMAGE_TAG
+    "org.opencontainers.image.url"         = VLLM_BUILD_URL
+    "ai.vllm.build.commit"                 = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
+    "ai.vllm.build.pipeline"               = VLLM_BUILD_PIPELINE
+    "ai.vllm.build.url"                    = VLLM_BUILD_URL
+    "ai.vllm.image.tag"                    = RUST_RENDERER_IMAGE_TAG
+  }
+}
+
 # Build targets
 
 target "test" {
@@ -102,6 +135,13 @@ target "openai" {
   inherits = ["_common", "_labels"]
   target   = "vllm-openai"
   tags     = ["vllm:openai"]
+  output   = ["type=docker"]
+}
+
+target "rust-renderer" {
+  inherits = ["_rust_renderer_common", "_rust_renderer_labels"]
+  target   = "vllm-rust-renderer"
+  tags     = ["vllm:rust-renderer"]
   output   = ["type=docker"]
 }
 
