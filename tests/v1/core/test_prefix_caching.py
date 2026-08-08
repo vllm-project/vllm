@@ -4311,3 +4311,45 @@ def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 4 * block_size
+
+
+def test_full_report_with_dcp_uses_effective_block_size():
+    """Full KV cache report must use the DCP-effective block size when
+    emitting BlockStored events for cached prefix blocks. Using the raw
+    physical page size triggers an assertion in resolve_block_hashes()
+    because hash blocks are sized at physical * dcp_world_size."""
+
+    physical_block_size = 16
+    dcp_size = 2
+    effective_block_size = physical_block_size * dcp_size
+
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(physical_block_size, num_blocks=8),
+        max_model_len=8192,
+        scheduler_block_size=effective_block_size,
+        hash_block_size=effective_block_size,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        dcp_world_size=dcp_size,
+    )
+
+    token_ids = list(range(2 * effective_block_size))
+
+    # Prime the cache with a request.
+    prime = make_request("prime", token_ids, effective_block_size, sha256)
+    assert manager.allocate_slots(prime, len(token_ids)) is not None
+    manager.take_events()
+    manager.free(prime)
+
+    # Trigger the full report path with a prefix-hitting request.
+    trigger = make_request("trigger", token_ids, effective_block_size, sha256)
+    trigger.kv_cache_report_mode = "full"
+
+    # Before the fix this raised AssertionError in resolve_block_hashes().
+    manager.get_computed_blocks(trigger)
+
+    events = manager.take_events()
+    stored_events = [e for e in events if isinstance(e, BlockStored)]
+    assert len(stored_events) > 0
+    for event in stored_events:
+        assert event.block_size == effective_block_size
