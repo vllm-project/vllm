@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import errno
+import fcntl
 import mmap
 import os
 import time
@@ -71,7 +72,10 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When expected_openers
+    is given, the path is unlinked as soon as that many workers have mapped it,
+    so the kernel reclaims the memory on process exit however that exit
+    happens; mappings taken before the unlink stay valid.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -83,6 +87,7 @@ class SharedOffloadRegion:
         rank: int | None,
         kv_bytes_per_block: int,
         cpu_page_size: int,
+        expected_openers: int | None = None,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_block % self.page_size == 0
@@ -92,6 +97,7 @@ class SharedOffloadRegion:
         self.total_size_bytes = self.num_blocks * self._row_stride
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self._openers_path = f"{self.mmap_path}.openers"
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
         if rank is not None:
@@ -99,6 +105,7 @@ class SharedOffloadRegion:
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+
         try:
             self.fd: int | None = os.open(
                 self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
@@ -120,9 +127,18 @@ class SharedOffloadRegion:
             # for the full 30 s timeout.
             try:
                 check_shm_free_space(self.total_size_bytes)
+                # Discard any count left behind by a crashed run before
+                # ftruncate releases the other workers from
+                # _wait_for_file_size, otherwise they could unlink the file
+                # before all of them have mapped it.
+                self._reset_openers()
                 os.ftruncate(self.fd, self.total_size_bytes)
             except (RuntimeError, OSError):
                 os.unlink(self.mmap_path)
+                try:
+                    os.unlink(self._openers_path)
+                except FileNotFoundError:
+                    pass
                 os.close(self.fd)
                 raise
             self._creator = True
@@ -138,6 +154,8 @@ class SharedOffloadRegion:
             flags=mmap.MAP_SHARED,
             prot=mmap.PROT_READ | mmap.PROT_WRITE,
         )
+        if expected_openers is not None:
+            self._unlink_after_all_open(expected_openers)
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
@@ -168,6 +186,54 @@ class SharedOffloadRegion:
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
         self.is_pinned: bool = False
+
+    def _reset_openers(self) -> None:
+        """Zero the opener count. Creator-only, before the mmap file is sized."""
+        openers_fd = os.open(self._openers_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(openers_fd, fcntl.LOCK_EX)
+            os.ftruncate(openers_fd, 0)
+        finally:
+            fcntl.flock(openers_fd, fcntl.LOCK_UN)
+            os.close(openers_fd)
+
+    def _unlink_after_all_open(self, expected_openers: int) -> None:
+        """Unlink the backing file once every local worker has mapped it.
+
+        The mappings stay valid, but the kernel can now reclaim the memory when
+        the last process exits, including on SIGKILL or a crash where cleanup()
+        never runs.
+
+        Args:
+            expected_openers: Number of workers sharing this node's file.
+
+        Raises:
+            RuntimeError: More workers mapped the file than expected.
+        """
+        openers_fd = os.open(self._openers_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(openers_fd, fcntl.LOCK_EX)
+            raw_count = os.pread(openers_fd, 32, 0)
+            opener_count = int(raw_count) + 1 if raw_count else 1
+            if opener_count > expected_openers:
+                raise RuntimeError(
+                    f"Expected {expected_openers} mmap openers of "
+                    f"{self.mmap_path}, got at least {opener_count}"
+                )
+            os.ftruncate(openers_fd, 0)
+            os.pwrite(openers_fd, str(opener_count).encode(), 0)
+
+            if opener_count == expected_openers:
+                os.unlink(self.mmap_path)
+                os.unlink(self._openers_path)
+                logger.info(
+                    "Unlinked mmap file %s after %d workers mapped it",
+                    self.mmap_path,
+                    expected_openers,
+                )
+        finally:
+            fcntl.flock(openers_fd, fcntl.LOCK_UN)
+            os.close(openers_fd)
 
     def create_next_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -254,11 +320,23 @@ class SharedOffloadRegion:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
         if self._creator and getattr(self, "mmap_path", None):
+            # Both paths may already be gone: _unlink_after_all_open removes
+            # them as soon as every local worker has mapped the region.
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
+            except FileNotFoundError:
+                pass
             except Exception:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
+                )
+            try:
+                os.unlink(self._openers_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                logger.warning(
+                    "Failed to unlink path %s", self._openers_path, exc_info=True
                 )
             self._creator = False

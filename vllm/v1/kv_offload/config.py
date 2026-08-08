@@ -51,6 +51,10 @@ class OffloadingParallelConfig:
     # True when concatenating a block's data across all workers yields
     # the same result regardless of the parallelism configuration.
     is_parallelism_agnostic: bool
+    # Workers sharing this node's mmap file, i.e. how many openers the shared
+    # region waits for before unlinking it. Node-local because /dev/shm is.
+    # Not a sizing knob: host memory is still budgeted over world_size.
+    local_world_size: int = 1
 
 
 @dataclass(frozen=True)
