@@ -7,6 +7,10 @@ from prometheus_client import REGISTRY
 from prometheus_client import Metric as PromMetric
 from prometheus_client.samples import Sample
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 @dataclass
 class Metric:
@@ -138,7 +142,12 @@ def get_metrics_snapshot() -> list[Metric]:
                     )
                 )
         else:
-            raise AssertionError(f"Unknown metric type {metric.type}")
+            logger.debug(
+                "Skipping unknown metric type %s for metric %s",
+                metric.type,
+                metric.name,
+            )
+            continue
 
     return collected
 
