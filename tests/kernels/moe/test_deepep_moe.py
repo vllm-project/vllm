@@ -11,7 +11,7 @@ import torch.distributed
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from tests.kernels.moe.utils import check_accuracy, make_dummy_moe_config
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -66,8 +66,14 @@ def make_weights(
 
     # per-out-channel weight quantization
     assert dtype == current_platform.fp8_dtype()
-    w1 = torch.empty((e, 2 * n, k), device="cuda", dtype=torch.float16)
-    w2 = torch.empty((e, k, n), device="cuda", dtype=torch.float16)
+    # Keep FP8 inputs finite and bounded. torch.empty made this test depend on
+    # allocator contents, while larger values exceed its fixed W8A8 tolerance.
+    w1 = torch.randn(
+        (e, 2 * n, k), device=current_platform.device_type, dtype=torch.float16
+    ).div_(100)
+    w2 = torch.randn(
+        (e, k, n), device=current_platform.device_type, dtype=torch.float16
+    ).div_(100)
 
     n_b_scales = 2 * n
     k_b_scales = k
@@ -361,14 +367,6 @@ def assert_deepep_close(
     k: int,
     use_fp8_dispatch: bool,
 ) -> None:
-    if use_fp8_dispatch and current_platform.is_fp8_fnuz():
-        # ROCm e4m3fnuz rounds differently than the reference quant,
-        # so DeepEP's fp8 dispatch can yield a few outliers even with
-        # a correct kernel; allow a small fraction of mismatches here.
-        atol = rtol = 1.5e-1
-        check_accuracy(expected, actual, atol=atol, rtol=rtol, percent=0.95)
-        return
-
     torch.testing.assert_close(
         expected,
         actual,
@@ -490,9 +488,16 @@ def test_deep_ep_moe(
     world_dp_size: tuple[int, int],
     per_act_token_quant: bool,
     workspace_init,
+    monkeypatch,
 ):
     low_latency_mode = False
     use_fp8_dispatch = False
+
+    if current_platform.is_rocm():
+        # The cooperative kernel launches on this path segfault inside the ROCm
+        # HSA runtime at process exit while rocprofiler-sdk is attached, and
+        # torch attaches it implicitly. Workers are spawned, so they inherit it.
+        monkeypatch.setenv("ROCPROFILER_REGISTER_ENABLED", "0")
 
     set_random_seed(7)
     world_size, dp_size = world_dp_size

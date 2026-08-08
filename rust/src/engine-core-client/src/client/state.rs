@@ -74,17 +74,13 @@ impl EngineRoutingState {
     ///
     /// Scheduler stats can raise the load estimate above the frontend-local
     /// view, but they should not lower it below requests this frontend has
-    /// already admitted. Waiting requests still get the same extra penalty
-    /// as the original `waiting * 4 + running` score.
+    /// already admitted.
     fn routing_score(&self) -> usize {
-        const WAITING_WEIGHT: usize = 4;
-
         let Some(stats) = self.last_scheduler_stats else {
             return self.inflight;
         };
 
-        let scheduler_total = stats.running + stats.waiting;
-        self.inflight.max(scheduler_total) + stats.waiting * (WAITING_WEIGHT - 1)
+        self.inflight.max(stats.running + stats.waiting)
     }
 
     /// Replace the local routing view with a fresh real scheduler snapshot.
@@ -750,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_score_keeps_extra_waiting_penalty() {
+    fn routing_score_counts_waiting_without_extra_penalty() {
         let state = EngineRoutingState {
             inflight: 1,
             last_scheduler_stats: Some(EngineLoadSnapshot {
@@ -759,7 +755,7 @@ mod tests {
             }),
         };
 
-        assert_eq!(state.routing_score(), 14);
+        assert_eq!(state.routing_score(), 5);
     }
 
     #[test]

@@ -33,6 +33,7 @@ CacheDType = Literal[
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
+    "nvfp4_4over6",
 ]
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -80,6 +81,8 @@ class CacheConfig:
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
     bfloat16 instead, this is an invalid option for models that do not default
     to fp8.
+    "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
+    scales per 16 values by minimizing squared reconstruction error.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
@@ -108,11 +111,6 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
-    calculate_kv_scales: bool = False
-    """Deprecated: This option is deprecated and will be removed in v0.19.
-    It enables dynamic calculation of `k_scale` and `v_scale` when
-    kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
-    checkpoint if available. Otherwise, the scales will default to 1.0."""
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
@@ -140,10 +138,10 @@ class CacheConfig:
     """The cache strategy for Mamba layers:
 
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size. This is
-      the default behavior (for models that support it) when prefix caching is enabled.
+    - "all": cache the mamba state of all tokens at position i * block_size.
     - "align": only cache the mamba state of the last token of each scheduler step and
-      when the token is at position i * block_size.
+      when the token is at position i * block_size. This is the default when prefix
+      caching is enabled.
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM history buffer length B: with use_replayssm, standard decode
@@ -275,18 +273,6 @@ class CacheConfig:
         if self.mamba_block_size is not None:
             self.user_specified_mamba_block_size = True
         return self
-
-    @field_validator("calculate_kv_scales", mode="after")
-    @classmethod
-    def _warn_deprecated_calculate_kv_scales(cls, calculate_kv_scales: bool) -> bool:
-        if calculate_kv_scales:
-            logger.warning(
-                "The `--calculate-kv-scales` option is deprecated and will "
-                "be removed in v0.19. The scales will be loaded from the "
-                "model checkpoint if available, otherwise they default to "
-                "1.0."
-            )
-        return calculate_kv_scales
 
     @field_validator("cache_dtype", mode="after")
     @classmethod

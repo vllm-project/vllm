@@ -144,7 +144,7 @@ class MambaStateShapeCalculator:
         num_heads: int,
         tp_size: int,
         head_dim: int,
-    ) -> tuple[tuple[int, int, int], ...]:
+    ) -> tuple[tuple[int, int, int]]:
         state_shape = (num_heads // tp_size, head_dim, head_dim)
         return (state_shape,)
 
@@ -293,7 +293,7 @@ class MambaStateShapeCalculator:
 
         conv_dim = proj_size + 2 * proj_k_size
         conv_state_shape = cls._orient_conv_shape(
-            divide(conv_dim, tp_world_size), conv_kernel_size - 1
+            divide(conv_dim, tp_world_size), conv_kernel_size - 1 + num_spec
         )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
         return (conv_state_shape, recurrent_state_shape)
