@@ -97,6 +97,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.punica_wrapper.lora_route_mapping is not None:
+            raise NotImplementedError(
+                "Routed LoRA reference execution does not support embeddings."
+            )
+
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]

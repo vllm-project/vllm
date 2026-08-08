@@ -7,14 +7,22 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from vllm.lora.request import LoRARequest
+from vllm.lora.layers import LoRARouteMapping
+from vllm.lora.request import (
+    LoRARequest,
+    LoRARequestLike,
+    iter_lora_requests,
+)
+from vllm.lora.routing_utils import (
+    NO_LORA_ID,
+    has_routed_lora,
+    make_lora_route_mapping,
+)
 from vllm.lora.utils import get_captured_lora_counts
 
 if TYPE_CHECKING:
     from vllm.config.compilation import CompilationConfig
     from vllm.config.lora import LoRAConfig
-
-NO_LORA_ID = 0
 
 
 def get_lora_capture_cases(
@@ -78,14 +86,18 @@ class LoraState:
         self.lora_ids = np.zeros(max_num_reqs, dtype=np.int32)
         self.lora_ids.fill(NO_LORA_ID)
         # req_id -> lora_request
-        self.lora_requests: dict[str, LoRARequest] = {}
+        self.lora_requests: dict[str, LoRARequestLike] = {}
 
     def add_request(
-        self, req_id: str, req_index: int, lora_request: LoRARequest | None
+        self, req_id: str, req_index: int, lora_request: LoRARequestLike | None
     ) -> None:
         if lora_request is not None:
             self.lora_requests[req_id] = lora_request
-            self.lora_ids[req_index] = lora_request.lora_int_id
+            self.lora_ids[req_index] = (
+                lora_request.lora_int_id
+                if isinstance(lora_request, LoRARequest)
+                else NO_LORA_ID
+            )
         else:
             self.lora_ids[req_index] = NO_LORA_ID
 
@@ -97,17 +109,39 @@ class LoraState:
         req_ids: list[str],
         idx_mapping: np.ndarray,
         num_scheduled_tokens: np.ndarray,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
-        lora_ids = self.lora_ids[idx_mapping]
-        prompt_lora_mapping = tuple(lora_ids)
-        token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        set[LoRARequest],
+        LoRARouteMapping | None,
+    ]:
+        lora_requests = tuple(self.lora_requests.get(req_id) for req_id in req_ids)
+        if has_routed_lora(lora_requests):
+            prompt_lora_mapping = tuple(NO_LORA_ID for _ in req_ids)
+            token_lora_mapping = tuple(
+                NO_LORA_ID for _ in range(int(num_scheduled_tokens.sum()))
+            )
+            lora_route_mapping = make_lora_route_mapping(
+                lora_requests,
+                num_scheduled_tokens,
+                prompt_lora_mapping,
+            )
+        else:
+            lora_ids = self.lora_ids[idx_mapping]
+            prompt_lora_mapping = tuple(lora_ids)
+            token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
+            lora_route_mapping = None
         active_lora_requests: set[LoRARequest] = self.get_activate_loras(req_ids)
-        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+        return (
+            prompt_lora_mapping,
+            token_lora_mapping,
+            active_lora_requests,
+            lora_route_mapping,
+        )
 
     def get_activate_loras(self, req_ids: list[str]) -> set[LoRARequest]:
         active_lora_requests: set[LoRARequest] = set()
         for req_id in req_ids:
             lora_request = self.lora_requests.get(req_id)
-            if lora_request is not None:
-                active_lora_requests.add(lora_request)
+            active_lora_requests.update(iter_lora_requests(lora_request))
         return active_lora_requests

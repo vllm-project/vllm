@@ -25,7 +25,7 @@ from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-    from vllm.lora.request import LoRARequest
+    from vllm.lora.request import LoRARequestLike
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
@@ -68,7 +68,7 @@ class Request:
         prompt_embeds: torch.Tensor | None = None,
         prompt_is_token_ids: list[bool] | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
-        lora_request: "LoRARequest | None" = None,
+        lora_request: "LoRARequestLike | None" = None,
         cache_salt: str | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,

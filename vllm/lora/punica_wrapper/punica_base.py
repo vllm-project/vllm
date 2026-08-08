@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from .utils import compute_meta, convert_mapping
+from .utils import compute_meta, convert_mapping, convert_route_mapping
 
 if TYPE_CHECKING:
     # avoid circuit import
-    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.layers import LoRAMapping, LoRARouteMapping
 
 
 class PunicaWrapperABC(ABC):
@@ -27,7 +27,7 @@ class PunicaWrapperABC(ABC):
     @abstractmethod
     def update_metadata(
         self,
-        mapping: "LoRAMapping",
+        mapping: "LoRAMapping | LoRARouteMapping",
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
@@ -164,6 +164,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
+        self._lora_route_indices: torch.Tensor | None = None
+        self._lora_route_weights: torch.Tensor | None = None
 
     def _update_base_metadata(
         self,
@@ -281,14 +283,31 @@ class PunicaWrapperBase(PunicaWrapperABC):
         embeddings_indices_len = self.indices_len[3]
         return self._embeddings_indices[:, :embeddings_indices_len]
 
+    @property
+    def lora_route_mapping(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self._lora_route_indices is None or self._lora_route_weights is None:
+            return None
+        return self._lora_route_indices, self._lora_route_weights
+
     def update_metadata(
         self,
-        mapping: "LoRAMapping",
+        mapping: "LoRAMapping | LoRARouteMapping",
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
         **kwargs,
     ):
+        from vllm.lora.layers import LoRARouteMapping
+
+        if isinstance(mapping, LoRARouteMapping):
+            self._lora_route_indices, self._lora_route_weights = convert_route_mapping(
+                mapping, lora_index_to_id, self.device
+            )
+            mapping = mapping.scalar_fallback_mapping()
+        else:
+            self._lora_route_indices = None
+            self._lora_route_weights = None
+
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
         if mapping.is_prefill:

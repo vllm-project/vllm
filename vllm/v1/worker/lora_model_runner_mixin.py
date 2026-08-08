@@ -15,7 +15,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.lora.layers import LoRAMapping, LoRAMappingType, LoRARouteMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
@@ -66,6 +66,7 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping: tuple[int, ...],
         token_lora_mapping: tuple[int, ...],
         lora_requests: set[LoRARequest],
+        lora_route_mapping: LoRARouteMapping | None = None,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         self._ensure_lora_enabled()
@@ -74,12 +75,21 @@ class LoRAModelRunnerMixin:
         # non-cuda platforms.
         # On cuda platforms we use the same kernels for prefill and
         # decode and this flag is generally ignored.
-        lora_mapping = LoRAMapping(
-            token_lora_mapping,
-            prompt_lora_mapping,
-            is_prefill=True,
-            type=mapping_type,
-        )
+        if lora_route_mapping is None:
+            lora_mapping = LoRAMapping(
+                token_lora_mapping,
+                prompt_lora_mapping,
+                is_prefill=True,
+                type=mapping_type,
+            )
+        else:
+            lora_mapping = LoRARouteMapping(
+                token_lora_ids=lora_route_mapping.token_lora_ids,
+                token_lora_weights=lora_route_mapping.token_lora_weights,
+                prompt_mapping=prompt_lora_mapping,
+                is_prefill=True,
+                type=mapping_type,
+            )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
     def _ensure_lora_enabled(self) -> None:
@@ -99,11 +109,16 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping: tuple[int, ...]  # of size np.sum(num_sampled_tokens)
         token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
-        prompt_lora_mapping, token_lora_mapping, lora_requests = (
+        lora_route_mapping: LoRARouteMapping | None
+        prompt_lora_mapping, token_lora_mapping, lora_requests, lora_route_mapping = (
             input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
         )
         return self._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
+            prompt_lora_mapping,
+            token_lora_mapping,
+            lora_requests,
+            lora_route_mapping,
+            mapping_type,
         )
 
     @contextmanager
@@ -244,7 +259,7 @@ class LoRAModelRunnerMixin:
                 tuple(sample_lora_mapping),
                 tuple(token_lora_mapping),
                 lora_requests,
-                mapping_type,
+                mapping_type=mapping_type,
             )
 
             yield

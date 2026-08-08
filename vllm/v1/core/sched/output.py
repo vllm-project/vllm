@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-    from vllm.lora.request import LoRARequest
+    from vllm.lora.request import LoRARequestLike
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -24,7 +24,7 @@ else:
     ECConnectorMetadata = object
     KVConnectorMetadata = object
     KVCacheBlockCopy = object
-    LoRARequest = object
+    LoRARequestLike = object
     MultiModalFeatureSpec = object
     PoolingParams = object
     SamplingParams = object
@@ -40,7 +40,7 @@ class NewRequestData:
     pooling_params: PoolingParams | None
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
-    lora_request: LoRARequest | None
+    lora_request: LoRARequestLike | None
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
 

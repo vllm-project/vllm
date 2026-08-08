@@ -16,7 +16,7 @@ from vllm.inputs import (
 )
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, LoRARequestLike
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -145,7 +145,7 @@ class InputProcessor:
                 f"but got {type(params).__name__}"
             )
 
-    def _validate_lora(self, lora_request: LoRARequest | None) -> None:
+    def _validate_lora(self, lora_request: LoRARequestLike | None) -> None:
         if lora_request is None:
             return
 
@@ -167,7 +167,7 @@ class InputProcessor:
     def _get_mm_identifier(
         self,
         mm_hash: str,
-        lora_request: LoRARequest | None,
+        lora_request: LoRARequestLike | None,
     ) -> str:
         """
         When enable_tower_connector_lora is True, multi-modal embeddings
