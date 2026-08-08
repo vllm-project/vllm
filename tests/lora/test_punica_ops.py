@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import vllm.lora.ops.triton_ops as triton_ops
+from vllm.lora.ops.torch_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
@@ -636,3 +637,81 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+# lora_indices with a mix of -1 (no LoRA for that row) and 0 (the one loaded
+# adapter, since max_loras=1 below). With max_loras=1, index -1 aliases index
+# 0 via negative indexing, so these rows only stay correct if bgmv_* skip
+# them rather than gathering lora_b_weights[-1].
+_MIXED_LORA_INDICES = [0, -1, -1, 0, -1, 0]
+
+
+def test_bgmv_shrink_skips_no_lora_rows():
+    torch.set_default_device("cpu")
+    rank, hidden_size = 4, 8
+    lora_a_weights = torch.randn(1, rank, hidden_size)
+    inputs = torch.randn(len(_MIXED_LORA_INDICES), hidden_size)
+    lora_indices = torch.tensor(_MIXED_LORA_INDICES, dtype=torch.long)
+    scaling = 0.5
+
+    output = torch.zeros(len(_MIXED_LORA_INDICES), rank)
+    bgmv_shrink(inputs, lora_a_weights, output, lora_indices, scaling)
+
+    no_lora_rows = lora_indices == -1
+    assert torch.equal(output[no_lora_rows], torch.zeros_like(output[no_lora_rows])), (
+        "bgmv_shrink wrote into no-lora rows, aliasing the loaded adapter's weights"
+    )
+    expected = scaling * (inputs[~no_lora_rows] @ lora_a_weights[0].T)
+    torch.testing.assert_close(output[~no_lora_rows], expected)
+
+
+def test_bgmv_expand_skips_no_lora_rows():
+    torch.set_default_device("cpu")
+    rank, hidden_size = 4, 8
+    lora_b_weights = torch.randn(1, hidden_size, rank)
+    inputs = torch.randn(len(_MIXED_LORA_INDICES), rank)
+    lora_indices = torch.tensor(_MIXED_LORA_INDICES, dtype=torch.long)
+
+    output = torch.randn(len(_MIXED_LORA_INDICES), hidden_size)
+    output_snapshot = output.clone()
+    bgmv_expand(inputs, lora_b_weights, output, lora_indices, add_inputs=True)
+
+    no_lora_rows = lora_indices == -1
+    assert torch.equal(output[no_lora_rows], output_snapshot[no_lora_rows]), (
+        "bgmv_expand modified no-lora rows, aliasing the loaded adapter's weights"
+    )
+    expected = output_snapshot[~no_lora_rows] + (
+        inputs[~no_lora_rows] @ lora_b_weights[0].T
+    )
+    torch.testing.assert_close(output[~no_lora_rows], expected)
+
+
+def test_bgmv_expand_slice_skips_no_lora_rows():
+    torch.set_default_device("cpu")
+    rank, hidden_size = 4, 8
+    slice_offset, slice_size = 3, hidden_size
+    lora_b_weights = torch.randn(1, hidden_size, rank)
+    inputs = torch.randn(len(_MIXED_LORA_INDICES), rank)
+    lora_indices = torch.tensor(_MIXED_LORA_INDICES, dtype=torch.long)
+
+    output = torch.randn(len(_MIXED_LORA_INDICES), slice_offset + hidden_size + 2)
+    output_snapshot = output.clone()
+    bgmv_expand_slice(
+        inputs,
+        lora_b_weights,
+        output,
+        lora_indices,
+        slice_offset,
+        slice_size,
+        add_inputs=True,
+    )
+
+    no_lora_rows = lora_indices == -1
+    assert torch.equal(output[no_lora_rows], output_snapshot[no_lora_rows]), (
+        "bgmv_expand_slice modified no-lora rows, aliasing the loaded adapter's weights"
+    )
+    lora_slice = slice(slice_offset, slice_offset + slice_size)
+    expected = output_snapshot[~no_lora_rows, lora_slice] + (
+        inputs[~no_lora_rows] @ lora_b_weights[0].T
+    )
+    torch.testing.assert_close(output[~no_lora_rows, lora_slice], expected)
