@@ -73,7 +73,7 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
-    if kv_cache_dtype == "nvfp4":
+    if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
         return KVQuantMode.TURBOQUANT
@@ -435,7 +435,7 @@ class FullAttentionSpec(AttentionSpec):
         hs_v = self.head_size_v
         if self.separate_kv_head_groups:
             return self.num_kv_heads * hs_k * get_dtype_size(self.dtype)
-        # TODO(lucas): make these dtype specific paths seperate specs once we have it
+        # TODO(lucas): make these dtype specific paths separate specs once we have it
         # so the attention backend returns the spec
         if self.kv_quant_mode.is_nvfp4:
             hs_k = nvfp4_kv_cache_full_dim(hs_k)

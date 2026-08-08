@@ -450,6 +450,14 @@ def test_qk_norm_rope_kvcache_fusion(
         and use_shuffle_kv_layout == "1"
     ):
         pytest.skip("ROCM_AITER_UNIFIED_ATTN is NHD-only; shuffle env is ignored")
+    if (
+        attn_backend == AttentionBackendEnum.ROCM_AITER_FA
+        and use_shuffle_kv_layout == "1"
+    ):
+        pytest.skip(
+            "ROCM_AITER_FA gates the qk_norm+rope+kvcache fusion off under shuffle "
+            "layout (defers to reshape_and_cache_shuffle_triton), so nothing fuses"
+        )
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,

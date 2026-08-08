@@ -427,6 +427,73 @@ def test_reshape_and_cache_flash(
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
 
 
+@torch.inference_mode()
+def test_nvfp4_4over6_selects_lower_error_scale(
+    kv_cache_factory_flashinfer,
+) -> None:
+    if not current_platform.has_device_capability(100):
+        pytest.skip("NVFP4 requires compute capability >= 10.0 (Blackwell).")
+
+    device = CUDA_DEVICES[0]
+    block_size = 16
+    head_size = 64
+    source = torch.tensor(
+        [6.0] + [4.5] * 15,
+        dtype=torch.bfloat16,
+        device=device,
+    ).repeat(1, 1, head_size // 16)
+    slot_mapping = torch.zeros(1, dtype=torch.long, device=device)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+
+    def quantize_and_dequantize(cache_dtype: str) -> torch.Tensor:
+        key_caches, value_caches = kv_cache_factory_flashinfer(
+            1,
+            block_size,
+            1,
+            1,
+            head_size,
+            cache_dtype,
+            source.dtype,
+            device=device,
+            cache_layout="NHD",
+        )
+        key_cache, value_cache = key_caches[0], value_caches[0]
+        key_cache.zero_()
+        value_cache.zero_()
+
+        ops.reshape_and_cache_flash(
+            source,
+            source,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            cache_dtype,
+            scale,
+            scale,
+        )
+
+        from tests.kernels.quantization.nvfp4_utils import (
+            dequant_nvfp4_kv_cache,
+        )
+
+        data, block_scales = nvfp4_split_data_scale(key_cache)
+        return dequant_nvfp4_kv_cache(
+            data.permute(0, 2, 1, 3),
+            block_scales.permute(0, 2, 1, 3),
+            scale.item(),
+            head_size,
+            block_size,
+        )[0, 0, 0]
+
+    default = quantize_and_dequantize("nvfp4")
+    four_over_six = quantize_and_dequantize("nvfp4_4over6")
+    source_f32 = source[0, 0].float()
+
+    default_mse = (default - source_f32).square().mean()
+    four_over_six_mse = (four_over_six - source_f32).square().mean()
+    assert four_over_six_mse < default_mse
+
+
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @pytest.mark.parametrize("kv_cache_layout", CACHE_LAYOUTS)
