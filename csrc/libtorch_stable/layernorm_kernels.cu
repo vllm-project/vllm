@@ -110,7 +110,8 @@ fused_add_rms_norm_kernel(
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size], null if !HasWeight
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float epsilon, const int num_tokens, const int hidden_size,
+    const int64_t residual_stride) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
@@ -130,7 +131,7 @@ fused_add_rms_norm_kernel(
       reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int id = blockIdx.x * vec_hidden_size + idx;
+    int64_t id = blockIdx.x * residual_stride / width + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = input_v[strided_id];
     temp += residual_v[id];
@@ -148,7 +149,7 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int id = blockIdx.x * vec_hidden_size + idx;
+    int64_t id = blockIdx.x * residual_stride / width + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> res = residual_v[id];
     _f16Vec<scalar_t, width> out;
@@ -181,16 +182,17 @@ fused_add_rms_norm_kernel(
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size], null if !HasWeight
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float epsilon, const int num_tokens, const int hidden_size,
+    const int64_t residual_stride) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     scalar_t z = input[blockIdx.x * input_stride + idx];
-    z += residual[blockIdx.x * hidden_size + idx];
+    z += residual[blockIdx.x * residual_stride + idx];
     float x = (float)z;
     variance += x * x;
-    residual[blockIdx.x * hidden_size + idx] = z;
+    residual[blockIdx.x * residual_stride + idx] = z;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -203,7 +205,7 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
+    float x = (float)residual[blockIdx.x * residual_stride + idx];
     if constexpr (HasWeight) {
       input[blockIdx.x * input_stride + idx] =
           (scalar_t)(x * s_variance) * weight[idx];
@@ -248,7 +250,9 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
   int64_t input_shape_d3 = (num_dims >= 4) ? input.size(-3) : 0;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  const int max_block_size =
+      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 grid(num_tokens);
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -296,13 +300,13 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
                   input.mutable_data_ptr<scalar_t>(), input_stride,        \
                   residual.mutable_data_ptr<scalar_t>(),                   \
                   weight->const_data_ptr<scalar_t>(), epsilon, num_tokens, \
-                  hidden_size);                                            \
+                  hidden_size, residual_stride);                           \
         } else {                                                           \
           vllm::fused_add_rms_norm_kernel<scalar_t, width, false>          \
               <<<grid, block, 0, stream>>>(                                \
                   input.mutable_data_ptr<scalar_t>(), input_stride,        \
                   residual.mutable_data_ptr<scalar_t>(), nullptr, epsilon, \
-                  num_tokens, hidden_size);                                \
+                  num_tokens, hidden_size, residual_stride);               \
         }                                                                  \
       });
 
@@ -311,21 +315,27 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
                         std::optional<torch::stable::Tensor> weight,
                         double epsilon) {
   STD_TORCH_CHECK(input.scalar_type() == residual.scalar_type());
-  STD_TORCH_CHECK(residual.is_contiguous());
+  STD_TORCH_CHECK(residual.stride(-1) == 1);
   if (weight.has_value()) {
     STD_TORCH_CHECK(weight->scalar_type() == input.scalar_type());
     STD_TORCH_CHECK(weight->is_contiguous());
   }
   int hidden_size = input.size(-1);
   int64_t input_stride = input.stride(-2);
+  int64_t residual_stride = residual.stride(-2);
   int num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
   /* This kernel is memory-latency bound in many scenarios.
      When num_tokens is large, a smaller block size allows
      for increased block occupancy on CUs and better latency
-     hiding on global mem ops. */
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+     hiding on global mem ops. In batch-invariant mode the block size must
+     not depend on num_tokens, otherwise the same token would use a different
+     reduction width (and thus a different floating-point summation order)
+     across batches; lock it to 1024 to keep results bit-exact. */
+  const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  const int max_block_size =
+      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 block(std::min(hidden_size, max_block_size));
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -335,8 +345,8 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
   auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
   bool offsets_are_multiple_of_vector_width =
-      hidden_size % vector_width == 0 && input_stride % vector_width == 0;
-  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+      hidden_size % vector_width == 0 && input_stride % vector_width == 0 &&
+      residual_stride % vector_width == 0;
   const bool has_weight = weight.has_value();
   if (has_weight) {
     auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight->data_ptr());
