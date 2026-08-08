@@ -518,16 +518,27 @@ class TritonAttentionImpl(AttentionImpl):
             cap = current_platform.get_device_capability()
             cap_str = cap.as_version_str() if cap is not None else "unknown"
             dev = current_platform.get_device_name()
-            if self.kv_cache_dtype.startswith("fp8") and not (
-                current_platform.has_device_capability(89)
+            # Triton on SM80 can read fp8e5 (fp8_e5m2); it is only fp8e4nv
+            # (e4m3) that needs SM89+. Admit the e5m2 KV cache on Ampere and
+            # keep rejecting e4m3 below SM89. See #50881 for the measured
+            # SM80 path (A100/A800, 1M context).
+            fp8_e5m2_on_sm80 = (
+                self.kv_cache_dtype == "fp8_e5m2"
+                and current_platform.has_device_capability(80)
+            )
+            if (
+                self.kv_cache_dtype.startswith("fp8")
+                and not current_platform.has_device_capability(89)
+                and not fp8_e5m2_on_sm80
             ):
                 suggested = (
-                    "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
+                    "float16" if (cap is None or cap.to_int() < 80) else "fp8_e5m2"
                 )
                 raise ValueError(
-                    f"FP8 KV cache is not supported by the Triton attention backend "
-                    f"on {dev} (compute capability {cap_str}); native FP8 (fp8e4nv) "
-                    f"requires SM89+. Re-run with --kv-cache-dtype {suggested}."
+                    f"This FP8 KV cache dtype is not supported by the Triton "
+                    f"attention backend on {dev} (compute capability {cap_str}); "
+                    f"native FP8 (fp8e4nv) requires SM89+. Re-run with "
+                    f"--kv-cache-dtype {suggested}."
                 )
             if self.kv_cache_dtype == "bfloat16" and not (
                 current_platform.has_device_capability(80)
