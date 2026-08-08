@@ -1394,6 +1394,10 @@ class FlashAttentionImpl(AttentionImpl):
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
+        # FA4's SM100 head-dim-256 encoder kernel does not support split KV.
+        force_single_split = self.batch_invariant_enabled or (
+            self.vllm_flash_attn_version == 4 and self.head_size == 256
+        )
         flash_attn_varlen_func(
             q=query,
             k=key,
@@ -1414,7 +1418,7 @@ class FlashAttentionImpl(AttentionImpl):
             else None,
             k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
             v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
-            num_splits=1 if self.batch_invariant_enabled else 0,
+            num_splits=1 if force_single_split else 0,
             s_aux=self.sinks,
         )
 

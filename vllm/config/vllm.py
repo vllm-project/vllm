@@ -657,7 +657,18 @@ class VllmConfig:
         if model_config is None:
             return False
 
-        if model_config.runner_type != "generate":
+        if model_config.runner_type == "pooling":
+            if model_config.is_multimodal_model:
+                return False
+            # The Transformers backend registers attention layers under names
+            # V2's pooling path does not build metadata for. This also
+            # covers models with no in-tree implementation, which fall back to
+            # that backend even though model_impl is left as "auto".
+            if model_config.using_transformers_backend():
+                return False
+            # Fall through rather than return, so pooling models are still
+            # subject to the MoE and hybrid checks below.
+        elif model_config.runner_type != "generate":
             return False
 
         architectures = getattr(model_config, "architectures", [])
