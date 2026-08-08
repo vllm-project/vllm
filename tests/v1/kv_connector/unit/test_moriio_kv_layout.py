@@ -11,37 +11,56 @@ from typing import Any
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_layout
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
 
-if not (current_platform.is_rocm() and mori_available):
-    pytest.skip(
-        "MoRIIOs are only available on ROCm with mori package installed",
-        allow_module_level=True,
+moriio_runtime_available = current_platform.is_rocm() and mori_available
+requires_moriio_runtime = pytest.mark.skipif(
+    not moriio_runtime_available,
+    reason="MoRIIO runtime tests require ROCm with mori package installed",
+)
+
+if moriio_runtime_available:
+    msgpack = importlib.import_module("msgpack")
+    moriio_common = importlib.import_module(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
+    )
+    moriio_engine = importlib.import_module(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine"
     )
 
-moriio_common = importlib.import_module(
-    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
-)
-moriio_engine = importlib.import_module(
-    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine"
-)
-moriio_layout = importlib.import_module(
-    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout"
-)
-msgpack = importlib.import_module("msgpack")
+    ROLE = moriio_common.ROLE
+    MoRIIOError = moriio_common.MoRIIOError
+    MoRIIOTransferAck = moriio_common.MoRIIOTransferAck
+    RemoteAllocInfo = moriio_common.RemoteAllocInfo
+    WriteTask = moriio_common.WriteTask
+    set_role = moriio_common.set_role
+    MoRIIOWrapper = moriio_engine.MoRIIOWrapper
+    MoRIIOWriter = moriio_engine.MoRIIOWriter
+else:
 
-ROLE = moriio_common.ROLE
-MoRIIOError = moriio_common.MoRIIOError
-MoRIIOTransferAck = moriio_common.MoRIIOTransferAck
-RemoteAllocInfo = moriio_common.RemoteAllocInfo
-WriteTask = moriio_common.WriteTask
-set_role = moriio_common.set_role
-MoRIIOWrapper = moriio_engine.MoRIIOWrapper
-MoRIIOWriter = moriio_engine.MoRIIOWriter
+    class _SkippedMsgpack:
+        @staticmethod
+        def dumps(_payload: object) -> bytes:
+            return b""
+
+    class _SkippedMoRIIOTransferAck:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+    msgpack = _SkippedMsgpack()
+    ROLE = SimpleNamespace(PRODUCER="producer", CONSUMER="consumer")
+    MoRIIOError = RuntimeError
+    MoRIIOTransferAck = _SkippedMoRIIOTransferAck
+    RemoteAllocInfo = None
+    WriteTask = None
+    set_role = None
+    MoRIIOWrapper = None
+    MoRIIOWriter = None
 
 
 def _full_spec(
@@ -338,6 +357,7 @@ def test_mixed_layers_compute_distinct_offsets_per_layer():
     assert interleaved != indexer
 
 
+@requires_moriio_runtime
 def test_write_transfer_plan_caches_offsets_per_geometry():
     kv_caches = {
         "dense0": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
@@ -403,6 +423,7 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
     assert len(request_info.transfer_offsets) == 2
 
 
+@requires_moriio_runtime
 def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
     request_info = RemoteAllocInfo(block_ids=[4, 5])
     wrapper = _wrapper_for_messages()
@@ -420,6 +441,7 @@ def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
     assert writer._sealed_writes["xfer"] == 2
 
 
+@requires_moriio_runtime
 def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     class FakeWrapper:
         def __init__(self):
@@ -481,6 +503,7 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     assert wrapper._is_transfer_terminal_locked("xfer")
 
 
+@requires_moriio_runtime
 def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
     class FakeStatus:
         def __init__(self):
@@ -507,6 +530,7 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
     assert wrapper.transfer_status == [global_status]
 
 
+@requires_moriio_runtime
 def test_write_failure_marks_terminal_and_clears_scheduled_state():
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
@@ -525,6 +549,7 @@ def test_write_failure_marks_terminal_and_clears_scheduled_state():
     assert "xfer" not in writer._sealed_writes
 
 
+@requires_moriio_runtime
 def test_schedule_write_rejects_terminal_transfer_without_recreating_state():
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
@@ -542,6 +567,7 @@ def test_schedule_write_rejects_terminal_transfer_without_recreating_state():
     assert "xfer" not in writer._sealed_writes
 
 
+@requires_moriio_runtime
 def test_late_remote_blocks_message_is_ignored_after_transfer_done():
     set_role(ROLE.PRODUCER)
     wrapper = _wrapper_for_messages()
@@ -607,6 +633,7 @@ def test_late_remote_blocks_message_is_ignored_after_transfer_done():
         pytest.param(None, b"xfer", "plain", id="plain-string"),
     ],
 )
+@requires_moriio_runtime
 def test_moriio_wrapper_routes_valid_messages(role, payload, expected):
     wrapper = _wrapper_for_messages()
     completions: list[str] = []
@@ -660,6 +687,7 @@ def test_moriio_wrapper_routes_valid_messages(role, payload, expected):
         ),
     ],
 )
+@requires_moriio_runtime
 def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
     wrapper = _wrapper_for_messages()
     if role is not None:
