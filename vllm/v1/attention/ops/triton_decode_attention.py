@@ -359,7 +359,11 @@ def _fwd_grouped_kernel_stage1(
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
-        base_offs_k = cur_kv_head * stride_buf_kh + offs_d[:, None]
+        if IS_MLA:
+            # token-major lora tile [BLOCK_N, BLOCK_DMODEL], reused for both dots
+            base_offs_k = cur_kv_head * stride_buf_kh + offs_d[None, :]
+        else:
+            base_offs_k = cur_kv_head * stride_buf_kh + offs_d[:, None]
         base_offs_v = cur_kv_head * stride_buf_vh + offs_dv[None, :]
         if BLOCK_DPE > 0:
             base_offs_kpe = cur_kv_head * stride_buf_kh + offs_dpe[:, None]
@@ -380,18 +384,31 @@ def _fwd_grouped_kernel_stage1(
                 kv_page_number * stride_buf_kpbs + (offs_n % PAGE_SIZE) * stride_buf_kbs
             )
 
-            # explicitly facilitate overlapping load/compute
-            offs_buf_k = kv_off_k[None, :] + base_offs_k
-            k = tl.load(
-                K_Buffer + offs_buf_k,
-                mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
-                other=0.0,
-                cache_modifier=".cg",
-            )
-
-            if k.dtype.is_fp8():
-                k = (k.to(tl.float32) * ks).to(q.dtype)
-            qk = tl.dot(q, k.to(q.dtype))
+            if IS_MLA:
+                # token-major load; transpose folded into the QK dot, same tile
+                # reused for the PV dot (no materialized v = tl.trans(k))
+                offs_buf_k = kv_off_k[:, None] + base_offs_k
+                k = tl.load(
+                    K_Buffer + offs_buf_k,
+                    mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
+                    other=0.0,
+                    cache_modifier=".cg",
+                )
+                if k.dtype.is_fp8():
+                    k = (k.to(tl.float32) * ks).to(q.dtype)
+                qk = tl.dot(q, tl.trans(k.to(q.dtype)))
+            else:
+                # explicitly facilitate overlapping load/compute
+                offs_buf_k = kv_off_k[None, :] + base_offs_k
+                k = tl.load(
+                    K_Buffer + offs_buf_k,
+                    mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
+                    other=0.0,
+                    cache_modifier=".cg",
+                )
+                if k.dtype.is_fp8():
+                    k = (k.to(tl.float32) * ks).to(q.dtype)
+                qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
                 offs_buf_kpe = kv_off_k[None, :] + base_offs_kpe
                 kpe = tl.load(
@@ -425,17 +442,16 @@ def _fwd_grouped_kernel_stage1(
                 )
                 if v.dtype.is_fp8():
                     v = (v.to(tl.float32) * vs).to(q.dtype)
-            else:
-                # MLA uses a single c_kv.
-                # loading the same c_kv to interpret it as v is not necessary.
-                # transpose the existing c_kv (aka k) for the dot product.
-                v = tl.trans(k)
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
             p = tl.exp(qk - n_e_max[:, None])
             acc *= re_scale[:, None]
-            acc += tl.dot(p.to(v.dtype), v)
+            if IS_MLA:
+                # c_kv (aka k) is already token-major: use it directly as v
+                acc += tl.dot(p.to(k.dtype), k)
+            else:
+                acc += tl.dot(p.to(v.dtype), v)
 
             e_sum = e_sum * re_scale + tl.sum(p, 1)
             e_max = n_e_max
