@@ -66,40 +66,6 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "DeepseekV2ForCausalLM",
-        "GraniteMoeForCausalLM",
-        "InklingForCausalLM",
-        "InklingForConditionalGeneration",
-        "KimiK3ForConditionalGeneration",
-        "LongcatFlashNgramForCausalLM",
-        "Qwen2MoeForCausalLM",
-    }
-)
-
-# Architectures that default to V1 on ROCm: the V2 runner faults during the
-# profile run. VLLM_USE_V2_MODEL_RUNNER=1 still forces V2.
-# TODO: fix V2 enablement
-ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "KimiK3ForConditionalGeneration",
-    }
-)
-
-
-@lru_cache
-def default_v2_model_runner_architectures() -> frozenset[str]:
-    """Architectures defaulting to the V2 model runner on this platform."""
-    from vllm.platforms import current_platform
-
-    if current_platform.is_rocm():
-        return (
-            DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
-            - ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES
-        )
-    return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
-
 
 class OptimizationLevel(IntEnum):
     """Optimization level enum."""
@@ -654,26 +620,7 @@ class VllmConfig:
 
     def _is_default_v2_model_runner_model(self) -> bool:
         model_config = self.model_config
-        if model_config is None:
-            return False
-
-        if model_config.runner_type != "generate":
-            return False
-
-        architectures = getattr(model_config, "architectures", [])
-        default_architectures = default_v2_model_runner_architectures()
-        is_default_v2_architecture = any(
-            arch in default_architectures for arch in architectures
-        )
-
-        if getattr(model_config, "is_hybrid", False) and (
-            not is_default_v2_architecture
-        ):
-            return False
-
-        if getattr(model_config, "is_attention_free", False):
-            return False
-        return is_default_v2_architecture or not model_config.is_moe
+        return model_config is not None and model_config.runner_type == "generate"
 
     @property
     def needs_dp_coordinator(self) -> bool:

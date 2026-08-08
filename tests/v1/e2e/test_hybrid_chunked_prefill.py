@@ -79,6 +79,10 @@ def test_mtp_speculative_mixed_batch_short_prefill(
         enable_chunked_prefill=True,
         enable_prefix_caching=enable_prefix_caching,
         mamba_cache_mode="align" if enable_prefix_caching else "none",
+        # MRV2 warmup materializes the worst-case spec-decode logits all-gather
+        # (num_reqs * (1 + num_speculative_tokens) rows), which memory profiling
+        # does not yet account for. Leave headroom so warmup doesn't OOM.
+        gpu_memory_utilization=0.85,
     ) as llm:
         sampling_params = SamplingParams(
             temperature=0.0,
