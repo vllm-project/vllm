@@ -80,6 +80,11 @@ class MooncakeStoreCoordinator:
             for g in kv_cache_groups
         ), "scheduler_block_size must be a multiple of each group's block_size"
         self.kv_cache_groups = kv_cache_groups
+        self.mamba_group_ids = {
+            group_id
+            for group_id, group in enumerate(kv_cache_groups)
+            if isinstance(_unwrap_spec(group.kv_cache_spec), MambaSpec)
+        }
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
         self.enable_partial_hash_hits = partial_hash_hits_enabled(

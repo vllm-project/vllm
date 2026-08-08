@@ -691,6 +691,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         # persisted, from the core-provided hand-off.
                         continue
                     block_id = mamba_offloads[g_idx]
+                elif g_idx in self.coord.mamba_group_ids:
+                    continue
                 elif block_idx < len(group_blocks):
                     block_id = group_blocks[block_idx]
                 else:

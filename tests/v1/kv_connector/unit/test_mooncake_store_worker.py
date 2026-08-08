@@ -627,6 +627,7 @@ def _make_partial_tail_send_thread(
         enable_partial_hash_hits=True,
         hash_block_size=4,
         lcm_block_size=16,
+        mamba_group_ids={1},
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
@@ -687,6 +688,77 @@ def test_partial_tail_offload_skips_null_source_blocks():
         [0x1000 + 3 * 256],
         [0x2000 + 7 * 256],
     ]
+
+
+def test_partial_tail_offload_skips_cap_omitted_mamba_group():
+    """A Mamba group omitted by the handoff cap must not fall back to the
+    connector's positional block table."""
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MambaSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+
+    full_spec = FullAttentionSpec(
+        block_size=4, num_kv_heads=8, head_size=64, dtype=torch.float32
+    )
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["full"], full_spec),
+            KVCacheGroupSpec(["mamba-1"], mamba_spec),
+            KVCacheGroupSpec(["mamba-2"], mamba_spec),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=4,
+    )
+
+    def make_db(group_id: int, block_size: int, base_addr: int):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=block_size,
+            hash_block_size=4,
+        )
+        db.set_kv_caches_base_addr([base_addr])
+        db.set_block_len([256])
+        return db
+
+    db_full = make_db(0, 4, 0x1000)
+    db_mamba_1 = make_db(1, 16, 0x2000)
+    db_mamba_2 = make_db(2, 16, 0x3000)
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_mamba_1, db_mamba_2],
+    )
+
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], [5], [9]),
+        block_hashes=[b"a0", b"a1", b"a2"],
+        can_save=True,
+        # The scheduler's cap accepted group 1 and omitted group 2 at boundary 12.
+        boundary_state_offloads=[(1, 1, 7, 12)],
+    )
+    assert thread._maybe_offload_boundary_states(req)
+
+    keys, addrs, _sizes, _replicate_config = (
+        store.batch_put_from_multi_buffers.call_args.args
+    )
+    puts = list(zip(keys, addrs, strict=True))
+    boundary_hash = BlockHash(b"a2")
+    assert (db_mamba_1.key_for(boundary_hash), [0x2000 + 7 * 256]) in puts
+    assert (db_mamba_2.key_for(boundary_hash), [0x3000 + 9 * 256]) not in puts
 
 
 def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
