@@ -33,6 +33,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.qwen3 import Qwen3Parser
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -1694,3 +1695,57 @@ class TestDropSpecialTokens:
             e.value for e in events if e.type == EventType.REASONING_CHUNK
         )
         assert "<bos>" not in reasoning_text
+
+
+# ── TestTruncatedToolCallStreamingParity ─────────────────────────────
+
+
+@pytest.mark.parametrize("truncated_suffix", ["\n", "\n<function=get_wea"])
+def test_qwen3_truncated_tool_call_streaming_parity(truncated_suffix):
+    """Incomplete Qwen3 tool markup is dropped by both parsing paths."""
+    tokenizer = make_mock_tokenizer(
+        {
+            "<think>": 200,
+            "</think>": 201,
+            "<tool_call>": 202,
+            "</tool_call>": 203,
+        }
+    )
+    request = _make_delegating_request()
+
+    def make_parser():
+        return Qwen3Parser(
+            tokenizer,
+            tools=None,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+
+    prefix = "Let me check."
+    deltas = [
+        (prefix, [ord(char) for char in prefix]),
+        ("<tool_call>", [202]),
+        (truncated_suffix, [ord(char) for char in truncated_suffix]),
+    ]
+    full_text = "".join(text for text, _ in deltas)
+    token_ids = [token_id for _, ids in deltas for token_id in ids]
+
+    _, nonstream_content, _ = make_parser().parse(
+        full_text,
+        request,
+        enable_auto_tools=True,
+        model_output_token_ids=token_ids,
+    )
+
+    stream_parser = make_parser()
+    stream_content: list[str] = []
+    for index, (text, ids) in enumerate(deltas):
+        delta = stream_parser.parse_delta(
+            text,
+            ids,
+            request,
+            finished=index == len(deltas) - 1,
+        )
+        if delta is not None and delta.content:
+            stream_content.append(delta.content)
+
+    assert nonstream_content == "".join(stream_content) == prefix
