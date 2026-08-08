@@ -1105,6 +1105,94 @@ def test_prefix_cache_query_not_inflated_by_connector_defer():
     assert stats.queries == request.num_tokens
 
 
+def _run_to_finished(scheduler: Scheduler, request: Request) -> None:
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    for _ in range(100):
+        output = scheduler.schedule()
+        if request.request_id not in output.num_scheduled_tokens:
+            break
+        scheduler.update_from_output(output, create_model_runner_output([request]))
+        if request.is_finished():
+            break
+    assert request.is_finished()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
+
+
+def test_connector_match_clamped_to_prompt_suffix():
+    """A KV connector reporting more matched tokens than the prompt suffix not
+    locally cached must be clamped to leave at least one token of local
+    prefill: the last token is always recomputed to obtain logits (the local
+    lookup applies the same num_tokens - 1 cap). Without the clamp a match
+    that reaches the end of the prompt schedules zero local tokens and
+    triggers `assert num_new_tokens > 0`."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=16, is_async=False),
+        block_size=16,
+    )
+    r1, r2 = create_requests(
+        num_requests=2,
+        num_tokens=32,
+        max_tokens=16,
+        same_prompt=True,
+        req_ids=["r1", "r2"],
+    )
+    scheduler.add_request(r1)
+    _run_to_finished(scheduler, r1)
+    scheduler.add_request(r2)
+    output = scheduler.schedule()
+    assert r2.request_id in output.num_scheduled_tokens
+    # r2 hits the locally cached prefix block (16 tokens); the connector
+    # match of 16 is clamped to the 15 remaining suffix tokens, so exactly
+    # one local token is scheduled.
+    assert output.num_scheduled_tokens[r2.request_id] == 1
+    scheduler.update_from_output(output, create_model_runner_output([r2]))
+    assert r2.num_computed_tokens == 32
+
+    # The request is now fully prefilled: the next schedule is a decode.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[r2.request_id] == 1
+    assert not r2.is_prefill_chunk
+
+
+def test_connector_match_exceeding_prompt_clamped():
+    """A connector match that would push the computed token count past the
+    prompt length (local block-aligned hit plus a longer match) must be
+    clamped instead of tripping `assert num_computed_tokens <=
+    request.num_tokens`. The local hit is truncated to block alignment, the
+    match covers the remaining suffix minus the last token."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=16, is_async=False),
+        block_size=16,
+    )
+    r1, r2 = create_requests(
+        num_requests=2,
+        num_tokens=40,
+        max_tokens=16,
+        same_prompt=True,
+        req_ids=["r1", "r2"],
+    )
+    scheduler.add_request(r1)
+    _run_to_finished(scheduler, r1)
+
+    scheduler.add_request(r2)
+    output = scheduler.schedule()
+    assert r2.request_id in output.num_scheduled_tokens
+    assert output.num_scheduled_tokens[r2.request_id] == 1
+    scheduler.update_from_output(output, create_model_runner_output([r2]))
+    assert r2.num_computed_tokens == 40
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[r2.request_id] == 1
+    assert not r2.is_prefill_chunk
+
+
 def test_preemption_re_records_prefix_cache_query():
     """A preempted request re-enters the lookup on resume, so its recomputation
     is counted again into the preempted stats."""

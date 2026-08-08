@@ -829,6 +829,24 @@ class Scheduler(SchedulerInterface):
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
 
+                    # Bound the connector-reported match by the prompt suffix
+                    # not locally cached. A match reaching the end of the
+                    # prompt would leave no local work for this step; the last
+                    # token must be recomputed to obtain logits (the local
+                    # lookup applies the same `num_tokens - 1` cap in
+                    # get_computed_blocks).
+                    num_external_computed_tokens = min(
+                        num_external_computed_tokens,
+                        max(
+                            request.num_tokens - num_new_local_computed_tokens - 1,
+                            0,
+                        ),
+                    )
+                    if num_external_computed_tokens == 0:
+                        # Clamped to nothing: there is no load to run async.
+                        load_kv_async = False
+
+                    if self.connector is not None:
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
                         )
