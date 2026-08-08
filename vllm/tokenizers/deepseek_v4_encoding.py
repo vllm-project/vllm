@@ -364,7 +364,15 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
             prompt += thinking_end_token if thinking_mode != "thinking" else thinking_start_token
             prompt += task_sp_token
 
-    elif messages[index].get("role") in ["user", "developer"]:
+    # A trailing system message opens generation, while a system message
+    # followed by assistant opens that assistant history turn.
+    elif role in ["user", "developer"] or (
+        role == "system"
+        and (
+            index == len(messages) - 1
+            or messages[index + 1].get("role") == "assistant"
+        )
+    ):
         # Normal generation: append Assistant + thinking token
         prompt += ASSISTANT_SP_TOKEN
         if not drop_thinking and thinking_mode == "thinking":
