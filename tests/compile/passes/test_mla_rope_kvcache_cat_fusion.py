@@ -272,6 +272,14 @@ def test_mla_rope_kvcache_cat_fusion(
     kv_cache_dtype: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    # FlashAttnMLA V1 does not support an FP8 KV cache (it raises
+    # NotImplementedError at backend construction), so this cell of the
+    # parametrize matrix is not a valid configuration. Skip it, mirroring
+    # the is_quantized_kv_cache() gate in
+    # vllm/v1/attention/backends/mla/flashattn_mla.py.
+    if attn_backend == AttentionBackendEnum.FLASH_ATTN_MLA and kv_cache_dtype == "fp8":
+        pytest.skip("FlashAttnMLA V1 with FP8 KV cache not yet supported")
+
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
