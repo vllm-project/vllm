@@ -350,6 +350,9 @@ class BenchmarkMetrics:
     max_output_tokens_per_s: float
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
+    # Only set when the server reports usage.prompt_tokens_details.cached_tokens
+    # (requires --enable-prompt-tokens-details on the vLLM server).
+    total_cached: int | None = None
 
 
 @dataclass
@@ -576,6 +579,7 @@ def calculate_metrics(
     """
     actual_output_lens: list[int] = []
     total_input = 0
+    total_cached: int | None = None
     completed = 0
     good_completed = 0
     itls: list[float] = []
@@ -604,6 +608,8 @@ def calculate_metrics(
                     )
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
+            if (cached := outputs[i].cached_tokens) is not None:
+                total_cached = (total_cached or 0) + cached
             tpot = 0.0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
@@ -760,6 +766,7 @@ def calculate_metrics(
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
         rtfx=input_audio_duration / dur_s,
+        total_cached=total_cached,
     )
 
     return metrics, actual_output_lens
@@ -1174,6 +1181,8 @@ async def benchmark(
         print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
+    if isinstance(metrics, BenchmarkMetrics) and metrics.total_cached is not None:
+        print("{:<40} {:<10}".format("Total cached tokens:", metrics.total_cached))
     if isinstance(metrics, BenchmarkMetrics) and tokenizer:
         print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
     print(
@@ -1289,6 +1298,9 @@ async def benchmark(
             "input_lens": [output.prompt_len for output in outputs],
             "errors": [output.error for output in outputs],
         }
+
+    if isinstance(metrics, BenchmarkMetrics) and metrics.total_cached is not None:
+        result["total_cached_tokens"] = metrics.total_cached
 
     if probe_stats is not None:
         result.update(probe_stats)
@@ -1715,6 +1727,13 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--append-result",
         action="store_true",
         help="Append the benchmark result to the existing json file.",
+    )
+    parser.add_argument(
+        "--report-cached-tokens",
+        action="store_true",
+        help="Expect the server to report cached prompt tokens in "
+        "usage.prompt_tokens_details and warn if it does not. For vLLM "
+        "servers, this requires --enable-prompt-tokens-details.",
     )
     parser.add_argument(
         "--metadata",
@@ -2202,6 +2221,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         self_timed=args.self_timed,
         probe_request_rate=args.probe_request_rate,
     )
+
+    report_cached_tokens = getattr(args, "report_cached_tokens", False)
+    if report_cached_tokens and "total_cached_tokens" not in benchmark_result:
+        warnings.warn(
+            "--report-cached-tokens was set but the server did not report "
+            "cached token counts (usage.prompt_tokens_details.cached_tokens). "
+            "If benchmarking a vLLM server, start it with "
+            "--enable-prompt-tokens-details.",
+            stacklevel=2,
+        )
 
     # Save config and results to json
     result_json: dict[str, Any] = {}

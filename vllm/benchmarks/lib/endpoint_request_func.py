@@ -97,6 +97,7 @@ class RequestFuncOutput:
     itl: list[float] = field(default_factory=list)  # list of inter-token latencies
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
+    cached_tokens: int | None = None  # prompt tokens served from prefix cache
     error: str = ""
     start_time: float = 0.0
     input_audio_duration: float = 0.0  # in seconds
@@ -245,6 +246,8 @@ async def async_request_openai_completions(
                                 output.output_tokens = usage.get("completion_tokens")
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
+                                if details := usage.get("prompt_tokens_details"):
+                                    output.cached_tokens = details.get("cached_tokens")
                 if first_chunk_received:
                     output.success = True
                 else:
@@ -416,6 +419,8 @@ async def async_request_openai_chat_completions(
                                 output.output_tokens = usage.get("completion_tokens")
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
+                                if details := usage.get("prompt_tokens_details"):
+                                    output.cached_tokens = details.get("cached_tokens")
 
                             most_recent_timestamp = timestamp
 
