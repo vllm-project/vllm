@@ -152,6 +152,43 @@ def test_vllm_openai_image_embeds_metadata_contract() -> None:
         assert expected in dockerfile
 
 
+def test_vllm_rust_renderer_image_embeds_metadata_contract() -> None:
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.rust").read_text()
+
+    for expected in (
+        "ARG VLLM_BUILD_COMMIT",
+        "ARG VLLM_BUILD_PIPELINE",
+        "ARG VLLM_BUILD_URL",
+        "ARG VLLM_IMAGE_TAG",
+        "VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown}",
+        "VLLM_BUILD_PIPELINE=${VLLM_BUILD_PIPELINE:-local}",
+        "VLLM_BUILD_URL=${VLLM_BUILD_URL:-}",
+        "VLLM_IMAGE_TAG=${VLLM_IMAGE_TAG:-local/vllm-rust-renderer:dev}",
+        'ai.vllm.build.commit="${VLLM_BUILD_COMMIT}"',
+        'ai.vllm.build.pipeline="${VLLM_BUILD_PIPELINE}"',
+        'ai.vllm.build.url="${VLLM_BUILD_URL}"',
+        'ai.vllm.image.tag="${VLLM_IMAGE_TAG}"',
+    ):
+        assert expected in dockerfile
+
+
+def test_vllm_rust_renderer_bake_target_uses_renderer_metadata() -> None:
+    bake_file = (REPO_ROOT / "docker" / "docker-bake.hcl").read_text()
+
+    for expected in (
+        'variable "RUST_RENDERER_IMAGE_TAG"',
+        'target "_rust_renderer_common"',
+        'dockerfile = "docker/Dockerfile.rust"',
+        'target "_rust_renderer_labels"',
+        '"org.opencontainers.image.version"     = RUST_RENDERER_IMAGE_TAG',
+        '"ai.vllm.image.tag"                    = RUST_RENDERER_IMAGE_TAG',
+        'target "rust-renderer"',
+        'inherits = ["_rust_renderer_common", "_rust_renderer_labels"]',
+        'target   = "vllm-rust-renderer"',
+    ):
+        assert expected in bake_file
+
+
 def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
     bake_file = (REPO_ROOT / "docker" / "docker-bake-rocm.hcl").read_text()
 
