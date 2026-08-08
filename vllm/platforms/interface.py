@@ -638,6 +638,13 @@ class Platform:
                     backend_cls.get_name(),
                 )
             cache_config.block_size = preferred
+        elif not backend_cls.supports_block_size(cache_config.block_size):
+            raise ValueError(
+                f"User-specified block_size={cache_config.block_size} is not "
+                f"supported by the {backend_cls.get_name()} attention "
+                f"backend. Supported kernel block sizes: "
+                f"{backend_cls.get_supported_kernel_block_sizes()}."
+            )
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
