@@ -172,7 +172,15 @@ def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 @functools.cache
-def inkling_config() -> ParserEngineConfig:
+def inkling_config(*, plain_text_mode: bool = False) -> ParserEngineConfig:
+    # A message header exists to hide the optional function name between the
+    # model-role and content-kind markers. Without tools no function name can
+    # be emitted, so in plain-text mode a message starts directly in CONTENT
+    # and its text streams out instead of being buffered until a closer proves
+    # it was not a function name.
+    message_start_state = (
+        ParserState.CONTENT if plain_text_mode else ParserState.MESSAGE_HEADER
+    )
     terminals = {
         "MSG_MODEL": MESSAGE_MODEL,
         "TEXT_START": CONTENT_TEXT,
@@ -186,7 +194,7 @@ def inkling_config() -> ParserEngineConfig:
     transitions: dict[tuple[ParserState, str], Transition] = {
         # ── Between blocks / inside a text block ──────────────────────
         (ParserState.CONTENT, "MSG_MODEL"): Transition(
-            ParserState.MESSAGE_HEADER,
+            message_start_state,
             (),
         ),
         # Opening a block that renders as visible content proves no reasoning
@@ -220,7 +228,7 @@ def inkling_config() -> ParserEngineConfig:
         # The optional function name between the model-role and content-kind
         # markers is metadata, not visible assistant content.
         (ParserState.MESSAGE_HEADER, "MSG_MODEL"): Transition(
-            ParserState.MESSAGE_HEADER,
+            message_start_state,
             (),
         ),
         (ParserState.MESSAGE_HEADER, "TEXT_START"): Transition(
@@ -282,8 +290,8 @@ def inkling_config() -> ParserEngineConfig:
         name="inkling",
         # Normal generation continues after a prompt-prefilled
         # `<|message_model|>`. Non-streaming parsing receives only the generated
-        # suffix, so begin in the corresponding message-header state as well.
-        initial_state=ParserState.MESSAGE_HEADER,
+        # suffix, so begin in the corresponding message-start state as well.
+        initial_state=message_start_state,
         terminals=terminals,
         # Inkling content-kind markers are the grammar. When the engine is
         # used through DelegatingParser, the reasoning pass can hand the tool
@@ -305,13 +313,35 @@ def inkling_config() -> ParserEngineConfig:
 class InklingParser(ParserEngine):
     CONFIG_NAME = "inkling"
 
+    # ``reasoning_effort`` values for which Inkling renders no thinking budget
+    # and answers in bare text. Only the named forms are handled here.
+    _PLAIN_TEXT_EFFORTS = frozenset({"none", "minimal"})
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
-        kwargs.setdefault("parser_engine_config", inkling_config())
+        chat_kwargs = kwargs.get("chat_template_kwargs") or {}
+        effort = chat_kwargs.get("reasoning_effort")
+        # Plain-text mode asserts that no function name can appear, so it needs
+        # proof that the prompt declared no tool -- and ``tools`` is not proof:
+        # Inkling also renders tools carried by developer messages, which never
+        # reach it. Only a caller that has looked at every source can say so,
+        # via ``_vllm_prompt_has_tools``. Absent that, assume tools and keep
+        # message-header parsing, which is what happens today.
+        prompt_has_tools = chat_kwargs.get("_vllm_prompt_has_tools", True)
+        self._plain_text_mode = (
+            not prompt_has_tools and effort in self._PLAIN_TEXT_EFFORTS
+        )
+        self._message_start_state = (
+            ParserState.CONTENT if self._plain_text_mode else ParserState.MESSAGE_HEADER
+        )
+        kwargs.setdefault(
+            "parser_engine_config",
+            inkling_config(plain_text_mode=self._plain_text_mode),
+        )
         super().__init__(tokenizer, tools, **kwargs)
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
@@ -337,7 +367,7 @@ class InklingParser(ParserEngine):
                 self._streaming_initialized = True
                 return
             if token_id == model_id:
-                self._engine.reset(initial_state=ParserState.MESSAGE_HEADER)
+                self._engine.reset(initial_state=self._message_start_state)
                 self._streaming_initialized = True
                 return
             if token_id in special_ids:

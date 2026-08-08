@@ -47,6 +47,39 @@ from vllm.utils.mistral import mt as _mt
 logger = init_logger(__name__)
 
 
+def prompt_declares_tools(
+    request: Any, chat_template_kwargs: dict[str, Any] | None = None
+) -> bool:
+    """Whether the prompt this request renders to declares any tool.
+
+    Callers use this to *prove* that none did, so every source that reaches
+    the rendered prompt is checked:
+
+    - ``request.tools``, which becomes the renderer's ``tool_dicts``;
+    - a ``tools`` entry in the effective chat-template kwargs, whether a
+      request override or a server default (``"auto"`` reads as unset, as it
+      does in :func:`merge_kwargs`);
+    - tools attached to individual developer messages, which Inkling renders
+      into the prompt (:mod:`vllm.renderers.inkling_encoding`) and which never
+      appear in ``request.tools``.
+
+    Over-reporting only costs a caller its optimisation; under-reporting can
+    make it act on a tool-enabled prompt, so anything unclear counts as
+    declaring tools.
+    """
+    if getattr(request, "tools", None):
+        return True
+    template_tools = (chat_template_kwargs or {}).get("tools")
+    if template_tools and template_tools != "auto":
+        return True
+    return any(
+        isinstance(message, dict)
+        and message.get("role") == "developer"
+        and message.get("tools")
+        for message in getattr(request, "messages", None) or ()
+    )
+
+
 def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
