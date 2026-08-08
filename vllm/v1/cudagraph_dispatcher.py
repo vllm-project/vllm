@@ -96,16 +96,38 @@ class CudagraphDispatcher:
             self.compilation_config.compile_sizes
             and self.cudagraph_mode != CUDAGraphMode.NONE
         ):
+            # The valid compile_sizes are exactly the sizes left unchanged by
+            # cudagraph padding, i.e. the fixed points of the padding map we
+            # just computed. Derive them from that map so the advice stays
+            # self-consistent even when the capture sizes were rescaled (e.g.
+            # rounded up for speculative decoding), where the actually-valid
+            # values differ from the originally configured capture sizes.
+            valid_sizes = sorted(s for s in set(self._bs_to_padded_graph_size) if s > 0)
             for size in self.compilation_config.compile_sizes:
                 size = int(size)
                 if size <= max_size:
                     padded = self._bs_to_padded_graph_size[size]
                     if padded != size:
+                        # Truncate so the message stays readable when there
+                        # are many capture sizes.
+                        shown = ", ".join(str(s) for s in valid_sizes[:16])
+                        if len(valid_sizes) > 16:
+                            shown += ", ..."
+                        spec_hint = ""
+                        if self.vllm_config.speculative_config is not None:
+                            spec_hint = (
+                                " Speculative decoding is enabled, so cudagraph "
+                                "capture sizes are rounded up to a multiple of "
+                                "(num_speculative_tokens + 1); the valid "
+                                "compile_sizes therefore differ from the "
+                                "originally configured cudagraph_capture_sizes."
+                            )
                         raise ValueError(
                             f"compile_sizes contains {size} which would be "
-                            f"padded to {padded}. All compile_sizes must be "
-                            "values that won't be changed by cudagraph padding. "
-                            "Use values from cudagraph_capture_sizes."
+                            f"padded to {padded} by cudagraph padding. All "
+                            "compile_sizes must be values that won't be changed "
+                            f"by padding. Valid compile_sizes are: [{shown}]."
+                            + spec_hint
                         )
 
     def _get_lora_cases(self) -> list[int]:
