@@ -33,6 +33,9 @@ class ParserState(Enum):
     TOOL_NAME = auto()
     TOOL_ARGS = auto()
     TOOL_BETWEEN = auto()
+    # Inside a block belonging to a different model format; terminals
+    # matched here pass through as plain content.
+    FOREIGN_BLOCK = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,11 @@ class Transition:
     next_state: ParserState
     events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
+    # Hold this transition's events until the tool name completes, then
+    # validate the name before committing to the tool call.  Set on
+    # recovery transitions whose trigger marker has no dedicated special
+    # token, so prose quoting the marker is not misparsed as a tool call.
+    validate_tool_name: bool = False
 
 
 @dataclass(frozen=True)
