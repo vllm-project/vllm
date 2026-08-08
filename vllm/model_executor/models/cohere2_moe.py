@@ -207,7 +207,7 @@ class Cohere2MoeAttention(nn.Module):
             layer_types is not None
             and layer_types[self.layer_idx] == "sliding_attention"
         ):
-            self.sliding_window = config.sliding_window
+            self.sliding_window = config.sliding_window + 1
 
         # Prefix-dense layers have full attention (no sliding window). When
         # prefix_dense_sliding_window_pattern == 1, they keep RoPE even though

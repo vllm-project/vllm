@@ -1443,6 +1443,14 @@ class SpeculativeConfig:
             == "step3p5_mtp"
         )
 
+    def use_cohere_eagle(self) -> bool:
+        return (
+            self.method == "eagle"
+            and self.draft_model_config is not None
+            and self.draft_model_config.hf_config.architectures[0]
+            == "EagleCohereForCausalLM"
+        )
+
     def use_eagle(self) -> bool:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
