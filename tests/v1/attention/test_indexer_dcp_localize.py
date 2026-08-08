@@ -674,17 +674,20 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
-def test_dcp_filter_compaction_matches_reference(interleave: int, dcp_rank: int):
-    """In-kernel compaction (atomic slot allocator across multiple column tiles)
-    must, for every row, produce exactly the rank-owned physical slots packed
-    into [0, valid_count) with -1 in the tail -- the same SET a reference filter
-    + sort/gather produces. Uses wide rows (> BLOCK_N valid slots) so the
-    cross-tile atomic allocation is exercised, with interior -1 gaps."""
+# 384 is not a power of two, so it exercises the multi-tile atomic allocator
+# rather than the single-tile path 1024 takes.
+@pytest.mark.parametrize("num_topk", [1024, 384])
+def test_dcp_filter_compaction_matches_reference(
+    interleave: int, dcp_rank: int, num_topk: int
+):
+    """In-kernel compaction must, for every row, produce exactly the rank-owned
+    physical slots packed into [0, valid_count) with -1 in the tail -- the same
+    SET a reference filter + sort/gather produces. Uses wide rows (> BLOCK_N
+    valid slots), with interior -1 gaps."""
     device = torch.device("cuda")
     torch.manual_seed(7)
     dcp_size = 2
     block_size = 8
-    num_topk = 1024  # > BLOCK_N(128) -> multiple tiles per row
     num_rows = 5
     max_blocks = 64
     seq = max_blocks * block_size
@@ -698,7 +701,9 @@ def test_dcp_filter_compaction_matches_reference(interleave: int, dcp_rank: int)
         (num_rows, num_topk), -1, dtype=torch.int32, device=device
     )
     for r in range(num_rows):
-        n_valid = int(torch.randint(200, 600, (1,)).item())
+        # Ids are distinct, so a row holds at most `seq` valid entries.
+        hi = min(num_topk * 3 // 4, seq)
+        n_valid = int(torch.randint(num_topk // 4, hi, (1,)).item())
         perm = torch.randperm(seq, device=device)[:n_valid].to(torch.int32)
         token_indices[r, :n_valid] = perm
 
