@@ -384,8 +384,8 @@ def test_colbert_embed_not_supported(
     [
         pytest.param("bert", True, id="bert-v2"),
         pytest.param("modernbert", True, id="modernbert-v2"),
-        pytest.param("jina", False, id="jina-v1"),
-        pytest.param("lfm2", False, id="lfm2-v1"),
+        pytest.param("jina", True, id="jina-v2"),
+        pytest.param("lfm2", True, id="lfm2-v2"),
     ],
 )
 def test_colbert_hf_comparison(vllm_runner, monkeypatch, backend, use_v2):
