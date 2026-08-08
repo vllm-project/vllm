@@ -2234,6 +2234,30 @@ class FormatScheme:
         """Run after the key schemes' ``process``, before the kernel's."""
 
 
+class _DropInputScale(FormatScheme):
+    """Interim: register then drop a W4A16 checkpoint's on-disk input_scale."""
+
+    def extra_weights(self, layer, shapes, ctx, wl) -> None:
+        data = torch.full((shapes.num_partitions,), torch.nan)
+        layer.register_parameter(
+            "input_scale", PerTensorScaleParameter(data=data, weight_loader=wl)
+        )
+
+    def post_process(self, layer) -> None:
+        scale = getattr(layer, "input_scale", None)
+        if scale is None:
+            return
+        if not torch.isnan(scale).all():
+            logger.warning_once(
+                "Dropping input_scale from a weight-only W4A16 NVFP4 "
+                "checkpoint (deprecated)."
+            )
+        del layer.input_scale
+
+
+_DROP_INPUT_SCALE = _DropInputScale()
+
+
 @register_weight_loader_v2_supported_method
 class ModelOptLinearMethod(LinearMethodBase):
     """Generic, format-agnostic ModelOpt linear method. Holds a weight scheme +
@@ -2358,9 +2382,9 @@ def resolve(algo: str, subcfg, prefix: str):
         # input scale). alpha = weight_gs * input_gs.
         return QuantSpec(weight=kNvfp4Static, activation=kNvfp4Dynamic), ctx, None
     if algo == "W4A16_NVFP4":
-        # W4A16: same fp4 weight, no activation quant. activation=None drives
-        # use_a16=True in select_linear_kernel (-> Marlin) and skips alpha.
-        return QuantSpec(weight=kNvfp4Static, activation=None), ctx, None
+        # W4A16: fp4 weight, no activation quant (-> Marlin). _DROP_INPUT_SCALE
+        # is a no-op for genuine exports; keeps legacy input_scale ckpts loading.
+        return QuantSpec(weight=kNvfp4Static, activation=None), ctx, _DROP_INPUT_SCALE
     raise NotImplementedError(f"resolve: unsupported ModelOpt linear algo {algo!r}")
 
 
