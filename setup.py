@@ -78,6 +78,10 @@ def has_precompiled_rust_extensions() -> bool:
     return not get_missing_precompiled_rust_extension_modules()
 
 
+def is_metadata_only_build() -> bool:
+    return bool({"egg_info", "dist_info"}.intersection(sys.argv[1:]))
+
+
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
@@ -1218,8 +1222,8 @@ def add_vllm_package_data(filename: str) -> None:
         vllm_files.append(filename)
 
 
-# If using precompiled artifacts, extract and patch package_data in advance.
-if USE_PRECOMPILED_RUST_FRONTEND:
+# PEP 517 invokes setup.py for metadata before invoking the actual build.
+if USE_PRECOMPILED_RUST_FRONTEND and not is_metadata_only_build():
     wheel_url, download_filename = precompiled_wheel_utils.determine_wheel_url()
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url,
