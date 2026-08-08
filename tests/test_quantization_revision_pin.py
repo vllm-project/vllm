@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -10,22 +11,10 @@ from vllm.config.vllm import VllmConfig
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
-class _QuantConfig:
-    def __init__(self):
-        self.calls: list[tuple[str, object, str | None]] = []
-
-    def get_min_capability(self):
-        return 0
-
-    def get_supported_act_dtypes(self):
-        return [torch.float32]
-
-    def maybe_update_config(self, model_name, hf_config=None, revision=None):
-        self.calls.append((model_name, hf_config, revision))
-
-
 def test_quantization_config_forwards_model_revision(monkeypatch: pytest.MonkeyPatch):
-    quant_config = _QuantConfig()
+    quant_config = Mock()
+    quant_config.get_min_capability.return_value = 0
+    quant_config.get_supported_act_dtypes.return_value = [torch.float32]
     model_config = SimpleNamespace(
         quantization="auto_gptq",
         model="repo/model",
@@ -42,9 +31,10 @@ def test_quantization_config_forwards_model_revision(monkeypatch: pytest.MonkeyP
         "vllm.platforms.current_platform.get_device_capability", lambda: None
     )
 
-    result = VllmConfig._get_quantization_config(model_config, SimpleNamespace())
+    VllmConfig._get_quantization_config(model_config, SimpleNamespace())
 
-    assert result is quant_config
-    assert quant_config.calls == [
-        ("repo/model", model_config.hf_config, "pinned-revision")
-    ]
+    quant_config.maybe_update_config.assert_called_once_with(
+        "repo/model",
+        hf_config=model_config.hf_config,
+        revision="pinned-revision",
+    )

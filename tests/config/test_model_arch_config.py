@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from transformers import PretrainedConfig
@@ -140,21 +141,11 @@ def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.Monke
         qk_nope_head_dim=128,
     )
     hf_config.name_or_path = "org/model"
-    observed: dict[str, object] = {}
-
-    def fake_get_hf_file_to_dict(file_name, model, revision):
-        observed.update(
-            {
-                "file_name": file_name,
-                "model": model,
-                "revision": revision,
-            }
-        )
-        return {"qk_rope_head_dim": 64}
+    get_hf_file_to_dict = Mock(return_value={"qk_rope_head_dim": 64})
 
     monkeypatch.setattr(
         "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
-        fake_get_hf_file_to_dict,
+        get_hf_file_to_dict,
     )
 
     convertor = ModelArchConfigConvertorBase(
@@ -164,11 +155,9 @@ def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.Monke
     )
 
     assert convertor._get_qk_rope_head_dim() == 64
-    assert observed == {
-        "file_name": "config.json",
-        "model": "org/model",
-        "revision": "pinned-revision",
-    }
+    get_hf_file_to_dict.assert_called_once_with(
+        "config.json", "org/model", "pinned-revision"
+    )
 
 
 @pytest.mark.parametrize(
