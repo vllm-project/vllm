@@ -26,5 +26,7 @@ steps:
   - rust-toolchain.toml
   - .buildkite/test_areas/rust_frontend_cargo.yaml
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  - .buildkite/scripts/rust-coverage.sh
+  - codecov.yml
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
