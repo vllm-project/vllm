@@ -716,6 +716,60 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return output
 
+    def _prepare_sparse_mla_offload_inputs(
+        self,
+        layer_view: "SparseMLALayerView",
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        num_mqa_tokens: int,
+        num_actual_toks: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.impl.is_sparse or layer_view.layer_name != self.layer_name:
+            raise RuntimeError("invalid sparse MLA offload layer view")
+        if num_mqa_tokens != num_actual_toks:
+            raise RuntimeError("sparse MLA offload requires pure Decode")
+        if (
+            k_c_normed.dtype != torch.bfloat16
+            or k_pe.dtype != torch.bfloat16
+            or k_c_normed.ndim != 2
+            or k_c_normed.shape[1] != 512
+            or k_pe.ndim != 3
+            or k_pe.shape[1:] != (1, 64)
+        ):
+            raise RuntimeError("invalid sparse MLA offload Main input")
+        current_main_kv = torch.cat((k_c_normed, k_pe.squeeze(1)), dim=-1)
+        if (
+            current_main_kv.shape != (num_actual_toks, 576)
+            or current_main_kv.dtype != torch.bfloat16
+            or not current_main_kv.is_contiguous()
+        ):
+            raise RuntimeError("invalid sparse MLA offload Main")
+
+        topk_buffer = getattr(self.impl, "topk_indices_buffer", None)
+        if topk_buffer is None:
+            raise RuntimeError("missing sparse MLA offload Top-K buffer")
+        buffers = layer_view.local_buffers
+        row_capacity = (
+            buffers["request_active"].shape[0]
+            if "request_active" in buffers
+            else topk_buffer.shape[0]
+        )
+        topk_rows = max(row_capacity, num_actual_toks)
+        if topk_buffer.shape[0] < topk_rows:
+            raise RuntimeError("sparse MLA offload Top-K capacity is too small")
+        topk_indices = topk_buffer[:topk_rows]
+        if topk_indices.ndim == 2:
+            topk_indices = topk_indices.unsqueeze(1)
+        if (
+            topk_indices.ndim != 3
+            or topk_indices.shape[1] != 1
+            or topk_indices.dtype != torch.int32
+            or topk_indices.device != current_main_kv.device
+            or not topk_indices.is_contiguous()
+        ):
+            raise RuntimeError("invalid sparse MLA offload Top-K view")
+        return current_main_kv, topk_indices
+
     def forward_impl(
         self,
         q: torch.Tensor,
@@ -952,50 +1006,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_q, kv_cache, attn_metadata, self
                 )
             else:
-                if not self.impl.is_sparse or layer_view.layer_name != self.layer_name:
-                    raise RuntimeError("invalid sparse MLA offload layer view")
-                if num_mqa_tokens != num_actual_toks:
-                    raise RuntimeError("sparse MLA offload requires pure Decode")
-                if (
-                    k_c_normed.dtype != torch.bfloat16
-                    or k_pe.dtype != torch.bfloat16
-                    or k_c_normed.ndim != 2
-                    or k_c_normed.shape[1] != 512
-                    or k_pe.ndim != 3
-                    or k_pe.shape[1:] != (1, 64)
-                ):
-                    raise RuntimeError("invalid sparse MLA offload Main input")
-                current_main_kv = torch.cat((k_c_normed, k_pe.squeeze(1)), dim=-1)
-                if (
-                    current_main_kv.shape != (num_actual_toks, 576)
-                    or current_main_kv.dtype != torch.bfloat16
-                    or not current_main_kv.is_contiguous()
-                ):
-                    raise RuntimeError("invalid sparse MLA offload Main")
-
-                topk_buffer = getattr(self.impl, "topk_indices_buffer", None)
-                if topk_buffer is None:
-                    raise RuntimeError("missing sparse MLA offload Top-K buffer")
-                buffers = layer_view.local_buffers
-                row_capacity = (
-                    buffers["request_active"].shape[0]
-                    if "request_active" in buffers
-                    else topk_buffer.shape[0]
+                current_main_kv, topk_indices = self._prepare_sparse_mla_offload_inputs(
+                    layer_view,
+                    k_c_normed,
+                    k_pe,
+                    num_mqa_tokens,
+                    num_actual_toks,
                 )
-                topk_rows = max(row_capacity, num_actual_toks)
-                if topk_buffer.shape[0] < topk_rows:
-                    raise RuntimeError("sparse MLA offload Top-K capacity is too small")
-                topk_indices = topk_buffer[:topk_rows]
-                if topk_indices.ndim == 2:
-                    topk_indices = topk_indices.unsqueeze(1)
-                if (
-                    topk_indices.ndim != 3
-                    or topk_indices.shape[1] != 1
-                    or topk_indices.dtype != torch.int32
-                    or topk_indices.device != current_main_kv.device
-                    or not topk_indices.is_contiguous()
-                ):
-                    raise RuntimeError("invalid sparse MLA offload Top-K view")
 
                 from vllm.v1.attention.ops.flashmla import (
                     sparse_mla_cache_plan,
