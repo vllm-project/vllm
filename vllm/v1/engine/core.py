@@ -2104,21 +2104,6 @@ class DPEngineCoreProc(EngineCoreProc):
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
 
-            if (
-                self.has_coordinator
-                and self.dp_rank == 0
-                and self.engines_running
-                and not was_running
-                and not self.pending_pause
-            ):
-                # Notify the coordinator that the engines have started,
-                # mirroring the wave_complete notification below. It must
-                # observe both edges rather than assume that a START_DP_WAVE
-                # it sent was acted upon, since paused engines discard it.
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
-
             if self.eep_scaling_state is not None:
                 state = self.eep_scaling_state
                 if state.commit_requested or not state.is_ready_for_switch():
@@ -2175,6 +2160,19 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+            elif (
+                not was_running
+                and self.has_coordinator
+                and self.dp_rank == 0
+                and not self.pending_pause
+            ):
+                # Mirror of the wave_complete notification above: the
+                # coordinator must observe this edge too rather than assume
+                # that a START_DP_WAVE it sent was acted upon, since a paused
+                # engine discards it.
+                self.output_queue.put_nowait(
+                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                )
 
         raise SystemExit
 
