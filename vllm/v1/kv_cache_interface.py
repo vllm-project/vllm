@@ -65,6 +65,12 @@ class KVQuantMode(IntEnum):
         return self == KVQuantMode.TURBOQUANT
 
 
+class MLAKVCacheRole(str, Enum):
+    DEVICE = "device"
+    MAIN_HOST = "main_host"
+    INDEXER_DEVICE = "indexer_device"
+
+
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
     if kv_cache_dtype == "int4_per_token_head":
@@ -395,6 +401,7 @@ class MLAAttentionSpec(FullAttentionSpec):
     model_version: str | None = None
     # Marks draft groups that flatten a non-causal query block into decode rows.
     non_causal_multi_token_decode: bool = False
+    offload_role: MLAKVCacheRole = MLAKVCacheRole.DEVICE
 
     def __post_init__(self):
         super().__post_init__()
@@ -434,15 +441,17 @@ class MLAAttentionSpec(FullAttentionSpec):
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
+        offload_role_set = set(spec.offload_role for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
             and len(block_stride_set) == 1
+            and len(offload_role_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version, and KV block "
-            "stride indexing."
+            "quantization method, compress ratio, model version, KV block "
+            "stride indexing, and offload role."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -458,6 +467,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
+            offload_role=offload_role_set.pop(),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -968,6 +978,55 @@ class KVCacheTensor:
     block_stride: int = 0  # total bytes per block in a packed layout (0 = not packed)
 
 
+class SparseMLAAllocationTier(str, Enum):
+    HOST_SHARED = "host_shared"
+    HBM_LOCAL = "hbm_local"
+
+
+class SparseMLAAllocationOwner(str, Enum):
+    GENERIC_KV_ALLOCATOR = "generic_kv_allocator"
+    OFFLOAD_MANAGER = "offload_manager"
+
+
+@dataclass(frozen=True, slots=True)
+class SparseMLAAllocationManifestEntry:
+    name: str
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    alignment_bytes: int
+    allocation_count: int
+    owner: SparseMLAAllocationOwner
+    tier: SparseMLAAllocationTier
+
+
+@dataclass(frozen=True, slots=True)
+class SparseMLAOffloadMemoryPlan:
+    num_blocks: int
+    feasible_num_blocks: int
+    main_layer_names: tuple[str, ...]
+    indexer_layer_names: tuple[str, ...]
+    host_pool_bytes_per_dp_replica: int
+    worker_available_hbm_bytes_per_tp_rank: int
+    fixed_offload_hbm_bytes_per_tp_rank: int
+    effective_available_hbm_bytes_per_tp_rank: int
+    device_bytes_per_tp_rank: int
+    num_dp_replicas: int
+    tensor_parallel_size: int
+    manifest: tuple[SparseMLAAllocationManifestEntry, ...]
+
+    @property
+    def host_bytes_total(self) -> int:
+        return self.host_pool_bytes_per_dp_replica * self.num_dp_replicas
+
+    @property
+    def device_bytes_total(self) -> int:
+        return (
+            self.device_bytes_per_tp_rank
+            * self.num_dp_replicas
+            * self.tensor_parallel_size
+        )
+
+
 @dataclass
 class KVCacheGroupSpec:
     """
@@ -1001,6 +1060,7 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    sparse_mla_offload_plan: SparseMLAOffloadMemoryPlan | None = None
 
     @property
     def has_mamba_layers(self) -> bool:

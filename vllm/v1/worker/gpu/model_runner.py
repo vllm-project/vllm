@@ -25,15 +25,18 @@ from typing import Any, NamedTuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.kv_transfer import ensure_kv_transfer_shutdown
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
+    get_tp_group,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -69,6 +72,7 @@ from vllm.v1.outputs import (
     RoutedExpertsTensors,
     make_empty_encoder_model_runner_output,
 )
+from vllm.v1.utils import compute_iteration_details
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -123,10 +127,19 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
+from vllm.v1.worker.gpu.sparse_mla_offload import (
+    SparseMLAOffloadManager,
+    _failure,
+    _FailureStatus,
+    _format_failure,
+    _gather_failure,
+    _get_sparse_mla_physical_kv_cache,
+)
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
+from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
@@ -278,6 +291,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self.sparse_mla_offload_manager: SparseMLAOffloadManager | None = None
+        self._sparse_mla_tp_fence_token: torch.Tensor | None = None
+        self._sparse_mla_kv_caches_dict: dict[str, torch.Tensor] | None = None
+        self._sparse_mla_indexer_layer_names: tuple[str, ...] = ()
+        self._sparse_mla_shutdown_started = False
+        self._sparse_mla_terminal_connector_failure: _FailureStatus | None = None
+        self._sparse_mla_connector_shutdown_complete = False
+        self._sparse_mla_sync_complete = False
+        self._sparse_mla_graphs_released = False
+        self._sparse_mla_borrower_step = 0
+        self._sparse_mla_borrowers_unbound = False
+        self._sparse_mla_local_closed = False
+        self._sparse_mla_shared_shutdown_complete = False
+        self._sparse_mla_local_cleanup_step = 0
+        self._sparse_mla_local_shutdown_complete = False
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -554,18 +582,98 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
+        plan = self.kv_cache_config.sparse_mla_offload_plan
+        if (
+            plan is not None
+            and getattr(self.vllm_config, "num_speculative_tokens", None)
+            not in (None, 0)
+            and type(self.speculator) is not MTPSpeculator
+        ):
+            raise ValueError("sparse MLA offload supports only standard MTP")
+        physical_kv_cache_config = self.kv_cache_config
+        physical_attn_groups = self.attn_groups
+        if plan is not None:
+            physical_kv_cache_config, physical_attn_groups = (
+                _get_sparse_mla_physical_kv_cache(
+                    self.kv_cache_config, self.attn_groups
+                )
+            )
+
         self.kv_caches: list[torch.Tensor] = []
         kv_caches_dict = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
-            self.kv_cache_config,
-            self.attn_groups,
+            physical_kv_cache_config,
+            physical_attn_groups,
             self.device,
             self.cache_config.cache_dtype,
             self.kernel_block_sizes,
             self.vllm_config,
         )
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        if plan is None:
+            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+            return
+
+        tp_group = get_tp_group()
+        inventory_error = None
+        try:
+            indexer_inventory = {
+                name: kv_caches_dict[name] for name in plan.indexer_layer_names
+            }
+        except Exception as error:
+            inventory_error = _failure(
+                "Indexer inventory", tp_group.rank_in_group, error
+            )
+        canonical = _gather_failure(inventory_error, tp_group)
+        if canonical is not None:
+            raise RuntimeError(_format_failure(canonical))
+
+        manager = SparseMLAOffloadManager.create_with_tp_shared_pool(
+            plan, tp_group, indexer_inventory
+        )
+        self.sparse_mla_offload_manager = manager
+        self._sparse_mla_kv_caches_dict = kv_caches_dict
+        self._sparse_mla_indexer_layer_names = tuple(plan.indexer_layer_names)
+
+        initialization_error = None
+        try:
+            fence_token = manager._local_buffers["tp_fence_token"]
+            if (
+                fence_token.shape != (1,)
+                or fence_token.dtype != torch.int32
+                or fence_token.device != tp_group.device
+                or not fence_token.is_contiguous()
+            ):
+                raise RuntimeError("invalid sparse MLA TP fence token")
+            self._sparse_mla_tp_fence_token = fence_token
+            if type(self.speculator) is MTPSpeculator:
+                self.speculator.bind_sparse_mla_offload_manager(manager)
+            missing_layers = []
+            for name in plan.main_layer_names:
+                layer = self.compilation_config.static_forward_context.get(name)
+                if layer is None:
+                    missing_layers.append(name)
+                    continue
+                layer._sparse_mla_offload_view = manager.layer_view(name)
+            if missing_layers and tp_group.device.type == "cuda":
+                raise RuntimeError("missing sparse MLA Attention layers")
+            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        except Exception as error:
+            initialization_error = _failure(
+                "post-factory initialization", tp_group.rank_in_group, error
+            )
+        initialization_failure = _gather_failure(initialization_error, tp_group)
+        if initialization_failure is None:
+            return
+
+        initialization_message = _format_failure(initialization_failure)
+        try:
+            self.shutdown_sparse_mla_shared()
+        except Exception as rollback_error:
+            raise RuntimeError(
+                f"{initialization_message}; rollback: {rollback_error}"
+            ) from rollback_error
+        raise RuntimeError(initialization_message)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1253,6 +1361,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        sparse_mla_decode_step = (
+            self.sparse_mla_offload_manager is not None
+            and not dummy_run
+            and scheduler_output.total_num_scheduled_tokens > 0
+            and isinstance(scheduler_output, SchedulerOutput)
+        )
+        sparse_mla_mtp_step = (
+            sparse_mla_decode_step
+            and type(getattr(self, "speculator", None)) is MTPSpeculator
+        )
+        if sparse_mla_decode_step:
+            iteration = compute_iteration_details(scheduler_output)
+            invalid_common = (
+                iteration.num_ctx_requests != 0
+                or iteration.num_generation_requests <= 0
+                or scheduler_output.scheduled_new_reqs
+            )
+            if sparse_mla_mtp_step:
+                max_width = 1 + self.vllm_config.num_speculative_tokens
+                invalid_batch = invalid_common or any(
+                    not 1 <= count <= max_width
+                    for count in scheduler_output.num_scheduled_tokens.values()
+                )
+            else:
+                invalid_batch = (
+                    invalid_common
+                    or bool(scheduler_output.scheduled_spec_decode_tokens)
+                    or any(
+                        count != 1
+                        for count in scheduler_output.num_scheduled_tokens.values()
+                    )
+                )
+            if invalid_batch:
+                if sparse_mla_mtp_step:
+                    raise ValueError(
+                        "sparse MLA offload supports only real standard-MTP pure Decode"
+                    )
+                raise ValueError(
+                    "sparse MLA offload supports only real non-MTP pure Decode"
+                )
+
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1307,6 +1456,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+            manager = self.sparse_mla_offload_manager
+            if manager is not None:
+                if self.block_tables.blocks_per_kv_block != [1]:
+                    raise ValueError(
+                        "sparse MLA offload requires blocks_per_kv_block == [1]"
+                    )
+                manager._prepare_decode_batch(
+                    input_batch.req_ids,
+                    tuple(
+                        new_req.req_id
+                        for new_req in scheduler_output.scheduled_new_reqs
+                    ),
+                    input_batch.idx_mapping,
+                    block_tables,
+                    self.block_tables.num_blocks.gpu,
+                    input_batch.seq_lens,
+                    input_batch.num_reqs_after_padding,
+                )
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
@@ -1444,7 +1611,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
+            if sparse_mla_decode_step:
+                if not isinstance(attn_metadata, dict):
+                    raise RuntimeError("missing sparse MLA attention metadata")
+                tail_start = input_batch.num_tokens
+                tail_end = input_batch.num_tokens_after_padding
+                for metadata in attn_metadata.values():
+                    req_id_per_token = getattr(metadata, "req_id_per_token", None)
+                    if req_id_per_token is not None:
+                        req_id_per_token[tail_start:tail_end].fill_(-1)
             self.kv_connector.pre_forward(scheduler_output)
+            if sparse_mla_decode_step:
+                fence_token = self._sparse_mla_tp_fence_token
+                if fence_token is None:
+                    raise RuntimeError("missing sparse MLA TP fence token")
+                manager = self.sparse_mla_offload_manager
+                if sparse_mla_mtp_step and isinstance(manager, SparseMLAOffloadManager):
+                    manager._fence_mtp_target()
+                else:
+                    if sparse_mla_mtp_step:
+                        fence_token.fill_(-1)
+                    get_tp_group().broadcast(fence_token, src=0)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
@@ -1466,6 +1653,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
+                if sparse_mla_decode_step:
+                    fence_token = self._sparse_mla_tp_fence_token
+                    if fence_token is None:
+                        raise RuntimeError("missing sparse MLA TP fence token")
+                    manager = self.sparse_mla_offload_manager
+                    if sparse_mla_mtp_step and isinstance(
+                        manager, SparseMLAOffloadManager
+                    ):
+                        manager._fence_mtp_target()
+                    else:
+                        if sparse_mla_mtp_step:
+                            fence_token.fill_(-1)
+                        get_tp_group().broadcast(fence_token, src=0)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
                     # cudagraph, chosen inside run_pw_graph). cg_mode is only
@@ -1623,6 +1823,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+        if (
+            self.sparse_mla_offload_manager is not None
+            and type(getattr(self, "speculator", None)) is MTPSpeculator
+        ):
+            manager = self.sparse_mla_offload_manager
+            assert manager is not None
+            manager._finalize_mtp_batch(
+                input_batch.idx_mapping,
+                self.req_states.num_computed_tokens.gpu,
+            )
+
         if self.speculator is not None:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
@@ -1715,9 +1926,208 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+    def _release_sparse_mla_graph_references(self) -> None:
+        graph_roots = [(self, "cudagraph_manager")]
+        speculator = self.speculator
+        if speculator is not None:
+            graph_roots.extend(
+                (speculator, name)
+                for name in (
+                    "prefill_cudagraph_manager",
+                    "decode_cudagraph_manager",
+                    "query_cudagraph_manager",
+                )
+            )
+        for owner, name in graph_roots:
+            root = getattr(owner, name, None)
+            if root is None:
+                continue
+            root.graphs.clear()
+            root.breakable_cg_runner = None
+            setattr(owner, name, None)
+        gc.collect()
+        self._sparse_mla_graphs_released = True
+
+    def _unbind_sparse_mla_borrowers(self) -> None:
+        self._sparse_mla_tp_fence_token = None
+        manager = self.sparse_mla_offload_manager
+        assert manager is not None
+        for name in manager._plan.main_layer_names:
+            layer = self.compilation_config.static_forward_context.get(name)
+            if layer is not None:
+                layer._sparse_mla_offload_view = None
+        step = self._sparse_mla_borrower_step
+        if step == 0:
+            self.kv_connector = NO_OP_KV_CONNECTOR
+            self._sparse_mla_borrower_step = step = 1
+        if step == 1:
+            assert self._sparse_mla_kv_caches_dict is not None
+            self._sparse_mla_kv_caches_dict.clear()
+            self._sparse_mla_kv_caches_dict = None
+            self._sparse_mla_borrower_step = step = 2
+        if step == 2:
+            if type(self.speculator) is MTPSpeculator:
+                self.speculator.unbind_sparse_mla_offload_manager()
+            self.speculator = None
+            self._sparse_mla_borrower_step = step = 3
+        for index, name in enumerate(self._sparse_mla_indexer_layer_names, start=3):
+            if step > index:
+                continue
+            layer = self.compilation_config.static_forward_context[name]
+            if hasattr(layer, "kv_cache"):
+                del layer.kv_cache
+            self._sparse_mla_borrower_step = step = index + 1
+        kv_caches_step = len(self._sparse_mla_indexer_layer_names) + 3
+        if step == kv_caches_step:
+            if hasattr(self, "kv_caches"):
+                self.kv_caches.clear()
+            self._sparse_mla_borrower_step = step = kv_caches_step + 1
+        if step == kv_caches_step + 1:
+            gc.collect()
+            self._sparse_mla_borrower_step = kv_caches_step + 2
+        self._sparse_mla_borrowers_unbound = True
+
+    def shutdown_sparse_mla_shared(self) -> None:
+        if failure := self._sparse_mla_terminal_connector_failure:
+            raise RuntimeError(_format_failure(failure))
+        if self.sparse_mla_offload_manager is None and not (
+            self._sparse_mla_shutdown_started
+        ):
+            return
+        if self._sparse_mla_shared_shutdown_complete:
+            return
+
+        self._sparse_mla_shutdown_started = True
+        tp_group = get_tp_group()
+        rank = tp_group.rank_in_group
+        if not self._sparse_mla_connector_shutdown_complete:
+            connector_error = None
+            try:
+                ensure_kv_transfer_shutdown()
+            except Exception as error:
+                connector_error = _failure("connector shutdown", rank, error)
+            connector_failure = _gather_failure(connector_error, tp_group)
+            if connector_failure is not None:
+                dist.barrier(group=tp_group.cpu_group)
+                terminal_envelope: list[tuple[bool, _FailureStatus | None]] = [
+                    (False, None)
+                ]
+                dist.broadcast_object_list(
+                    terminal_envelope,
+                    src=tp_group.ranks[0],
+                    group=tp_group.cpu_group,
+                )
+                self._sparse_mla_terminal_connector_failure = connector_failure
+                raise RuntimeError(_format_failure(connector_failure))
+            self._sparse_mla_connector_shutdown_complete = True
+
+        local_error = None
+        if not self._sparse_mla_sync_complete:
+            try:
+                torch.accelerator.synchronize()
+                self._sparse_mla_sync_complete = True
+            except Exception as error:
+                local_error = _failure("accelerator synchronize", rank, error)
+        if local_error is None and not self._sparse_mla_graphs_released:
+            try:
+                self._release_sparse_mla_graph_references()
+            except Exception as error:
+                local_error = _failure("graph release", rank, error)
+        if local_error is None and not self._sparse_mla_borrowers_unbound:
+            try:
+                self._unbind_sparse_mla_borrowers()
+            except Exception as error:
+                local_error = _failure("borrower unbind", rank, error)
+        if local_error is None and not self._sparse_mla_local_closed:
+            try:
+                manager = self.sparse_mla_offload_manager
+                assert manager is not None
+                manager.close()
+                self._sparse_mla_local_closed = True
+            except Exception as error:
+                local_error = _failure("manager close", rank, error)
+
+        canonical = _gather_failure(local_error, tp_group)
+        dist.barrier(group=tp_group.cpu_group)
+        owner_envelope: tuple[bool, _FailureStatus | None]
+        if rank == 0:
+            if canonical is not None:
+                owner_envelope = False, None
+            else:
+                try:
+                    manager = self.sparse_mla_offload_manager
+                    assert manager is not None
+                    manager.unlink()
+                    owner_envelope = True, None
+                except Exception as error:
+                    owner_envelope = False, _failure("owner unlink", rank, error)
+        else:
+            owner_envelope = False, None
+        owner_envelopes = [owner_envelope]
+        dist.broadcast_object_list(
+            owner_envelopes,
+            src=tp_group.ranks[0],
+            group=tp_group.cpu_group,
+        )
+        owner_success, owner_failure = owner_envelopes[0]
+        if canonical is not None:
+            raise RuntimeError(_format_failure(canonical))
+        if owner_failure is not None:
+            raise RuntimeError(_format_failure(owner_failure))
+        assert owner_success
+        self.sparse_mla_offload_manager = None
+        self._sparse_mla_shared_shutdown_complete = True
+
+    def _finish_sparse_mla_local_shutdown(self) -> None:
+        step = self._sparse_mla_local_cleanup_step
+        if step == 0:
+            if hasattr(self, "kv_caches"):
+                self.kv_caches.clear()
+            self._sparse_mla_local_cleanup_step = step = 1
+        if step == 1:
+            if hasattr(self, "attn_groups"):
+                self.attn_groups.clear()
+            self._sparse_mla_local_cleanup_step = step = 2
+        if step == 2:
+            if hasattr(self, "kv_cache_config"):
+                del self.kv_cache_config
+            self._sparse_mla_local_cleanup_step = step = 3
+        if step == 3:
+            free_before_shutdown(self.vllm_config)
+            self._sparse_mla_local_cleanup_step = step = 4
+        if step == 4:
+            if hasattr(self, "model_state"):
+                del self.model_state
+            self._sparse_mla_local_cleanup_step = step = 5
+        if step == 5:
+            self.speculator = None
+            self._sparse_mla_local_cleanup_step = step = 6
+        if step == 6:
+            if hasattr(self, "model"):
+                del self.model
+            self._sparse_mla_local_cleanup_step = step = 7
+        if step == 7:
+            gc.collect()
+            self._sparse_mla_local_cleanup_step = step = 8
+        if step == 8:
+            torch.accelerator.empty_cache()
+            self._sparse_mla_local_cleanup_step = step = 9
+        if step == 9:
+            logger.debug("Cleaned up model weights, KV caches, and workspace")
+            self._sparse_mla_local_cleanup_step = 10
+        self._sparse_mla_local_shutdown_complete = True
+
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if (
+            self._sparse_mla_shutdown_started
+            or self._sparse_mla_terminal_connector_failure is not None
+            or self.sparse_mla_offload_manager is not None
+        ):
+            self.shutdown_sparse_mla_shared()
+            self._finish_sparse_mla_local_shutdown()
+            return
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()

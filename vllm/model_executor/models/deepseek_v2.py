@@ -98,7 +98,11 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+    MLAKVCacheRole,
+)
 
 from .interfaces import (
     MixtureOfExperts,
@@ -634,6 +638,11 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            offload_role=(
+                MLAKVCacheRole.INDEXER_DEVICE
+                if vllm_config.attention_config.sparse_mla_kv_offload is not None
+                else MLAKVCacheRole.DEVICE
+            ),
         )  # Only has one vector instead of K + V
 
     def forward(self): ...

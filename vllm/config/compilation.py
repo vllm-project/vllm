@@ -774,6 +774,7 @@ class CompilationConfig:
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
+        "vllm::sparse_mla_offload_attention",
         "vllm::hpc_rope_norm_forward",
     ]
 

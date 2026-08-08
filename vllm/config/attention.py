@@ -4,7 +4,7 @@
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -12,6 +12,14 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+
+
+@config
+class SparseMLAKVOffloadConfig:
+    host_pool_gib: float = Field(gt=0, allow_inf_nan=False)
+    """Pinned Host pool size for one DP replica/TP group."""
+    device_buffer_size: int | None = Field(default=None, gt=0)
+    """Resident Main rows per request; defaults to twice Indexer Top-K."""
 
 
 @config
@@ -80,6 +88,9 @@ class AttentionConfig:
     When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
 
+    sparse_mla_kv_offload: SparseMLAKVOffloadConfig | None = None
+    """Sparse MLA split-memory planning configuration."""
+
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
     Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
@@ -125,6 +136,8 @@ class AttentionConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         ignored_factors: set[str] = set()
+        if self.sparse_mla_kv_offload is None:
+            ignored_factors.add("sparse_mla_kv_offload")
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 

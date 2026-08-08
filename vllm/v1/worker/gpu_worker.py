@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import regex as re
@@ -90,6 +90,7 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -1324,6 +1325,11 @@ class Worker(WorkerBase):
 
     def shutdown(self) -> None:
         gc.unfreeze()
+
+        if self.use_v2_model_runner and (
+            model_runner := getattr(self, "model_runner", None)
+        ):
+            cast("GPUModelRunnerV2", model_runner).shutdown_sparse_mla_shared()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
