@@ -756,3 +756,130 @@ class TestRegisteredAdapters:
             )
             == "second"
         )
+
+
+def _delegating_content(parser, request, text: str) -> str:
+    """Non-streaming content through the serving layer's entry point."""
+    _, content, _ = parser.parse(
+        text,
+        request,
+        enable_auto_tools=True,
+        model_output_token_ids=[token_id for token_id, _ in _tokenize(text)],
+    )
+    return content or ""
+
+
+def _streamed_content(results) -> str:
+    return "".join(result.content or "" for result in results if result)
+
+
+def _delegating_stream_content(parser, request, text: str) -> str:
+    return _streamed_content(_stream_delegating(parser, request, text))
+
+
+def _chat_request(reasoning_effort, tools=None):
+    """A real request: `tool_choice` defaults to "none" without tools and
+    "auto" with them, and that default selects the tool-extraction branch."""
+    return ChatCompletionRequest(
+        model="inkling-small",
+        messages=[{"role": "user", "content": "hi"}],
+        reasoning_effort=reasoning_effort,
+        tools=tools,
+    )
+
+
+class TestBlockEndMarkerNotLeaked:
+    """Regression tests for https://github.com/vllm-project/vllm/issues/49865.
+
+    The serving config that reports it is ``--reasoning-parser inkling``
+    plus ``--tool-call-parser inkling``, i.e. DelegatingParser: the reasoning
+    pass runs with ``skip_tool_parsing`` and deliberately passes block-end
+    markers through as text so the tool pass can see them. Whenever that
+    second pass does not get to run, or its stripped result is discarded, the
+    literal ``<|end_message|>`` reaches the client.
+    """
+
+    @pytest.fixture(
+        params=[_delegating_content, _delegating_stream_content],
+        ids=["non_streaming", "streaming"],
+    )
+    def run(self, request):
+        return request.param
+
+    @pytest.mark.parametrize("reasoning_effort", ["none", "minimal"])
+    @pytest.mark.parametrize("suffix", [END_MESSAGE, END_SAMPLING])
+    def test_bare_text_without_tools(
+        self, mock_tokenizer, run, reasoning_effort, suffix
+    ):
+        request = _chat_request(reasoning_effort)
+        parser = _make_delegating_parser(
+            mock_tokenizer, reasoning_effort=reasoning_effort
+        )
+
+        assert run(parser, request, f"answer{suffix}") == "answer"
+
+    @pytest.mark.parametrize("reasoning_effort", ["none", "minimal"])
+    def test_text_block_without_tools(self, mock_tokenizer, run, reasoning_effort):
+        request = _chat_request(reasoning_effort)
+        parser = _make_delegating_parser(
+            mock_tokenizer, reasoning_effort=reasoning_effort
+        )
+
+        assert run(parser, request, f"{TEXT_START}answer{END_MESSAGE}") == "answer"
+
+    @pytest.mark.parametrize("reasoning_effort", ["none", "minimal", "high"])
+    def test_text_block_with_tools_and_no_tool_call(
+        self, mock_tokenizer, run, reasoning_effort
+    ):
+        """Agent clients declare tools on every turn, so ``tool_choice`` is
+        "auto" even when the model answers in plain text."""
+        tools = [{"type": "function", "function": {"name": "get_weather"}}]
+        request = _chat_request(reasoning_effort, tools)
+        assert request.tool_choice == "auto"
+        parser = _make_delegating_parser(
+            mock_tokenizer, tools, reasoning_effort=reasoning_effort
+        )
+
+        assert run(parser, request, f"{TEXT_START}answer{END_MESSAGE}") == "answer"
+
+    @pytest.mark.parametrize("opener", [TOOL_TEXT, TOOL_ERROR])
+    def test_raw_and_error_tool_blocks_with_tools(self, mock_tokenizer, run, opener):
+        """Raw and error tool blocks also render as visible content, so they
+        end reasoning for the same reason a text block does."""
+        tools = [{"type": "function", "function": {"name": "get_weather"}}]
+        request = _chat_request("none", tools)
+        parser = _make_delegating_parser(mock_tokenizer, tools)
+
+        assert run(parser, request, f"{opener}answer{END_MESSAGE}") == "answer"
+
+    @pytest.mark.parametrize(
+        "tools",
+        [None, [{"type": "function", "function": {"name": "get_weather"}}]],
+        ids=["without_tools", "with_tools"],
+    )
+    def test_thinking_then_text_block(self, mock_tokenizer, run, tools):
+        request = _chat_request("high", tools)
+        parser = _make_delegating_parser(mock_tokenizer, tools, reasoning_effort="high")
+        text = (
+            f"{THINK_START}pondering{END_MESSAGE}"
+            f"{MSG_MODEL}{TEXT_START}answer{END_MESSAGE}"
+        )
+
+        assert run(parser, request, text) == "answer"
+
+    def test_tool_call_still_parsed_with_tools(self, mock_tokenizer):
+        """The stripped-content path must not swallow real tool calls."""
+        tools = [{"type": "function", "function": {"name": "get_weather"}}]
+        request = _chat_request("none", tools)
+        parser = _make_delegating_parser(mock_tokenizer, tools)
+
+        reasoning, content, tool_calls = parser.parse(
+            "get_weather" + _tool_block("get_weather", '{"city":"SF"}'),
+            request,
+            enable_auto_tools=True,
+        )
+
+        assert reasoning is None
+        assert not content
+        assert tool_calls[0].name == "get_weather"
+        assert json.loads(tool_calls[0].arguments) == {"city": "SF"}

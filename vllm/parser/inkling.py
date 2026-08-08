@@ -196,9 +196,13 @@ def inkling_config(
             message_start_state,
             (),
         ),
+        # Any block that renders as visible content proves no reasoning is
+        # still open. Confirming that here (not only in plain-text mode) is
+        # what lets DelegatingParser hand the block to the tool pass, which
+        # is the only place block-end markers get stripped while streaming.
         (ParserState.CONTENT, "TEXT_START"): Transition(
             ParserState.CONTENT,
-            (EventType.REASONING_END,) if plain_text_mode else (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.CONTENT, "THINK_START"): Transition(
             ParserState.REASONING,
@@ -211,11 +215,11 @@ def inkling_config(
         # Raw / error tool blocks render as visible text.
         (ParserState.CONTENT, "TOOL_TEXT"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.CONTENT, "TOOL_ERROR"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         # The optional function name between the model-role and content-kind
         # markers is metadata, not visible assistant content.
@@ -225,7 +229,7 @@ def inkling_config(
         ),
         (ParserState.MESSAGE_HEADER, "TEXT_START"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.MESSAGE_HEADER, "THINK_START"): Transition(
             ParserState.REASONING,
@@ -237,11 +241,11 @@ def inkling_config(
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_TEXT"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_ERROR"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         # ── Inside a thinking block ───────────────────────────────────
         (ParserState.REASONING, "THINK_START"): Transition(
