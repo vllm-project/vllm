@@ -225,6 +225,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_sum",
     "vllm:request_decode_time_seconds_bucket",
     "vllm:request_decode_time_seconds_count",
+    "vllm:kv_cache_size_tokens",
 ]
 
 EXPECTED_METRICS_MM = [

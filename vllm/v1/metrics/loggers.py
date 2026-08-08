@@ -567,6 +567,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_kv_cache_usage = create_metric_per_engine(
             gauge_kv_cache_usage, per_engine_labelvalues
         )
+                
+        gauge_gpu_kv_cache_size_tokens = self._gauge_cls(  
+            name="vllm:gpu_kv_cache_size_tokens",  
+            documentation="Total GPU KV cache capacity in tokens.",  
+            multiprocess_mode="mostrecent",  
+            labelnames=labelnames,  
+        )  
+        self.gauge_gpu_kv_cache_size_tokens = create_metric_per_engine(  
+            gauge_gpu_kv_cache_size_tokens, per_engine_labelvalues  
+        )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
@@ -1278,6 +1288,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
 
     def log_engine_initialized(self):
+        if self.vllm_config.cache_config.kv_cache_size_tokens is not None:
+            for idx in self.engine_indexes:
+                self.gauge_gpu_kv_cache_size_tokens[idx].set(
+                    self.vllm_config.cache_config.kv_cache_size_tokens
+                )
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
