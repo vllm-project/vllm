@@ -226,6 +226,44 @@ def make_kv_cache_config_three_types(
     )
 
 
+def test_peek_num_cached_tokens_has_no_event_side_effects():
+    block_size = 4
+    prompt_token_ids = list(range(block_size * 2 + 1))
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=8),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    first_req = make_request(
+        "first",
+        prompt_token_ids,
+        block_size,
+        sha256,
+    )
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(first_req)
+    allocated_blocks = manager.allocate_slots(
+        first_req,
+        first_req.num_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert allocated_blocks is not None
+    manager.take_events()
+
+    second_req = make_request(
+        "second",
+        prompt_token_ids,
+        block_size,
+        sha256,
+    )
+    second_req.kv_cache_report_mode = "full"
+
+    assert manager.peek_num_cached_tokens(second_req) == block_size * 2
+    assert manager.take_events() == []
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_prefill(hash_fn):
     block_size = 16
