@@ -282,6 +282,25 @@ To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter 
 - **Reverse proxy layer:** In addition to vLLM's built-in limit, consider enforcing request body validation and rate limiting at your reverse proxy to further constrain abusive payloads.
 - **Monitoring:** Monitor per-request resource consumption to detect anomalous patterns that may indicate abuse.
 
+### P2P KV-Offload Peer Session Limits
+
+Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
+
+vLLM enforces several configurable limits to prevent this:
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_P2P_MAX_PEERS` | `128` | Maximum concurrent P2P peer sessions. New peers (both outbound and inbound) are rejected when this limit is reached. |
+| `VLLM_P2P_HANDSHAKE_TIMEOUT_S` | `30` | Seconds to wait for a newly connected peer to complete the P2P handshake. Sessions that remain connected but not ready after this deadline are torn down. |
+| `VLLM_P2P_IDLE_TIMEOUT_S` | `300` | Seconds a P2P session may remain idle (no pending work, no messages) before it is evicted. Set to `0` to disable idle eviction. |
+
+Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
+
+**Recommendations:**
+
+- **Public-facing deployments with P2P enabled:** Lower `VLLM_P2P_MAX_PEERS` to the expected number of legitimate peers (e.g., `16` or `32`).
+- **Sensitive deployments:** Consider deploying behind a reverse proxy that strips or validates `kv_transfer_params` from API requests to prevent client-supplied peer addresses entirely.
+
 ## Tool Server and MCP Security
 
 vLLM supports connecting to external tool servers via the `--tool-server` argument. This enables models to call tools through the Responses API (`/v1/responses`). Tool server support works with all models — it is not limited to specific model architectures.
