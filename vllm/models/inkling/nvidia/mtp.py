@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.mtp_validation import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModalEmbeddings
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingModelConfig
@@ -311,13 +312,31 @@ class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
         w = self.lm_head.weight
         if self._logits_zero is None:
             self._logits_zero = w.new_zeros(1)
-        logits = torch.addmm(
-            self._logits_zero,
-            hidden_states,
-            w.t(),
-            beta=0.0,
-            alpha=1.0 / mup,
-        )
+        inv_mup = 1.0 / mup
+        head_dtype = self.logits_processor.head_dtype
+        # Honor a non-model head dtype (fp32 lm_head for RL training-inference
+        # consistency) the same way the target's InklingLogitsProcessor does,
+        # so the draft's logits do not diverge from the target's.
+        if head_dtype is not None and head_dtype != hidden_states.dtype:
+            if not hidden_states.is_cuda or current_platform.is_rocm():
+                logits = self.logits_processor._get_logits(
+                    hidden_states, self.lm_head, None
+                )
+                if logits is not None:
+                    logits = logits * inv_mup
+                return logits
+            logits = torch.addmm(
+                self._logits_zero,
+                hidden_states,
+                w.t(),
+                beta=0.0,
+                alpha=inv_mup,
+                out_dtype=head_dtype,
+            )
+        else:
+            logits = torch.addmm(
+                self._logits_zero, hidden_states, w.t(), beta=0.0, alpha=inv_mup
+            )
         logits = self.logits_processor._gather_logits(logits)
         if logits is not None:
             logits = logits[..., : self.logits_processor.org_vocab_size]

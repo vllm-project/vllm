@@ -24,6 +24,7 @@ import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.platforms import current_platform
 
 
 class InklingLogitsProcessor(LogitsProcessor):
@@ -107,22 +108,38 @@ class InklingLogitsProcessor(LogitsProcessor):
         mup = self.logits_mup_width_multiplier
         if not mup:
             return super().forward(lm_head, hidden_states, embedding_bias)
-        # Fold the muP width divisor into the lm_head GEMM alpha (fp32 epilogue):
-        # no separate elementwise kernel, no bf16 rounding of scaled logits, and
-        # no weight mutation. Overfit to the served checkpoint: bf16 lm_head, no
-        # soft cap, unit logits scale.
         assert self.soft_cap is None
         assert self.scale == 1.0
         w = lm_head.weight
         if self._logits_zero is None:
             self._logits_zero = w.new_zeros(1)
-        logits = torch.addmm(
-            self._logits_zero,
-            hidden_states,
-            w.t(),
-            beta=0.0,
-            alpha=1.0 / mup,
-        )
+        inv_mup = 1.0 / mup
+        head_dtype = self.head_dtype
+        # A non-model head dtype (e.g. `--hf-overrides '{"head_dtype":
+        # "float32"}'` for RL training-inference consistency) must be honored.
+        # The default ``addmm`` below emits logits in ``hidden_states``' dtype
+        # and would silently drop the promotion.
+        if head_dtype is not None and head_dtype != hidden_states.dtype:
+            if not hidden_states.is_cuda or current_platform.is_rocm():
+                logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+                if logits is not None:
+                    logits = logits * inv_mup
+                return logits
+            # Fold muP into the fp32-accumulate GEMM epilogue: bit-for-bit
+            # identical to the projection above, no extra kernel.
+            logits = torch.addmm(
+                self._logits_zero,
+                hidden_states,
+                w.t(),
+                beta=0.0,
+                alpha=inv_mup,
+                out_dtype=head_dtype,
+            )
+        else:
+            # Default served path: fold muP into the lm_head GEMM alpha.
+            logits = torch.addmm(
+                self._logits_zero, hidden_states, w.t(), beta=0.0, alpha=inv_mup
+            )
         logits = self._gather_logits(logits)
         if logits is not None:
             logits = logits[..., : self.org_vocab_size]
