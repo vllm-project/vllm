@@ -329,8 +329,10 @@ pub struct EngineUnsupportedArgs {
     pub collect_detailed_traces: Option<Unsupported>,
 
     /// The interval (or buffer size) for streaming in terms of token length.
-    #[arg(long)]
-    pub stream_interval: Option<Unsupported>,
+    /// Accepted as a no-op: the Rust frontend manages its own SSE batching
+    /// independently and does not use this Python engine-side knob.
+    #[arg(long, hide = true)]
+    pub stream_interval: Option<Noop>,
 
     /// Structured outputs configuration.
     #[arg(long)]
