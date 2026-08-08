@@ -219,14 +219,15 @@ class FlashMLASparseMetadata(AttentionMetadata):
     fp8_use_mixed_batch: bool = False
 
 
+# Maximum tokens per prefill chunk buffer to stay within CUDA grid limits (SM90 Hopper limit)
+MAX_PREFILL_CHUNK_TOKENS = 131072
+
+
 def get_prefill_workspace_size(max_model_len: int):
-    # NOTE(Lucas): 5 is a magic number for controlling the prefill buffer size.
-    # May be tuned later.
-    # Memory usage: 5 * max_model_len * 576 * 2 bytes
-    #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
-    #            5 * 163840 * 576 * 2 = ~900 MB
-    # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
-    return max_model_len * 5
+    # Cap total workspace size per chunk to MAX_PREFILL_CHUNK_TOKENS to prevent
+    # CUDA phase1.cuh grid dimension assertions during sparse prefill
+    calculated_size = max_model_len * 5
+    return min(calculated_size, MAX_PREFILL_CHUNK_TOKENS * 5)
 
 
 class FlashMLASparseMetadataBuilder(
@@ -269,6 +270,12 @@ class FlashMLASparseMetadataBuilder(
 
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        # Guardrail: Enforce block size compatibility
+        if cache_config.block_size not in [64, 128]:
+            raise ValueError(
+                f"FlashMLASparseBackend requires --block-size to be 64 or 128, "
+                f"but got {cache_config.block_size}. Please adjust --block-size 64."
+            )
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
         self.topk_tokens_tensor = torch.full(
             (max_num_seqs,), self.topk_tokens, device=device, dtype=torch.int32
@@ -421,9 +428,10 @@ class FlashMLASparseMetadataBuilder(
                 num_prefills, dtype=torch.int32, device=self.device
             )
 
-            # Chunk prefill requests to fit within workspace size
-            max_prefill_buffer_size = get_prefill_workspace_size(
-                self.vllm_config.model_config.max_model_len
+            # Chunk prefill requests to fit within workspace size and kernel bounds
+            max_prefill_buffer_size = min(
+                get_prefill_workspace_size(self.vllm_config.model_config.max_model_len),
+                MAX_PREFILL_CHUNK_TOKENS,
             )
             chunk_bounds = split_prefill_chunks(
                 prefill_seq_lens_cpu, max_prefill_buffer_size

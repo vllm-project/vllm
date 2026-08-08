@@ -424,6 +424,35 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "logging; remove --disable-log-stats to enable per-request metrics."
         )
 
+    # =========================================================================
+    # Validation for DeepSeek FlashMLA / Large Context Configurations
+    # =========================================================================
+    model_tag = getattr(args, "model_tag", "") or getattr(args, "model", "")
+    if "deepseek" in model_tag.lower():
+        # Guard against incompatible FP8 KV-Cache + Block Size combinations on FlashMLA
+        kv_dtype = getattr(args, "kv_cache_dtype", "auto")
+        block_size = getattr(args, "block_size", 16)
+
+        if kv_dtype == "fp8" and block_size > 128:
+            raise ValueError(
+                f"Invalid configuration for DeepSeek FlashMLA: "
+                f"--kv-cache-dtype fp8 with --block-size {block_size} "
+                f"can cause CUDA assertions in FlashMLA sparse prefill kernels. "
+                f"Please set --block-size to 128 or lower."
+            )
+
+        # Alert if context length is extremely high when combined with speculative execution
+        max_model_len = getattr(args, "max_model_len", None)
+        speculative_config = getattr(args, "speculative_config", None)
+        if max_model_len and max_model_len > 128000 and speculative_config:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "High context length (>128k) combined with speculative decoding "
+                "on DeepSeek. Ensure FlashMLA grid dimensions do not exceed GPU boundaries."
+            )
+
     if args.data_parallel_multi_port_external_lb:
         from vllm.entrypoints.openai.dp_supervisor import (
             validate_multi_port_external_lb_args,
