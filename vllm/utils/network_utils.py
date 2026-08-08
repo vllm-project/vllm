@@ -72,6 +72,37 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
+def get_ray_node_ip() -> str | None:
+    """Return the current Ray node's IP as registered in ``ray.nodes()``.
+
+    This is the IP passed to ``ray start --node-ip-address`` and is what
+    Ray uses for cluster RPC. Returns ``None`` when Ray is not
+    initialized, when the current node cannot be located in
+    ``ray.nodes()``, or on any error. Callers should fall back to
+    :func:`get_ip` (which respects ``VLLM_HOST_IP``) in that case.
+
+    The point of this helper is multi-NIC nodes (e.g. WiFi default
+    route + dedicated cluster NIC such as a Mellanox DAC). vLLM's
+    :func:`get_ip` falls back to ``socket.connect(("8.8.8.8", 80))``
+    which returns the default-route interface IP — which may not be
+    the IP Ray actually uses for cross-host RPC. ``ray.nodes()`` is
+    authoritative.
+    """
+    try:
+        import ray
+        if not ray.is_initialized():
+            return None
+        node_id = ray.get_runtime_context().get_node_id()
+        for node in ray.nodes():
+            if node.get("NodeID") == node_id and node.get("Alive"):
+                ip = node.get("NodeManagerAddress")
+                if ip and ip != "127.0.0.1":
+                    return ip
+    except Exception:
+        pass
+    return None
+
+
 def test_loopback_bind(address: str, family: int) -> bool:
     try:
         s = socket.socket(family, socket.SOCK_DGRAM)
