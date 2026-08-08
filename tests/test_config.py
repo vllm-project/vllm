@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pydantic
 import pytest
+from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
@@ -29,10 +30,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
-from vllm.config.vllm import (
-    OPTIMIZATION_LEVEL_TO_CONFIG,
-    OptimizationLevel,
-)
+from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -405,6 +403,29 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.nnodes == 1
     assert parallel_config.node_rank == 0
     assert parallel_config.world_size == 8
+
+
+def test_draft_model_enables_async_scheduling_by_default():
+    parallel_config = ParallelConfig(distributed_executor_backend="uni")
+    model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
+    speculative_config = SpeculativeConfig(
+        method="draft_model",
+        model="Qwen/Qwen3-0.6B",
+        num_speculative_tokens=3,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+    cfg = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
+    )
+
+    assert cfg.scheduler_config.async_scheduling is True
 
 
 @dataclass
@@ -1748,3 +1769,23 @@ def test_load_config_rejects_invalid_safetensors_load_strategy():
 def test_load_config_rejects_non_string_load_format(bad_load_format):
     with pytest.raises(pydantic.ValidationError):
         LoadConfig(load_format=bad_load_format)
+
+
+# A real Qwen3-0.6B model revision that is used in the tests below.
+REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+
+
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_revision_not_resolved_when_weights_differ_from_model(mock_resolve):
+    model_weights = "unsloth/Qwen3-0.6B-GGUF:Q8_0"
+    config = ModelConfig("Qwen/Qwen3-0.6B", model_weights=model_weights)
+    assert config.revision is None
+
+
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_revision_resolved_when_weights_match_model(mock_resolve):
+    model = "Qwen/Qwen3-0.6B"
+    config = ModelConfig(model)
+    assert isinstance(config.revision, ResolvedRevision)
+    assert config.revision.resolved == REVISION
+    mock_resolve.assert_any_call(model, None, config.hf_token)
