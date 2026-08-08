@@ -601,6 +601,63 @@ def copy_kv_cache_blocks_inplace(
         blocks[dst_indices] = blocks[src_indices]
 
 
+def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:
+    """Whether every request in the batch has the same query length.
+
+    This tests the batch shape only. Callers classifying a scheduled batch as a
+    decode batch must use ``get_uniform_decode_token_count`` instead, because a
+    prompt chunk can have a decode batch's shape.
+
+    Args:
+        num_reqs: Number of requests in the batch.
+        num_tokens: Total number of tokens in the batch.
+        max_query_len: Largest per-request query length in the batch.
+    """
+    return num_reqs > 0 and num_tokens == max_query_len * num_reqs
+
+
+def get_uniform_decode_token_count(
+    num_reqs: int,
+    num_tokens: int,
+    max_query_len: int,
+    num_computed_tokens: np.ndarray,
+    prefill_lens: np.ndarray,
+) -> int | None:
+    """Per-request token count of a uniform decode batch, or None.
+
+    A batch is a uniform decode batch only if every request has the same query
+    length *and* no request is still prefilling. Query length alone is a shape
+    test that a prompt chunk satisfies by coincidence: a prompt chunk of
+    ``1 + num_speculative_tokens`` tokens has the shape of a spec-decode step,
+    and a 1-token chunk has the shape of a plain decode step. Classifying such
+    a batch as a decode batch replays a decode-captured cudagraph over prompt
+    tokens, whose captured kernels read per-request state that a prefill
+    metadata build does not refresh.
+
+    Args:
+        num_reqs: Number of requests in the batch.
+        num_tokens: Total number of tokens in the batch.
+        max_query_len: Largest per-request query length in the batch.
+        num_computed_tokens: Per-request tokens computed before this step, in
+            batch order. Must be exactly ``num_reqs`` long; a full
+            ``max_num_reqs`` state array would compare the wrong requests.
+        prefill_lens: Per-request prefill length, i.e. the prompt plus any
+            output tokens recomputed after preemption, in batch order. Same
+            length requirement.
+
+    Returns:
+        The shared per-request query length, or None if the batch is not a
+        uniform decode batch.
+    """
+    if not is_uniform_query_len(num_reqs, num_tokens, max_query_len):
+        return None
+    # Equivalent to `InputBatch.is_prefilling_np.any()`, which the drafter's
+    # call site derives from the same two arrays.
+    if np.any(num_computed_tokens < prefill_lens):
+        return None
+    return max_query_len
+
+
 def is_residual_scattered_for_sp(
     vllm_config: VllmConfig, num_input_tokens: int
 ) -> bool:
