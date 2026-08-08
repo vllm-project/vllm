@@ -1,49 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import weakref
-
 import pytest
 
-from vllm import LLM
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 
 @pytest.fixture(scope="function")
-def text_llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct", enforce_eager=True, seed=0)
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+def text_llm(vllm_runner_factory):
+    return vllm_runner_factory(
+        "meta-llama/Llama-3.2-1B-Instruct", enforce_eager=True, seed=0
+    ).llm
 
 
 @pytest.fixture(scope="function")
-def llm_for_failure_test():
+def llm_for_failure_test(vllm_runner_factory):
     """
     Fixture for testing issue #26081.
     Uses a small max_model_len to easily trigger length errors.
     """
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model="meta-llama/Llama-3.2-1B-Instruct",
+    return vllm_runner_factory(
+        "meta-llama/Llama-3.2-1B-Instruct",
         enforce_eager=True,
         seed=0,
         max_model_len=128,
         disable_log_stats=True,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+    ).llm
 
 
 def test_chat(text_llm):
@@ -99,21 +81,13 @@ def test_llm_chat_tokenization_no_double_bos(text_llm):
 
 
 @pytest.fixture(scope="function")
-def thinking_llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model="Qwen/Qwen3-0.6B",
+def thinking_llm(vllm_runner_factory):
+    return vllm_runner_factory(
+        "Qwen/Qwen3-0.6B",
         max_model_len=4096,
         enforce_eager=True,
         seed=0,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+    ).llm
 
 
 @pytest.mark.parametrize("enable_thinking", [True, False])

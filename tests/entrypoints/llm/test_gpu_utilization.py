@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 
 
-def test_gpu_memory_utilization():
+def test_gpu_memory_utilization(vllm_runner_factory):
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -16,8 +16,12 @@ def test_gpu_memory_utilization():
     # makes sure gpu_memory_utilization is per-instance limit,
     # not a global limit
     llms = [
-        LLM(model="facebook/opt-125m", gpu_memory_utilization=0.3, enforce_eager=True)
-        for i in range(3)
+        vllm_runner_factory(
+            "facebook/opt-125m",
+            gpu_memory_utilization=0.3,
+            enforce_eager=True,
+        ).llm
+        for _ in range(3)
     ]
     for llm in llms:
         outputs = llm.generate(prompts, sampling_params)

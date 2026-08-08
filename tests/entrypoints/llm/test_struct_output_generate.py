@@ -9,13 +9,10 @@ from typing import Any
 import jsonschema
 import pytest
 import regex as re
-import torch
 from pydantic import BaseModel
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.config import StructuredOutputsConfig
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
@@ -212,11 +209,11 @@ class CarDescription(BaseModel):
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE,
 )
 def test_structured_output(
-    request: pytest.FixtureRequest,
     backend: str,
     tokenizer_mode: str,
     model_name: str,
     speculative_config: dict[str, Any],
+    vllm_runner_factory,
 ):
     sample_json_schema = SAMPLE_JSON_SCHEMA
     unsupported_json_schema = UNSUPPORTED_JSON_SCHEMA
@@ -229,8 +226,8 @@ def test_structured_output(
 
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
-    llm = LLM(
-        model=model_name,
+    llm = vllm_runner_factory(
+        model_name,
         enforce_eager=True,
         max_model_len=1024,
         structured_outputs_config=dict(
@@ -242,8 +239,7 @@ def test_structured_output(
         config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
         **platform_args,
-    )
-    request.addfinalizer(llm.llm_engine.engine_core.shutdown)
+    ).llm
 
     #
     # Test 1: Generate JSON output based on a provided schema
@@ -738,14 +734,15 @@ def test_structured_output_with_reasoning_matrices(
     model_name: str,
     speculative_config: dict[str, Any] | None,
     async_scheduling: bool,
+    vllm_runner_factory,
 ):
     if current_platform.is_tpu() and speculative_config:
         pytest.skip("TPU does not support speculative decoding")
 
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
-    llm = LLM(
-        model=model_name,
+    llm = vllm_runner_factory(
+        model_name,
         # Don't use eager execution on TPUs because we want to test for no
         # recompilation at runtime
         enforce_eager=bool(not current_platform.is_tpu()),
@@ -759,7 +756,7 @@ def test_structured_output_with_reasoning_matrices(
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
         async_scheduling=async_scheduling,
-    )
+    ).llm
     tokenizer = llm.get_tokenizer()
     reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_parser)(
         tokenizer=tokenizer
@@ -808,16 +805,17 @@ def test_structured_output_with_reasoning_matrices(
 def test_structured_output_auto_mode(
     model_name: str,
     tokenizer_mode: str,
+    vllm_runner_factory,
 ):
     unsupported_json_schema = UNSUPPORTED_JSON_SCHEMA
-    llm = LLM(
-        model=model_name,
+    llm = vllm_runner_factory(
+        model_name,
         max_model_len=1024,
         structured_outputs_config=dict(backend="auto"),
         tokenizer_mode=tokenizer_mode,
         load_format="auto",
         config_format="auto",
-    )
+    ).llm
 
     sampling_params = SamplingParams(
         temperature=1.0,
@@ -852,16 +850,16 @@ def test_structured_output_auto_mode(
         assert isinstance(parsed_json, dict)
 
 
-def test_guidance_no_additional_properties():
-    llm = LLM(
-        model="Qwen/Qwen2.5-1.5B-Instruct",
+def test_guidance_no_additional_properties(vllm_runner_factory):
+    llm = vllm_runner_factory(
+        "Qwen/Qwen2.5-1.5B-Instruct",
         max_model_len=1024,
         structured_outputs_config=dict(
             backend="guidance",
             disable_any_whitespace=True,
             disable_additional_properties=True,
         ),
-    )
+    ).llm
 
     schema = {
         "type": "object",
@@ -913,21 +911,22 @@ def test_guidance_no_additional_properties():
 @pytest.mark.parametrize("backend", ["guidance", "xgrammar", "outlines"])
 def test_structured_output_batched_with_non_structured_outputs_requests(
     backend: str,
+    vllm_runner_factory,
 ):
     sample_json_schema = SAMPLE_JSON_SCHEMA
     # Don't use eager execution on TPUs because we want to test for no
     # recompilation at runtime
     enforce_eager = bool(not current_platform.is_tpu())
 
-    llm = LLM(
-        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    llm = vllm_runner_factory(
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
         enforce_eager=enforce_eager,
         max_model_len=1024,
         structured_outputs_config=StructuredOutputsConfig(
             backend=backend,
             disable_any_whitespace=backend in {"xgrammar", "guidance"},
         ),
-    )
+    ).llm
 
     structured_outputs_prompt = (
         "Give an example JSON for an employee profile that fits this "
@@ -958,12 +957,6 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
 
     assert outputs is not None
 
-    # Free memory as soon as possible as failed assertions
-    # will short circuit and not free up memory
-    del llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
     for index, output in enumerate(outputs):
         assert output is not None
         assert isinstance(output, RequestOutput)
@@ -989,11 +982,11 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
 
 
 @pytest.mark.parametrize("backend", ["xgrammar"])
-def test_structured_output_with_structural_tag(backend: str):
-    llm = LLM(
-        model="Qwen/Qwen2.5-1.5B-Instruct",
+def test_structured_output_with_structural_tag(backend: str, vllm_runner_factory):
+    llm = vllm_runner_factory(
+        "Qwen/Qwen2.5-1.5B-Instruct",
         structured_outputs_config=StructuredOutputsConfig(backend=backend),
-    )
+    ).llm
 
     structural_tag_config = {
         "type": "structural_tag",

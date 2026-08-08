@@ -3,7 +3,6 @@
 
 import pytest
 
-from tests.entrypoints.multimodal.conftest import managed_llm
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.exceptions import VLLMValidationError
@@ -14,17 +13,17 @@ TEXT_ONLY_PROMPT = "USER: What is 2 + 2?\nASSISTANT:"
 
 
 @pytest.fixture(scope="module")
-def llm():
+def llm(vllm_runner):
     """LLM with enable_mm_embeds=True and all modality limits zeroed out."""
-    with managed_llm(
-        model=MODEL,
+    with vllm_runner(
+        MODEL,
         max_model_len=2048,
         enforce_eager=True,
         gpu_memory_utilization=0.8,
         enable_mm_embeds=True,
         limit_mm_per_prompt={"image": 0},
-    ) as llm:
-        yield llm
+    ) as runner:
+        yield runner.llm
 
 
 @pytest.mark.skip_global_cleanup

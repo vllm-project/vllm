@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import weakref
-
 import pytest
 
 from vllm import LLM, PoolingRequestOutput
 from vllm.config import PoolerConfig
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.tasks import PoolingTask
 
 MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
@@ -17,24 +14,19 @@ num_labels = 2
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         pooler_config=PoolerConfig(task="token_classify"),
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        yield runner.llm
 
 
 @pytest.mark.skip_global_cleanup
