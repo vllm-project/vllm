@@ -523,6 +523,15 @@ class DelegatingParser(Parser):
                     or (isinstance(content, str) and not content.strip())
                 ):
                     return [], None
+                if self._engine_based and tool_call_info is not None:
+                    # Engine-backed parsers route content extraction through
+                    # extract_tool_calls, so the structural markers the
+                    # reasoning pass preserved for us are only stripped in
+                    # its result -- same reasoning as the tool_choice="none"
+                    # branch above. Keeping the raw content here would leak
+                    # block-end markers whenever the model answers in plain
+                    # text while tools are declared.
+                    return None, tool_call_info.content
                 return None, content
 
         return tool_calls, content
