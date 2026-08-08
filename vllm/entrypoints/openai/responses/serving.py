@@ -438,7 +438,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 self.default_sampling_params,
                 self.override_max_tokens,
                 truncate_prompt_tokens=(
-                    -1 if request.truncation != "disabled" else None
+                    -1 if request.truncation == "auto" else None
                 ),
             )
 
@@ -740,7 +740,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     self.default_sampling_params,  # type: ignore
                     self.override_max_tokens,  # type: ignore
                     truncate_prompt_tokens=(
-                        -1 if context.request.truncation != "disabled" else None
+                        -1 if context.request.truncation == "auto" else None
                     ),
                 )
 

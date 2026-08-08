@@ -353,7 +353,7 @@ class ResponsesRequest(OpenAIBaseModel):
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=self.max_output_tokens or 0,
-            truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
+            truncate_prompt_tokens=-1 if self.truncation == "auto" else None,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_output_tokens",
         )
@@ -741,6 +741,16 @@ class ResponsesResponse(OpenAIBaseModel):
         # TODO: implement the other reason for incomplete_details,
         # which is content_filter
         # incomplete_details = IncompleteDetails(reason='content_filter')
+        background = (
+            request.background
+            if request.background is not None
+            else ResponsesRequest.model_fields["background"].default
+        )
+        truncation = (
+            request.truncation
+            if request.truncation is not None
+            else ResponsesRequest.model_fields["truncation"].default
+        )
         return cls(
             id=request.request_id,
             created_at=created_time,
@@ -758,7 +768,7 @@ class ResponsesResponse(OpenAIBaseModel):
             tool_choice=request.tool_choice,
             tools=request.tools,
             top_p=sampling_params.top_p,
-            background=request.background,
+            background=background,
             max_output_tokens=sampling_params.max_tokens,
             max_tool_calls=request.max_tool_calls,
             previous_response_id=request.previous_response_id,
@@ -770,7 +780,7 @@ class ResponsesResponse(OpenAIBaseModel):
             status=status,
             text=request.text,
             top_logprobs=sampling_params.logprobs,
-            truncation=request.truncation,
+            truncation=truncation,
             user=request.user,
             usage=usage,
             kv_transfer_params=kv_transfer_params,
