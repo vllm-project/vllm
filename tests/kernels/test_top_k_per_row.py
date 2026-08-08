@@ -919,6 +919,50 @@ def test_workspace_topk(test_config: dict, top_k: int, backend: str) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_persistent_topk_reused_group_after_short_row() -> None:
+    """A short row must not advance a group's radix histogram ring."""
+    torch.set_default_device("cuda:0")
+    set_random_seed(0)
+
+    top_k = 2048
+    long_seq_len = 32769
+    radix = 256
+    fixed_smem = ((radix + radix + 5) * 4 + 15) & ~15
+    props = torch.cuda.get_device_properties(0)
+    max_smem = props.shared_memory_per_block_optin
+    if max_smem <= props.shared_memory_per_multiprocessor // 2:
+        pytest.skip("Cannot force one persistent_topk CTA per SM")
+
+    max_chunk = ((max_smem - fixed_smem) // 4 // 4) * 4
+    ctas_per_group = max(
+        (props.multi_processor_count - 1 + 9) // 10,
+        (long_seq_len + max_chunk - 1) // max_chunk,
+    )
+    if ctas_per_group >= props.multi_processor_count:
+        pytest.skip("Not enough SMs to construct a reused CTA group")
+
+    stride = ctas_per_group * max_chunk
+    num_groups = max(1, (props.multi_processor_count - 1) // ctas_per_group)
+    num_rows = 3 * num_groups
+    lengths = torch.full((num_rows,), top_k, dtype=torch.int32, device="cuda")
+    target_row = 2 * num_groups
+    lengths[0] = long_seq_len
+    lengths[num_groups] = long_seq_len - 1
+    lengths[target_row] = long_seq_len
+
+    logits = torch.randn(num_rows, stride, dtype=torch.float32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+    _run_topk_backend(
+        "persistent_topk", logits, lengths, indices, top_k, stride
+    )
+    torch.accelerator.synchronize()
+
+    expected = logits[target_row, :long_seq_len].topk(top_k).indices
+    assert set(indices[target_row].cpu().tolist()) == set(expected.cpu().tolist())
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
