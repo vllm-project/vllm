@@ -112,9 +112,11 @@ class Mxfp4MoeBackend(Enum):
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
     # ROCm AITER backends
-    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
+    AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel (gfx950)
     # Keep the legacy name as an alias while the ROCm split backend rename settles.
     AITER = "AITER_MXFP4_BF16"
+    # W4A16: aiter Triton moe_gemm_a16w4 kernel (gfx942/gfx950/gfx1250)
+    AITER_TRITON_MXFP4_BF16 = "AITER_TRITON_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
     AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel
     # Triton
@@ -133,6 +135,7 @@ class Mxfp4MoeBackend(Enum):
 # AITER backends group
 AITER_BACKENDS = (
     Mxfp4MoeBackend.AITER_MXFP4_BF16,
+    Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
     Mxfp4MoeBackend.AITER_MXFP4_FP8,
     Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
 )
@@ -147,6 +150,8 @@ TRTLLM_BACKENDS = (
 TRITON_BACKENDS = (
     Mxfp4MoeBackend.TRITON,
     Mxfp4MoeBackend.TRITON_UNFUSED,
+    # aiter Triton W4A16 shares the triton_kernels weight format
+    Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
 )
 
 
@@ -226,14 +231,18 @@ def backend_to_kernel_cls(
         return [BatchedMarlinExperts]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
-            AiterW4A16ExpertsMonolithic,
-        )
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
-        return [AiterExperts, AiterW4A16ExpertsMonolithic]
+        return [AiterExperts]
+
+    elif backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+            AiterW4A16ExpertsMonolithic,
+        )
+
+        return [AiterW4A16ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
@@ -294,9 +303,11 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "marlin": [Mxfp4MoeBackend.MARLIN],
         "aiter": [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
             Mxfp4MoeBackend.AITER_MXFP4_FP8,
             Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         ],
+        "aiter_triton_mxfp4_bf16": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
         "xpu": [Mxfp4MoeBackend.XPU],
@@ -318,6 +329,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
@@ -1761,6 +1773,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(
