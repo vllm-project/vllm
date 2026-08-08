@@ -525,6 +525,9 @@ class Llama4Model(LlamaModel):
                 # TODO: add EP support for non fused weights
                 pass
 
+            if not new_loaded_weight.is_contiguous():
+                new_loaded_weight = new_loaded_weight.contiguous()
+
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
             weight_loader(
