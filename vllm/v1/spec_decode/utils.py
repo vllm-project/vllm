@@ -299,6 +299,10 @@ def extend_all_queries_by_N(
         max_query_len=cad.max_query_len + N,
         max_seq_len=cad.max_seq_len + N,
         slot_mapping=new_slot_mapping,
+        # Invalidate the derived CPU shadows so they are lazily recomputed from
+        # the already-updated GPU seq_lens, avoiding a stale CPU/GPU mismatch.
+        _seq_lens_cpu=None,
+        _num_computed_tokens_cpu=None,
     )
     return new_cad
 
