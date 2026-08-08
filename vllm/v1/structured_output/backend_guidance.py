@@ -108,7 +108,7 @@ class GuidanceBackend(StructuredOutputBackend):
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
     ) -> StructuredOutputGrammar:
-        self.serialized_grammar = serialize_guidance_grammar(
+        serialized_grammar = serialize_guidance_grammar(
             request_type,
             grammar_spec,
             self.disable_any_whitespace,
@@ -117,7 +117,7 @@ class GuidanceBackend(StructuredOutputBackend):
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
-            self.serialized_grammar,
+            serialized_grammar,
             log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
         )
 
