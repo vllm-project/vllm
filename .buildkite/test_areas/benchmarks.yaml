@@ -32,3 +32,17 @@ steps:
   - vllm/v1/attention/
   commands:
   - python3 benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k"
+  mirror:
+    amd:
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - benchmarks/attention_benchmarks/
+      - vllm/v1/attention/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k"

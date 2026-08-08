@@ -54,6 +54,25 @@ steps:
   commands:
     - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+  mirror:
+    amd:
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_USE_DEEP_GEMM=0
+      - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
 - label: LM Eval Small Models (1xB200)
   key: lm-eval-small-models-1xb200
@@ -78,6 +97,24 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
+  mirror:
+    amd:
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 - label: LM Eval PCP (4xB200)
   key: lm-eval-pcp-4xb200
@@ -129,6 +166,27 @@ steps:
   - vllm/third_party/flash_linear_attention/ops/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
+  mirror:
+    amd:
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_5_mtp.py
+      - vllm/transformers_utils/configs/qwen3_5.py
+      - vllm/transformers_utils/configs/qwen3_5_moe.py
+      - vllm/model_executor/models/qwen2.py
+      - vllm/model_executor/models/qwen3.py
+      - vllm/model_executor/models/qwen3_next.py
+      - vllm/model_executor/models/qwen3_next_mtp.py
+      - vllm/third_party/flash_linear_attention/ops/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-mi355.txt
 
 - label: LM Eval Large Models (8xH200)
   key: lm-eval-large-models-8xh200
@@ -305,6 +363,27 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
+  mirror:
+    amd:
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 35
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/model_executor/layers/fused_moe/
+      - tests/evals/gpt_oss/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - uv pip install --system 'gpt-oss[eval]==0.0.5'
+      - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 - label: GPQA Eval (GPT-OSS) (DGX Spark)
   key: gpqa-eval-gpt-oss-spark

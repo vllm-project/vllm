@@ -201,6 +201,23 @@ steps:
   - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+  mirror:
+    amd:
+      dind: false
+      device: mi355_8
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - examples/features/torchrun/torchrun_dp_example_offline.py
+      - vllm/config/parallel.py
+      - vllm/distributed/
+      - vllm/v1/engine/llm_engine.py
+      - vllm/v1/executor/uniproc_executor.py
+      - vllm/v1/worker/gpu_worker.py
+      - vllm/platforms/rocm.py
+      commands:
+      - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: Distributed Tests (4xA100)
   key: distributed-tests-4xa100
