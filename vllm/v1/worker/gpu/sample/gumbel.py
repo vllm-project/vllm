@@ -2,16 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
-
-# Smallest positive value produced by Triton's fp32 `tl.rand`. Used to clamp
-# zero draws before the flipped Gumbel transform below.
-#
-# Triton requires globals accessed from `@triton.jit` functions to be wrapped
-# in `tl.constexpr(...)`. We can only do that when Triton is actually
-# available — on the CPU worker path `tl` is a placeholder whose `constexpr`
-# attribute is `None`, and `tl.constexpr(...)` would crash at import time.
-_TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
+from vllm.triton_utils import tl, tldevice, triton
 
 
 @triton.jit
@@ -59,12 +50,18 @@ def apply_temperature(
 
 
 @triton.jit
-def tl_rand64(seed, offset, includes_zero: tl.constexpr):
+def _tl_randbits64(seed, offset):
+    # Philox generates 128 bits per call and `tl.rand` discards 96 of them,
+    # so drawing 64 bits costs the same RNG work as drawing 32.
     lo, hi, _, _ = tl.randint4x(seed, offset)
     lo = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
     hi = hi.to(tl.uint32, bitcast=True).to(tl.uint64)
-    r = (hi << 32) | lo
+    return (hi << 32) | lo
 
+
+@triton.jit
+def tl_rand64(seed, offset, includes_zero: tl.constexpr):
+    r = _tl_randbits64(seed, offset)
     # 1 / 2**64
     scale = 5.421010862427522170037e-20
     u = r.to(tl.float64) * scale
@@ -75,9 +72,17 @@ def tl_rand64(seed, offset, includes_zero: tl.constexpr):
 
 @triton.jit
 def tl_rand32(seed, offset, includes_zero: tl.constexpr):
-    u = tl.rand(seed, offset)
+    # Same 64-bit stream as `tl_rand64`, converted to fp32. The uint64 ->
+    # fp32 convert rounds to nearest, which is exact for small values, so the
+    # u -> 0 tail resolves down to 2**-64 instead of `tl.rand`'s 2**-31 floor
+    # (both far above fp32's 2**-126 minimum normal). Elsewhere the rounding
+    # only loses bits fp32 cannot hold anyway.
+    r = _tl_randbits64(seed, offset)
+    # 1 / 2**64
+    scale = 5.421010862427522170037e-20
+    u = r.to(tl.float32) * scale
     if not includes_zero:
-        u = tl.maximum(u, _TL_RAND_MIN)
+        u = tl.maximum(u, 1.1754943508222875e-38)  # float32 tiny
     return u
 
 
@@ -143,12 +148,14 @@ def gumbel_block_argmax(
             gumbel_noise = -tl.log(-tl.log(u))
         else:
             u = tl_rand32(gumbel_seed, block, includes_zero=False)
-            # Draw the large-noise tail (which decides the argmax winner) from u -> 0,
-            # where fp32 has fine resolution, instead of u -> 1, where fp32 spacing is
-            # ~2**-24. The naive `-log(-log(u))` puts the winning tail at u -> 1,
-            # hard-capping the noise at ~16.6 and coarsely quantizing it; using
-            # `log1p(-u)` == `log(1 - u)` keeps the tail in the well-resolved region.
-            # Note `1 - u` would lose precision for small u, so `log1p` is required.
+            # Draw the large-noise tail (which decides the argmax winner) from
+            # u -> 0, where fp32 has fine resolution, instead of u -> 1, where
+            # fp32 spacing is ~2**-24. The naive `-log(-log(u))` puts the
+            # winning tail at u -> 1, hard-capping the noise at ~16.6 and
+            # coarsely quantizing it; with `log1p(-u)` == `log(1 - u)` the
+            # tail resolves down to u = 2**-64, i.e. noise up to ~44.4. Note
+            # `1 - u` would lose precision for small u, so `log1p` is
+            # required.
             gumbel_noise = -tl.log(-tldevice.log1p(-u))
 
         # Apply gumbel noise.
