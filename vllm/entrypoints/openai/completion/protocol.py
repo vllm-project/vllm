@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     OpenAIBaseModel,
     PerRequestTimingMetrics,
+    StopParam,
     StreamOptions,
     UsageInfo,
     structured_outputs_from_response_format,
@@ -61,7 +62,7 @@ class CompletionRequest(OpenAIBaseModel):
     n: int = 1
     presence_penalty: float | None = 0.0
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
     suffix: str | None = None
