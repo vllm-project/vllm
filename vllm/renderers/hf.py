@@ -18,6 +18,7 @@ import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
 import torch
+from transformers import TokenizersBackend
 from typing_extensions import override
 
 from vllm.entrypoints.chat_utils import (
@@ -62,15 +63,20 @@ if TYPE_CHECKING:
         ChatTemplateContentFormatOption,
         ConversationMessage,
     )
-    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs import (
+        MultiModalDataDict,
+        MultiModalUUIDDict,
+        TextPrompt,
+        TokensPrompt,
+    )
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
     )
 
-    from .inputs import DictPrompt
-    from .params import ChatParams
+    from .inputs import DictPrompt, TokPrompt
+    from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -925,6 +931,59 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # HF tokenizers may be slow (use_fast=False); only fast tokenizers
         # expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
+
+    def tokenize_prompts(
+        self,
+        prompts: Sequence[DictPrompt],
+        params: TokenizeParams,
+    ) -> list[TokPrompt]:
+        tokenizer = self.get_tokenizer()
+        if (
+            not isinstance(tokenizer, TokenizersBackend)
+            or not prompts
+            or any(
+                "encoder_prompt" in prompt
+                or "prompt_token_ids" in prompt
+                or "prompt_embeds" in prompt
+                or not isinstance(prompt.get("prompt"), str)
+                or "multi_modal_data" in prompt
+                or "multi_modal_uuids" in prompt
+                for prompt in prompts
+            )
+        ):
+            return super().tokenize_prompts(prompts, params)
+
+        text_prompts = [
+            params.apply_pre_tokenization(tokenizer, cast("TextPrompt", prompt))
+            for prompt in prompts
+        ]
+        want_offsets = params.return_token_offsets and self._can_produce_offsets()
+        kwargs = params.get_encode_kwargs()
+        if want_offsets:
+            kwargs = {**kwargs, "return_offsets_mapping": True}
+
+        encoding = tokenizer(
+            [prompt["prompt"] for prompt in text_prompts],
+            **kwargs,
+        )
+        offset_mappings = encoding.get("offset_mapping")
+
+        tokenized_prompts: list[TokPrompt] = []
+        for index, (prompt, token_ids) in enumerate(
+            zip(text_prompts, encoding["input_ids"], strict=True)
+        ):
+            tokenized = self._build_tokens_prompt(
+                token_ids,
+                prompt,
+                offset_mapping=(
+                    offset_mappings[index] if offset_mappings is not None else None
+                ),
+            )
+            tokenized_prompts.append(
+                params.apply_post_tokenization(tokenizer, tokenized)
+            )
+
+        return tokenized_prompts
 
     def render_messages(
         self,

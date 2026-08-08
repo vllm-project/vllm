@@ -37,6 +37,20 @@ from vllm.v1.engine.llm_engine import LLMEngine
 logger = init_logger(__name__)
 
 
+_OFFLINE_TOKENIZATION_BATCH_SIZE = 32
+
+
+def _batch_prompts(prompts: Iterable[PromptType]) -> Iterable[list[PromptType]]:
+    batch = []
+    for prompt in prompts:
+        batch.append(prompt)
+        if len(batch) == _OFFLINE_TOKENIZATION_BATCH_SIZE:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 _P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _O = TypeVar(
     "_O",
@@ -305,17 +319,19 @@ class OfflineInferenceMixin:
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
         seq_priority = self._priority_to_seq(priority, len(seq_prompts))
 
+        prompt_iter = maybe_tqdm(
+            seq_prompts,
+            use_tqdm=use_tqdm,
+            desc="Rendering prompts",
+        )
         return self._render_and_add_requests(
             prompts=(
-                self._preprocess_cmpl_one(
-                    prompt,
+                processed_prompt
+                for prompt_batch in _batch_prompts(prompt_iter)
+                for processed_prompt in self._preprocess_cmpl(
+                    prompt_batch,
                     tokenization_kwargs,
                     mm_processor_kwargs=mm_processor_kwargs,
-                )
-                for prompt in maybe_tqdm(
-                    seq_prompts,
-                    use_tqdm=use_tqdm,
-                    desc="Rendering prompts",
                 )
             ),
             params=seq_params,
