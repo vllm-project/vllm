@@ -11,7 +11,10 @@ from torch.nn.parameter import Parameter
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import (
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -19,6 +22,7 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -498,6 +502,13 @@ class ColumnParallelLinear(LinearBase):
             tp_size=self.tp_size,
         )
 
+        vllm_config = get_current_vllm_config_or_none()
+        self.use_sequence_parallel = (
+            not disable_tp
+            and vllm_config is not None
+            and vllm_config.parallel_config.use_sequence_parallel_moe
+        )
+
         self._maybe_allow_fp8_block_shape_mismatch()
         self.gather_output = gather_output
 
@@ -592,6 +603,9 @@ class ColumnParallelLinear(LinearBase):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        if self.use_sequence_parallel and self.tp_size > 1:
+            input_ = tensor_model_parallel_all_gather(input_, dim=0)
+
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -1679,6 +1693,13 @@ class RowParallelLinear(LinearBase):
             disable_tp=disable_tp,
         )
 
+        vllm_config = get_current_vllm_config_or_none()
+        self.use_sequence_parallel = (
+            not disable_tp
+            and vllm_config is not None
+            and vllm_config.parallel_config.use_sequence_parallel_moe
+        )
+
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
@@ -1763,7 +1784,9 @@ class RowParallelLinear(LinearBase):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
 
-        if self.reduce_results and self.tp_size > 1:
+        if self.use_sequence_parallel and self.tp_size > 1:
+            output = tensor_model_parallel_reduce_scatter(output_parallel, dim=0)
+        elif self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel
