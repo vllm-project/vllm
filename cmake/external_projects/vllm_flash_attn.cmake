@@ -57,6 +57,15 @@ install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" ALL_
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
+# FA pins CMAKE_CXX_STANDARD to 17; force C++20 to match vLLM and Torch headers.
+foreach(_FA_COMPONENT _vllm_fa2_C _vllm_fa3_C)
+  if(TARGET ${_FA_COMPONENT})
+    set_target_properties(${_FA_COMPONENT} PROPERTIES
+      CXX_STANDARD 20
+      CXX_STANDARD_REQUIRED ON)
+  endif()
+endforeach()
+
 # Restore the install prefix after FA's install rules
 install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" ALL_COMPONENTS)
 install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
