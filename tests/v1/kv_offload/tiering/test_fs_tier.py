@@ -245,6 +245,11 @@ def test_store_then_load_roundtrip(fs_tier):
     tier.submit_load(job_l)
     load_results = drain(tier)
     assert all(r.success for r in load_results)
+    # A successful load must NOT touch the file: the delete path fires only on
+    # a provable short read, so a good block stays on disk (guards against an
+    # over-eager delete regressing to upstream's delete-on-any-error).
+    for k in (key(1), key(2)):
+        assert os.path.exists(tier.file_mapper.get_file_name(k))
     # Blocks stay on disk after load
     assert lookup_and_wait(tier, [key(1), key(2)]) == [
         LookupResult.HIT,
@@ -543,6 +548,187 @@ def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     load_results = drain(tier)
     assert len(load_results) == 1
     assert not load_results[0].success
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_failed_load_corrects_verdict_and_removes_corrupt_file(
+    fs_tier, monkeypatch, use_c_ext
+):
+    """Failed-load livelock regression, covering the whole contract.
+
+    A successful promotion leaves the cached HIT and the on-disk block intact.
+    A promotion that short-reads a truncated (corrupt) block fails, and in
+    get_finished_jobs() the tier removes the corrupt file (stores are atomic,
+    so a too-short file is genuine corruption) and marks the cached verdict
+    False. The SAME request's next lookup is then a MISS served from cache with
+    NO re-probe, so the scheduler cannot re-issue the doomed promotion.
+    """
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    path = tier.file_mapper.get_file_name(key(1))
+
+    ctx = ReqContext(req_id="livelock-req")
+    assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+    # A successful promotion must NOT touch the verdict or the file.
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and results[0].success
+    assert tier.lookup(key(1), ctx) == LookupResult.HIT
+    assert os.path.exists(path)
+
+    # Truncate below block_size so the next promotion short-reads.
+    with open(path, "wb") as f:
+        f.write(b"x" * 10)
+    tier.submit_load(make_job(3, [key(1)], [0], is_promotion=True))
+    results = drain(tier)  # get_finished_jobs() marks the verdict False here
+    assert len(results) == 1 and not results[0].success
+
+    # Corrupt file removed; the SAME request now misses from cache, no re-probe.
+    assert not os.path.exists(path)
+    lm = tier._lookup_manager
+    assert tier.lookup(key(1), ctx) == LookupResult.MISS
+    assert lm._lookup_batch == []
+
+    # A FRESH request re-probes the tier (no cached verdict) and misses too,
+    # since the corrupt file is gone -- the real batch_lookup re-probe path.
+    fresh = ReqContext(req_id="fresh-after-short-read")
+    assert lookup_and_wait(tier, [key(1)], ctx=fresh) == [LookupResult.MISS]
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_batched_partial_load_failure_keeps_loaded_blocks(
+    fs_tier, monkeypatch, use_c_ext
+):
+    """A batched promotion stops at the first bad block and reports how many
+    loaded before it (#50321). Corrupt the LAST block: the earlier blocks load
+    fine, so the job reports successful_keys for them and marks only the failed
+    tail a miss. The earlier keys stay HIT — including for the same request —
+    while the corrupt block stays a MISS (its file was removed)."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    keys = [key(1), key(2), key(3)]  # last one is the "bad" block
+    tier.submit_store(make_job(1, keys, [0, 1, 2]))
+    assert all(r.success for r in drain(tier))
+    bad_path = tier.file_mapper.get_file_name(key(3))
+
+    ctx = ReqContext(req_id="batch-req")
+    assert lookup_and_wait(tier, keys, ctx=ctx) == [LookupResult.HIT] * 3
+
+    # Corrupt only the last block, then load the whole batch as one job.
+    with open(bad_path, "wb") as f:
+        f.write(b"x" * 10)
+    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True))
+    results = drain(tier)
+    # (a) the job fails but reports the two blocks that loaded before the bad one.
+    assert len(results) == 1 and not results[0].success
+    assert tuple(results[0].successful_keys) == (key(1), key(2))
+
+    # (b) Only the failed tail is a miss; the loaded blocks stay HIT on the same
+    # request, and nothing was re-probed.
+    lm = tier._lookup_manager
+    assert [tier.lookup(k, ctx) for k in keys] == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+        LookupResult.MISS,
+    ]
+    assert lm._lookup_batch == []
+
+    # (c) A fresh request re-probes: the loaded blocks are still on disk (HIT),
+    # only the corrupt block was removed (MISS).
+    tier.on_request_finished(ctx)
+    fresh = ReqContext(req_id="fresh-batch-req")
+    assert lookup_and_wait(tier, keys, ctx=fresh) == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+        LookupResult.MISS,
+    ]
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_batched_load_first_block_fails_marks_whole_batch(
+    fs_tier, monkeypatch, use_c_ext
+):
+    """When the FIRST block fails, nothing loaded before it: the job reports no
+    successful_keys (None) and the whole batch is marked a miss for the
+    request."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    keys = [key(1), key(2), key(3)]  # first one is the "bad" block
+    tier.submit_store(make_job(1, keys, [0, 1, 2]))
+    assert all(r.success for r in drain(tier))
+
+    ctx = ReqContext(req_id="batch-first-fail")
+    assert lookup_and_wait(tier, keys, ctx=ctx) == [LookupResult.HIT] * 3
+
+    with open(tier.file_mapper.get_file_name(key(1)), "wb") as f:
+        f.write(b"x" * 10)
+    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+    # Nothing loaded before the failure -> no partial success reported.
+    assert results[0].successful_keys is None
+    # The whole batch is a miss for this request.
+    assert [tier.lookup(k, ctx) for k in keys] == [LookupResult.MISS] * 3
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_transient_load_failure_leaves_file(fs_tier, monkeypatch, use_c_ext):
+    """A transient host error (here ELOOP on open) is NOT a short read: the job
+    fails but the block file must survive untouched, on both the C and Python
+    paths. Deleting on a transient error would turn a passing hiccup into
+    permanent data loss."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    path = tier.file_mapper.get_file_name(key(1))
+    with open(path, "rb") as f:
+        original = f.read()
+
+    # Make open() fail with ELOOP (fd < 0) without truncating the block. Not
+    # chmod 000: CI runs as root, which bypasses permission bits, so open()
+    # would succeed and the load would not fail at all.
+    saved = path + ".saved"
+    loop = path + ".loop"
+    os.rename(path, saved)
+    os.symlink(loop, path)
+    os.symlink(path, loop)
+
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+
+    # The path is left alone: a non-short-read error must not unlink.
+    assert os.path.lexists(path)
+
+    os.unlink(path)
+    os.unlink(loop)
+    os.rename(saved, path)
+    with open(path, "rb") as f:
+        assert f.read() == original
 
 
 # ---------------------------------------------------------------------------

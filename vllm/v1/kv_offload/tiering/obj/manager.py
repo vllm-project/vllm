@@ -141,6 +141,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 )
         # Keys of in-flight store jobs, tracked only when events are enabled.
         self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Keys of in-flight load (promotion) jobs, so a failed download can
+        # mark its own cached lookup verdicts False (see get_finished_jobs).
+        self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
 
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjAgent", agent_config)
@@ -281,6 +284,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
+        self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
@@ -340,12 +344,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._pending_results.append(JobResult(job_id=job_id, success=success))
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """Poll in-flight transfers; return completed (job_id, success) pairs."""
+        """Poll transfers; a failed promotion marks its cached verdicts False
+        here (scheduler thread)."""
         self._poll_active_transfers()
         results = self._pending_results
         self._pending_results = []
-        if self.events is not None:
-            for result in results:
+        for result in results:
+            if self.events is not None:
                 keys = self._store_job_keys.pop(result.job_id, None)
                 if result.success and keys:
                     self.events.append(
@@ -356,6 +361,17 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                             locality=self.locality,
                         )
                     )
+            # Mark only the keys that did not load as a miss; the request
+            # recomputes them. The miss is per-request (cleared when the request
+            # finishes), so other requests still HIT the blocks that loaded
+            # fine. nixl reports the batch as a whole (successful_keys is None),
+            # so today this marks all keys; the subtraction keeps it correct if
+            # partial results are ever reported.
+            load_keys = self._load_job_keys.pop(result.job_id, None)
+            if load_keys is not None and not result.success:
+                successful = set(result.successful_keys or ())
+                failed = [k for k in load_keys if k not in successful]
+                self._lookup_manager.mark_miss(failed)
         return results
 
     def take_events(self) -> Iterable[OffloadingEvent]:
