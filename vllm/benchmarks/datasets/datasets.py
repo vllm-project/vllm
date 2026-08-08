@@ -4813,3 +4813,131 @@ class SpeedBench(CustomDataset):
         random.seed(self.random_seed)
         if not getattr(self, "disable_shuffle", False):
             random.shuffle(self.data)
+
+
+# -----------------------------------------------------------------------------
+# Standalone Dataset Sampling Functions
+# -----------------------------------------------------------------------------
+
+
+def sample_sharegpt_requests(
+    dataset_path: str,
+    tokenizer: TokenizerLike,
+    num_requests: int,
+    output_len: int | None = None,
+    random_seed: int = 0,
+    disable_shuffle: bool = False,
+    request_id_prefix: str = "",
+    no_oversample: bool = False,
+    lora_path: str | None = None,
+    max_loras: int | None = None,
+    enable_multimodal_chat: bool = False,
+    lora_assignment: str = "random",
+) -> list[SampleRequest]:
+    """Sample requests from a ShareGPT dataset."""
+    dataset = ShareGPTDataset(
+        dataset_path=dataset_path,
+        random_seed=random_seed,
+        disable_shuffle=disable_shuffle,
+    )
+    return dataset.sample(
+        tokenizer=tokenizer,
+        num_requests=num_requests,
+        request_id_prefix=request_id_prefix,
+        no_oversample=no_oversample,
+        lora_path=lora_path,
+        max_loras=max_loras,
+        output_len=output_len,
+        enable_multimodal_chat=enable_multimodal_chat,
+        lora_assignment=lora_assignment,
+    )
+
+
+def sample_random_requests(
+    tokenizer: TokenizerLike,
+    num_requests: int,
+    input_len: int = 1024,
+    output_len: int = 128,
+    prefix_len: int = 0,
+    range_ratio: RangeRatio = 0.0,
+    random_seed: int = 0,
+    request_id_prefix: str = "",
+    no_oversample: bool = False,
+    max_loras: int | None = None,
+    lora_path: str | None = None,
+    lora_assignment: str = "random",
+) -> list[SampleRequest]:
+    """Generate synthetic random sample requests."""
+    dataset = RandomDataset(random_seed=random_seed)
+    return dataset.sample(
+        tokenizer=tokenizer,
+        num_requests=num_requests,
+        input_len=input_len,
+        output_len=output_len,
+        prefix_len=prefix_len,
+        range_ratio=range_ratio,
+        request_id_prefix=request_id_prefix,
+        no_oversample=no_oversample,
+        max_loras=max_loras,
+        lora_path=lora_path,
+        lora_assignment=lora_assignment,
+    )
+
+
+def sample_sonnet_requests(
+    dataset_path: str,
+    tokenizer: TokenizerLike,
+    num_requests: int,
+    input_len: int = 550,
+    output_len: int = 150,
+    prefix_len: int = 0,
+    return_prompt_formatted: bool = False,
+    random_seed: int = 0,
+    disable_shuffle: bool = False,
+    request_id_prefix: str = "",
+    no_oversample: bool = False,
+) -> list[SampleRequest]:
+    """Sample requests from a Sonnet dataset."""
+    dataset = SonnetDataset(
+        dataset_path=dataset_path,
+        random_seed=random_seed,
+        disable_shuffle=disable_shuffle,
+    )
+    return dataset.sample(
+        tokenizer=tokenizer,
+        num_requests=num_requests,
+        input_len=input_len,
+        output_len=output_len,
+        prefix_len=prefix_len,
+        return_prompt_formatted=return_prompt_formatted,
+        request_id_prefix=request_id_prefix,
+        no_oversample=no_oversample,
+    )
+
+
+def sample_hf_requests(
+    dataset_path: str,
+    tokenizer: TokenizerLike,
+    num_requests: int,
+    dataset_subset: str | None = None,
+    dataset_split: str | None = None,
+    random_seed: int = 0,
+    disable_shuffle: bool = False,
+    request_id_prefix: str = "",
+    no_oversample: bool = False,
+) -> list[SampleRequest]:
+    """Sample requests from a HuggingFace dataset."""
+    dataset = HuggingFaceDataset(
+        dataset_path=dataset_path,
+        dataset_subset=dataset_subset,
+        dataset_split=dataset_split or "train",
+        random_seed=random_seed,
+        disable_shuffle=disable_shuffle,
+    )
+    return dataset.sample(
+        tokenizer=tokenizer,
+        num_requests=num_requests,
+        request_id_prefix=request_id_prefix,
+        no_oversample=no_oversample,
+    )
+
