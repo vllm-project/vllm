@@ -84,6 +84,32 @@ steps:
       pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp
       pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py"
 
+- label: CPU-Simulated Forward Tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  soft_fail: true
+  source_file_dependencies:
+  - vllm/config/
+  - vllm/engine/arg_utils.py
+  - vllm/platforms/cpu.py
+  - vllm/sampling_params.py
+  - vllm/triton_utils/
+  - vllm/v1/core/
+  - vllm/v1/kv_cache_interface.py
+  - vllm/v1/metrics/
+  - vllm/v1/outputs.py
+  - vllm/v1/worker/
+  - tests/conftest.py
+  - tests/models/registry.py
+  - tests/v1/e2e/test_simulated_forward.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
+      uv pip install git+https://github.com/triton-lang/triton-cpu.git@270e696d
+      TRITON_CPU_BACKEND=1 pytest -x -v -s \
+        tests/v1/e2e/test_simulated_forward.py"
+
 - label: CPU-Quantization Model Tests
   depends_on: []
   device: intel_cpu
