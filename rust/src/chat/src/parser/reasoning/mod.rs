@@ -92,6 +92,12 @@ impl ReasoningParserFactory {
             .register_pattern("glm-4.5", names::GLM45)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("kimi", names::KIMI)
+            // MiniCPM5 uses `<think>`/`</think>`. Its template prefills an
+            // open think block only when `enable_thinking=true` is passed;
+            // with no kwargs the completion carries an explicit `<think>`
+            // opener instead. The qwen3 parser (wait-for-explicit-start with
+            // prompt-boundary override) handles both cases.
+            .register_pattern("minicpm5", names::QWEN3)
             // step3p5 patterns must precede `step3`: substring matching would
             // otherwise route step3p5 IDs to step3.
             .register_pattern("step-3p5", names::STEP3P5)

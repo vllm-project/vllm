@@ -161,6 +161,13 @@ fn factory_new_resolves_default_patterns() {
         Some(names::HY_V3)
     );
     assert_eq!(
+        factory.resolve_name_for_model("openbmb/MiniCPM5-1B"),
+        Some(names::MINICPM5)
+    );
+    // Earlier MiniCPM generations do not emit the MiniCPM5 XML format.
+    assert_eq!(factory.resolve_name_for_model("openbmb/MiniCPM-V-2_6"), None);
+    assert_eq!(factory.resolve_name_for_model("openbmb/MiniCPM3-4B"), None);
+    assert_eq!(
         factory.resolve_name_for_model("MiniMax/MiniMax-M3-Text"),
         Some(names::MINIMAX_M3)
     );

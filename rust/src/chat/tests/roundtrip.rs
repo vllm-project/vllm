@@ -293,6 +293,25 @@ impl RoundtripCase {
             sort_json_keys: true,
         }
     }
+
+    /// MiniCPM5 XML function/param tool-call format with `<think>` reasoning
+    /// tags. With no thinking kwargs the template does not prefill `<think>`
+    /// and the completion carries an explicit opener, which the qwen3
+    /// reasoning parser consumes in content mode.
+    fn minicpm5() -> Self {
+        Self {
+            model_id: "openbmb/MiniCPM5-1B",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            // `enable_thinking=false` prefills a closed think block that the
+            // history render omits, breaking prompt extension, so only the
+            // thinking-on behavior is exercised here.
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
@@ -333,6 +352,7 @@ roundtrip_tests! {
     kimi_k3 => [tool_call_mix],
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
+    minicpm5 => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.

@@ -73,6 +73,15 @@ fn factory_routes_seed_oss_models() {
 }
 
 #[test]
+fn factory_resolves_minicpm5_to_qwen3() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("openbmb/MiniCPM5-1B"),
+        Some(names::QWEN3)
+    );
+}
+
+#[test]
 fn factory_resolves_minimax_m3_before_generic_minimax() {
     let factory = ReasoningParserFactory::new();
     assert_eq!(
