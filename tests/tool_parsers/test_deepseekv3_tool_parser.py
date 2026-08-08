@@ -90,3 +90,97 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
                 ),
             },
         )
+
+
+TOOL_CALLS_BEGIN = "<｜tool▁calls▁begin｜>"
+TOOL_CALLS_END = "<｜tool▁calls▁end｜>"
+TOOL_CALL_BEGIN = "<｜tool▁call▁begin｜>"
+TOOL_CALL_END = "<｜tool▁call▁end｜>"
+TOOL_SEP = "<｜tool▁sep｜>"
+
+
+@pytest.fixture(scope="module")
+def deepseekv3_tokenizer():
+    return get_tokenizer("deepseek-ai/DeepSeek-V3")
+
+
+def _stream_deltas(tokenizer, deltas):
+    """Drive the streaming parser with explicit multi-token text deltas,
+    as produced by async scheduling / stream_interval > 1."""
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+    from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
+
+    parser = DeepSeekV3ToolParser(tokenizer)
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    name = None
+    args = ""
+    previous_text = ""
+    previous_ids: list[int] = []
+    for delta_text in deltas:
+        delta_ids = tokenizer.encode(delta_text, add_special_tokens=False)
+        current_text = previous_text + delta_text
+        current_ids = previous_ids + delta_ids
+        delta_message = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=previous_ids,
+            current_token_ids=current_ids,
+            delta_token_ids=delta_ids,
+            request=request,
+        )
+        if delta_message is not None:
+            for tool_call in delta_message.tool_calls:
+                if tool_call.function:
+                    if tool_call.function.name:
+                        name = tool_call.function.name
+                    if tool_call.function.arguments:
+                        args += tool_call.function.arguments
+        previous_text = current_text
+        previous_ids = current_ids
+    return name, args
+
+
+@pytest.mark.parametrize(
+    "final_args_deltas,expected_args",
+    [
+        # arguments ending with a number: the final characters and the
+        # tool-call end token arrive in the same delta
+        (['{"code": 1', "23}\n```" + TOOL_CALL_END], '{"code": 123}'),
+        # arguments ending with a nested object
+        (
+            ['{"a": {"b": "x', '"}}\n```' + TOOL_CALL_END],
+            '{"a": {"b": "x"}}',
+        ),
+        # arguments ending with a boolean
+        (['{"flag": ', "true}\n```" + TOOL_CALL_END], '{"flag": true}'),
+        # control: arguments ending with a quoted string (worked before)
+        (['{"city": "Tok', 'yo"}\n```' + TOOL_CALL_END], '{"city": "Tokyo"}'),
+    ],
+    ids=["number_tail", "nested_object_tail", "boolean_tail", "string_tail"],
+)
+def test_streaming_final_args_chunk_shares_delta_with_end_token(
+    deepseekv3_tokenizer, final_args_deltas, expected_args
+):
+    """The last characters of the arguments arriving in the same delta as
+    the tool-call end token must not be dropped, regardless of what
+    character the arguments end with.
+
+    Regression: the closing branch reconstructed the unstreamed tail with
+    a `"}`-based heuristic, dropping the tail entirely for arguments
+    ending in a number/boolean/null and truncating nested objects.
+    """
+    deltas = [
+        TOOL_CALLS_BEGIN + TOOL_CALL_BEGIN + "function" + TOOL_SEP + "get_code\n"
+        "```json\n",
+        *final_args_deltas,
+        TOOL_CALLS_END,
+    ]
+
+    name, args = _stream_deltas(deepseekv3_tokenizer, deltas)
+
+    assert name == "get_code"
+    assert args == expected_args
