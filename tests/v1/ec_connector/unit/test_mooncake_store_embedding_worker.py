@@ -56,6 +56,7 @@ class FakeStore:
         self.fail_register_addrs = set()
         self.raise_on_batch_put = False
         self.batch_put_results = [0]
+        self.batch_put_calls = []
 
     def batch_is_exist(self, keys):
         self.batch_is_exist_calls.append(list(keys))
@@ -200,8 +201,14 @@ class FakeBufferStore(FakeStore):
     ):
         if self.raise_on_batch_put:
             raise RuntimeError("batch put failed")
-        self.objects[keys[0]] = b"tensor-object"
-        return self.batch_put_results
+        self.batch_put_calls.append((keys, buffer_ptrs, buffer_sizes, replicate_config))
+        results = self.batch_put_results
+        if len(results) != len(keys):
+            results = [0] * len(keys)
+        for key, result in zip(keys, results, strict=True):
+            if result >= 0:
+                self.objects[key] = b"tensor-object"
+        return results
 
 
 class FakeReplicateConfig:
@@ -409,6 +416,26 @@ def test_buffer_put_unregisters_payload_and_metadata_buffers():
     assert store.unregistered[-2:] == [metadata_addr, payload_addr]
 
 
+def test_buffer_put_batches_multiple_tensor_objects_in_one_store_call():
+    pool_keys = [make_pool_key("image-a"), make_pool_key("image-b")]
+    tensors = [
+        torch.zeros((2, 4), dtype=torch.float16),
+        torch.ones((3, 4), dtype=torch.float16),
+    ]
+    store = FakeBufferStore()
+    client = MooncakeEmbeddingStoreClient(store, replicate_config=FakeReplicateConfig())
+
+    results = client.put_tensors(pool_keys, tensors)
+
+    assert results == [True, True]
+    assert len(store.batch_put_calls) == 1
+    keys, buffer_ptrs, buffer_sizes, _ = store.batch_put_calls[0]
+    assert keys == [make_embedding_data_key(key) for key in pool_keys]
+    assert len(buffer_ptrs) == len(buffer_sizes) == 2
+    assert [sizes[1] for sizes in buffer_sizes] == [16, 24]
+    assert len(store.registered) == len(store.unregistered) == 4
+
+
 def test_buffer_put_unregisters_payload_and_metadata_when_put_raises():
     pool_key = make_pool_key()
     tensor = torch.zeros((2, 4), dtype=torch.float16)
@@ -589,6 +616,61 @@ def test_sending_thread_stores_embedding_tensor_asynchronously():
 
     assert store.pub_tensors[0][0] == make_embedding_data_key(pool_key)
     assert sending_thread.get_and_clear_finished_identifiers() == {pool_key.identifier}
+    sending_thread.close()
+
+
+def test_sending_thread_batches_queued_tensor_objects():
+    pool_keys = [make_pool_key("image-a"), make_pool_key("image-b")]
+    tensors = [
+        torch.zeros((2, 4), dtype=torch.float16),
+        torch.ones((3, 4), dtype=torch.float16),
+    ]
+    store = FakeBufferStore()
+    worker = EmbeddingStoreWorker(
+        store_client=MooncakeEmbeddingStoreClient(store),
+        tensor_database=EmbeddingTensorDatabase(),
+    )
+    sending_thread = EmbeddingStoreSendingThread(worker)
+    for pool_key, tensor in zip(pool_keys, tensors, strict=True):
+        sending_thread.add_request(
+            EmbeddingSaveRequest(pool_key=pool_key, tensor=tensor)
+        )
+
+    sending_thread.start()
+    sending_thread.request_queue.join()
+
+    assert store.batch_is_exist_calls == [
+        [make_embedding_data_key(key) for key in pool_keys]
+    ]
+    assert len(store.batch_put_calls) == 1
+    assert sending_thread.get_and_clear_finished_identifiers() == {
+        "image-a",
+        "image-b",
+    }
+    sending_thread.close()
+
+
+def test_sending_thread_reports_only_failed_item_from_batch_put():
+    pool_keys = [make_pool_key("image-a"), make_pool_key("image-b")]
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeBufferStore()
+    store.batch_put_results = [0, -1]
+    worker = EmbeddingStoreWorker(
+        store_client=MooncakeEmbeddingStoreClient(store),
+        tensor_database=EmbeddingTensorDatabase(),
+    )
+    sending_thread = EmbeddingStoreSendingThread(worker)
+    for pool_key in pool_keys:
+        sending_thread.add_request(
+            EmbeddingSaveRequest(pool_key=pool_key, tensor=tensor)
+        )
+
+    sending_thread.start()
+    sending_thread.request_queue.join()
+
+    assert sending_thread.get_and_clear_finished_identifiers() == {"image-a"}
+    assert sending_thread.get_and_clear_failed_identifiers() == {"image-b"}
+    assert "failed to put embedding tensor" in sending_thread.failure_reasons["image-b"]
     sending_thread.close()
 
 

@@ -359,6 +359,7 @@ class MooncakeStoreECConnector(ECConnectorBase):
     ) -> tuple[set[str] | None, set[str] | None]:
         if self.worker is None or not self.is_producer:
             return None, None
+        self.worker.wait_for_pending_saves()
         finished_sending = self.worker.get_finished_sending()
         failed_sending = self.worker.get_failed_sending()
         for identifier, reason in failed_sending.items():

@@ -25,6 +25,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 class FakeWorker:
     def __init__(self):
         self.requests = []
+        self.wait_for_pending_saves_calls = 0
         self.key_metadata = EmbeddingKeyMetadata(
             cache_prefix="",
             kind="encoder_output",
@@ -46,6 +47,9 @@ class FakeWorker:
 
     def get_failed_sending(self):
         return {}
+
+    def wait_for_pending_saves(self):
+        self.wait_for_pending_saves_calls += 1
 
 
 def make_connector(*, soft_pin_video_embedding: bool = False):
@@ -458,6 +462,7 @@ def test_get_finished_logs_failed_embedding_saves(caplog):
 
     finished_sending, finished_recving = connector.get_finished({"req-1"})
 
+    assert connector.worker.wait_for_pending_saves_calls == 1
     assert finished_sending == {"image-ok"}
     assert finished_recving is None
     assert "embedding_store_save_failed" in caplog.text

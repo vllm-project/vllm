@@ -31,6 +31,7 @@ from vllm.utils.network_utils import make_zmq_socket
 
 from .store_client import (
     EmbeddingStoreLoadError,
+    EmbeddingStoreSaveError,
     MooncakeEmbeddingStoreClient,
 )
 
@@ -93,6 +94,10 @@ class EmbeddingStoreWorker:
         if self.sending_thread is None:
             return {}
         return self.sending_thread.get_and_clear_failure_reasons()
+
+    def wait_for_pending_saves(self) -> None:
+        if self.sending_thread is not None:
+            self.sending_thread.request_queue.join()
 
     def get_operation_stats(self) -> EmbeddingStoreOperationStats | None:
         with self._operation_stats_lock:
@@ -181,72 +186,127 @@ class EmbeddingStoreWorker:
         tensor: torch.Tensor,
         with_soft_pin: bool = False,
     ) -> None:
+        request = EmbeddingSaveRequest(
+            pool_key=pool_key,
+            tensor=tensor,
+            with_soft_pin=with_soft_pin,
+        )
+        error = self.save_tensors([request])[0]
+        if error is not None:
+            raise error
+
+    def save_tensors(
+        self,
+        requests: list[EmbeddingSaveRequest],
+    ) -> list[Exception | None]:
+        """Store a batch and return one error slot per request."""
+        if not requests:
+            return []
+
+        errors: list[Exception | None] = [None] * len(requests)
+        pool_keys = [request.pool_key for request in requests]
         exists_started = time.perf_counter()
         try:
-            exists = self.store_client.exists(pool_key)
-        except Exception:
+            exists = self.store_client.batch_exists(pool_keys)
+            if len(exists) != len(requests):
+                raise EmbeddingStoreSaveError(
+                    "Mooncake batch exists returned an unexpected number of results: "
+                    f"expected {len(requests)}, got {len(exists)}"
+                )
+        except Exception as error:
             self._record_operation(
                 "save_exists",
                 time.perf_counter() - exists_started,
-                1,
+                len(requests),
                 status="error",
-                num_failed_keys=1,
+                num_failed_keys=len(requests),
             )
-            raise
+            return [error] * len(requests)
 
+        missing_count = sum(not hit for hit in exists)
         self._record_operation(
             "save_exists",
             time.perf_counter() - exists_started,
-            1,
-            status="ok" if exists else "miss",
+            len(requests),
+            status="miss" if missing_count else "ok",
         )
-        if exists:
-            logger.info(
-                "embedding_store_save_skip identifier=%s embedding_pool_key=%s "
-                "reason=exists",
-                pool_key.identifier,
-                pool_key.to_string(),
-            )
-            return
+        missing_by_soft_pin: dict[bool, list[int]] = {False: [], True: []}
+        stored_tensors: dict[int, torch.Tensor] = {}
+        tensor_nbytes: dict[int, int] = {}
+        used_staging: dict[int, bool] = {}
+        for index, (request, hit) in enumerate(zip(requests, exists, strict=True)):
+            if hit:
+                logger.info(
+                    "embedding_store_save_skip identifier=%s embedding_pool_key=%s "
+                    "reason=exists",
+                    request.identifier,
+                    request.pool_key.to_string(),
+                )
+                continue
+            tensor = request.tensor
+            stored_tensor = tensor if tensor.is_contiguous() else tensor.contiguous()
+            stored_tensors[index] = stored_tensor
+            used_staging[index] = stored_tensor is not tensor
+            tensor_nbytes[index] = build_tensor_meta(
+                request.pool_key, stored_tensor
+            ).nbytes
+            staging_event = _record_tensor_ready_event(stored_tensor)
+            _wait_tensor_ready_event(staging_event)
+            missing_by_soft_pin[request.with_soft_pin].append(index)
 
-        started = time.perf_counter()
-        stored_tensor = tensor if tensor.is_contiguous() else tensor.contiguous()
-        used_staging = stored_tensor is not tensor
-        tensor_meta = build_tensor_meta(pool_key, stored_tensor)
-        staging_event = _record_tensor_ready_event(stored_tensor)
-        _wait_tensor_ready_event(staging_event)
-        try:
-            self.store_client.put_tensor(
-                pool_key,
-                stored_tensor,
-                with_soft_pin=with_soft_pin,
-            )
-        except Exception:
+        for with_soft_pin, indices in missing_by_soft_pin.items():
+            if not indices:
+                continue
+            started = time.perf_counter()
+            total_nbytes = sum(tensor_nbytes[index] for index in indices)
+            try:
+                results = self.store_client.put_tensors(
+                    [requests[index].pool_key for index in indices],
+                    [stored_tensors[index] for index in indices],
+                    with_soft_pin=with_soft_pin,
+                )
+            except Exception as error:
+                results = [False] * len(indices)
+                for index in indices:
+                    errors[index] = error
+            for index, success in zip(indices, results, strict=True):
+                if not success and errors[index] is None:
+                    errors[index] = EmbeddingStoreSaveError(
+                        "failed to put embedding tensor for "
+                        f"{requests[index].pool_key.to_string()}"
+                    )
+
+            num_failed = sum(not success for success in results)
             self._record_operation(
                 "save_put",
                 time.perf_counter() - started,
-                1,
-                num_bytes=tensor_meta.nbytes,
-                status="error",
-                num_failed_keys=1,
+                len(indices),
+                num_bytes=total_nbytes,
+                status="error" if num_failed else "ok",
+                num_failed_keys=num_failed,
             )
-            raise
-        self._record_operation(
-            "save_put",
-            time.perf_counter() - started,
-            1,
-            num_bytes=tensor_meta.nbytes,
-            status="ok",
-        )
-        logger.info(
-            "embedding_store_put identifier=%s embedding_pool_key=%s nbytes=%d "
-            "used_staging=%s embedding_store_put_ms=%.3f",
-            pool_key.identifier,
-            pool_key.to_string(),
-            tensor_meta.nbytes,
-            used_staging,
-            (time.perf_counter() - started) * 1000.0,
-        )
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.info(
+                "embedding_store_batch_put num_keys=%d num_failed_keys=%d "
+                "nbytes=%d embedding_store_put_ms=%.3f",
+                len(indices),
+                num_failed,
+                total_nbytes,
+                elapsed_ms,
+            )
+            for index, success in zip(indices, results, strict=True):
+                if success:
+                    request = requests[index]
+                    logger.info(
+                        "embedding_store_put identifier=%s embedding_pool_key=%s "
+                        "nbytes=%d used_staging=%s embedding_store_put_ms=%.3f",
+                        request.identifier,
+                        request.pool_key.to_string(),
+                        tensor_nbytes[index],
+                        used_staging[index],
+                        elapsed_ms,
+                    )
+        return errors
 
     def load(
         self,
@@ -413,23 +473,52 @@ class EmbeddingStoreSendingThread(threading.Thread):
 
     def run(self) -> None:
         while True:
-            request = self.request_queue.get()
-            try:
-                if request is None:
-                    return
-                _wait_tensor_ready_event(request.ready_event)
-                self.store_worker.save_tensor(
-                    request.pool_key,
-                    request.tensor,
-                    with_soft_pin=request.with_soft_pin,
-                )
-                self.set_finished_identifier(request.identifier)
-            except Exception as e:
-                if request is not None:
-                    self.set_failed_identifier(request.identifier, e)
-                logger.error("Error in %s: %s", self.name, e)
-            finally:
+            first_request = self.request_queue.get()
+            if first_request is None:
                 self.request_queue.task_done()
+                return
+
+            requests = [first_request]
+            should_close = False
+            while True:
+                try:
+                    request = self.request_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if request is None:
+                    should_close = True
+                    self.request_queue.task_done()
+                    break
+                requests.append(request)
+
+            ready_requests = []
+            try:
+                for request in requests:
+                    try:
+                        _wait_tensor_ready_event(request.ready_event)
+                    except Exception as event_error:
+                        self.set_failed_identifier(request.identifier, event_error)
+                        logger.error("Error in %s: %s", self.name, event_error)
+                    else:
+                        ready_requests.append(request)
+
+                errors = self.store_worker.save_tensors(ready_requests)
+                for request, save_error in zip(ready_requests, errors, strict=True):
+                    if save_error is None:
+                        self.set_finished_identifier(request.identifier)
+                    else:
+                        self.set_failed_identifier(request.identifier, save_error)
+                        logger.error("Error in %s: %s", self.name, save_error)
+            except Exception as batch_error:
+                for request in ready_requests:
+                    self.set_failed_identifier(request.identifier, batch_error)
+                logger.error("Error in %s: %s", self.name, batch_error)
+            finally:
+                for _ in requests:
+                    self.request_queue.task_done()
+
+            if should_close:
+                return
 
     def close(self) -> None:
         if self._closed.is_set():

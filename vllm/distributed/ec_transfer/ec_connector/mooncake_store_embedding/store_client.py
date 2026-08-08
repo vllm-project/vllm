@@ -251,8 +251,30 @@ class MooncakeEmbeddingStoreClient:
         *,
         with_soft_pin: bool = False,
     ) -> None:
-        _validate_supported_embedding_tensor_dtype(tensor)
-        key = make_embedding_data_key(pool_key)
+        results = self.put_tensors(
+            [pool_key],
+            [tensor],
+            with_soft_pin=with_soft_pin,
+        )
+        if not results[0]:
+            raise EmbeddingStoreSaveError(
+                f"failed to put embedding tensor for {pool_key.to_string()}"
+            )
+
+    def put_tensors(
+        self,
+        pool_keys: list[EmbeddingPoolKey],
+        tensors: list[Any],
+        *,
+        with_soft_pin: bool = False,
+    ) -> list[bool]:
+        if len(pool_keys) != len(tensors):
+            raise ValueError("pool_keys and tensors must have the same length")
+        if not pool_keys:
+            return []
+        for tensor in tensors:
+            _validate_supported_embedding_tensor_dtype(tensor)
+
         replicate_config = _make_embedding_replicate_config(
             self.replicate_config,
             with_soft_pin=with_soft_pin,
@@ -263,70 +285,85 @@ class MooncakeEmbeddingStoreClient:
             None,
         )
         if batch_put_from_multi_buffers is not None:
-            self._put_tensor_from_buffers(
-                pool_key,
-                tensor,
+            return self._put_tensors_from_buffers(
+                pool_keys,
+                tensors,
                 replicate_config=replicate_config,
             )
-            return
 
-        if replicate_config is None:
-            put_fn = getattr(self.store, "put_tensor", None)
-            if put_fn is None:
-                raise EmbeddingStoreSaveError(
-                    "Mooncake Embedding Store requires put_tensor or pub_tensor "
-                    "support for single-object embedding tensors."
-                )
-            ret = put_fn(key, tensor)
-        else:
-            put_fn = getattr(self.store, "pub_tensor", None)
-            if put_fn is None:
-                raise EmbeddingStoreSaveError(
-                    "Mooncake Embedding Store requires pub_tensor support when "
-                    "a ReplicateConfig is configured."
-                )
-            ret = put_fn(key, tensor, replicate_config)
-        if ret != 0:
-            raise EmbeddingStoreSaveError(
-                f"failed to put embedding tensor for {pool_key.to_string()}: {ret}"
-            )
+        results = []
+        for pool_key, tensor in zip(pool_keys, tensors, strict=True):
+            key = make_embedding_data_key(pool_key)
+            if replicate_config is None:
+                put_fn = getattr(self.store, "put_tensor", None)
+                if put_fn is None:
+                    raise EmbeddingStoreSaveError(
+                        "Mooncake Embedding Store requires put_tensor or pub_tensor "
+                        "support for single-object embedding tensors."
+                    )
+                ret = put_fn(key, tensor)
+            else:
+                put_fn = getattr(self.store, "pub_tensor", None)
+                if put_fn is None:
+                    raise EmbeddingStoreSaveError(
+                        "Mooncake Embedding Store requires pub_tensor support when "
+                        "a ReplicateConfig is configured."
+                    )
+                ret = put_fn(key, tensor, replicate_config)
+            results.append(ret == 0)
+        return results
 
-    def _put_tensor_from_buffers(
+    def _put_tensors_from_buffers(
         self,
-        pool_key: EmbeddingPoolKey,
-        tensor: Any,
+        pool_keys: list[EmbeddingPoolKey],
+        tensors: list[Any],
         *,
         replicate_config: Any | None,
-    ) -> None:
-        if not tensor.is_contiguous():
-            raise EmbeddingStoreSaveError(
-                "embedding tensor must be contiguous before batch buffer put"
+    ) -> list[bool]:
+        keys = []
+        buffer_ptrs = []
+        buffer_sizes = []
+        metadata_buffers = []
+        for pool_key, tensor in zip(pool_keys, tensors, strict=True):
+            if not tensor.is_contiguous():
+                raise EmbeddingStoreSaveError(
+                    "embedding tensor must be contiguous before batch buffer put"
+                )
+            data_size = tensor.numel() * tensor.element_size()
+            metadata = _encode_mooncake_tensor_metadata(tensor)
+            metadata_buffer = (ctypes.c_ubyte * len(metadata)).from_buffer_copy(
+                metadata
             )
-        data_size = tensor.numel() * tensor.element_size()
-        metadata = _encode_mooncake_tensor_metadata(tensor)
-        metadata_buffer = (ctypes.c_ubyte * len(metadata)).from_buffer_copy(metadata)
-        metadata_ptr = ctypes.addressof(metadata_buffer)
-        payload_ptr = tensor.data_ptr()
-        registered_addrs: list[int] = []
-        try:
-            self.register_tensor(payload_ptr, data_size)
-            registered_addrs.append(payload_ptr)
-            self.register_tensor(metadata_ptr, len(metadata))
-            registered_addrs.append(metadata_ptr)
+            metadata_buffers.append(metadata_buffer)
+            metadata_ptr = ctypes.addressof(metadata_buffer)
+            keys.append(make_embedding_data_key(pool_key))
+            buffer_ptrs.append([metadata_ptr, tensor.data_ptr()])
+            buffer_sizes.append([len(metadata), data_size])
 
-            key = make_embedding_data_key(pool_key)
+        registered_addrs: list[int] = []
+        registered_addr_set: set[int] = set()
+        try:
+            for ptrs, sizes in zip(buffer_ptrs, buffer_sizes, strict=True):
+                for offset in (1, 0):
+                    addr = ptrs[offset]
+                    size = sizes[offset]
+                    if addr in registered_addr_set:
+                        continue
+                    self.register_tensor(addr, size)
+                    registered_addrs.append(addr)
+                    registered_addr_set.add(addr)
             results = self.store.batch_put_from_multi_buffers(
-                [key],
-                [[metadata_ptr, payload_ptr]],
-                [[len(metadata), data_size]],
+                keys,
+                buffer_ptrs,
+                buffer_sizes,
                 replicate_config,
             )
-            failed = [result for result in results if result < 0]
-            if failed:
+            if len(results) != len(keys):
                 raise EmbeddingStoreSaveError(
-                    "failed to put embedding tensor for "
-                    f"{pool_key.to_string()}: {failed}"
+                    "Mooncake batch put returned an unexpected number of results: "
+                    f"expected {len(keys)}, got {len(results)}"
                 )
+            return [result >= 0 for result in results]
         finally:
             for addr in reversed(registered_addrs):
                 self.unregister_tensor(addr)
