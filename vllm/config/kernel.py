@@ -130,6 +130,8 @@ MoEBackend = Literal[
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "flashinfer_b12x",
+    "flashinfer_moe_ep_mega_deep_gemm",
+    "flashinfer_moe_ep_mega_cutedsl",
     "marlin",
     "humming",
     "triton_unfused",
@@ -138,6 +140,17 @@ MoEBackend = Literal[
     "hpc",
     "emulation",
 ]
+
+# Backends that run the DeepSeek-V4 mega-MoE model path (fused expert module
+# plus prepare_megamoe routing), whether the experts compute natively
+# (deep_gemm) or through the flashinfer moe_ep runtime.
+MEGA_MOE_BACKENDS = frozenset(
+    {
+        "deep_gemm_mega_moe",
+        "flashinfer_moe_ep_mega_deep_gemm",
+        "flashinfer_moe_ep_mega_cutedsl",
+    }
+)
 
 LinearBackend = Literal[
     "auto",
@@ -203,6 +216,14 @@ class KernelConfig:
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
+    - "flashinfer_moe_ep_mega_deep_gemm": Use the FlashInfer moe_ep
+      expert-parallel mega-MoE with the DeepGEMM megakernel, which consumes an
+      MXFP4 checkpoint verbatim (Blackwell, requires expert parallel;
+      DeepSeek-V4 only)
+    - "flashinfer_moe_ep_mega_cutedsl": Same, with the CuteDSL megakernel
+      (additionally requires NVSHMEM). The checkpoint selects the weight path:
+      an NVFP4 checkpoint is consumed prequantized, MXFP4 weights are
+      requantized at load
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
