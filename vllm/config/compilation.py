@@ -1182,6 +1182,13 @@ class CompilationConfig:
                         self.pass_config.fuse_qk_norm_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
+                    # DeepGEMM builds CUtensorMap with absolute device addresses;
+                    # keep GEMM (+internal quant) outside piecewise CUDAGraph.
+                    self.splitting_ops.append("vllm::deep_gemm_fp8_blockscale_mm")
+                    self.splitting_ops.append("vllm::fp8_gemm_nt_op")
+                    self.splitting_ops.append(
+                        "vllm::dynamic_flashinfer_deepgemm_blockscale_gemm"
+                    )
 
             elif len(self.splitting_ops) == 0:
                 if (

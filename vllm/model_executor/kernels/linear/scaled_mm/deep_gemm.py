@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import ClassVar
+
 import torch
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
+    per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -30,18 +32,15 @@ from .BlockScaledMMLinearKernel import (
 
 
 class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    # Match FlashInfer: keep BF16→FP8 quant inside the custom op so
+    # torch.compile/Inductor cannot rewrite TMA-aligned scale strides.
+    apply_input_quant: ClassVar[bool] = False
+
     def __init__(self, config: FP8ScaledMMLinearLayerConfig):
         super().__init__(config)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
-        act_scale_descriptor = config.activation_quant_key.scale
         self.is_deep_gemm_supported = is_deep_gemm_supported()
-        self.quant_fp8 = QuantFP8(
-            static=False,
-            group_shape=act_scale_descriptor.group_shape,
-            use_ue8m0=self.use_deep_gemm_e8m0,
-            tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
-            column_major_scales=True,
-        )
+        # Input quant happens inside deep_gemm_fp8_blockscale_mm (not here).
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -113,16 +112,82 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        out_dtype = self.config.out_dtype
-        output = torch.empty(
-            (A.shape[0], B.shape[0]),
-            dtype=out_dtype,
-            device=A.device,
+        # A is BF16 (apply_input_quant=False). As is unused placeholder.
+        del As
+        group_size = self.weight_group_shape.col
+        return torch.ops.vllm.deep_gemm_fp8_blockscale_mm(
+            A,
+            B,
+            Bs,
+            group_size,
+            self.use_deep_gemm_e8m0,
+            bool(envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES),
         )
-        torch.ops.vllm.fp8_gemm_nt_op(A, As, B, Bs, output, self.use_deep_gemm_e8m0)
-        return output
 
 
+def _deep_gemm_fp8_blockscale_mm_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_size: int,
+    use_deep_gemm_e8m0: bool,
+    tma_aligned_scales: bool,
+) -> torch.Tensor:
+    """BF16→FP8 quant + DeepGEMM, all inside one custom op (FI-style).
+
+    Doing quant in the compiled FX graph lets Inductor rewrite TMA-aligned
+    scale strides (e.g. (1, align(M,4)) → (1, M)), which makes DeepGEMM's
+    SFA TMA read OOB (CUDA_ERROR_ILLEGAL_ADDRESS). FlashInfer swapAB avoids
+    this by owning quant+gemm inside its opaque kernel/op.
+    """
+    q_input, input_scale = per_token_group_quant_fp8(
+        input,
+        group_size=group_size,
+        column_major_scales=True,
+        tma_aligned_scales=tma_aligned_scales,
+        use_ue8m0=use_deep_gemm_e8m0,
+    )
+    output = torch.empty(
+        (q_input.shape[0], weight.shape[0]),
+        dtype=torch.bfloat16,
+        device=q_input.device,
+    )
+    fp8_gemm_nt(
+        (q_input, input_scale),
+        (weight, weight_scale),
+        output,
+        is_deep_gemm_e8m0_used=use_deep_gemm_e8m0,
+    )
+    return output
+
+
+def _deep_gemm_fp8_blockscale_mm_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_size: int,
+    use_deep_gemm_e8m0: bool,
+    tma_aligned_scales: bool,
+) -> torch.Tensor:
+    return torch.empty(
+        input.shape[0],
+        weight.shape[0],
+        dtype=torch.bfloat16,
+        device=input.device,
+    )
+
+
+direct_register_custom_op(
+    "deep_gemm_fp8_blockscale_mm",
+    _deep_gemm_fp8_blockscale_mm_impl,
+    fake_impl=_deep_gemm_fp8_blockscale_mm_fake,
+    # Opaque to Dynamo: quant+TMA layout stay inside the op.
+    # cudagraph_unsafe: DeepGEMM CUtensorMap uses absolute addresses.
+    tags=(torch.Tag.cudagraph_unsafe,),
+)
+
+
+# Backward-compatible alias used by older compiled artifacts / call sites.
 def _fp8_gemm_nt_op(
     q_input: torch.Tensor,
     input_scale: torch.Tensor,
@@ -131,6 +196,10 @@ def _fp8_gemm_nt_op(
     output: torch.Tensor,
     use_deep_gemm_e8m0: bool,
 ) -> None:
+    from vllm.utils.deep_gemm import get_col_major_tma_aligned_tensor
+
+    if input_scale.dim() >= 2:
+        input_scale = get_col_major_tma_aligned_tensor(input_scale)
     fp8_gemm_nt(
         (q_input, input_scale),
         (weight, weight_scale),
@@ -155,4 +224,5 @@ direct_register_custom_op(
     _fp8_gemm_nt_op,
     mutates_args=["output"],
     fake_impl=_fp8_gemm_nt_op_fake,
+    tags=(torch.Tag.needs_fixed_stride_order, torch.Tag.cudagraph_unsafe),
 )
