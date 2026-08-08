@@ -166,6 +166,33 @@ class TestNixlTransportWithMockedAgent:
         assert result.done == ()
         assert tid in result.failed
 
+    def test_poll_marks_failed_when_check_xfer_state_raises(self):
+        """A check_xfer_state exception marks the transfer as failed.
+
+        Regression: poll() used to log a warning and continue without
+        recording the failure, so the transfer stayed in _inflight forever,
+        was re-polled (and re-warned) every cycle, and its handle was never
+        released.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid in transport._inflight
+
+        transport._agent.check_xfer_state.side_effect = RuntimeError("nixl boom")
+        result = transport.poll()
+
+        assert result.done == ()
+        assert tid in result.failed
+        # Cleaned up: no longer inflight, handle release attempted.
+        assert tid not in transport._inflight
+        transport._agent.release_xfer_handle.assert_called()
+
+        # Later polls no longer see (or re-warn about) the dead transfer.
+        result = transport.poll()
+        assert result == PollResult(done=(), failed=())
+
     def test_poll_ignores_in_progress(self):
         """Transfers in PROC/PEND state stay inflight."""
         transport = self._make_transport()
