@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import hashlib
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -64,6 +65,34 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
+
+_LMCACHE_MP_CACHE_SALT_VERSION = "vllm_lmcache_mp_v1"
+
+
+def _encode_cache_key_component(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _make_lmcache_mp_cache_salt(request: "Request") -> str:
+    """Build the LMCache MP cache salt used for external KV keys.
+
+    The MP protocol passes token IDs plus cache_salt to LMCache. Fold the
+    LoRA name into that salt so external KV blocks produced by one adapter
+    cannot be reused by another adapter with the same prompt tokens. Hash
+    each component so arbitrary names and user salts stay safe for LMCache
+    file/object keys.
+    """
+    cache_salt = request.cache_salt or ""
+    lora_request = request.lora_request
+    lora_name = lora_request.lora_name if lora_request is not None else ""
+    if not cache_salt and not lora_name:
+        return ""
+
+    return (
+        f"{_LMCACHE_MP_CACHE_SALT_VERSION}_"
+        f"lora_{_encode_cache_key_component(lora_name)}_"
+        f"salt_{_encode_cache_key_component(cache_salt)}"
+    )
 
 
 # Helper functions
@@ -220,7 +249,7 @@ class LMCacheMPRequestTracker:
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
-        self.cache_salt: str = request.cache_salt or ""
+        self.cache_salt = _make_lmcache_mp_cache_salt(request)
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
@@ -869,6 +898,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
+                        cache_salt=tracker.cache_salt,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",
