@@ -7,7 +7,7 @@ ARG BASE_UBI_IMAGE_TAG=9.6-1754584681
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS builder-base
 
-ARG VLLM_VERSION="0.22.1"
+ARG VLLM_VERSION="0.0.0.dev"
 ARG PYTHON_VERSION=3.12
 ARG VLLM_TARGET_DEVICE=cpu
 
@@ -44,10 +44,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # copy vllm source code to build cache
 COPY . .
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-14/enable && \
-    pip install -U uv
-
 # build & install vLLM so that all transitive dependencies are build/downloaded into the uv cache
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-14/enable && \
@@ -74,7 +70,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     find /root/.cache/uv -name "*.whl" && \
     SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION" uv build \
       --wheel --out-dir ${WHEEL_DIR} --no-build-isolation && \
-    uv pip install "$(echo ${WHEEL_DIR}/vllm*.whl)[tensorizer]" --refresh
+    uv pip install "$(echo ${WHEEL_DIR}/vllm*.whl)[tensorizer]" --refresh && \
+    uv pip uninstall -y cmake meson-python scikit-build-core maturin build wheel auditwheel pybind11 nanobind cython setuptools-rust && \
+    # Remove packaged test suites
+    find ${VIRTUAL_ENV}/lib64/python${PYTHON_VERSION}/site-packages \
+        -type d \( -name tests -o -name test \) -exec rm -rf {} + && \
+    find ${VIRTUAL_ENV} -name "__pycache__" -type d -exec rm -rf {} + && \
+    find ${VIRTUAL_ENV} -name "*.pyc" -delete && \
+    rm -f ${VIRTUAL_ENV}/lib64/python${PYTHON_VERSION}/site-packages/xgrammar/lib/libxgrammar.a
 
 ###############################################################
 #                   FINAL VLLM IMAGE STAGE                    #
@@ -152,5 +155,3 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 USER 2000
 
 ENTRYPOINT ["vllm", "serve"]
-
- 
