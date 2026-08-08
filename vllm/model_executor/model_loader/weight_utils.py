@@ -932,7 +932,7 @@ def safetensors_weights_iterator(
                 state_dict = load(f.read())
             for name, param in state_dict.items():
                 if not should_skip_weight(name, local_expert_ids):
-                    yield name, param
+                    yield name, param.clone()
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
             # instead we reconstruct the subclasses here before returning
@@ -962,13 +962,13 @@ def safetensors_weights_iterator(
                 unflattened_state_dict, leftover_state_dict = (
                     unflatten_tensor_state_dict(state_dict, metadata)
                 )
-            yield from unflattened_state_dict.items()
+            yield from ((k, v.clone()) for k, v in unflattened_state_dict.items())
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
                     if should_skip_weight(name, local_expert_ids):
                         continue
-                    param = f.get_tensor(name)
+                    param = f.get_tensor(name).clone()
                     yield name, param
 
 
@@ -999,7 +999,8 @@ def multi_thread_safetensors_weights_iterator(
             state_dict = future.result()
             del future
             for key in list(state_dict):
-                yield key, state_dict.pop(key)
+                val = state_dict.pop(key).clone()
+                yield key, val
 
 
 def runai_safetensors_weights_iterator(
