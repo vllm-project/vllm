@@ -12,10 +12,13 @@ from compressed_tensors.quantization import (
     QuantizationType,
 )
 
+from vllm.model_executor.layers.fused_moe.oracle import int_wna16
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
     _backend_incompatibility_reason,
     _convert_moe_wna16_humming_tensors,
+    _process_awq_weights_marlin,
+    _process_weights_marlin,
     convert_to_wna16_moe_kernel_format,
     map_wna16_backend,
 )
@@ -203,3 +206,142 @@ def test_moe_wna16_uses_humming_quant_config(monkeypatch):
     )
 
     assert method.get_fused_moe_quant_config(layer) is quant_config
+
+
+@pytest.mark.parametrize("quant_method", ["awq", "gptq"])
+@pytest.mark.parametrize(
+    ("tp_size", "intermediate_size"), [(2, 512), (4, 256), (8, 128)]
+)
+def test_marlin_moe_w13_scale_permutation_uses_weight_k(
+    monkeypatch, quant_method, tp_size, intermediate_size
+):
+    hidden_size = 4096
+    group_size = 128
+    pack_factor = 8
+    num_experts = 1
+    w13_scales = torch.arange(
+        num_experts * (hidden_size // group_size) * (2 * intermediate_size),
+        dtype=torch.float32,
+    ).reshape(num_experts, hidden_size // group_size, 2 * intermediate_size)
+    w2_scales = torch.arange(
+        num_experts * (intermediate_size // group_size) * hidden_size,
+        dtype=torch.float32,
+    ).reshape(num_experts, intermediate_size // group_size, hidden_size)
+    layer = SimpleNamespace(
+        intermediate_size_per_partition=intermediate_size,
+        num_groups_w13=hidden_size // group_size,
+        num_groups_w2=intermediate_size // group_size,
+    )
+
+    permute_scales = int_wna16.marlin_moe_permute_scales
+    observed_size_ks = []
+
+    def capture_size_k(*, s, size_k, size_n, group_size, is_a_8bit=False):
+        observed_size_ks.append(size_k)
+        return permute_scales(
+            s=s,
+            size_k=size_k,
+            size_n=size_n,
+            group_size=group_size,
+            is_a_8bit=is_a_8bit,
+        )
+
+    monkeypatch.setattr(int_wna16, "marlin_moe_permute_scales", capture_size_k)
+
+    if quant_method == "awq":
+        monkeypatch.setattr(
+            int_wna16.ops,
+            "awq_marlin_moe_repack",
+            lambda qweight, *_args, **_kwargs: qweight,
+        )
+        monkeypatch.setattr(
+            int_wna16,
+            "moe_awq_to_marlin_zero_points",
+            lambda qzeros, **_kwargs: qzeros,
+        )
+        w13_qweight = torch.empty(
+            num_experts,
+            hidden_size,
+            2 * intermediate_size // pack_factor,
+            dtype=torch.int32,
+        )
+        w2_qweight = torch.empty(
+            num_experts,
+            intermediate_size,
+            hidden_size // pack_factor,
+            dtype=torch.int32,
+        )
+        w13_qzeros = torch.empty(
+            num_experts,
+            hidden_size // group_size,
+            2 * intermediate_size // pack_factor,
+            dtype=torch.int32,
+        )
+        w2_qzeros = torch.empty(
+            num_experts,
+            intermediate_size // group_size,
+            hidden_size // pack_factor,
+            dtype=torch.int32,
+        )
+        converted = _process_awq_weights_marlin(
+            layer,
+            4,
+            pack_factor,
+            group_size,
+            None,
+            w13_qweight,
+            w2_qweight,
+            w13_scales,
+            w2_scales,
+            w13_qzeros,
+            w2_qzeros,
+        )
+    else:
+        monkeypatch.setattr(
+            int_wna16.ops,
+            "gptq_marlin_moe_repack",
+            lambda qweight, *_args, **_kwargs: qweight,
+        )
+        w13_qweight = torch.empty(
+            num_experts,
+            hidden_size // pack_factor,
+            2 * intermediate_size,
+            dtype=torch.int32,
+        )
+        w2_qweight = torch.empty(
+            num_experts,
+            intermediate_size // pack_factor,
+            hidden_size,
+            dtype=torch.int32,
+        )
+        converted = _process_weights_marlin(
+            layer,
+            None,
+            4,
+            pack_factor,
+            group_size,
+            None,
+            w13_qweight,
+            w2_qweight,
+            w13_scales,
+            w2_scales,
+            torch.empty(num_experts, hidden_size, dtype=torch.int32),
+            torch.empty(num_experts, intermediate_size, dtype=torch.int32),
+        )
+
+    correctly_permuted_w13 = permute_scales(
+        s=w13_scales,
+        size_k=hidden_size,
+        size_n=w13_scales.shape[2],
+        group_size=group_size,
+    )
+    old_w13_permutation = permute_scales(
+        s=w13_scales,
+        size_k=intermediate_size,
+        size_n=w13_scales.shape[2],
+        group_size=group_size,
+    )
+
+    assert observed_size_ks == [hidden_size, intermediate_size]
+    assert torch.equal(converted[2], correctly_permuted_w13)
+    assert torch.equal(old_w13_permutation, correctly_permuted_w13) == (tp_size < 8)
