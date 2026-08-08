@@ -39,7 +39,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-from vllm.v1.kv_offload.sparse.hisparse_runtime import ResolvedHiSparseConfig
+from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+    ResolvedHiSparseConfig,
+    get_hisparse_host_block_stride,
+)
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -1358,7 +1361,7 @@ def _get_kv_cache_config_packed(
 
 
 def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
-    """Return the HiSparse per-rank pinned host budget."""
+    """Return the HiSparse pinned host budget."""
     config = vllm_config.attention_config.hisparse_config
     if config is None:
         return None
@@ -1616,7 +1619,8 @@ def _get_hisparse_hma_config(
     )
     gpu_stride = round_up(gpu_stride, hot_page_alignment)
     host_page = sum(spec.page_size_bytes for spec in source_specs.values())
-    host_num_blocks = host_budget // host_page
+    host_block_stride = get_hisparse_host_block_stride(vllm_config, host_page)
+    host_num_blocks = host_budget // host_block_stride
     gpu_num_blocks = available_memory // gpu_stride
     override = vllm_config.cache_config.num_gpu_blocks_override
     if override is not None:

@@ -607,6 +607,22 @@ def test_multi_worker_race_shared_memory_visible(iid):
         _cleanup_file(regions[0].mmap_path)
 
 
+def test_replicated_workers_share_the_same_slot(iid):
+    creator = _make_region(iid, rank=0)
+    joiner = _make_region(iid, rank=0)
+    creator_view = creator.create_next_view(PAGE_SIZE)
+    joiner_view = joiner.create_next_view(PAGE_SIZE)
+    try:
+        creator_view[2].fill_(37)
+
+        assert joiner_view[2].tolist() == [37] * PAGE_SIZE
+    finally:
+        del creator_view, joiner_view
+        joiner.cleanup()
+        creator.cleanup()
+        _cleanup_file(creator.mmap_path)
+
+
 def test_multiprocess_race_construct_and_write(iid):
     """N processes race to construct the same SharedOffloadRegion, each writes
     fill_value = rank+1 into their slot; parent verifies interleaved layout."""
