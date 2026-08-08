@@ -23,6 +23,61 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
+# The single-process executor runs the model in the same process that also
+# handles scheduling and the CPU-side multimodal input path (e.g. torch.concat
+# in MultiModalFlatField._reduce_data). By default PyTorch sizes its intra-op
+# thread pool to the number of physical cores, which oversubscribes the CPU for
+# these memory-bandwidth-bound ops. Under concurrency -- and especially inside
+# containers with CFS quotas -- thread oversubscription actively *slows down*
+# concat instead of speeding it up.
+#
+# Unlike MultiprocExecutor (N worker processes x 1 thread each), a single
+# process should keep a small thread pool near the memory-bandwidth "knee"
+# rather than collapsing to 1 thread (which makes concat slower) or spawning a
+# thread per core (which causes contention). Empirically the knee is well below
+# the core count, so we cap to a small default that users can override via
+# OMP_NUM_THREADS or VLLM_UNIPROC_OMP_THREADS.
+_UNIPROC_DEFAULT_OMP_THREADS = 4
+
+
+def _maybe_limit_uniproc_omp_threads() -> None:
+    """Cap Torch intra-op parallelism for the single-process executor.
+
+    Only lowers the thread count, never raises it, and always defers to an
+    explicit ``OMP_NUM_THREADS`` set in the environment. Set
+    ``VLLM_UNIPROC_OMP_THREADS=0`` to disable this behavior and leave Torch's
+    default untouched.
+    """
+    # Respect an explicit OMP_NUM_THREADS from the user/deployment.
+    if "OMP_NUM_THREADS" in os.environ:
+        return
+
+    target = envs.VLLM_UNIPROC_OMP_THREADS
+    if target is None:
+        target = _UNIPROC_DEFAULT_OMP_THREADS
+
+    # Non-positive means "leave Torch's default untouched".
+    if target <= 0:
+        return
+
+    current = torch.get_num_threads()
+    target = min(current, target)
+    if target >= current:
+        return
+
+    logger.warning(
+        "Reducing Torch intra-op parallelism from %d to %d threads to avoid "
+        "CPU oversubscription in the single-process (uni) executor. This "
+        "memory-bandwidth-bound path (e.g. multimodal torch.concat) does not "
+        "scale to all cores and contends under concurrency. Set "
+        "OMP_NUM_THREADS or VLLM_UNIPROC_OMP_THREADS to tune this value.",
+        current,
+        target,
+    )
+    os.environ["OMP_NUM_THREADS"] = str(target)
+    torch.set_num_threads(target)
+
+
 class AsyncOutputFuture(Future):
     def __init__(self, async_output: AsyncModelRunnerOutput, single_value: bool):
         self.async_output = async_output
@@ -45,6 +100,7 @@ class AsyncOutputFuture(Future):
 class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
+        _maybe_limit_uniproc_omp_threads()
         self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         kwargs = dict(
