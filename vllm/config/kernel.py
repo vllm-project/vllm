@@ -162,6 +162,12 @@ LinearBackend = Literal[
     "xpu_woq",
 ]
 
+NvFp4InputQuantBackend = Literal[
+    "auto",
+    "cuda",
+    "flashinfer_cutedsl",
+]
+
 
 @config
 class KernelConfig:
@@ -237,6 +243,19 @@ class KernelConfig:
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
     """
 
+    nvfp4_input_quant_backend: NvFp4InputQuantBackend = "auto"
+    """Backend for the NVFP4 activation (input) quantization in NVFP4 dense linear
+    layers. Only the FlashInfer NVFP4 linear kernels honor this; other kernels
+    always use the built-in CUDA kernel. Available options:
+
+    - "auto": Use FlashInfer's CuTe-DSL nvfp4_quantize when available (Blackwell
+      SM100+ with a CuTe-DSL FlashInfer build), else the built-in CUDA kernel
+      (default)
+    - "cuda": Always use the built-in CUDA kernel
+    - "flashinfer_cutedsl": Force the CuTe-DSL kernel; errors at setup if it is
+      unavailable
+    """
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -247,6 +266,13 @@ class KernelConfig:
     @field_validator("linear_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("nvfp4_input_quant_backend", mode="before")
+    @classmethod
+    def _normalize_nvfp4_input_quant_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value

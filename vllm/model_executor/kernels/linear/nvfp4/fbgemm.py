@@ -50,7 +50,7 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
-            backend="fbgemm",
+            gemm_backend="fbgemm",
         )
 
         out = torch.ops.fbgemm.f4f4bf16(

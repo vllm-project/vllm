@@ -343,6 +343,29 @@ def has_flashinfer_b12x_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl_nvfp4_quant() -> bool:
+    """Return ``True`` if FlashInfer's CuTe-DSL ``nvfp4_quantize`` backend is
+    usable (Blackwell SM100+).
+
+    ``nvfp4_quantize`` is exposed even without CuTe-DSL, so this also checks
+    ``flashinfer.cute_dsl.is_cute_dsl_available()`` to avoid a runtime failure on
+    the first ``backend="cute-dsl"`` call.
+    """
+    if not has_flashinfer() or not current_platform.has_device_capability(100):
+        return False
+    mod = _get_submodule("flashinfer")
+    if mod is None or not hasattr(mod, "nvfp4_quantize"):
+        return False
+    cute_dsl = _get_submodule("flashinfer.cute_dsl")
+    if cute_dsl is None or not hasattr(cute_dsl, "is_cute_dsl_available"):
+        return False
+    try:
+        return bool(cute_dsl.is_cute_dsl_available())
+    except Exception:
+        return False
+
+
+@functools.cache
 def has_nvidia_artifactory() -> bool:
     """Return `True` if NVIDIA's artifactory is accessible.
 
@@ -704,6 +727,54 @@ if has_flashinfer():
         )
 
     @torch.library.custom_op(
+        "vllm::flashinfer_cutedsl_nvfp4_quantize",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_cutedsl_nvfp4_quantize(
+        a: torch.Tensor, a_global_sf: torch.Tensor, sf_layout: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # CuTe-DSL NVFP4 quant; sf_layout is "128x4", "8x4", or "linear".
+        from flashinfer import SfLayout
+        from flashinfer import nvfp4_quantize as nvfp4_quantize_
+
+        layouts = {
+            "128x4": SfLayout.layout_128x4,
+            "8x4": SfLayout.layout_8x4,
+            "linear": SfLayout.layout_linear,
+        }
+        return nvfp4_quantize_(
+            a,
+            a_global_sf,
+            sfLayout=layouts[sf_layout],
+            do_shuffle=False,
+            backend="cute-dsl",
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_cutedsl_nvfp4_quantize",
+    )
+    def flashinfer_cutedsl_nvfp4_quantize_fake(
+        a: torch.Tensor, a_global_sf: torch.Tensor, sf_layout: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        m, n = a.shape
+        round_up = lambda x, y: (x + y - 1) // y * y
+        scale_n = n // 16
+        if sf_layout == "linear":
+            # Linear: row-major [m, n // 16] scale, no swizzle padding.
+            scale = torch.empty(m, scale_n, dtype=torch.uint8, device=a.device)
+        else:
+            # 128x4 / 8x4 swizzled: pad rows to the tile and cols to 4.
+            row_tile = 8 if sf_layout == "8x4" else 128
+            scale = torch.empty(
+                round_up(m, row_tile),
+                round_up(scale_n, 4),
+                dtype=torch.uint8,
+                device=a.device,
+            )
+        return torch.empty(m, n // 2, dtype=torch.uint8, device=a.device), scale
+
+    @torch.library.custom_op(
         "vllm::mm_mxfp8",
         mutates_args=[],
         device_types="cuda",
@@ -1046,6 +1117,7 @@ __all__ = [
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",
+    "has_flashinfer_cutedsl_nvfp4_quant",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",

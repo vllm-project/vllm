@@ -3,9 +3,11 @@
 import pytest
 import torch
 
+from tests.kernels.quantization.nvfp4_utils import break_fp4_bytes
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.flashinfer import has_flashinfer_cutedsl_nvfp4_quant
 from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.has_device_capability(100):
@@ -133,6 +135,25 @@ def recover_swizzled_scales(scale, m, n):
 
 def round_up(x: int, y: int) -> int:
     return (x + y - 1) // y * y
+
+
+# Signed FP4 (E2M1) levels in ascending order; an index gap of 1 between two
+# decoded values is a single representable-level (rounding-boundary) step.
+_FP4_LEVELS_ASC = sorted(set(E2M1_TO_FLOAT32))
+
+
+def assert_fp4_within_one_level(packed_a: torch.Tensor, packed_b: torch.Tensor) -> None:
+    """Assert two packed-FP4 tensors decode to values differing by at most one FP4
+    level per element. Unlike a packed-byte mismatch fraction this is size- and
+    nibble-independent and bounds every element to a single level, so a larger
+    systematic difference is still caught while an approximate-reciprocal boundary
+    flip is tolerated."""
+    a = break_fp4_bytes(packed_a, torch.float32).flatten()
+    b = break_fp4_bytes(packed_b, torch.float32).flatten()
+    levels = torch.tensor(_FP4_LEVELS_ASC, dtype=torch.float32, device=a.device)
+    gap = (torch.searchsorted(levels, a) - torch.searchsorted(levels, b)).abs()
+    max_gap = int(gap.max())
+    assert max_gap <= 1, f"fp4 codes differ by up to {max_gap} levels"
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -306,3 +327,263 @@ def test_quantize_to_fp4_padded_no_sf_swizzled(pad_shape: tuple[int, int]) -> No
     out_ans = cast_from_fp4(out, m, n)
     torch.testing.assert_close(out_ans, out_ref)
     torch.testing.assert_close(scale_ans, scale_ref)
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutedsl_nvfp4_quant(),
+    reason="FlashInfer NVFP4 quantization is not available.",
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("shape", SHAPES + PAD_SHAPES)
+@torch.inference_mode()
+def test_flashinfer_nvfp4_quant_128x4_matches_vllm(
+    dtype: torch.dtype,
+    shape: tuple[int, int],
+) -> None:
+    """FlashInfer CuTe-DSL 128x4 quant must match the vLLM C++ kernel it replaces
+    (including M not a multiple of 128). CuTe-DSL uses an approximate reciprocal,
+    so assert equivalence (at most one FP4 level per element + aggregate dequant
+    error), not bit-exactness."""
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+
+    m, n = shape
+    x = torch.randn((m, n), dtype=dtype)
+    global_scale = (
+        FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
+    )
+
+    # vLLM C++ 128x4 (the path FlashInfer replaces).
+    ref_out, ref_scale = ops.scaled_fp4_quant(
+        x, global_scale, is_sf_swizzled_layout=True
+    )
+    # FlashInfer CuTe-DSL 128x4.
+    fi_out, fi_scale = ops.scaled_fp4_quant(
+        x, global_scale, is_sf_swizzled_layout=True, quant_backend="flashinfer_cutedsl"
+    )
+
+    assert fi_out.shape == ref_out.shape
+    assert fi_scale.shape == ref_scale.shape
+
+    # An approximate reciprocal may flip a value to an adjacent FP4 level, but no
+    # element may differ by more than one level.
+    assert_fp4_within_one_level(fi_out, ref_out)
+
+    # Aggregate dequant error catches systematic (scale/layout) errors while
+    # tolerating those isolated single-level boundary flips.
+    n_blocks = n // BLOCK_SIZE
+    fi_s = recover_swizzled_scales(fi_scale, m, n)
+    ref_s = recover_swizzled_scales(ref_scale, m, n)
+    fi_fp4 = break_fp4_bytes(fi_out, torch.float32).reshape(m, n_blocks, BLOCK_SIZE)
+    ref_fp4 = break_fp4_bytes(ref_out, torch.float32).reshape(m, n_blocks, BLOCK_SIZE)
+    fi_deq = fi_fp4 * fi_s.unsqueeze(-1) / global_scale
+    ref_deq = ref_fp4 * ref_s.unsqueeze(-1) / global_scale
+    agg_rel_err = (fi_deq - ref_deq).abs().sum() / ref_deq.abs().sum().clamp_min(1e-6)
+    assert agg_rel_err < 1e-2, f"aggregate rel err {float(agg_rel_err):.4f}"
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutedsl_nvfp4_quant(),
+    reason="FlashInfer NVFP4 quantization is not available.",
+)
+@pytest.mark.parametrize("shape", PADDED_OUTPUT_SHAPES)
+@torch.inference_mode()
+def test_flashinfer_nvfp4_quant_128x4_padded_output(
+    shape: tuple[int, int],
+) -> None:
+    """The FlashInfer route emulates padded_n by zero-padding the input. The
+    data region must equal the unpadded FlashInfer output and the padded
+    columns (fp4 and scale) must be exactly zero."""
+    dtype = torch.float16
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+
+    m, n = shape
+    padded_n = round_up(n, 32)
+    assert padded_n > n
+
+    x = torch.randn((m, n), dtype=dtype)
+    global_scale = (
+        FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
+    )
+
+    padded_out, padded_scale = ops.scaled_fp4_quant(
+        x,
+        global_scale,
+        is_sf_swizzled_layout=True,
+        padded_n=padded_n,
+        quant_backend="flashinfer_cutedsl",
+    )
+    unpadded_out, unpadded_scale = ops.scaled_fp4_quant(
+        x, global_scale, is_sf_swizzled_layout=True, quant_backend="flashinfer_cutedsl"
+    )
+
+    assert padded_out.shape == (m, padded_n // 2)
+
+    # Padding whole zero blocks leaves the real blocks unchanged.
+    torch.testing.assert_close(padded_out[:, : n // 2], unpadded_out)
+    assert torch.count_nonzero(padded_out[:, n // 2 :]) == 0
+
+    padded_s = recover_swizzled_scales(padded_scale, m, padded_n)
+    unpadded_s = recover_swizzled_scales(unpadded_scale, m, n)
+    torch.testing.assert_close(padded_s[:, : n // BLOCK_SIZE], unpadded_s)
+    assert torch.count_nonzero(padded_s[:, n // BLOCK_SIZE :]) == 0
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutedsl_nvfp4_quant(),
+    reason="FlashInfer NVFP4 quantization is not available.",
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("shape", [(90, 64), (150, 64), (90, 128), (150, 128)])
+@torch.inference_mode()
+def test_flashinfer_nvfp4_quant_128x4_zeros_scale_padding(
+    dtype: torch.dtype,
+    shape: tuple[int, int],
+) -> None:
+    """The swizzled scale buffer is padded to round_up(m, 128) rows. This CuTe-DSL
+    path bypasses create_fp4_scale_tensor's zero-init, so it relies on the
+    FlashInfer kernel zeroing those padded rows itself. Guards against a FlashInfer
+    change reintroducing the uninitialized-scale corruption fixed in PR #45739."""
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+
+    m, n = shape
+    padded_m = round_up(m, 128)
+    assert padded_m > m and (n // BLOCK_SIZE) % 4 == 0  # row padding only
+
+    x = torch.randn((m, n), dtype=dtype)
+    global_scale = (
+        FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
+    )
+
+    _, scale = ops.scaled_fp4_quant(
+        x, global_scale, is_sf_swizzled_layout=True, quant_backend="flashinfer_cutedsl"
+    )
+
+    # Un-swizzle the full padded buffer; the padded rows [m:padded_m) must be zero.
+    full = recover_swizzled_scales(scale, padded_m, n)
+    assert torch.count_nonzero(full[m:]) == 0
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutedsl_nvfp4_quant(),
+    reason="FlashInfer NVFP4 quantization is not available.",
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("shape", SHAPES + PAD_SHAPES)
+@torch.inference_mode()
+def test_flashinfer_nvfp4_quant_linear_matches_vllm(
+    dtype: torch.dtype,
+    shape: tuple[int, int],
+) -> None:
+    """FlashInfer CuTe-DSL linear quant must match the vLLM C++ kernel it
+    mirrors. Same approximate-reciprocal tolerance as the 128x4 test; the linear
+    scale is a plain [m, n // 16] tensor, compared directly (no unswizzle)."""
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+
+    m, n = shape
+    x = torch.randn((m, n), dtype=dtype)
+    global_scale = (
+        FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
+    )
+
+    # vLLM C++ linear (the path FlashInfer mirrors).
+    ref_out, ref_scale = ops.scaled_fp4_quant(
+        x, global_scale, is_sf_swizzled_layout=False
+    )
+    # FlashInfer CuTe-DSL linear.
+    fi_out, fi_scale = ops.scaled_fp4_quant(
+        x, global_scale, is_sf_swizzled_layout=False, quant_backend="flashinfer_cutedsl"
+    )
+
+    assert fi_out.shape == ref_out.shape
+    assert fi_scale.shape == ref_scale.shape
+
+    # An approximate reciprocal may flip a value to an adjacent FP4 level, but no
+    # element may differ by more than one level.
+    assert_fp4_within_one_level(fi_out, ref_out)
+
+    # Aggregate dequant error catches systematic (scale/layout) errors while
+    # tolerating those isolated single-level boundary flips.
+    n_blocks = n // BLOCK_SIZE
+    fi_s = fi_scale.to(torch.float32)
+    ref_s = ref_scale.to(torch.float32)
+    fi_fp4 = break_fp4_bytes(fi_out, torch.float32).reshape(m, n_blocks, BLOCK_SIZE)
+    ref_fp4 = break_fp4_bytes(ref_out, torch.float32).reshape(m, n_blocks, BLOCK_SIZE)
+    fi_deq = fi_fp4 * fi_s.unsqueeze(-1) / global_scale
+    ref_deq = ref_fp4 * ref_s.unsqueeze(-1) / global_scale
+    agg_rel_err = (fi_deq - ref_deq).abs().sum() / ref_deq.abs().sum().clamp_min(1e-6)
+    assert agg_rel_err < 1e-2, f"aggregate rel err {float(agg_rel_err):.4f}"
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutedsl_nvfp4_quant(),
+    reason="FlashInfer NVFP4 quantization is not available.",
+)
+@torch.inference_mode()
+def test_nvfp4_quant_trtllm_8x4_layout_selection() -> None:
+    """For the TRTLLM backend the SF layout is chosen by M: 8x4 at m <= 32 and
+    128x4 above (distinguished by the scale row count). This holds with
+    quant_backend="flashinfer_cutedsl", which routes to the cute-dsl 8x4 / 128x4
+    kernels."""
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+    n = 64
+
+    # m <= 32 with the TRTLLM backend: 8x4 layout (cute-dsl 8x4 here).
+    m_small = 16
+    x = torch.randn((m_small, n), dtype=torch.bfloat16)
+    gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
+    _, scale = ops.scaled_fp4_quant(
+        x, gs, gemm_backend="flashinfer-trtllm", quant_backend="flashinfer_cutedsl"
+    )
+    assert scale.shape[0] == round_up(m_small, 8)
+
+    # m > 32: the 8x4 path no longer applies, so it routes to the 128x4 CuTe-DSL
+    # kernel.
+    m_large = 64
+    x = torch.randn((m_large, n), dtype=torch.bfloat16)
+    gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
+    _, scale = ops.scaled_fp4_quant(
+        x, gs, gemm_backend="flashinfer-trtllm", quant_backend="flashinfer_cutedsl"
+    )
+    assert scale.shape[0] == round_up(m_large, 128)
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutedsl_nvfp4_quant(),
+    reason="FlashInfer NVFP4 quantization is not available.",
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_flashinfer_cutedsl_nvfp4_quant_8x4_matches_cuda(dtype: torch.dtype) -> None:
+    """FlashInfer CuTe-DSL 8x4 quant (TRTLLM small-M) must match the CUDA 8x4
+    kernel. There is no vLLM C++ 8x4 kernel, so both sides are FlashInfer; assert
+    at most one FP4 level (and one e4m3 scale step) per element, not
+    bit-exactness."""
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+    n = 128
+
+    for m in (1, 16, 32):
+        x = torch.randn((m, n), dtype=dtype)
+        gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(x).max().to(torch.float32)
+        cuda_out, cuda_scale = ops.scaled_fp4_quant(
+            x, gs, gemm_backend="flashinfer-trtllm", quant_backend="auto"
+        )
+        fi_out, fi_scale = ops.scaled_fp4_quant(
+            x, gs, gemm_backend="flashinfer-trtllm", quant_backend="flashinfer_cutedsl"
+        )
+
+        # Both use the 8x4 layout (scale rows rounded up to 8).
+        assert fi_out.shape == cuda_out.shape
+        assert fi_scale.shape == cuda_scale.shape
+        assert fi_scale.shape[0] == round_up(m, 8)
+
+        # At most one FP4 level and one e4m3 scale step may differ per element.
+        assert_fp4_within_one_level(fi_out, cuda_out)
+        fi_s = fi_scale.view(torch.float8_e4m3fn).to(torch.float32)
+        cuda_s = cuda_scale.view(torch.float8_e4m3fn).to(torch.float32)
+        torch.testing.assert_close(fi_s, cuda_s, rtol=0.13, atol=2**-9)
