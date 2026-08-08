@@ -16,7 +16,6 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext};
-use self::value::{TemplateValue, to_template_value};
 use super::{ChatRenderer, RenderedPrompt, effective_template_kwargs};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
@@ -28,7 +27,6 @@ mod error;
 mod format;
 mod template;
 mod tojson;
-mod value;
 
 pub use template::{load_chat_template, resolve_chat_template};
 
@@ -277,23 +275,12 @@ struct TemplateToolCall {
 #[derive(Debug, Serialize)]
 struct TemplateToolFunction {
     name: String,
-    arguments: TemplateValue,
+    arguments: JsonValue,
 }
 
 #[derive(Debug, Serialize)]
-pub(super) struct TemplateTool {
-    #[serde(rename = "type")]
-    tool_type: &'static str,
-    function: TemplateToolDefinition,
-}
-
-#[derive(Debug, Serialize)]
-struct TemplateToolDefinition {
-    name: String,
-    description: Option<String>,
-    parameters: TemplateValue,
-    strict: Option<bool>,
-}
+#[serde(transparent)]
+pub(super) struct TemplateTool(JsonValue);
 
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
 fn to_template_messages(
@@ -384,8 +371,6 @@ fn to_template_tool_calls(
                 error.as_report()
             ))
         })?;
-        let arguments = to_template_value(arguments);
-
         tool_calls.push(TemplateToolCall {
             id: tool_call.id.clone(),
             r#type: "function",
@@ -559,14 +544,27 @@ fn truncate_prompt_at_continue_final_message_tag(
 fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
     tools
         .iter()
-        .map(|tool| TemplateTool {
-            tool_type: "function",
-            function: TemplateToolDefinition {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: to_template_value(tool.parameters.clone()),
-                strict: tool.strict,
-            },
+        .map(|tool| {
+            let mut function = serde_json::Map::new();
+            function.insert("name".to_string(), JsonValue::String(tool.name.clone()));
+            if let Some(description) = &tool.description {
+                function.insert(
+                    "description".to_string(),
+                    JsonValue::String(description.clone()),
+                );
+            }
+            function.insert("parameters".to_string(), tool.parameters.clone());
+            if let Some(strict) = tool.strict {
+                function.insert("strict".to_string(), JsonValue::Bool(strict));
+            }
+
+            let mut definition = serde_json::Map::new();
+            definition.insert(
+                "type".to_string(),
+                JsonValue::String("function".to_string()),
+            );
+            definition.insert("function".to_string(), JsonValue::Object(function));
+            TemplateTool(JsonValue::Object(definition))
         })
         .collect()
 }
@@ -1008,7 +1006,7 @@ mod tests {
         .apply_chat_template(&request)
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("<bos>|true".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("<bos>|True".to_string()));
     }
 
     #[test]
@@ -1093,7 +1091,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap().prompt;
 
-        assert_eq!(rendered, Prompt::Text("true|x".to_string()));
+        assert_eq!(rendered, Prompt::Text("True|x".to_string()));
     }
 
     #[test]
@@ -1146,7 +1144,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("none|true".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("none|True".to_string()));
         assert_eq!(
             rendered.effective_template_kwargs.get("reasoning_effort"),
             Some(&Value::String("none".to_string()))
@@ -1241,6 +1239,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "get_weather|city");
+    }
+
+    #[test]
+    fn chat_template_preserves_openai_tool_field_order() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.tools = vec![ChatTool {
+            name: "get_weather".to_string(),
+            description: Some("Get weather".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+        }];
+        request.tool_choice = ChatToolChoice::Auto;
+
+        let rendered = render(
+            Some("{% for key, value in tools[0].function.items() %}{{ key }}|{% endfor %}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "name|description|parameters|");
     }
 
     #[test]
