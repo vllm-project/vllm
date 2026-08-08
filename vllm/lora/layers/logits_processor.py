@@ -155,7 +155,14 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         hidden_states: torch.Tensor,
         lm_head: VocabParallelEmbedding,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
+        # The LoRA delta is accumulated into the full gathered logits, so the
+        # TP gather cannot be skipped here.
+        if skip_gather:
+            raise NotImplementedError(
+                "Skipping the logits TP gather is not supported with an lm_head LoRA."
+            )
         # Get the logits for the next tokens.
         if hasattr(lm_head, "base_layer"):
             actual_lm_head = lm_head.base_layer
