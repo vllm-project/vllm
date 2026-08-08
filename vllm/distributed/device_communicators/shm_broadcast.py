@@ -767,8 +767,14 @@ class MessageQueue:
         read_timeout = self.ReadTimeoutWithWarnings(
             timeout=timeout, should_warn=not indefinite
         )
-        with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
-            while True:
+        while True:
+            # Re-read `current_idx` on every attempt and use that single value
+            # for both the metadata and the data slot. Another thread sharing
+            # this queue can advance `current_idx`, and a metadata slot cached
+            # across attempts would leave this reader spinning on a block the
+            # writer has already moved past.
+            current_idx = self.current_idx
+            with self.buffer.get_metadata(current_idx) as metadata_buffer:
 
                 def check():
                     memory_fence()
@@ -805,7 +811,7 @@ class MessageQueue:
                     continue
                 # found a block that is not read by this reader
                 # let caller read from the buffer
-                with self.buffer.get_data(self.current_idx) as buf:
+                with self.buffer.get_data(current_idx) as buf:
                     try:
                         yield buf
                     finally:
@@ -815,8 +821,7 @@ class MessageQueue:
                         # Without this, writer may not see our read completion and
                         # could wait indefinitely for all readers to finish.
                         memory_fence()
-                        next_idx = self.current_idx + 1
-                        self.current_idx = next_idx % self.buffer.max_chunks
+                        self.current_idx = (current_idx + 1) % self.buffer.max_chunks
                         self._spin_condition.record_read()
                 break
 
