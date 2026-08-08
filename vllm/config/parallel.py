@@ -69,7 +69,7 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int = Field(default=0, ge=0)
+    num_redundant_experts: int | None = Field(default=None, ge=0)
     """Number of redundant experts to use for expert parallelism."""
 
     log_balancedness: bool = False
@@ -101,6 +101,9 @@ class EPLBConfig:
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
+        # Default num_redundant_experts to 0 (minimum valid value) if unspecified
+        if self.num_redundant_experts is None:
+            self.num_redundant_experts = 0
         if self.use_async and self.policy != "default":
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
