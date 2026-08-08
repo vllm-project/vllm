@@ -1448,6 +1448,50 @@ def test_flashinfer_impl_requires_nvfp4_slot_mapping_writer(monkeypatch) -> None
         )
 
 
+@pytest.mark.parametrize("trtllm_supported", [False, True])
+def test_flashinfer_backend_gates_nvfp4_scale_search_on_trtllm(
+    monkeypatch, trtllm_supported: bool
+) -> None:
+    """NVFP4 variants that only change the store-time scale search need the
+    trtllm-gen native store path; plain nvfp4 stays available either way."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "supports_trtllm_attention",
+        lambda is_prefill: trtllm_supported,
+    )
+
+    backend = flashinfer_backend.FlashInferBackend
+    assert backend.supports_kv_cache_dtype("nvfp4")
+    assert backend.supports_kv_cache_dtype("nvfp4_4over6") is trtllm_supported
+
+
+def test_flashinfer_impl_rejects_nvfp4_scale_search_without_native_update(
+    monkeypatch,
+) -> None:
+    """The FlashInfer slot-mapping writer records plain max/6 scales, so an
+    NVFP4 scale-search dtype must fail instead of silently degrading."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "can_use_trtllm_attention",
+        lambda num_heads, num_kv_heads, is_prefill=False: False,
+    )
+
+    with pytest.raises(ValueError, match="trtllm-gen native NVFP4 KV cache update"):
+        flashinfer_backend.FlashInferImpl(
+            num_heads=1,
+            head_size=128,
+            scale=1.0,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="nvfp4_4over6",
+        )
+
+
 def test_fast_decode_plan_importable() -> None:
     """fast_decode_plan must be importable from flashinfer.decode.
 
