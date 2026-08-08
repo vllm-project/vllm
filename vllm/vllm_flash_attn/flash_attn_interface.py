@@ -4,6 +4,8 @@
 # ruff: noqa: E501
 
 
+from functools import cache
+
 import torch
 
 # isort: off
@@ -47,6 +49,11 @@ except (ImportError, ModuleNotFoundError) as e:
 # isort: on
 
 DEFAULT_FA_VERSION = 2
+
+
+@cache
+def _is_sm90(device: torch.device) -> bool:
+    return torch.cuda.get_device_capability(device) == (9, 0)
 
 
 def _is_fa2_supported() -> tuple[bool, str | None]:
@@ -281,7 +288,6 @@ def flash_attn_varlen_func(
         f"Fused FP8 output (output_scale) is only supported by FA4, "
         f"got fa_version={fa_version}"
     )
-
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
     # custom op does not support non-tuple input
@@ -292,6 +298,8 @@ def flash_attn_varlen_func(
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+    if fa_version == 4 and q_v is not None and _is_sm90(q.device):
+        q_v = maybe_contiguous(q_v)
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
 
@@ -399,10 +407,15 @@ def flash_attn_varlen_func(
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
+        sm90 = _is_sm90(q.device)
+        num_splits_dynamic_ptr = None
+        if sm90 and scheduler_metadata is not None and num_splits > 1:
+            num_splits_dynamic_ptr = scheduler_metadata
         out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
             v,
+            qv=q_v if sm90 else None,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             seqused_k=seqused_k,
@@ -416,6 +429,7 @@ def flash_attn_varlen_func(
             window_size_left=real_window_size[0] if real_window_size[0] >= 0 else None,
             window_size_right=real_window_size[1] if real_window_size[1] >= 0 else None,
             num_splits=num_splits,
+            num_splits_dynamic_ptr=num_splits_dynamic_ptr,
             return_lse=return_softmax_lse,
             out=out,
             learnable_sink=s_aux,
@@ -424,6 +438,9 @@ def flash_attn_varlen_func(
             aux_tensors=aux_tensors,
             aux_tensor_leading_dims=aux_tensor_leading_dims,
             output_scale=output_scale,
+            cp_world_size=cp_world_size if sm90 else 1,
+            cp_rank=cp_rank if sm90 else 0,
+            cp_tot_seqused_k=cp_tot_seqused_k if sm90 else None,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")

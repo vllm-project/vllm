@@ -1,0 +1,168 @@
+description: "Production-path mixed MLA attention"
+
+provenance:
+  geometries:
+    - model_id: mistralai/Mistral-Small-4-119B-2603
+      role: 320/256 MLA TP2 shard geometry, page 32
+      synthetic: false
+    - model_id: deepseek-ai/DeepSeek-V3
+      role: 576/512 MLA TP8 shard geometry, page 32
+      synthetic: false
+    - model_id: moonshotai/Kimi-K3
+      role: 576/512 MLA TP1 full-attention geometry, page 32
+      synthetic: false
+    - model_id: deepseek-ai/DeepSeek-V3
+      role: 576/512 MLA TP8 shard geometry, page 128
+      synthetic: false
+    - model_id: deepseek-ai/DeepSeek-V3
+      role: 576/512 MLA TP1 geometry, page 128
+      synthetic: false
+    - model_id: mistralai/Mistral-Small-4-119B-2603
+      role: 320/256 MLA TP2 shard geometry, page 128
+      synthetic: false
+    - model_id: deepseek-ai/DeepSeek-V3
+      role: 576/512 MLA TP4 shard geometry, page 32
+      synthetic: false
+    - model_id: deepseek-ai/DeepSeek-V3
+      role: 576/512 MLA TP2 shard geometry, page 32
+      synthetic: false
+    - model_id: moonshotai/Kimi-K3
+      role: 576/512 MLA TP1 full-attention geometry, page 128
+      synthetic: false
+
+model:
+  num_layers: 60
+  block_size: 32
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  num_q_heads: 16
+  num_kv_heads: 1
+
+model_parameter_sweep:
+  values:
+    # Mistral Small 4 119B TP2.
+    # https://huggingface.co/mistralai/Mistral-Small-4-119B-2603/blob/main/params.json
+    - num_layers: 36
+      head_dim: 320
+      kv_lora_rank: 256
+      qk_nope_head_dim: 64
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 16
+      num_kv_heads: 1
+      block_size: 32
+    # DeepSeek-V3 TP8.
+    # https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
+    - num_layers: 61
+      head_dim: 576
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 16
+      num_kv_heads: 1
+      block_size: 32
+    # Kimi K3 TP1 full-attention layer geometry. The q_lora projection and
+    # output gate are outside this attention-kernel benchmark.
+    # https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json
+    - num_layers: 24
+      head_dim: 576
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 96
+      num_kv_heads: 1
+      block_size: 32
+    - num_layers: 61
+      head_dim: 576
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 16
+      num_kv_heads: 1
+      block_size: 128
+    - num_layers: 61
+      head_dim: 576
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 128
+      num_kv_heads: 1
+      block_size: 128
+    - num_layers: 36
+      head_dim: 320
+      kv_lora_rank: 256
+      qk_nope_head_dim: 64
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 16
+      num_kv_heads: 1
+      block_size: 128
+    - num_layers: 61
+      head_dim: 576
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 32
+      num_kv_heads: 1
+      block_size: 32
+    - num_layers: 61
+      head_dim: 576
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 64
+      num_kv_heads: 1
+      block_size: 32
+    - num_layers: 24
+      head_dim: 576
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+      num_q_heads: 96
+      num_kv_heads: 1
+      block_size: 128
+  label_format: "{backend}_cache{head_dim}_h{num_q_heads}_b{block_size}"
+
+batch_specs:
+  # FlashAttention MLA decode/prefill routing boundary.
+  - "q128"
+  - "q512"
+  - "q513"
+  - "q2k"
+  - "q8k"
+  - "4q512"
+  - "q1s512"
+  - "q1s4k"
+  - "q1s32k"
+  - "16q1s512"
+  - "16q1s4k"
+  - "16q1s32k"
+  - "64q1s512"
+  - "64q1s4k"
+  - "64q1s32k"
+  - "16q4s1k"
+  - "16q8s4k"
+  - "4q128s1k"
+  - "q128s1k"
+  - "q512s4k"
+  - "q1ks16k"
+  - "16q1s4k_q1k"
+  - "32q1s8k_4q1ks2k"
+  - "32q1s16k_16q4s4k_2q1ks8k"
+  - "32q1s512_32q1s4k_32q1s8k_32q1s16k"
+  # One residual-length mix in production scheduler order:
+  # decode -> short/spec extends -> prefill.
+  - "9q1s3071_4q8s2049_q257s8191_2q513"
+
+device: "cuda:0"
+profile_memory: false
+cuda_graphs: true

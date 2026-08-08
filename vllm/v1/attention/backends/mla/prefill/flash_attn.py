@@ -42,13 +42,13 @@ else:
 FA4_STANDARD_DTYPES = (torch.bfloat16, torch.float16)
 
 # Current vLLM MLA prefill expands K/V to num_heads before FA4, so this plan
-# covers qhead_per_kvhead=1. Batch is not a current FA4 MLA-prefill key field.
-# Use b1 for compile-only specs because it is the conservative case for
-# Split-KV shape heuristics.
+# covers qhead_per_kvhead=1. On Hopper, packed-varlen batch 1 can select a
+# persistent scheduler. Batch 2 covers the batch>1 scheduler keys: FA4 selects
+# dynamic work for non-SplitKV and static work for SplitKV.
 # TODO(roberto): FA4 also has direct-GQA and qv/top-k absorbed-MLA paths, but
 # vLLM does not use them in this backend yet; they need a separate
 # num_kv_heads/qv/top-k-aware warmup plan if wired in later.
-FA4_MLA_PREFILL_COMPILE_BATCH_SIZE = 1
+FA4_MLA_PREFILL_COMPILE_BATCH_SIZES = (1, 2)
 FA4_MLA_PREFILL_Q_TILE = 128
 FA4_MLA_PREFILL_K_TILE = 128
 FA4_MLA_PREFILL_LONG_K_BLOCKS = 32
@@ -157,7 +157,9 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
 
         mla_dims = get_mla_dims(vllm_config.model_config)
         qk_head_dim = mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim
-        fa_version = get_flash_attn_version(head_size=qk_head_dim)
+        fa_version = vllm_config.attention_config.flash_attn_version
+        if fa_version is None:
+            fa_version = get_flash_attn_version(head_size=qk_head_dim)
         if fa_version != 4:
             return []
 
@@ -220,7 +222,7 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
                 )
 
         return self._trace_dispatch(self.dispatch)(
-            batch_size=FA4_MLA_PREFILL_COMPILE_BATCH_SIZE,
+            batch_size=(FA4_MLA_PREFILL_COMPILE_BATCH_SIZES if is_sm90 else 1),
             dtype=dtype,
             num_heads=num_heads,
             mla_dims=mla_dims,

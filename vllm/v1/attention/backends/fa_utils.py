@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
+import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -9,11 +12,139 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
 # Track whether upstream flash-attn is available on ROCm.
 # Set during module initialization and never modified afterwards.
 # This module-level flag avoids repeated import attempts and ensures
 # consistent behavior (similar to IS_AITER_FOUND in _aiter_ops.py).
 _ROCM_FLASH_ATTN_AVAILABLE = False
+
+
+def _fa4_cute_import_error() -> str | None:
+    """Import the real CuTeDSL entry point used by FA4 kernels."""
+    try:
+        import_module("vllm.vllm_flash_attn.cute.interface")
+    except Exception as error:
+        return f"{type(error).__name__}: {error}"
+    return None
+
+
+def _uses_generic_sparse_mla_fa3(vllm_config: "VllmConfig") -> bool:
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attention_config = vllm_config.attention_config
+    configured_backends = (
+        attention_config.backend,
+        *attention_config.backend_per_kind.values(),
+    )
+    if AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE in configured_backends:
+        return True
+    if attention_config.backend is not None:
+        return False
+    if attention_config.backend_per_kind.get("mla_attention") is not None:
+        return False
+
+    model_config = vllm_config.model_config
+    if model_config is None or not getattr(model_config, "use_mla", False):
+        return False
+    if getattr(model_config, "architecture", None) in (
+        "DeepseekV4ForCausalLM",
+        "DeepSeekV4MTPModel",
+    ):
+        return False
+    return hasattr(model_config.hf_text_config, "index_topk")
+
+
+def _requires_fa4(vllm_config: "VllmConfig") -> bool:
+    attention_config = vllm_config.attention_config
+    if attention_config._flash_attn_version_required:
+        return True
+
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return False
+    get_head_size = getattr(model_config, "get_head_size", None)
+    return get_head_size is not None and get_head_size() > 256
+
+
+def _collect_fallback_reasons(reasons: list[str]) -> list[str]:
+    """Return the ordered union of fallback reasons from every worker rank."""
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return reasons
+
+    world_size = torch.distributed.get_world_size()
+    if world_size == 1:
+        return reasons
+    gathered_reasons: list[list[str] | None] = [None] * world_size
+    torch.distributed.all_gather_object(gathered_reasons, reasons)
+    return list(
+        dict.fromkeys(
+            reason
+            for rank_reasons in gathered_reasons
+            if rank_reasons is not None
+            for reason in rank_reasons
+        )
+    )
+
+
+def resolve_flash_attn_version(vllm_config: "VllmConfig") -> int | None:
+    """Resolve an explicit Hopper FA4 request before model construction.
+
+    Known FA4 gaps that FA3 supports freeze the whole server to FA3. Defaults
+    and routes owned by other backends retain their existing selectors.
+    """
+    requested = vllm_config.attention_config.flash_attn_version
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return requested
+    if requested == 3:
+        if capability.major == 9 and capability.minor == 0:
+            logger.info_once(
+                "FlashAttention version resolved for the whole server: "
+                "requested=FA3, effective=FA3.",
+                scope="global",
+            )
+        return 3
+    if (capability.major, capability.minor) != (9, 0) or requested != 4:
+        return requested
+    reasons: list[str] = []
+    if import_error := _fa4_cute_import_error():
+        reasons.append(f"the FA4 CuTeDSL interface failed to import ({import_error})")
+    if envs.VLLM_BATCH_INVARIANT:
+        reasons.append("FA4 does not support batch-invariant serving on Hopper")
+
+    cache_config = vllm_config.cache_config
+    if cache_config is not None and cache_config.cache_dtype in ("fp8", "fp8_e4m3"):
+        reasons.append("FA4 does not support FP8 KV cache on Hopper")
+    if _uses_generic_sparse_mla_fa3(vllm_config):
+        reasons.append("FA4 does not support the generic sparse-MLA FA3 route")
+
+    reasons = _collect_fallback_reasons(reasons)
+    if reasons:
+        if _requires_fa4(vllm_config):
+            raise ValueError(
+                "The model requires FA4, but the requested Hopper FA4 "
+                f"configuration cannot use it: {'; '.join(reasons)}"
+            )
+        vllm_config.attention_config.flash_attn_version = 3
+        vllm_config.attention_config._flash_attn_version_fallback = True
+        for reason in reasons:
+            logger.warning_once(
+                "%s; the whole server is using FA3 "
+                "(requested=FA4, effective=FA3).",
+                reason,
+                scope="global",
+            )
+        return 3
+
+    logger.info_once(
+        "FlashAttention version resolved for the whole server: "
+        "requested=FA4, effective=FA4.",
+        scope="global",
+    )
+    return 4
 
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
@@ -153,6 +284,14 @@ def get_flash_attn_version(
             ):
                 upgrade_reason = "Per-sequence causal (dynamic_causal) requires FA4"
             if upgrade_reason:
+                if (
+                    vllm_config is not None
+                    and vllm_config.attention_config._flash_attn_version_fallback
+                ):
+                    raise ValueError(
+                        "The server resolved FA4 to FA3, but this attention layer "
+                        f"requires FA4: {upgrade_reason}"
+                    )
                 logger.info_once(
                     "%s: upgrading FlashAttention 3 -> 4",
                     upgrade_reason,
@@ -241,9 +380,11 @@ def flash_attn_supports_kv_cache_dtype(
         head_size_v=head_size_v,
         has_sinks=has_sinks,
     )
-    return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
-        fa_version == 4 and current_platform.is_device_capability_family(100)
-    )
+    if fa_version == 3 and current_platform.is_device_capability_family(90):
+        return True
+    if fa_version == 4 and current_platform.is_device_capability_family(100):
+        return True
+    return False
 
 
 def flash_attn_supports_quant_query_input() -> bool:
@@ -265,12 +406,12 @@ def flash_attn_supports_mla():
                 is_fa_version_supported,
             )
 
-            return is_fa_version_supported(
-                3
-            ) and current_platform.is_device_capability_family(90)
-
-            # NOTE(Lucas): FA4 CuteDSL does NOT currently support MLA's non-standard
-            # head dimensions (576 for qk, 512 for v) due to TMEM capacity limits.
+            if current_platform.is_device_capability(90):
+                return is_fa_version_supported(3) or is_fa_version_supported(4)
+            return (
+                current_platform.is_device_capability_family(90)
+                and is_fa_version_supported(3)
+            )
 
         except (ImportError, AssertionError):
             pass

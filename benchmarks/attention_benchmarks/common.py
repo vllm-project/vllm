@@ -19,6 +19,16 @@ from rich.table import Table
 
 from vllm.triton_utils import triton
 
+_MLA_BACKEND_ALIASES: dict[str, tuple[str, int]] = {
+    "FLASH_ATTN_MLA_ALL_FA3": ("FLASH_ATTN_MLA", 3),
+    "FLASH_ATTN_MLA_ALL_FA4": ("FLASH_ATTN_MLA", 4),
+}
+
+
+def resolve_mla_backend(backend: str) -> tuple[str, int | None]:
+    """Resolve benchmark-only MLA aliases without changing the production registry."""
+    return _MLA_BACKEND_ALIASES.get(backend, (backend, None))
+
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
     """
@@ -328,16 +338,20 @@ class BenchmarkResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
+
+        def finite_or_none(value: float | None) -> float | None:
+            return value if value is None or math.isfinite(value) else None
+
         return {
             "config": asdict(self.config),
-            "mean_time": self.mean_time,
-            "median_time": self.median_time,
-            "std_time": self.std_time,
-            "min_time": self.min_time,
-            "max_time": self.max_time,
-            "throughput_tokens_per_sec": self.throughput_tokens_per_sec,
-            "memory_allocated_mb": self.memory_allocated_mb,
-            "memory_reserved_mb": self.memory_reserved_mb,
+            "mean_time": finite_or_none(self.mean_time),
+            "median_time": finite_or_none(self.median_time),
+            "std_time": finite_or_none(self.std_time),
+            "min_time": finite_or_none(self.min_time),
+            "max_time": finite_or_none(self.max_time),
+            "throughput_tokens_per_sec": finite_or_none(self.throughput_tokens_per_sec),
+            "memory_allocated_mb": finite_or_none(self.memory_allocated_mb),
+            "memory_reserved_mb": finite_or_none(self.memory_reserved_mb),
             "error": self.error,
         }
 
@@ -483,7 +497,7 @@ class ResultsFormatter:
 
         data = [r.to_dict() for r in results]
         with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+            json.dump(data, f, indent=2, default=str, allow_nan=False)
 
         self.console.print(f"[green]Saved JSON results to {path}[/]")
 
@@ -555,7 +569,8 @@ def is_mla_backend(backend: str) -> bool:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     try:
-        backend_enum = AttentionBackendEnum[backend]
+        canonical_backend, _ = resolve_mla_backend(backend)
+        backend_enum = AttentionBackendEnum[canonical_backend]
         backend_class = backend_enum.get_class()
         return backend_class.is_mla()
     except (KeyError, ValueError, ImportError, AttributeError):

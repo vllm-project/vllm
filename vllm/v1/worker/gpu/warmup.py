@@ -31,18 +31,30 @@ def run_mixed_prefill_decode_warmup(
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
     num_tokens: int,
     *,
+    decode_prompt_len: int = 2,
+    num_decode_reqs: int = 1,
+    decode_scheduled_tokens: int = 1,
     mixed_step_context: AbstractContextManager[object] | None = None,
     req_id_prefix: str = "_v2_mixed_warmup",
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs."""
-    if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
+    if (
+        model_runner.is_pooling_model
+        or decode_prompt_len < 2
+        or num_decode_reqs < 1
+        or decode_scheduled_tokens < 1
+        or model_runner.max_num_reqs < num_decode_reqs + 1
+        or num_tokens < num_decode_reqs * decode_scheduled_tokens + 2
+    ):
         return False
 
-    decode_req_id = f"{req_id_prefix}_decode_"
+    decode_req_ids = (
+        [f"{req_id_prefix}_decode_"]
+        if num_decode_reqs == 1
+        else [f"{req_id_prefix}_decode_{i}_" for i in range(num_decode_reqs)]
+    )
     prefill_req_id = f"{req_id_prefix}_prefill_"
-    decode_prompt_len = 2
-    decode_scheduled_tokens = 1
-    prefill_len = num_tokens - decode_scheduled_tokens
+    prefill_len = num_tokens - num_decode_reqs * decode_scheduled_tokens
     decode_token_ids = list(range(decode_prompt_len))
     prefill_token_ids = list(range(prefill_len))
 
@@ -63,7 +75,9 @@ def run_mixed_prefill_decode_warmup(
     prefill_block_counts = [
         cdiv(prefill_len, block_size) for block_size in group_block_sizes
     ]
-    required_blocks = sum(decode_block_counts) + sum(prefill_block_counts)
+    required_blocks = (
+        num_decode_reqs * sum(decode_block_counts) + sum(prefill_block_counts)
+    )
     if model_runner.kv_cache_config.num_blocks <= required_blocks:
         logger.warning(
             "Skipping V2 mixed prefill+decode warmup because only %d KV blocks "
@@ -83,33 +97,38 @@ def run_mixed_prefill_decode_warmup(
 
     sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
 
-    decode_prefill_output = SchedulerOutput.make_empty()
-    decode_prefill_output.scheduled_new_reqs = [
-        NewRequestData(
-            req_id=decode_req_id,
-            prompt_token_ids=decode_token_ids,
-            mm_features=[],
-            sampling_params=sampling_params,
-            pooling_params=None,
-            block_ids=tuple(_alloc_blocks(n) for n in decode_prefill_block_counts),
-            num_computed_tokens=0,
-            lora_request=None,
-            prefill_token_ids=decode_token_ids,
-        ),
-    ]
-    decode_prefill_output.num_scheduled_tokens = {
-        decode_req_id: decode_prompt_len,
-    }
-    decode_prefill_output.total_num_scheduled_tokens = decode_prompt_len
-    decode_prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+    decode_prefill_outputs = []
+    for req_id in decode_req_ids:
+        output = SchedulerOutput.make_empty()
+        output.scheduled_new_reqs = [
+            NewRequestData(
+                req_id=req_id,
+                prompt_token_ids=decode_token_ids,
+                mm_features=[],
+                sampling_params=sampling_params,
+                pooling_params=None,
+                block_ids=tuple(
+                    _alloc_blocks(n) for n in decode_prefill_block_counts
+                ),
+                num_computed_tokens=0,
+                lora_request=None,
+                prefill_token_ids=decode_token_ids,
+            ),
+        ]
+        output.num_scheduled_tokens = {req_id: decode_prompt_len}
+        output.total_num_scheduled_tokens = decode_prompt_len
+        output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+        decode_prefill_outputs.append(output)
 
-    decode_new_blocks = tuple(_alloc_blocks(n) for n in decode_block_deltas)
     cached_decode_req = CachedRequestData.make_empty()
-    cached_decode_req.req_ids = [decode_req_id]
-    cached_decode_req.num_computed_tokens = [decode_prompt_len]
-    cached_decode_req.num_output_tokens = [1]
+    cached_decode_req.req_ids = decode_req_ids
+    cached_decode_req.num_computed_tokens = [decode_prompt_len] * num_decode_reqs
+    cached_decode_req.num_output_tokens = [1] * num_decode_reqs
     cached_decode_req.new_block_ids = [
-        decode_new_blocks if any(decode_block_deltas) else None
+        tuple(_alloc_blocks(n) for n in decode_block_deltas)
+        if any(decode_block_deltas)
+        else None
+        for _ in decode_req_ids
     ]
 
     mixed_output = SchedulerOutput.make_empty()
@@ -128,20 +147,21 @@ def run_mixed_prefill_decode_warmup(
         ),
     ]
     mixed_output.num_scheduled_tokens = {
-        decode_req_id: decode_scheduled_tokens,
+        **dict.fromkeys(decode_req_ids, decode_scheduled_tokens),
         prefill_req_id: prefill_len,
     }
     mixed_output.total_num_scheduled_tokens = num_tokens
     mixed_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     cleanup_output = SchedulerOutput.make_empty()
-    cleanup_output.finished_req_ids = {decode_req_id, prefill_req_id}
+    cleanup_output.finished_req_ids = {*decode_req_ids, prefill_req_id}
 
     context = mixed_step_context or nullcontext()
     model_runner.kv_connector.set_disabled(True)
     try:
-        worker_execute_model(decode_prefill_output)
-        worker_sample_tokens(None)
+        for output in decode_prefill_outputs:
+            worker_execute_model(output)
+            worker_sample_tokens(None)
         with context:
             worker_execute_model(mixed_output)
             worker_sample_tokens(None)

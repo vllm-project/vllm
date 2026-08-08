@@ -36,8 +36,25 @@ class AttentionConfig:
     that is invalid for that kind raises at startup."""
 
     flash_attn_version: Literal[2, 3, 4] | None = None
-    """Force vllm to use a specific flash-attention version (2, 3, or 4).
+    """Request a flash-attention version (2, 3, or 4). On Hopper, FA4 falls
+    back server-wide to FA3 when FA4 lacks a capability that FA3 supports.
     Only valid when using the flash-attention backend."""
+
+    _flash_attn_version_fallback: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        metadata={"preserve_on_replace": True},
+    )
+    """Whether the Hopper FA4 resolver changed the requested version to FA3."""
+
+    _flash_attn_version_required: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        metadata={"preserve_on_replace": True},
+    )
+    """Whether model configuration requires FA4-only behavior."""
 
     use_prefill_decode_attention: bool = False
     """Use separate prefill and decode kernels for attention instead of
@@ -124,7 +141,10 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        ignored_factors: set[str] = set()
+        ignored_factors = {
+            "_flash_attn_version_fallback",
+            "_flash_attn_version_required",
+        }
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 

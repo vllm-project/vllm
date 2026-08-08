@@ -56,6 +56,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
@@ -1333,6 +1334,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_tokens,
                 self.input_buffers,
             )
+            if (
+                self.use_dcp
+                and self.vllm_config.attention_config.flash_attn_version == 4
+                and current_platform.is_device_capability(90)
+            ):
+                prepare_dcp_local_seq_lens(
+                    self.input_buffers.dcp_local_seq_lens,
+                    input_batch.seq_lens,
+                    input_batch.num_reqs,
+                    self.dcp_size,
+                    self.dcp_rank,
+                    self.cp_interleave,
+                )
+                input_batch.dcp_local_seq_lens = (
+                    self.input_buffers.dcp_local_seq_lens[: input_batch.num_reqs]
+                )
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
             else:
