@@ -29,6 +29,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
+    resolve_fa_num_splits,
 )
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
@@ -432,9 +433,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # When using cuda graph, we need to set the upper bound of the
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
-            self.max_num_splits = (
-                self.attention_config.flash_attn_max_num_splits_for_cuda_graph
-            )
+            self.max_num_splits = resolve_fa_num_splits(vllm_config)
 
         if self.dcp_world_size > 1:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
