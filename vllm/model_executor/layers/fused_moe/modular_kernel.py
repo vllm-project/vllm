@@ -1017,8 +1017,19 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         if capture_fn is None:
             self._routing_replay_buffer = None
             return
+        # Naive DP and DP+EP prepare paths all-gather per-rank batches before
+        # invoking the monolithic kernel. ``max_num_tokens`` is the scheduler
+        # limit for one rank, so the replay output must cover the largest
+        # dispatch group rather than only the local batch. Under EP that group
+        # can also contain sequence-parallel shards flattened into the EP
+        # group, including padding.
+        dispatch_group_size = max(
+            self.moe_config.dp_size,
+            self.moe_config.ep_size,
+        )
+        max_num_replay_tokens = self.moe_config.max_num_tokens * dispatch_group_size
         self._routing_replay_buffer = torch.empty(
-            (self.moe_config.max_num_tokens, self.moe_config.experts_per_token),
+            (max_num_replay_tokens, self.moe_config.experts_per_token),
             dtype=torch.int16,
             device=self.moe_config.device,
         )
