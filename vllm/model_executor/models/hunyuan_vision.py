@@ -856,11 +856,20 @@ class HunYuanVLForConditionalGeneration(
             input_tokens_tensor == image_start_token_id
         ).squeeze(1)
 
+        # Handle mismatch between token count and actual images
+        # (tokenizer may insert duplicate/placeholder image_start tokens)
+        num_images = len(image_grid_thw)
+        if len(image_start_indices) < num_images:
+            raise ValueError(
+                f"Insufficient image_start tokens ({len(image_start_indices)}) "
+                f"for {num_images} images. Expected at least {num_images}."
+            )
+
         p_index = torch.arange(len(input_tokens_tensor))
         w_index = torch.arange(len(input_tokens_tensor))
         h_index = torch.arange(len(input_tokens_tensor))
         t_index = torch.arange(len(input_tokens_tensor))
-        for image_index in range(len(image_start_indices)):
+        for image_index in range(num_images):
             # +1 : first image_token, +2: for xdrope positions
             pos = image_start_indices[image_index] + 2
             t, h, w = image_grid_thw[image_index]
