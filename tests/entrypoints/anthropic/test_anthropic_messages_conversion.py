@@ -13,6 +13,7 @@ Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
 import json
+import logging
 from argparse import Namespace
 from http import HTTPStatus
 from unittest.mock import MagicMock
@@ -41,7 +42,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    FunctionCall,
     PromptTokenUsageInfo,
+    ToolCall,
     UsageInfo,
 )
 from vllm.entrypoints.serve.utils.server_utils import validation_exception_handler
@@ -1372,6 +1375,32 @@ def _make_full_converter():
 
 
 class TestMessagesFullConverter:
+    @staticmethod
+    def _response_with_tool_arguments(arguments: str) -> ChatCompletionResponse:
+        return ChatCompletionResponse(
+            id="chatcmpl-tool",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        tool_calls=[
+                            ToolCall(
+                                id="call_1",
+                                function=FunctionCall(
+                                    name="lookup",
+                                    arguments=arguments,
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
     def test_empty_completion_emits_one_text_block(self):
         """An empty completion still yields exactly one (empty) text block."""
         generator = ChatCompletionResponse(
@@ -1392,6 +1421,34 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+    def test_tool_use_preserves_object_arguments(self):
+        generator = self._response_with_tool_arguments('{"query":"weather"}')
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        assert result.content[0].type == "tool_use"
+        assert result.content[0].input == {"query": "weather"}
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            '{"secret":"sensitive"',
+            '["sensitive"]',
+        ],
+    )
+    def test_tool_use_rejects_invalid_object_without_logging_arguments(
+        self, arguments: str, caplog: pytest.LogCaptureFixture
+    ):
+        generator = self._response_with_tool_arguments(arguments)
+
+        with caplog.at_level(logging.WARNING):
+            result = _make_full_converter().messages_full_converter(generator)
+
+        assert result.content[0].type == "tool_use"
+        assert result.content[0].input == {}
+        assert "call_1" in caplog.text
+        assert arguments not in caplog.text
 
 
 # ======================================================================
