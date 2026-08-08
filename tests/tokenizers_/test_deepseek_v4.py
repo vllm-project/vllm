@@ -297,8 +297,23 @@ def test_deepseek_v4_maps_xhigh_to_high_reasoning_effort():
     )
 
     assert prompt.startswith(
+        "<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum"
+    )
+
+
+def test_deepseek_v4_high_reasoning_effort_prepends_high_prompt():
+    prompt = _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        enable_thinking=True,
+        reasoning_effort="high",
+    )
+
+    assert prompt.startswith(
         "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
     )
+    # "high" and "max" must use distinct prompts.
+    assert "Beyond maximum" not in prompt
 
 
 @pytest.mark.parametrize(
