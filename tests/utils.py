@@ -49,6 +49,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     _KernelT,
     init_fp8_linear_kernel,
+    init_mxfp4_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -2385,6 +2386,58 @@ class TestFP8Layer(torch.nn.Module):
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.kernel.quant_fp8.enabled()
+
+    def forward(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(self, y, bias)
+
+
+MXFP4_BLOCK_SIZE = 32
+
+
+class TestMXFP4Layer(torch.nn.Module):
+    """
+    Test helper for MXFP4 W4A4 linear operations (weight: packed FP4 +
+    e8m0 block scale; activation: quantized on the fly to packed FP4 +
+    e8m0 block scale by the kernel via xpu_mxfp4_quantize).
+
+    Args:
+        hidden_size: Both in_features and out_features of the (square)
+            weight matrix.
+        block_size: MXFP4 scale group size (default 32).
+        scale_exp_range: Range of raw e8m0 scale byte values to sample
+            from (interpreted as float8_e8m0fnu after process_weights_
+            after_loading).
+        device: Device to allocate tensors on.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        block_size: int = MXFP4_BLOCK_SIZE,
+        scale_exp_range: tuple[int, int] = (118, 138),
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        # Packed FP4: two 4-bit values per uint8 byte, so the last
+        # dimension is halved relative to the logical (unpacked) weight.
+        self.weight = torch.randint(
+            0,
+            256,
+            (hidden_size, hidden_size // 2),
+            dtype=torch.uint8,
+            device=device,
+        )
+        self.weight_scale = torch.randint(
+            scale_exp_range[0],
+            scale_exp_range[1],
+            (hidden_size, hidden_size // block_size),
+            dtype=torch.uint8,
+            device=device,
+        )
+        self.kernel = init_mxfp4_linear_kernel()
+        self.kernel.process_weights_after_loading(self)
 
     def forward(
         self, y: torch.Tensor, bias: torch.Tensor | None = None
