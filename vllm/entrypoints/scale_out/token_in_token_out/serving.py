@@ -14,6 +14,12 @@ import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (
+    AsyncMultiModalItemTracker,
+)
+from vllm.entrypoints.chat_utils import (
+    _parse_chat_message_content_part as _parse_content_part,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     clamp_prompt_logprobs,
@@ -33,7 +39,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import EngineInput, mm_input
+from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
@@ -143,7 +149,27 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(e)
 
         engine_input: EngineInput
-        if features := request.features:
+        if request.content_parts:
+            tracker = AsyncMultiModalItemTracker(self.model_config)
+            mm_parser = tracker.create_parser()
+            for part in request.content_parts:
+                _parse_content_part(
+                    part,
+                    mm_parser,
+                    wrap_dicts=False,
+                    interleave_strings=False,
+                )
+            mm_data, mm_uuids = await tracker.resolve_items()
+
+            prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+            if mm_data:
+                prompt["multi_modal_data"] = mm_data
+            if mm_uuids:
+                prompt["multi_modal_uuids"] = mm_uuids
+            (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
+                [prompt], skip_mm_cache=True
+            )
+        elif features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
                 modality: [
