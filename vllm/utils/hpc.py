@@ -216,8 +216,42 @@ def hpc_fuse_moe_blockwise(
     )
 
 
+@functools.cache
+def has_hpc_bf16xfp32_gemm() -> bool:
+    """Return whether the optional HPC bf16xfp32 GEMM API is available."""
+    if not has_hpc():
+        return False
+
+    import hpc
+
+    required_apis = ("gemm_bf16xfp32", "get_gemm_bf16xfp32_workspace")
+    return all(hasattr(hpc, name) for name in required_apis)
+
+
+def hpc_gemm_bf16xfp32(
+    x: torch.Tensor,
+    weight_high: torch.Tensor,
+    weight_low: torch.Tensor,
+    scale: float,
+    split_flag: torch.Tensor,
+) -> torch.Tensor:
+    import hpc
+
+    return hpc.gemm_bf16xfp32(
+        x,
+        weight_high,
+        weight_low,
+        scale,
+        use_fp32_output=True,
+        use_splitk=True,
+        split_flag=split_flag,
+    )
+
+
 __all__ = [
     "has_hpc",
+    "has_hpc_bf16xfp32_gemm",
     "hpc_fuse_moe",
     "hpc_fuse_moe_blockwise",
+    "hpc_gemm_bf16xfp32",
 ]
