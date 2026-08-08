@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorMetadata,
+    MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     MooncakeXferMetadata,
     MooncakeXferResponse,
@@ -652,6 +653,82 @@ def test_scheduler_request_finished():
     assert delay_free is False
     assert len(scheduler_connector._reqs_need_send) == 0
     assert "id-1" in scheduler_connector._reqs_not_processed
+
+
+def test_aborted_remote_prefill_cleanup_does_not_finish_recv():
+    """Cleanup-only pulls notify P without completing a freed D request."""
+
+    scheduler_connector = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler_connector.is_kv_producer = False
+    scheduler_connector.is_kv_consumer = True
+    scheduler_connector._reqs_need_recv = {}
+    scheduler_connector._reqs_need_send = {}
+    scheduler_connector._reqs_not_processed = set()
+    request = SimpleNamespace(
+        request_id="d-req-1",
+        status=RequestStatus.FINISHED_ABORTED,
+        kv_transfer_params=dict(
+            do_remote_prefill=True,
+            do_remote_decode=False,
+            remote_engine_id="p-engine",
+            remote_bootstrap_addr="http://bootstrap:33333",
+            transfer_id="xfer-1",
+        ),
+    )
+
+    delay_free, _ = scheduler_connector.request_finished(request, block_ids=([],))
+    assert delay_free is False
+
+    metadata = scheduler_connector.build_connector_meta(MagicMock())
+    pull_meta = metadata.reqs_to_recv["p-engine"][request.request_id]
+    assert pull_meta.local_block_ids == []
+    assert pull_meta.notify_scheduler is False
+
+    pull_meta.pull_tasks_count = 1
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker.finished_recving_reqs = set()
+    worker.process_pulling_result(
+        MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.FINISH,
+            ok_reqs=[request.request_id],
+        ),
+        {request.request_id: pull_meta},
+    )
+
+    assert pull_meta.pull_tasks_count == 0
+    assert worker.finished_recving_reqs == set()
+
+
+def test_empty_remote_prefill_load_still_finishes_recv():
+    """A normal full-prefix hit still completes despite having no local blocks."""
+
+    metadata = MooncakeConnectorMetadata()
+    metadata.add_new_req(
+        request_id="d-req-1",
+        local_block_ids=[],
+        kv_transfer_params={
+            "remote_engine_id": "p-engine",
+            "remote_bootstrap_addr": "http://bootstrap:33333",
+            "transfer_id": "xfer-1",
+        },
+    )
+    pull_meta = metadata.reqs_to_recv["p-engine"]["d-req-1"]
+    assert pull_meta.notify_scheduler is True
+
+    pull_meta.pull_tasks_count = 1
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker.finished_recving_reqs = set()
+    worker.process_pulling_result(
+        MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.FINISH,
+            ok_reqs=["d-req-1"],
+        ),
+        {"d-req-1": pull_meta},
+    )
+
+    assert worker.finished_recving_reqs == {"d-req-1"}
 
 
 @contextlib.contextmanager
