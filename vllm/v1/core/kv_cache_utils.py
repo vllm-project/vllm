@@ -755,7 +755,7 @@ def _check_enough_kv_cache_memory(
                 f"the estimated maximum model length is {estimated_max_len}. "
             )
 
-        raise ValueError(
+        error_msg = (
             f"To serve at least one request with the model's max seq len "
             f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
@@ -766,6 +766,15 @@ def _check_enough_kv_cache_memory(
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             f"for more details."
         )
+        if envs.VLLM_ALLOW_INSUFFICIENT_KV_CACHE:
+            logger.warning_once(
+                "%s Continuing because VLLM_ALLOW_INSUFFICIENT_KV_CACHE=1 is "
+                "set. This expert-only override may OOM at startup or later "
+                "during request processing.",
+                error_msg,
+            )
+            return
+        raise ValueError(error_msg)
 
 
 def max_memory_usage_bytes(

@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
+    VLLM_ALLOW_INSUFFICIENT_KV_CACHE: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_MAX_COMPLETION_PROMPTS: int = 1024
@@ -1063,6 +1064,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # To enable this, set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1.
     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": lambda: (
         os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower()
+        in ("1", "true")
+    ),
+    # If set, allow the engine to continue after the startup KV-cache
+    # capacity check estimates that max_model_len cannot fit. This is an
+    # expert-only escape hatch for validating custom/downstream backends; it
+    # does not suppress empty-cache failures or scheduler admission checks.
+    "VLLM_ALLOW_INSUFFICIENT_KV_CACHE": lambda: (
+        os.environ.get("VLLM_ALLOW_INSUFFICIENT_KV_CACHE", "0").strip().lower()
         in ("1", "true")
     ),
     # If set, forces FP8 Marlin to be used for FP8 quantization regardless

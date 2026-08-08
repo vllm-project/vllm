@@ -2697,6 +2697,38 @@ def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
         get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
 
 
+@pytest.mark.skip_global_cleanup
+def test_allow_insufficient_kv_cache_downgrades_capacity_error(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv("VLLM_ALLOW_INSUFFICIENT_KV_CACHE", "1")
+    kv_cache_utils.envs.disable_envs_cache()
+
+    kv_cache_utils._check_enough_kv_cache_memory(
+        available_memory=1,
+        get_needed_memory=lambda: 2,
+        max_model_len=128000,
+        estimate_max_model_len=lambda _: 6148,
+    )
+
+    assert "VLLM_ALLOW_INSUFFICIENT_KV_CACHE=1" in caplog.text
+    assert "may OOM" in caplog.text
+
+
+@pytest.mark.skip_global_cleanup
+def test_allow_insufficient_kv_cache_does_not_ignore_empty_cache(monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_INSUFFICIENT_KV_CACHE", "1")
+    kv_cache_utils.envs.disable_envs_cache()
+
+    with pytest.raises(ValueError, match="No available memory"):
+        kv_cache_utils._check_enough_kv_cache_memory(
+            available_memory=0,
+            get_needed_memory=lambda: 2,
+            max_model_len=128000,
+            estimate_max_model_len=lambda _: 0,
+        )
+
+
 def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
     """DFlash drafters can have a smaller head size than the target model.
 
