@@ -467,7 +467,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
-        # Whether the running batch contains any prefill requests.
+        # Whether the batch contains any prefill requests.
         prefill_scheduled = False
 
         # For logging.
@@ -1062,6 +1062,8 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 self.running.append(request)
+                # A newly admitted prefill also makes this a mixed batch.
+                prefill_scheduled |= num_computed_tokens < request.num_tokens - 1
                 if self.log_stats:
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp

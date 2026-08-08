@@ -1674,6 +1674,50 @@ def test_spec_decode_padding_skipped_with_prefill_in_batch():
     assert r_candidate.request_id not in out.scheduled_spec_decode_tokens
 
 
+def test_spec_decode_padding_skipped_with_new_prefill_in_batch():
+    """Padding is skipped after a prefill is admitted from the waiting queue."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+        max_num_batched_tokens=64,
+    )
+    r_running, r_candidate = create_requests(
+        num_requests=2,
+        num_tokens=33,
+        same_prompt=True,
+        max_tokens=16,
+        req_ids=["running", "candidate"],
+    )
+    (r_prefill,) = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        max_tokens=16,
+        req_ids=["prefill"],
+    )
+
+    # Warm the shared prefix and keep r_running as a speculative decode request.
+    scheduler.add_request(r_running)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r_running.request_id] == 33
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r_running.request_id], [[1, 2, 3]]))
+
+    # Admit a new prefill before the full-prefix-hit candidate in the same step.
+    # There is exactly enough budget for 4 decode + 8 prefill + 1 candidate.
+    scheduler.max_num_scheduled_tokens = 13
+    scheduler.add_request(r_prefill)
+    scheduler.add_request(r_candidate)
+    out = scheduler.schedule()
+
+    assert out.scheduled_spec_decode_tokens[r_running.request_id] == [1, 2, 3]
+    assert out.num_scheduled_tokens[r_prefill.request_id] == 8
+    assert out.num_scheduled_tokens[r_candidate.request_id] == 1
+    assert out.total_num_scheduled_tokens == 13
+    assert r_candidate.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_scheduler_stats_waiting_queues():
     """Test that scheduler stats correctly report waiting and skipped_waiting queues."""
     # Create scheduler with limited capacity so we can have waiting requests
