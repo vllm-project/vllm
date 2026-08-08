@@ -36,6 +36,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gdn_state_io import (
+    gather_gdn_initial_state,
+    scatter_gdn_final_state,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -1433,8 +1437,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
+            use_flashinfer_state_io = (
+                getattr(self, "gdn_prefill_backend", None) == "flashinfer"
+            )
+            if use_flashinfer_state_io:
+                initial_state = gather_gdn_initial_state(
+                    ssm_state,
+                    prefill_state_indices,
+                    prefill_has_initial_state,
+                )
+            else:
+                initial_state = ssm_state[prefill_state_indices]
+                initial_state[~prefill_has_initial_state, ...] = 0
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1452,7 +1466,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 use_qk_l2norm_in_kernel=False,
             )
             # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if use_flashinfer_state_io:
+                scatter_gdn_final_state(
+                    ssm_state,
+                    prefill_state_indices,
+                    last_recurrent_state,
+                )
+            else:
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
