@@ -349,6 +349,63 @@ def test_select_common_block_size_no_valid_option():
         select_common_block_size(48, [backend_a, backend_b])
 
 
+def _make_backend_cls_for_kernel_block_size(
+    supported_sizes: list[int | MultipleOf],
+):
+    from vllm.v1.attention.backend import AttentionBackend
+
+    class _MockBackendCls(AttentionBackend):
+        @staticmethod
+        def get_name() -> str:
+            return "MOCK"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return supported_sizes
+
+    return _MockBackendCls
+
+
+def test_preferred_block_size_satisfies_all_backends():
+    # Sparse-MLA main backend (32 or 64) alongside an indexer backend that
+    # only supports 64: the first backend alone would pick 32, which the
+    # indexer rejects at select_common_block_size time.
+    from vllm.platforms.interface import Platform
+
+    main = _make_backend_cls_for_kernel_block_size([32, 64])
+    indexer = _make_backend_cls_for_kernel_block_size([64])
+
+    assert Platform._preferred_block_size_for_backends([main, indexer], 16) == 64
+    assert Platform._preferred_block_size_for_backends([main], 16) == 32
+
+
+def test_preferred_block_size_single_backend_keeps_default():
+    from vllm.platforms.interface import Platform
+
+    backend = _make_backend_cls_for_kernel_block_size([MultipleOf(16)])
+
+    assert Platform._preferred_block_size_for_backends([backend], 16) == 16
+
+
+def test_kernel_block_granularity_lcm():
+    from vllm.platforms.interface import Platform
+
+    backend_a = _make_backend_cls_for_kernel_block_size([MultipleOf(16)])
+    backend_b = _make_backend_cls_for_kernel_block_size([64])
+
+    assert Platform._kernel_block_granularity([backend_a, backend_b]) == 64
+    assert Platform._kernel_block_granularity([backend_a]) == 16
+
+
+def test_preferred_block_size_extends_to_common_multiple():
+    from vllm.platforms.interface import Platform
+
+    backend_a = _make_backend_cls_for_kernel_block_size([32])
+    backend_b = _make_backend_cls_for_kernel_block_size([48])
+
+    assert Platform._preferred_block_size_for_backends([backend_a, backend_b], 16) == 96
+
+
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
     model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
