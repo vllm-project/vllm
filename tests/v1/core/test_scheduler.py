@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+import logging
 from concurrent.futures import Future
 from unittest.mock import Mock
 
@@ -28,6 +29,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
@@ -5730,3 +5732,24 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
     # Must resume at the convergent boundary (block 0), not the deep FA hit.
     assert replay.num_tokens - num_scheduled == block_size
+
+
+def test_requests_admitted_while_paused_are_reported(caplog):
+    """A request arriving during a pause is queued rather than rejected, and
+    that must not be silent: it is invisible to the unfinished-request count,
+    so nothing else would tell the caller it is being held."""
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=2)
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    with caplog.at_level(logging.WARNING):
+        for request in requests:
+            scheduler.add_request(request)
+    assert requests[0].request_id in caplog.text
+
+    assert scheduler.get_num_unfinished_requests() == 0
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert "2 request(s) admitted while paused" in caplog.text

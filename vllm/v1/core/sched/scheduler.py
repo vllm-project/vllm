@@ -354,6 +354,7 @@ class Scheduler(SchedulerInterface):
             self._re_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+        self._num_admitted_while_paused = 0
 
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
@@ -2229,6 +2230,16 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if self._pause_state != PauseState.UNPAUSED:
+                self._num_admitted_while_paused += 1
+                if self._num_admitted_while_paused == 1:
+                    logger.warning(
+                        "Request %s was admitted while the scheduler is paused "
+                        "(%s). It is queued and will not be scheduled until "
+                        "resume; abort it if the pause is a generation boundary.",
+                        request.request_id,
+                        self._pause_state.name,
+                    )
             if self.connector is not None:
                 self.connector.on_new_request(request)
             if self.log_stats:
@@ -2336,6 +2347,12 @@ class Scheduler(SchedulerInterface):
         return self._pause_state
 
     def set_pause_state(self, pause_state: PauseState) -> None:
+        if pause_state == PauseState.UNPAUSED and self._num_admitted_while_paused:
+            logger.warning(
+                "%d request(s) admitted while paused are now schedulable.",
+                self._num_admitted_while_paused,
+            )
+        self._num_admitted_while_paused = 0
         self._pause_state = pause_state
 
     def _free_request_blocks(self, request: Request):
