@@ -36,7 +36,6 @@ from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
-    from torch.distributed import TCPStore
 
 logger = init_logger(__name__)
 
@@ -174,9 +173,6 @@ class CoreEngineProcManager:
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
-        # Coordination TCPStore kept alive while engines may rendezvous,
-        # see launch_core_engines().
-        self._coord_store: TCPStore | None = None
 
         # All ranks share this config object: capture the user-provided
         # --device-ids list before the per-rank shard overwrites it. Mutating
@@ -1118,7 +1114,8 @@ def launch_core_engines(
     # pre-allocated _data_parallel_master_port_list, whose ports can be
     # taken by other processes before they are bound. Only created when
     # engine rank 0 is local, i.e. this process runs on the DP master node.
-    # See ParallelConfig._pick_stateless_dp_port().
+    # This frame keeps the store alive until engines are ready (rendezvous
+    # done). See ParallelConfig._pick_stateless_dp_port().
     coord_store = None
     if (
         dp_size > 1
@@ -1215,7 +1212,6 @@ def launch_core_engines(
                 local_start_index=local_start_index or 0,
                 tensor_queue=tensor_queue,
             )
-            local_engine_manager._coord_store = coord_store
         else:
             local_engine_manager = None
 
