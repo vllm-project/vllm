@@ -20,15 +20,27 @@ class StubTokenizer:
     (git-LFS) tiktoken vocabulary.
     """
 
-    def __init__(self, token_ids: list[int]) -> None:
+    def __init__(
+        self,
+        token_ids: list[int],
+        *,
+        stub_encodings: dict[str, list[int]] | None = None,
+    ) -> None:
         self.token_ids = token_ids
         self.calls: list[dict[str, Any]] = []
         self.conversations: list[list[dict[str, Any]]] = []
+        self.stub_encodings = stub_encodings or {}
 
     def apply_chat_template(self, conversation, **kwargs) -> list[int]:
         self.conversations.append(conversation)
         self.calls.append(kwargs)
         return list(self.token_ids)
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        if text in self.stub_encodings:
+            return list(self.stub_encodings[text])
+        # Unknown stubs → empty ids so generation_prefix_len stays unset.
+        return []
 
 
 @dataclass
@@ -351,3 +363,40 @@ async def test_render_messages_async_returns_token_prompt():
 
     assert prompt == {"prompt_token_ids": [4, 5]}
     assert conversation[0]["role"] == "user"
+
+
+def test_render_messages_sets_generation_prefix_len_for_channel_open_stub():
+    think_stub = [90, 91, 92]
+    tokenizer = StubTokenizer(
+        [1, 2, 3, *think_stub],
+        stub_encodings={
+            "<|open|>think<|sep|>": think_stub,
+            "<|open|>response<|sep|>": [93, 94, 95],
+        },
+    )
+    renderer = _make_renderer(tokenizer)
+
+    _, prompt = renderer.render_messages(
+        [{"role": "user", "content": "hi"}], ChatParams()
+    )
+
+    assert prompt["prompt_token_ids"] == [1, 2, 3, 90, 91, 92]
+    assert prompt["generation_prefix_len"] == 3
+
+
+def test_render_messages_omits_generation_prefix_len_without_stub():
+    tokenizer = StubTokenizer(
+        [1, 2, 3],
+        stub_encodings={
+            "<|open|>think<|sep|>": [90, 91, 92],
+            "<|open|>response<|sep|>": [93, 94, 95],
+        },
+    )
+    renderer = _make_renderer(tokenizer)
+
+    _, prompt = renderer.render_messages(
+        [{"role": "user", "content": "hi"}], ChatParams()
+    )
+
+    assert prompt == {"prompt_token_ids": [1, 2, 3]}
+    assert "generation_prefix_len" not in prompt

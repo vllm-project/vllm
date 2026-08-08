@@ -15,7 +15,7 @@ from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
-from .inputs import DictPrompt
+from .inputs import DecoderOnlyDictPrompt, DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
@@ -25,11 +25,38 @@ from .params import ChatParams
 _K3_MEDIA_IO_DEFAULTS: dict[str, dict[str, Any]] = {"image": {"image_mode": None}}
 _K3_THINKING_EFFORTS = ("low", "high", "max")
 
+# XTML channel-open stubs that encoding_k3 may append as a generation prefix.
+# Engine keeps these ids; API usage.prompt_tokens excludes them when set below.
+_K3_CHANNEL_OPEN_STUBS = (
+    "<|open|>think<|sep|>",
+    "<|open|>response<|sep|>",
+)
+
 
 def _merge_k3_media_io_kwargs(
     media_io_kwargs: dict[str, dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]] | None:
     return merge_media_io_kwargs(_K3_MEDIA_IO_DEFAULTS, media_io_kwargs)
+
+
+def _k3_generation_prefix_len(tokenizer: HfTokenizer, token_ids: list[int]) -> int:
+    """Return length of a trailing channel-open stub, else 0."""
+    for stub in _K3_CHANNEL_OPEN_STUBS:
+        stub_ids = tokenizer.encode(stub, add_special_tokens=False)
+        n = len(stub_ids)
+        if n and len(token_ids) >= n and token_ids[-n:] == stub_ids:
+            return n
+    return 0
+
+
+def _prompt_with_generation_prefix_len(
+    tokenizer: HfTokenizer, token_ids: list[int]
+) -> DecoderOnlyDictPrompt:
+    prompt = parse_dec_only_prompt(token_ids)
+    prefix_len = _k3_generation_prefix_len(tokenizer, token_ids)
+    if prefix_len:
+        prompt["generation_prefix_len"] = prefix_len
+    return prompt
 
 
 def _dump_k3_template_value(value: Any) -> Any:
@@ -186,9 +213,8 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         )
 
         rendered_conversation = _normalize_k3_tool_messages(conversation)
-        prompt = parse_dec_only_prompt(
-            self._apply_chat_template(rendered_conversation, params)
-        )
+        token_ids = self._apply_chat_template(rendered_conversation, params)
+        prompt = _prompt_with_generation_prefix_len(self.get_tokenizer(), token_ids)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -211,7 +237,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
 
         rendered_conversation = _normalize_k3_tool_messages(conversation)
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
-        prompt = parse_dec_only_prompt(token_ids)
+        prompt = _prompt_with_generation_prefix_len(self.get_tokenizer(), token_ids)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
