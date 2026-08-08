@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import xgrammar as xgr
 
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
 )
+from vllm.v1.structured_output.utils import choice_as_grammar
 
 pytestmark = pytest.mark.cpu_test
 
@@ -104,3 +106,31 @@ def test_supported_json_features(supported_schema):
     assert not has_xgrammar_unsupported_json_features(supported_schema), (
         "Schema should be supported"
     )
+
+
+@pytest.mark.parametrize(
+    "choices",
+    [
+        ["yes", "no"],
+        # Characters that are special inside an EBNF string literal must be
+        # escaped so xgrammar can compile the grammar. A raw newline/carriage
+        # return/NUL terminates the literal and previously raised.
+        ["line one\nline two"],
+        ["carriage\rreturn"],
+        ["tab\tseparated"],
+        ['a quote " and a backslash \\'],
+        ["null" + chr(0) + "byte"],
+        ["café", "日本語"],
+    ],
+)
+def test_choice_as_grammar_compiles(choices):
+    # choice_as_grammar must emit an EBNF grammar that xgrammar can compile
+    # regardless of which characters the choices contain.
+    grammar = choice_as_grammar(choices)
+    xgr.Grammar.from_ebnf(grammar)  # must not raise
+
+
+def test_choice_as_grammar_escapes_special_chars():
+    choice = "a" + chr(10) + "b" + chr(9) + "c" + chr(34) + "d" + chr(92) + "e"
+    grammar = choice_as_grammar([choice])
+    assert grammar == r'root ::= "a\nb\tc\"d\\e"'
