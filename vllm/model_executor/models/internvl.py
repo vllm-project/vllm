@@ -596,6 +596,14 @@ class InternVLChatModel(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
+        # InternVL feeds precomputed text+vision embeddings into the text
+        # backbone. InternLM2 backbones currently produce corrupted logits
+        # under this torch.compile inputs_embeds path.
+        if config.text_config.architectures[0] == "InternLM2ForCausalLM":
+            inner_model = getattr(self.language_model, "model", None)
+            if inner_model is not None:
+                inner_model.do_not_compile = True
+
         self.img_context_token_id = None
         self.video_context_token_id = None
 
