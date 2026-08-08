@@ -28,6 +28,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
+from vllm.model_executor.warmup.mamba_ssu_autotune import mamba_ssu_autotune_warmup
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
@@ -157,6 +158,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         deep_gemm_warmup(model, max_tokens)
 
     minimax_m3_msa_warmup(worker)
+    mamba_ssu_autotune_warmup(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune

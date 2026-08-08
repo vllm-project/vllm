@@ -13,14 +13,27 @@ Tests cover:
 
 import json
 
+import pytest
+import torch
+
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     _get_default_ssm_launch_config,
     _try_get_optimal_ssm_config_cached,
+    get_ssm_autotune_config_file_path,
     get_ssm_config_file_name,
     get_ssm_configs,
     get_ssm_device_name,
+    save_ssm_configs,
     try_get_optimal_ssm_config,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_tuning import (
+    NUM_WARPS_CHOICES,
+    SSUTuningCase,
+    block_size_m_choices,
+    tune_ssu_case,
+    valid_request_batches,
+)
+from vllm.platforms import current_platform
 
 # Common kwargs for try_get_optimal_ssm_config. Tests pick (batch, nheads) so
 # their product (effective_batch) matches the value being probed.
@@ -82,6 +95,118 @@ def test_env_override_loads_custom_config(monkeypatch, tmp_path):
     _clear_caches()
 
 
+def test_autotune_cache_path_uses_existing_filename_schema(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    path = get_ssm_autotune_config_file_path(
+        headdim=_HEADDIM,
+        dstate=128,
+        cache_dtype="bfloat16",
+        device_name="GPU",
+    )
+
+    assert str(tmp_path) in path
+    assert path.endswith(get_ssm_config_file_name(_HEADDIM, 128, "float16", "GPU"))
+
+
+def test_cache_precedence_user_then_local_then_bundled(monkeypatch, tmp_path):
+    user_dir = tmp_path / "user"
+    cache_dir = tmp_path / "cache"
+    bundled_dir = tmp_path / "bundled"
+    for directory in (user_dir, cache_dir, bundled_dir):
+        directory.mkdir()
+
+    _write_config(user_dir, 16, {"1": {"BLOCK_SIZE_M": 4, "num_warps": 1}})
+    _write_config(cache_dir, 16, {"1": {"BLOCK_SIZE_M": 8, "num_warps": 2}})
+    _write_config(bundled_dir, 16, {"1": {"BLOCK_SIZE_M": 16, "num_warps": 4}})
+
+    monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(user_dir))
+    monkeypatch.setenv("VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.mamba_ssm._CONFIGS_DIR",
+        str(bundled_dir),
+    )
+    _clear_caches()
+    assert get_ssm_configs(_HEADDIM, 16, _CACHE_DTYPE)[1] == {
+        "BLOCK_SIZE_M": 4,
+        "num_warps": 1,
+    }
+
+    monkeypatch.delenv("VLLM_TUNED_CONFIG_FOLDER")
+    _clear_caches()
+    assert get_ssm_configs(_HEADDIM, 16, _CACHE_DTYPE)[1] == {
+        "BLOCK_SIZE_M": 8,
+        "num_warps": 2,
+    }
+
+    monkeypatch.setenv("VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR", str(tmp_path / "empty"))
+    _clear_caches()
+    assert get_ssm_configs(_HEADDIM, 16, _CACHE_DTYPE)[1] == {
+        "BLOCK_SIZE_M": 16,
+        "num_warps": 4,
+    }
+
+    _clear_caches()
+
+
+def test_save_ssm_configs_loads_from_local_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.mamba_ssm._CONFIGS_DIR",
+        str(tmp_path / "empty"),
+    )
+    save_ssm_configs(
+        _HEADDIM,
+        32,
+        _CACHE_DTYPE,
+        {128: {"BLOCK_SIZE_M": 32, "num_warps": 8}},
+    )
+    _clear_caches()
+
+    block_m, warps = try_get_optimal_ssm_config(
+        headdim=_HEADDIM,
+        dstate=32,
+        batch=1,
+        nheads=128,
+        cache_dtype=_CACHE_DTYPE,
+        is_blackwell=False,
+    )
+    assert (block_m, warps) == (32, 8)
+
+    _clear_caches()
+
+
+def test_warmup_request_batches_match_benchmark_grid():
+    assert valid_request_batches(2) == [1, 2]
+    assert valid_request_batches(20) == [1, 8, 16, 20]
+    assert valid_request_batches(2048) == [
+        1,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        1536,
+        2048,
+    ]
+    assert valid_request_batches(4096) == [
+        1,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        1536,
+        2048,
+        4096,
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Fallback to heuristic when no config file exists
 # ---------------------------------------------------------------------------
@@ -93,6 +218,7 @@ def test_fallback_when_no_config(monkeypatch, tmp_path):
     (device, headdim, dstate, cache_dtype) combination.
     """
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+    monkeypatch.setenv("VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(
         "vllm.model_executor.layers.mamba.ops.mamba_ssm._CONFIGS_DIR",
         str(tmp_path),
@@ -177,6 +303,7 @@ def test_non_dict_json_returns_none(monkeypatch, tmp_path):
         json.dump([1, 2, 3], f)
 
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+    monkeypatch.setenv("VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(
         "vllm.model_executor.layers.mamba.ops.mamba_ssm._CONFIGS_DIR",
         str(tmp_path),
@@ -194,6 +321,7 @@ def test_empty_config_falls_back_to_heuristic(monkeypatch, tmp_path):
     _write_config(tmp_path, dstate=64, payload={})
 
     monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+    monkeypatch.setenv("VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR", str(tmp_path / "cache"))
     _clear_caches()
 
     dstate = 64
@@ -210,3 +338,26 @@ def test_empty_config_falls_back_to_heuristic(monkeypatch, tmp_path):
     )
 
     _clear_caches()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="SSU autotune smoke test requires CUDA-like Triton platform.",
+)
+def test_tune_ssu_case_tiny_gpu():
+    case = SSUTuningCase(
+        batch=1,
+        nheads=1,
+        headdim=16,
+        dstate=16,
+        ngroups=1,
+        dtype=torch.float16,
+        state_dtype=torch.float32,
+        device=torch.device("cuda"),
+    )
+
+    cfg = tune_ssu_case(case, num_iters=1, num_warmup=1)
+
+    assert cfg is not None
+    assert cfg["BLOCK_SIZE_M"] in block_size_m_choices(case.headdim)
+    assert cfg["num_warps"] in NUM_WARPS_CHOICES
