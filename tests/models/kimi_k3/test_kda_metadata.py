@@ -281,6 +281,8 @@ def test_mixed_one_token_prefill_and_spec_decode_uses_prefill_metadata(
         actual.non_spec_query_start_loc,
         torch.tensor([0, 1], dtype=torch.int32),
     )
+    torch.testing.assert_close(actual.non_spec_token_indx, torch.tensor([0]))
+    torch.testing.assert_close(actual.spec_token_indx, torch.tensor([1, 2, 3]))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
