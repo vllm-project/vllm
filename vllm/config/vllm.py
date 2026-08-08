@@ -1817,7 +1817,9 @@ class VllmConfig:
         capture as:
 
         ```python
-        max_graph_size = min(max_num_seqs * 2, 512)
+        default_max_graph_size = 1024 if is_data_center_blackwell else 512
+        max_graph_size = min(max_num_seqs * decode_query_len * 2,
+                             default_max_graph_size)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
         cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
@@ -1841,8 +1843,8 @@ class VllmConfig:
         Example:
             With `max_num_batched_tokens = 8192`, and typical sequences
             averaging ~32 tokens, most practical batch sizes fall below 256.
-            However, the system will still allow capture sizes up to 512 if
-            shape and memory permit.
+            However, the system will still allow capture sizes up to the
+            platform default if shape and memory permit.
 
         Note:
             If users explicitly specify cudagraph capture sizes in the
@@ -1865,9 +1867,15 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
+                from vllm.platforms import current_platform
+
                 decode_query_len = 1 + self.num_speculative_tokens
+                default_max_graph_size = (
+                    1024 if current_platform.is_device_capability_family(100) else 512
+                )
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
+                    self.scheduler_config.max_num_seqs * decode_query_len * 2,
+                    default_max_graph_size,
                 )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
@@ -2386,12 +2394,6 @@ class VllmConfig:
                 f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
             )
 
-        if self.reasoning_config is not None:
-            logger.warning_once(
-                "Model Runner V2 does not yet support the thinking_token_budget "
-                "request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required."
-            )
-
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.
 
@@ -2435,7 +2437,10 @@ class VllmConfig:
     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
         if self.model_config is None:
             return self
-        if self.cache_config.cache_dtype == "nvfp4" and self.model_config.use_mla:
+        if (
+            self.cache_config.cache_dtype.startswith("nvfp4")
+            and self.model_config.use_mla
+        ):
             raise ValueError(
                 "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
                 "Attention) backends. Please use a different --kv-cache-dtype "
