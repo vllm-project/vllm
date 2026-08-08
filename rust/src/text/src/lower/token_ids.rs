@@ -99,7 +99,7 @@ pub(crate) fn validate_vocab_range(
         validate_param(
             "bad_words",
             bad_words_token_ids.iter().flatten().copied(),
-            limits.tokenizer_vocab_size,
+            limits.model_vocab_size,
         )?;
     }
 
