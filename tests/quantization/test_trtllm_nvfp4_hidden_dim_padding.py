@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils import flashinfer_fp4_moe
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer import (
     align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 

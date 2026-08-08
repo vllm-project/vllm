@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer import (
     activation_to_flashinfer_type,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

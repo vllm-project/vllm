@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
     trtllm_moe_pack_topk_ids_weights,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
 )

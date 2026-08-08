@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer import (
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
