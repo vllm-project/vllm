@@ -10,18 +10,56 @@ use super::{ReasoningParserFactory, names};
 #[test]
 fn factory_contains_and_lists_registered_parsers() {
     let factory = ReasoningParserFactory::new();
+    assert!(factory.contains(names::MIMO));
     assert!(factory.contains(names::QWEN3));
     assert!(factory.contains(names::DEEPSEEK_V4));
     assert!(factory.contains(names::SEED_OSS));
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
     assert!(factory.contains(names::GEMMA4));
+    assert!(factory.list().contains(&names::MIMO.to_string()));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
     assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
     assert!(factory.list().contains(&names::GEMMA4.to_string()));
+}
+
+#[test]
+fn factory_creates_and_routes_mimo_v2_parsers() {
+    let tokenizer = Arc::new(
+        TestTokenizer::new()
+            .with_regular_token("<think>", 256)
+            .with_regular_token("</think>", 257),
+    );
+    let factory = ReasoningParserFactory::new();
+
+    let mut mimo = factory.create(names::MIMO, tokenizer.clone()).unwrap();
+    let mut qwen3 = factory.create(names::QWEN3, tokenizer).unwrap();
+    let output = "<think>compare aliases</think>same content";
+    assert_eq!(mimo.push(output).unwrap(), qwen3.push(output).unwrap());
+
+    assert_eq!(
+        factory.resolve_name_for_model("XiaomiMiMo/MiMo-V2-Flash"),
+        Some(names::MIMO)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("XiaomiMiMo/MiMo-V2.5-Pro-FP4"),
+        Some(names::MIMO)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("XiaomiMiMo/MiMo-V2.5"),
+        Some(names::MIMO)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("XiaomiMiMo/MiMo-V2.5-Omni"),
+        Some(names::MIMO)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("XiaomiMiMo/MiMo-7B-RL"),
+        None
+    );
 }
 
 #[test]
