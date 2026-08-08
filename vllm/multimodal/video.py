@@ -92,6 +92,10 @@ class VideoLoaderRegistry(ExtensionManager):
 
         return self.processor2backend.get(video_processor)
 
+    def register_gpu_codec(self, name: str) -> None:
+        """Mark a codec name as requiring GPU without registering a loader."""
+        self._requires_gpu[name] = True
+
     def backend_requires_gpu(self, name: str) -> bool:
         return self._requires_gpu.get(name, False)
 
@@ -208,6 +212,7 @@ class VideoLoader:
 
 
 VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+VIDEO_LOADER_REGISTRY.register_gpu_codec("deepstream")
 
 PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
 # Per-decoder upper bound reserved for persistent PyNvVideoCodec surfaces.
@@ -632,6 +637,24 @@ class TorchCodecVideoBackendMixin:
         return batch.data.numpy(), list(frame_indices)
 
 
+def _pynvvc_frames_to_nhwc(frames):
+    """Return a stacked PyNvVideoCodec frame batch as contiguous NHWC.
+
+    PyNvVideoCodec's per-frame layout has varied across versions (HWC vs CHW),
+    so detect the channel axis rather than assuming a fixed order. NHWC is the
+    layout the other video backends return and the HF video processors expect.
+
+    Args:
+        frames: A ``(N, ?, ?, ?)`` uint8 tensor in either NHWC or NCHW order.
+
+    Returns:
+        The same frames as a contiguous ``(N, H, W, C)`` tensor.
+    """
+    if frames.shape[-1] != 3 and frames.shape[-3] == 3:
+        frames = frames.permute(0, 2, 3, 1)  # NCHW -> NHWC
+    return frames.contiguous()
+
+
 class PyNvVideoCodecVideoBackendMixin:
     """PyNvVideoCodec utilities for GPU-backed frame decode."""
 
@@ -802,7 +825,7 @@ class PyNvVideoCodecVideoBackendMixin:
                         "PyNvVideoCodec returned frames with unexpected shape "
                         f"{tuple(device_frames.shape)}"
                     )
-                device_frames = device_frames.permute(0, 3, 1, 2).contiguous()
+                device_frames = _pynvvc_frames_to_nhwc(device_frames)
                 host_frames = torch.empty(
                     device_frames.shape,
                     dtype=device_frames.dtype,
@@ -1136,6 +1159,7 @@ class VideoBackend(
             from nvidia.deepstream_videodecode import probe_metadata
 
             total_frames, original_fps, duration, _w, _h, codec = probe_metadata(data)
+            _check_frame_pixel_limit(_w, _h)
             source = cls._prepare_source(
                 VideoSourceMetadata(
                     total_frames_num=total_frames,

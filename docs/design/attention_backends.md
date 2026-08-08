@@ -153,7 +153,9 @@ hardware and configuration.
 
 > **‡** Automatic selection tries FlashAttention first. On Blackwell
 > (SM100), the fallback order is TRT-LLM Ragged, FlashInfer, then
-> TokenSpeed MLA. On other GPUs, only FlashAttention is considered.
+> TokenSpeed MLA; for (qk_nope_head_dim=192, qk_rope_head_dim=64,
+> v_head_dim=256) TRT-LLM Ragged is tried before FlashAttention. On other
+> GPUs, only FlashAttention is considered.
 
 ### Decode Backends
 
