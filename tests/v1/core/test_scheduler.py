@@ -928,6 +928,78 @@ def test_check_stop_min_tokens():
     assert request_stop.stop_reason == 42
 
 
+def test_check_stop_length_cap_below_min_tokens():
+    """Length caps must finish a request even below min_tokens.
+
+    Guards against requests hanging forever when min_tokens cannot be
+    satisfied: min_tokens only defers EOS/stop tokens, so a request that
+    reaches max_model_len (or a max_tokens clamped below min_tokens) must
+    still finish as FINISHED_LENGTH_CAPPED instead of spinning in the
+    scheduler with zero new tokens to schedule.
+    """
+    from vllm.v1.core.sched.utils import check_stop
+
+    # Reaching max_model_len below min_tokens must stop the request.
+    sampling_params = SamplingParams(
+        ignore_eos=True,
+        max_tokens=500,
+        min_tokens=500,
+    )
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    request = Request(
+        request_id="0",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    # 7 output tokens: num_tokens == 10 == max_model_len, min_tokens unmet.
+    request.append_output_token_ids([10, 11, 12, 13, 14, 15, 16])
+
+    result = check_stop(request, max_model_len=10)
+    assert result is True, "Should stop at max_model_len even below min_tokens"
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+    # Reaching max_tokens below min_tokens must stop the request. This can
+    # happen when max_tokens is clamped to the context window after
+    # SamplingParams validation (e.g. max_tokens=None on a long prompt).
+    sampling_params_capped = SamplingParams(
+        ignore_eos=True,
+        max_tokens=500,
+        min_tokens=500,
+    )
+    sampling_params_capped.max_tokens = 3
+    sampling_params_capped.update_from_generation_config({}, EOS_TOKEN_ID)
+    request_capped = Request(
+        request_id="1",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params_capped,
+        pooling_params=None,
+    )
+    request_capped.append_output_token_ids([10, 11, 12])
+
+    result = check_stop(request_capped, max_model_len=100)
+    assert result is True, "Should stop at max_tokens even below min_tokens"
+    assert request_capped.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+    # EOS still deferred below min_tokens when no length cap is reached.
+    sampling_params_eos = SamplingParams(
+        ignore_eos=False,
+        max_tokens=20,
+        min_tokens=5,
+    )
+    sampling_params_eos.update_from_generation_config({}, EOS_TOKEN_ID)
+    request_eos = Request(
+        request_id="2",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params_eos,
+        pooling_params=None,
+    )
+    request_eos.append_output_token_ids([10, EOS_TOKEN_ID])
+
+    result = check_stop(request_eos, max_model_len=100)
+    assert result is False, "EOS should still be deferred below min_tokens"
+
+
 @pytest.mark.parametrize(
     "enable_prefix_caching, prompt_logprobs",
     [

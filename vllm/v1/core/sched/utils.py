@@ -97,24 +97,30 @@ def check_stop(request: Request, max_model_len: int) -> bool:
     sampling_params = request.sampling_params
     assert sampling_params is not None
 
-    if request.num_output_tokens < sampling_params.min_tokens:
-        return False
+    min_tokens_satisfied = request.num_output_tokens >= sampling_params.min_tokens
+    if min_tokens_satisfied:
+        last_token_id = request.output_token_ids[-1]
+        if last_token_id == sampling_params.eos_token_id:
+            request.status = RequestStatus.FINISHED_STOPPED
+            return True
 
-    last_token_id = request.output_token_ids[-1]
-    if last_token_id == sampling_params.eos_token_id:
-        request.status = RequestStatus.FINISHED_STOPPED
-        return True
-
-    if last_token_id in (sampling_params.stop_token_ids or ()):
-        request.status = RequestStatus.FINISHED_STOPPED
-        request.stop_reason = last_token_id
-        return True
+        if last_token_id in (sampling_params.stop_token_ids or ()):
+            request.status = RequestStatus.FINISHED_STOPPED
+            request.stop_reason = last_token_id
+            return True
+    # Length caps apply even below min_tokens. min_tokens only defers EOS and
+    # stop tokens; if it also deferred the caps, a request whose min_tokens
+    # cannot be met within max_model_len (or a max_tokens clamped below
+    # min_tokens) would never finish and would spin in the scheduler forever.
     if (
         request.num_tokens >= max_model_len
         or request.num_output_tokens >= request.max_tokens
     ):
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
         return True
+
+    if not min_tokens_satisfied:
+        return False
 
     repetition_detection = sampling_params.repetition_detection
     if repetition_detection is not None and (
