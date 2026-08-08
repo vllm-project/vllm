@@ -220,15 +220,15 @@ def prepare_fp8_layer_for_marlin(
 
 
 def _moe_pad_shard_rows(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad each gate/up shard of a ``(E, 2 * n, ...)`` tensor to padded_n
-    rows. FP8 zero decodes to 0.0, so the padded rows contribute nothing."""
+    """Zero-pad each shard of an ``(E, shards * n, ...)`` tensor to padded_n."""
     if padded_n == n:
         return x
     e = x.size(0)
     rest = x.shape[2:]
-    x = x.view(e, 2, n, *rest)
+    num_shards = x.size(1) // n
+    x = x.view(e, num_shards, n, *rest)
     x = torch.nn.functional.pad(x, (0, 0) * len(rest) + (0, padded_n - n))
-    return x.reshape(e, 2 * padded_n, *rest)
+    return x.reshape(e, num_shards * padded_n, *rest)
 
 
 def _moe_pad_last(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
@@ -347,10 +347,11 @@ def prepare_fp8_moe_layer_for_marlin(
         if padded_n != n:
             if "w13" in name:
                 g = scales.size(1)
-                scales = scales.view(e, g, 2, n)
+                num_shards = size_n // n
+                scales = scales.view(e, g, num_shards, n)
                 scales = torch.nn.functional.pad(scales, (0, padded_n - n))
-                scales = scales.reshape(e, g, 2 * padded_n)
-                size_n = 2 * padded_n
+                scales = scales.reshape(e, g, num_shards * padded_n)
+                size_n = num_shards * padded_n
             else:
                 if group_size > 0:
                     pad_groups = (padded_n - n) // group_size
