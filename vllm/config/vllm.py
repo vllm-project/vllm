@@ -635,29 +635,39 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             return True
 
-        # DSpark runs on BOTH the V1 and V2 GPU model runners. Upstream force-
-        # routes it to V2; we do not, because on this SM12x DeepSeek-V4 stack V2
-        # loses long-context recall under concurrency.
+        # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
+        # is not otherwise a default-V2 architecture, so force V2 for it. If V2
+        # is unsupported for the rest of the config, _validate_v2_model_runner
+        # raises rather than silently falling back to V1 (which can't run dspark).
         #
-        # This guard was removed on 2026-08-03 and restored the same day. The
-        # removal was argued from ONE arthur c=12 sample per runner (V1 23/24 vs
-        # V2 22/24, "both inside the historical 22-24 band") -- but that band came
-        # from MTP2-on-V1 history, and one sample cannot see a distribution. Eight
-        # samples per runner, same serve, same head, DSpark on both:
+        # This fork removed upstream's routing on 2026-08-03 because V2 lost
+        # long-context recall under concurrency (8 samples per runner, same
+        # serve: V1 mean 22.25 [20,24] vs V2 mean 10.50 [6,13], Mann-Whitney
+        # U=0). Restored 2026-08-09: that collapse was NOT a property of the
+        # runner. It was the same-step ghost-block race in the prefix cache
+        # (vllm-project/vllm#42359) -- a block's hash becomes visible before the
+        # forward writes its KV, and a serve that loses the race keeps serving
+        # from the poisoned blocks. With VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT
+        # on, 4 fresh serves per runner, 3 arthur c=12 runs each:
         #
-        #   V1  20 23 21 23 24 23 23 21   mean 22.25, range [20, 24]
-        #   V2  13 12  8 13 11  6 12  9   mean 10.50, range [ 6, 13]
+        #   V1  serve means 22.3 / 21.7 / 21.7 / 21.0   gate mean 21.67
+        #   V2  serve means 22.0 / 20.7 / 22.7 / 22.7   gate mean 22.00
+        #   Mann-Whitney p = 0.697, no single-digit serve on either side
         #
-        # Completely separated -- V1's worst is above V2's best -- so Mann-Whitney
-        # gives U=0 at n=8,8. V2 drops more than half the needles. c=1 is exact
-        # (2/2) on both runners, so this is specifically a concurrency failure,
-        # which is what the original comment said.
+        # and V2 leads on every other measured axis: pp2048 +3.1/+4.2/+7.1% at
+        # d8192/16384/32768, tg128 +4/+20/+28%, TTFT lower at every depth, KV
+        # +24.9%. GSM8K, issue19, multi-needle and c=1 all tie. (The older
+        # "+6.6% draft acceptance" claim does NOT survive re-measurement: 2.772
+        # V1 vs 2.710 V2, i.e. a tie -- it was measured while V2 was poisoned.)
         #
-        # V2 remains ahead on KV headroom (+4.70 GiB, +27.5%) and draft acceptance
-        # (mean 2.097 vs 1.967, p<0.05); neither is worth long-context recall.
-        # See docs/sm120/experiments/2026-08-02-v2-model-runner-ab/.
-        #
-        # Opt into V2 explicitly with VLLM_USE_V2_MODEL_RUNNER=1.
+        # V1 stays fully supported: VLLM_USE_V2_MODEL_RUNNER=0 forces it, and the
+        # env check above takes precedence over every rule here.
+        # See docs/sm120/experiments/2026-08-09-runner-arbitration-786582103a/.
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+        ):
+            return True
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only);
         # force V2 as for dspark, since a hybrid target otherwise defaults to V1.

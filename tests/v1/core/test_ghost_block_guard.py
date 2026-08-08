@@ -214,3 +214,38 @@ def test_defers_only_when_the_tail_was_published_this_step(make, monkeypatch):
     # a new step clears the set -> back to ordinary allocation
     manager.new_step_starts()
     assert num_blocks() == baseline
+
+
+def _dspark_config():
+    """Minimal config carrying a DSpark speculative method."""
+    from unittest.mock import MagicMock
+
+    cfg = MagicMock()
+    cfg.speculative_config.method = "dspark"
+    cfg.parallel_config.prefill_context_parallel_size = 1
+    return cfg
+
+
+def test_dspark_defaults_to_v2_and_can_be_forced_back_to_v1(monkeypatch):
+    """The runner default flipped to V2 on 2026-08-09; V1 must stay reachable.
+
+    Both halves matter. The first pins the default so it cannot drift back
+    silently. The second pins the escape hatch: V1 is maintained for now, and a
+    regression that made VLLM_USE_V2_MODEL_RUNNER=0 stop working would strand
+    anyone who needs to fall back.
+    """
+    from vllm.config.vllm import VllmConfig
+
+    prop = VllmConfig.use_v2_model_runner.fget
+    cfg = _dspark_config()
+
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_USE_V2_MODEL_RUNNER", None, raising=False
+    )
+    assert prop(cfg) is True, "DSpark must route to V2 by default"
+
+    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False, raising=False)
+    assert prop(cfg) is False, "VLLM_USE_V2_MODEL_RUNNER=0 must still force V1"
+
+    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True, raising=False)
+    assert prop(cfg) is True
