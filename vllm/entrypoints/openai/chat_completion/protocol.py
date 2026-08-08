@@ -1133,6 +1133,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 parameter="n",
                 value=n,
             )
+        if data.get("stream"):
+            raise VLLMValidationError(
+                "Batch chat completions do not support `stream=True`.",
+                parameter="stream",
+            )
+        if data.get("tools"):
+            raise VLLMValidationError(
+                "Batch chat completions do not support `tools`.",
+                parameter="tools",
+            )
         return data
 
     def to_chat_completion_request(
