@@ -492,11 +492,18 @@ def make_nvfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif backend == NvFp4MoeBackend.MARLIN:
+        # Forward the full gated-activation parameterization, not only the
+        # clamp: SwiGLU-OAI models (e.g. MiniMax-M3) need alpha/beta too.
+        # MarlinExperts silently falls back to alpha=1.0 / beta=0.0 when the
+        # quant config omits them, running the wrong activation in every
+        # expert (see the linked issue for the end-to-end effect).
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
     elif backend == NvFp4MoeBackend.EMULATION:
