@@ -49,6 +49,24 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_p2p_resource_limit_defaults_and_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_P2P_MAX_PEERS", raising=False)
+    monkeypatch.delenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("VLLM_P2P_IDLE_TIMEOUT_S", raising=False)
+    assert envs.VLLM_P2P_MAX_PEERS == 128
+    assert envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S == 30
+    assert envs.VLLM_P2P_IDLE_TIMEOUT_S == 300
+
+    monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "64")
+    monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "15")
+    monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "60")
+    assert envs.VLLM_P2P_MAX_PEERS == 64
+    assert envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S == 15
+    assert envs.VLLM_P2P_IDLE_TIMEOUT_S == 60
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

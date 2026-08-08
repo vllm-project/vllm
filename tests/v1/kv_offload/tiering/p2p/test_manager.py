@@ -565,6 +565,7 @@ class _FakeSession:
         close_req_ids: list[str] | None = None,
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
+        last_activity_at: float | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -581,6 +582,9 @@ class _FakeSession:
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
         self.finishes: list[str] = []
+        self.last_activity_at: float = (
+            last_activity_at if last_activity_at is not None else time.monotonic()
+        )
         # Mirror P2PSession._server._inflight (transfer_id → handle) and
         # P2PSession._client.has_active_loads for the shutdown-drain and
         # drain_jobs paths. Tests populate _server._inflight when needed.
@@ -1693,3 +1697,213 @@ class TestBindHostPortDefaults:
         mgr_b = self._construct(monkeypatch, host="localhost", port=5710)
         assert mgr_a._local_id == mgr_b._local_id == "localhost:5710"
         assert mgr_a._nixl_agent_name != mgr_b._nixl_agent_name
+
+
+# ---------------------------------------------------------------------------
+# Tests for session capacity limit (VLLM_P2P_MAX_PEERS)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionCapLimit:
+    """_get_or_create_session and _accept_new_peers reject new peers when
+    the session count reaches VLLM_P2P_MAX_PEERS."""
+
+    def _make_with_control(self):
+        mgr = _make_manager()
+        created = []
+
+        class FakeControl:
+            def connect(self, peer_id):
+                conn = _RecordingConn(peer_id)
+                created.append(conn)
+                return conn
+
+            def poll(self):
+                return []
+
+        class FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+            def add_remote_peer(self, *a, **k):
+                pass
+
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._control = FakeControl()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        return mgr, created
+
+    def test_outbound_rejected_at_capacity(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "2")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, created = self._make_with_control()
+        mgr._sessions["peer-a:1"] = _FakeSession(peer_id="peer-a:1")  # type: ignore[assignment]
+        mgr._sessions["peer-b:2"] = _FakeSession(peer_id="peer-b:2")  # type: ignore[assignment]
+
+        result = mgr._get_or_create_session("peer-c:3")
+        assert result is None
+        assert "peer-c:3" not in mgr._sessions
+        assert len(created) == 0
+
+    def test_on_new_request_records_failure_on_cap(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        mgr._sessions["existing:1"] = _FakeSession(peer_id="existing:1")  # type: ignore[assignment]
+
+        ctx = _req_context(
+            kv_params=_remote_prefiller_kv_params(
+                remote_host="10.0.0.2", remote_port=9000, kv_request_id="req-cap"
+            )
+        )
+        mgr.on_new_request(ctx)
+        assert "req-cap" in mgr._failed_req_ids
+
+    def test_inbound_rejected_at_capacity(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        mgr._sessions["existing:1"] = _FakeSession(peer_id="existing:1")  # type: ignore[assignment]
+
+        conn = _RecordingConn("new-peer:2")
+        mgr._accept_new_peers([conn])
+        assert conn.close_calls == 1
+        assert "new-peer:2" not in mgr._sessions
+
+    def test_existing_session_reused_below_cap(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr, _ = self._make_with_control()
+        existing = _FakeSession(peer_id="existing:1")
+        mgr._sessions["existing:1"] = existing  # type: ignore[assignment]
+
+        result = mgr._get_or_create_session("existing:1")
+        assert result is existing
+
+
+# ---------------------------------------------------------------------------
+# Tests for graceful error boundary in _get_or_create_session
+# ---------------------------------------------------------------------------
+
+
+class TestGetOrCreateSessionErrorBoundary:
+    def test_connect_failure_returns_none(self):
+        mgr = _make_manager()
+
+        class FailingControl:
+            def connect(self, peer_id):
+                raise RuntimeError("socket exhausted")
+
+            def poll(self):
+                return []
+
+        mgr._control = FailingControl()  # type: ignore[assignment]
+        result = mgr._get_or_create_session("bad:1")
+        assert result is None
+        assert "bad:1" not in mgr._sessions
+
+
+# ---------------------------------------------------------------------------
+# Tests for idle session eviction
+# ---------------------------------------------------------------------------
+
+
+class TestIdleSessionEviction:
+    def _make_with_fake_data(self):
+        mgr = _make_manager()
+
+        class FakeControl:
+            def poll(self):
+                return []
+
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr._control = FakeControl()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        return mgr
+
+    def test_idle_session_evicted(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+
+        mgr = self._make_with_fake_data()
+        idle_session = _FakeSession(
+            peer_id="idle:1",
+            last_activity_at=time.monotonic() - 20,
+        )
+        mgr._sessions["idle:1"] = idle_session  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "idle:1" not in mgr._sessions
+
+    def test_active_session_kept(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+
+        mgr = self._make_with_fake_data()
+        active = _FakeSession(
+            peer_id="active:1",
+            last_activity_at=time.monotonic(),
+        )
+        mgr._sessions["active:1"] = active  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "active:1" in mgr._sessions
+
+    def test_session_with_pending_work_not_evicted(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+
+        mgr = self._make_with_fake_data()
+        busy = _FakeSession(
+            peer_id="busy:1",
+            last_activity_at=time.monotonic() - 100,
+        )
+        busy._server._inflight[1] = object()
+        mgr._sessions["busy:1"] = busy  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "busy:1" in mgr._sessions
+
+    def test_disabled_when_zero(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "0")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+
+        mgr = self._make_with_fake_data()
+        old = _FakeSession(
+            peer_id="old:1",
+            last_activity_at=time.monotonic() - 999999,
+        )
+        mgr._sessions["old:1"] = old  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "old:1" in mgr._sessions

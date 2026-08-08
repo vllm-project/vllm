@@ -28,9 +28,33 @@ _HEARTBEAT_IVL_MS = 2000
 _HEARTBEAT_TIMEOUT_MS = 10000
 _HEARTBEAT_TTL_MS = 10000
 
+# Events that indicate a fatal connection failure — the peer will never
+# become reachable through this socket.
+_FATAL_MONITOR_EVENTS: frozenset[int] = frozenset()  # populated after import
+
 # Shared sentinels returned when there is nothing to report.
 _EMPTY_INBOX: tuple[dict, ...] = ()
 _EMPTY_NEW_CONNECTIONS: tuple[ControlConnection, ...] = ()
+
+
+def _build_fatal_events() -> frozenset[int]:
+    events = {zmq.EVENT_DISCONNECTED, zmq.EVENT_CLOSED}
+    for attr in (
+        "EVENT_HANDSHAKE_FAILED_AUTH",
+        "EVENT_HANDSHAKE_FAILED_PROTOCOL",
+        "EVENT_HANDSHAKE_FAILED_NO_DETAIL",
+    ):
+        val = getattr(zmq, attr, None)
+        if val is not None:
+            events.add(val)
+    return frozenset(events)
+
+
+_FATAL_MONITOR_EVENTS = _build_fatal_events()
+
+_MONITOR_EVENT_MASK: int = 0
+for _ev in _FATAL_MONITOR_EVENTS:
+    _MONITOR_EVENT_MASK |= _ev
 
 
 def _tcp_addr(host: str, port: int | str) -> str:
@@ -248,7 +272,7 @@ class ZmqTransport(ControlTransport):
         safe_id = peer_id.replace(":", "-").replace("/", "-")
         monitor_addr = f"inproc://p2p-monitor-{safe_id}-{self._monitor_seq}"
         self._monitor_seq += 1
-        dealer.monitor(monitor_addr, zmq.EVENT_DISCONNECTED)
+        dealer.monitor(monitor_addr, _MONITOR_EVENT_MASK)
 
         monitor_sock = self._zmq_ctx.socket(zmq.PAIR)
         monitor_sock.connect(monitor_addr)
@@ -320,29 +344,33 @@ class ZmqTransport(ControlTransport):
                 self._pending_inbound.append((sender_id, msg))
 
     def _check_monitors(self) -> None:
-        """Non-blocking: check all monitor sockets for disconnection."""
+        """Non-blocking: check all monitor sockets for fatal events."""
         for conn in self._connections.values():
             if not conn.alive:
                 continue
-            try:
-                event = zmq.utils.monitor.recv_monitor_message(
-                    conn.monitor_socket, zmq.NOBLOCK
-                )
-            except zmq.Again:
-                continue
-            except zmq.ZMQError as exc:
-                logger.warning(
-                    "ZmqTransport %s: monitor error for peer %s: %s",
-                    self._local_id,
-                    conn.peer_id,
-                    exc,
-                )
-                continue
+            while True:
+                try:
+                    event = zmq.utils.monitor.recv_monitor_message(
+                        conn.monitor_socket, zmq.NOBLOCK
+                    )
+                except zmq.Again:
+                    break
+                except zmq.ZMQError as exc:
+                    logger.warning(
+                        "ZmqTransport %s: monitor error for peer %s: %s",
+                        self._local_id,
+                        conn.peer_id,
+                        exc,
+                    )
+                    break
 
-            if event["event"] == zmq.EVENT_DISCONNECTED:
-                logger.debug(
-                    "ZmqTransport %s: peer %s disconnected",
-                    self._local_id,
-                    conn.peer_id,
-                )
-                conn.mark_dead()
+                ev = event["event"]
+                if ev in _FATAL_MONITOR_EVENTS:
+                    logger.debug(
+                        "ZmqTransport %s: peer %s fatal event 0x%x",
+                        self._local_id,
+                        conn.peer_id,
+                        ev,
+                    )
+                    conn.mark_dead()
+                    break

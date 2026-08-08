@@ -19,9 +19,11 @@ received our ConnectMsg, after which queued outgoing messages are flushed.
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
@@ -129,6 +131,10 @@ class P2PSession:
         # Consecutive non-protocol dispatch errors. Reset on success.
         self._dispatch_error_count: int = 0
 
+        now = time.monotonic()
+        self._connected_at: float | None = None
+        self._last_activity_at: float = now
+
         # kv_request_ids whose FetchMsg arrived during the current poll
         # tick. Drained and returned in the next poll() result so the
         # manager can bind kv_request_id → session and replay any
@@ -169,6 +175,11 @@ class P2PSession:
         """True while inbound loads or outbound transfers are outstanding."""
         return self._client.has_active_loads or self._server.has_inflight_transfers
 
+    @property
+    def last_activity_at(self) -> float:
+        """Monotonic timestamp of the last meaningful session activity."""
+        return self._last_activity_at
+
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
@@ -182,6 +193,9 @@ class P2PSession:
         if self._conn is not None:
             raise ValueError(f"P2PSession {self.peer_id}: already connected")
         self._conn = conn
+        now = time.monotonic()
+        self._connected_at = now
+        self._last_activity_at = now
         self._send_connect()
 
     # ------------------------------------------------------------------
@@ -250,15 +264,33 @@ class P2PSession:
     def poll(self) -> SessionPollResult:
         """Process incoming messages, drive transfers, apply timeouts."""
         if self._conn is None:
-            # Pending session — store-job timeouts still apply so buffered
-            # jobs that never get picked up are surfaced as failures.
             return SessionPollResult(
                 loads=[],
                 stores=self._server.collect_idle_timeouts(),
                 new_fetch_ids=[],
             )
 
-        for msg in self._conn.recv():
+        # Handshake deadline: a peer that never completes the handshake
+        # is stuck in connected-but-not-ready state. Mark it dead so the
+        # manager reaps it instead of accumulating sockets indefinitely.
+        if (
+            not self._send_ready
+            and self._connected_at is not None
+            and time.monotonic() - self._connected_at
+            > envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S
+        ):
+            logger.warning(
+                "P2PSession %s: handshake timed out after %ds "
+                "— marking connection dead",
+                self.peer_id,
+                envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S,
+            )
+            self._conn.mark_dead()
+
+        messages = self._conn.recv()
+        if messages:
+            self._last_activity_at = time.monotonic()
+        for msg in messages:
             self._on_message(msg)
 
         loads = self._client.collect_results()
@@ -533,6 +565,7 @@ class P2PSession:
             return
         try:
             self._conn.send(msg)
+            self._last_activity_at = time.monotonic()
             logger.debug("P2PSession %s: sent %s", self.peer_id, msg.get(TYPE_KEY))
         except Exception:
             # A send failure means the connection is broken. Swallowing it

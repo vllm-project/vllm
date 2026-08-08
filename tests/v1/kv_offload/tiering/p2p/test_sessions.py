@@ -2610,3 +2610,105 @@ class TestTransferDoneMsgValidation:
         }
         with pytest.raises(ValueError, match="success"):
             TransferDoneMsg.validate(msg)
+
+
+# ---------------------------------------------------------------------------
+# Tests for handshake deadline
+# ---------------------------------------------------------------------------
+
+
+class TestHandshakeDeadline:
+    """A connected-but-not-ready session is marked dead after the
+    handshake timeout expires."""
+
+    def test_marks_dead_after_timeout(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_HANDSHAKE_TIMEOUT_S", None)
+
+        transport = FakeDataTransport()
+        conn = FakeConnection(peer_id="stale:9999")
+        session = P2PSession(
+            peer_id="stale:9999",
+            local_id="local:1",
+            transport=transport,
+            local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
+            conn=conn,
+        )
+
+        assert session.connected
+        assert not session.ready
+        assert session.alive
+
+        session._connected_at = time.monotonic() - 5
+
+        session.poll()
+        assert not session.alive
+
+    def test_no_timeout_when_ready(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_HANDSHAKE_TIMEOUT_S", None)
+
+        transport = FakeDataTransport()
+        conn = FakeConnection(peer_id="good:1234")
+        session = P2PSession(
+            peer_id="good:1234",
+            local_id="local:1",
+            transport=transport,
+            local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
+            conn=conn,
+        )
+
+        # Complete the handshake by feeding ConnectMsg + ConnectAckMsg.
+        conn._inbox = [
+            {
+                TYPE_KEY: ConnectMsg.TYPE,
+                ConnectMsg.PEER_ID: "good:1234",
+                ConnectMsg.AGENT_METADATA: b"meta",
+                ConnectMsg.BASE_ADDR: 0x1000,
+                ConnectMsg.NUM_BLOCKS: 16,
+                ConnectMsg.BLOCK_LEN: 4096,
+                ConnectMsg.CONFIG_FINGERPRINT: "",
+                ConnectMsg.HASH_SEED: _DEFAULT_HASH_SEED,
+            },
+            {TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "good:1234"},
+        ]
+        session.poll()
+        assert session.ready
+
+        session._connected_at = time.monotonic() - 100
+        session.poll()
+        assert session.alive
+
+    def test_activity_timestamp_updated_on_recv(self):
+        transport = FakeDataTransport()
+        conn = FakeConnection(peer_id="peer:1")
+        session = P2PSession(
+            peer_id="peer:1",
+            local_id="local:1",
+            transport=transport,
+            local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
+            conn=conn,
+        )
+        before = session._last_activity_at
+
+        conn._inbox = [
+            {
+                TYPE_KEY: ConnectMsg.TYPE,
+                ConnectMsg.PEER_ID: "peer:1",
+                ConnectMsg.AGENT_METADATA: b"meta",
+                ConnectMsg.BASE_ADDR: 0x1000,
+                ConnectMsg.NUM_BLOCKS: 16,
+                ConnectMsg.BLOCK_LEN: 4096,
+                ConnectMsg.CONFIG_FINGERPRINT: "",
+                ConnectMsg.HASH_SEED: _DEFAULT_HASH_SEED,
+            },
+        ]
+        session.poll()
+        assert session._last_activity_at >= before

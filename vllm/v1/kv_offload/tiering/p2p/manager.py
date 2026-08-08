@@ -370,7 +370,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
         if source is not None:
-            self._get_or_create_session(source.peer_id)
+            session = self._get_or_create_session(source.peer_id)
+            if session is None:
+                self._failed_req_ids.add(source.kv_request_id)
         return RequestOffloadingContext()
 
     @override
@@ -602,20 +604,45 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     # Internal
     # ------------------------------------------------------------------
 
-    def _get_or_create_session(self, peer_id: str) -> P2PSession:
+    def _get_or_create_session(self, peer_id: str) -> P2PSession | None:
         """Return the existing session for peer_id, or open one outbound.
 
         Consumer-side helper for on_new_request: when ``remote_prefiller``
-        (PD) or ``remote_kv_source`` (symmetric P2P) is set, the consumer must reach the
-        producer at peer_id. If we already have a session toward that
-        peer (from a prior load or a peer-initiated inbound), reuse it;
-        otherwise open an outbound ControlConnection and build a
+        (PD) or ``remote_kv_source`` (symmetric P2P) is set, the consumer
+        must reach the producer at peer_id. If we already have a session
+        toward that peer (from a prior load or a peer-initiated inbound),
+        reuse it; otherwise open an outbound ControlConnection and build a
         connected session.
+
+        Returns None if the session could not be created (capacity
+        exceeded or transport error).
         """
         session = self._sessions.get(peer_id)
         if session is not None:
             return session
-        conn = self._control.connect(peer_id)
+
+        max_peers = envs.VLLM_P2P_MAX_PEERS
+        if len(self._sessions) >= max_peers:
+            logger.warning(
+                "P2P %s: rejecting outbound peer %s — session limit "
+                "reached (%d/%d). Set VLLM_P2P_MAX_PEERS to increase.",
+                self._local_id,
+                peer_id,
+                len(self._sessions),
+                max_peers,
+            )
+            return None
+
+        try:
+            conn = self._control.connect(peer_id)
+        except Exception:
+            logger.exception(
+                "P2P %s: failed to open connection to %s",
+                self._local_id,
+                peer_id,
+            )
+            return None
+
         session = P2PSession(
             peer_id=peer_id,
             local_id=self._local_id,
@@ -628,12 +655,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         return session
 
     def _accept_new_peers(self, new_connections: Sequence[ControlConnection]) -> None:
+        max_peers = envs.VLLM_P2P_MAX_PEERS
         for conn in new_connections:
             logger.info(
                 "P2P %s: accepting incoming connection from %s",
                 self._local_id,
                 conn.peer_id,
             )
+            if len(self._sessions) >= max_peers:
+                logger.warning(
+                    "P2P %s: rejecting inbound peer %s — session limit "
+                    "reached (%d/%d). Set VLLM_P2P_MAX_PEERS to increase.",
+                    self._local_id,
+                    conn.peer_id,
+                    len(self._sessions),
+                    max_peers,
+                )
+                conn.close()
+                continue
             try:
                 existing = self._sessions.get(conn.peer_id)
                 if existing is not None:
@@ -730,6 +769,47 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 len(batches),
             )
 
+    def _reap_idle_sessions(self) -> None:
+        """Evict sessions that have been idle beyond the configured limit.
+
+        A session is idle when it has no pending work and its last activity
+        timestamp exceeds ``VLLM_P2P_IDLE_TIMEOUT_S``. Uses the same
+        teardown path as ``_reap_dead_sessions``.
+        """
+        idle_timeout = envs.VLLM_P2P_IDLE_TIMEOUT_S
+        if idle_timeout <= 0:
+            return
+        deadline = time.monotonic() - idle_timeout
+        idle: list[str] | None = None
+        for pid, s in self._sessions.items():
+            if not s.has_pending_work and s.last_activity_at <= deadline:
+                if idle is None:
+                    idle = []
+                idle.append(pid)
+        if idle is None:
+            return
+        for pid in idle:
+            session = self._sessions.pop(pid)
+            stale_kv_ids = [
+                kid for kid, s in self._kv_to_session.items() if s is session
+            ]
+            for kid in stale_kv_ids:
+                del self._kv_to_session[kid]
+            close_result = session.close()
+            for job_id in close_result.failed_jobs:
+                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            for job_id in close_result.failed_stores:
+                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._failed_req_ids.update(close_result.failed_req_ids)
+            self._failed_serve_ctxs.extend(close_result.failed_serves)
+            self._data.remove_remote_peer(pid)
+            logger.info(
+                "P2P %s: evicted idle peer %s (idle > %ds)",
+                self._local_id,
+                pid,
+                idle_timeout,
+            )
+
     # ------------------------------------------------------------------
     # Polling
     # ------------------------------------------------------------------
@@ -778,6 +858,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         self._reap_dead_sessions()
         self._reap_unbound_stores()
+        self._reap_idle_sessions()
 
     # ------------------------------------------------------------------
     # Lifecycle
