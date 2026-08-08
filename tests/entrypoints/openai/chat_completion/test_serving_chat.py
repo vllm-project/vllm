@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -595,6 +595,7 @@ def _build_serving_chat(
     reasoning_parser: str = "",
     tool_parser: str | None = None,
     enable_auto_tools: bool = False,
+    structured_outputs_enable_in_reasoning: bool = False,
 ) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
@@ -613,9 +614,86 @@ def _build_serving_chat(
         reasoning_parser=reasoning_parser,
         tool_parser=tool_parser,
         enable_auto_tools=enable_auto_tools,
+        structured_outputs_enable_in_reasoning=structured_outputs_enable_in_reasoning,
     )
 
     return serving_chat
+
+
+@pytest.mark.parametrize(
+    (
+        "response_format",
+        "use_beam_search",
+        "model_output",
+        "expected_reasoning",
+        "expected_content",
+    ),
+    [
+        (
+            {"type": "json_object"},
+            False,
+            '{"reasoning":"</think>","tool":"<tool_call>"}',
+            None,
+            '{"reasoning":"</think>","tool":"<tool_call>"}',
+        ),
+        (
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "object"},
+                },
+            },
+            False,
+            '{"value":"content"}',
+            None,
+            '{"value":"content"}',
+        ),
+        (
+            {"type": "json_object"},
+            True,
+            "thinking</think>answer",
+            "thinking",
+            "answer",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_structured_output_in_reasoning(
+    response_format: dict[str, Any] | None,
+    use_beam_search: bool,
+    model_output: str,
+    expected_reasoning: str | None,
+    expected_content: str,
+):
+    engine = MockEngine()
+    engine.renderer = _build_renderer(engine.model_config)
+
+    async def result_generator(*args, **kwargs):
+        yield _make_metrics_request_output(
+            text=model_output,
+            token_ids=(4, 5, 6),
+        )
+
+    engine.generate = result_generator
+    serving_chat = _build_serving_chat(
+        engine,
+        reasoning_parser="qwen3",
+        structured_outputs_enable_in_reasoning=True,
+    )
+    serving_chat.beam_search = result_generator
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        response_format=response_format,
+        use_beam_search=use_beam_search,
+    )
+
+    response = await serving_chat.create_chat_completion(request)
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert response.choices[0].message.reasoning == expected_reasoning
+    assert response.choices[0].message.content == expected_content
 
 
 def _build_minimal_metrics_serving_chat(
@@ -639,6 +717,7 @@ def _build_minimal_metrics_serving_chat(
 def _make_metrics_request_output(
     metrics: RequestStateStats | None = _PER_REQUEST_STATS,
     token_ids: tuple[int, ...] = (100, 101),
+    text: str = "Hello",
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test-id",
@@ -648,7 +727,7 @@ def _make_metrics_request_output(
         outputs=[
             CompletionOutput(
                 index=0,
-                text="Hello",
+                text=text,
                 token_ids=list(token_ids),
                 cumulative_logprob=None,
                 logprobs=None,
@@ -786,6 +865,9 @@ class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
     renderer: MagicMock = field(default_factory=MagicMock)
+    generate: Callable[..., AsyncIterator[RequestOutput]] = field(
+        default_factory=MagicMock
+    )
     errored: bool = False
 
 

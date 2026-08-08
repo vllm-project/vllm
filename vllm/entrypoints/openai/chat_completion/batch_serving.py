@@ -128,6 +128,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 tokenizer,
                 None,  # tools
                 chat_template_kwargs=chat_template_kwargs,
+                structured_output_in_reasoning=self._structured_output_in_reasoning(
+                    single_requests[0]
+                ),
             )
 
         render_result = await self.render_batch_chat_request(request)
