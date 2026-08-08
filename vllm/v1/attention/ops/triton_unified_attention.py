@@ -218,6 +218,8 @@ def kernel_unified_attention(
     USE_CAUSAL: tl.constexpr,  # bool
     USE_PER_SEQ_CAUSAL: tl.constexpr,  # bool
     per_seq_causal_ptr,  # [num_seqs] bool, or None
+    USE_DIFFUSION_RECT_SWA: tl.constexpr,  # bool
+    diffusion_rect_swa_ptr,  # [num_seqs] bool, or None
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,
@@ -398,6 +400,7 @@ def kernel_unified_attention(
 
     loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
         context_len,
+        seq_idx,
         seq_len,
         cur_batch_query_len,
         q_block_local_idx,
@@ -414,6 +417,8 @@ def kernel_unified_attention(
         USE_PER_SEQ_CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
+        USE_DIFFUSION_RECT_SWA,
+        diffusion_rect_swa_ptr,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -530,6 +535,9 @@ def kernel_unified_attention(
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
             MM_PREFIX_CLAMP_SW,
+            USE_DIFFUSION_RECT_SWA,
+            diffusion_rect_swa_ptr,
+            context_len,
         )
 
         # S : (BLOCK_M, TILE_SIZE)
@@ -575,6 +583,12 @@ def kernel_unified_attention(
                 sw_mask_v = dist < SLIDING_WINDOW
             else:
                 sw_mask_v = (dist < SLIDING_WINDOW) & (dist > -SLIDING_WINDOW)
+            if USE_DIFFUSION_RECT_SWA:
+                use_rect_swa = tl.load(diffusion_rect_swa_ptr + seq_idx)
+                rect_mask_v = (seq_offset[:, None] >= context_len - SLIDING_WINDOW) & (
+                    seq_offset[:, None] < seq_len
+                )
+                sw_mask_v = tl.where(use_rect_swa, rect_mask_v, sw_mask_v)
             V = tl.where(sw_mask_v, V, 0.0)
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: apply v_scale to P instead of V.
@@ -828,6 +842,7 @@ def unified_attention(
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
+    diffusion_rect_swa=None,
     # R-SWA support: prefix tokens stay globally visible, generated tokens use
     # a fixed sliding window.
     rswa_prefix_lens=None,
@@ -852,6 +867,8 @@ def unified_attention(
     use_per_seq_causal = isinstance(causal, torch.Tensor)
     use_causal = bool(causal) if not use_per_seq_causal else True
     per_seq_causal_ptr = causal if use_per_seq_causal else None
+    use_diffusion_rect_swa = diffusion_rect_swa is not None
+    diffusion_rect_swa_ptr = diffusion_rect_swa if use_diffusion_rect_swa else seqused_k
 
     # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
     # sub-byte unpack); everything else goes through the core kernel below.
@@ -1129,6 +1146,8 @@ def unified_attention(
         USE_CAUSAL=use_causal,
         USE_PER_SEQ_CAUSAL=use_per_seq_causal,
         per_seq_causal_ptr=per_seq_causal_ptr,
+        USE_DIFFUSION_RECT_SWA=use_diffusion_rect_swa,
+        diffusion_rect_swa_ptr=diffusion_rect_swa_ptr,
         USE_MM_PREFIX=use_mm_prefix,
         MAX_MM_RANGES=max_mm_ranges,
         mm_prefix_range_ptr=mm_prefix_range,

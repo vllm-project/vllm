@@ -81,6 +81,7 @@ class TritonAttentionMetadata:
     softmax_segm_expsum: torch.Tensor
 
     causal: bool | torch.Tensor
+    diffusion_rect_swa: torch.Tensor | None
 
     # For cascade attention.
     use_cascade: bool
@@ -234,6 +235,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             causal=common_attn_metadata.causal,
+            diffusion_rect_swa=common_attn_metadata.diffusion_rect_swa,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
@@ -699,6 +701,7 @@ class TritonAttentionImpl(AttentionImpl):
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
             causal=attn_metadata.causal,
+            diffusion_rect_swa=attn_metadata.diffusion_rect_swa,
             alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,
             window_size=self.sliding_window,

@@ -40,6 +40,7 @@ def ref_paged_attn(
     scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
+    diffusion_rect_swa: list[bool] | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -76,6 +77,12 @@ def ref_paged_attn(
                 .logical_not()
             )
             mask |= sliding_window_mask
+        if diffusion_rect_swa is not None and diffusion_rect_swa[i]:
+            assert sliding_window is not None
+            context_len = kv_len - query_len
+            rect_start = max(context_len - sliding_window, 0)
+            mask = torch.ones(query_len, kv_len, dtype=torch.bool)
+            mask[:, rect_start:kv_len] = False
         if soft_cap is not None and soft_cap > 0:
             attn = soft_cap * torch.tanh(attn / soft_cap)
         attn.masked_fill_(mask, float("-inf"))
@@ -643,3 +650,85 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+@torch.inference_mode()
+def test_triton_unified_attn_diffusion_rect_swa() -> None:
+    """Every diffusion canvas row sees one fixed prefix window."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    query_len = 32
+    context_len = 96
+    kv_len = context_len + query_len
+    sliding_window = 64
+    num_query_heads = 4
+    num_kv_heads = 2
+    head_size = 128
+    block_size = 16
+    num_blocks = kv_len // block_size
+    scale = head_size**-0.5
+
+    query = torch.randn(query_len, num_query_heads, head_size, dtype=torch.bfloat16)
+    key_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_tables = torch.arange(num_blocks, dtype=torch.int32).unsqueeze(0)
+    cu_query_lens = torch.tensor([0, query_len], dtype=torch.int32)
+    kv_lens = torch.tensor([kv_len], dtype=torch.int32)
+    causal = torch.tensor([False], dtype=torch.bool)
+    diffusion_rect_swa = torch.tensor([True], dtype=torch.bool)
+    output = torch.empty_like(query)
+
+    num_par_softmax_segments = 16
+    softmax_segm_output = torch.empty(
+        (0, num_query_heads, num_par_softmax_segments, head_size),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.empty(
+        (0, num_query_heads, num_par_softmax_segments), dtype=torch.float32
+    )
+    softmax_segm_expsum = torch.empty_like(softmax_segm_max)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        max_seqlen_q=query_len,
+        seqused_k=kv_lens,
+        max_seqlen_k=kv_len,
+        softmax_scale=scale,
+        causal=causal,
+        diffusion_rect_swa=diffusion_rect_swa,
+        window_size=(sliding_window - 1, 0),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=0,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=[query_len],
+        kv_lens=[kv_len],
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+        diffusion_rect_swa=[True],
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
