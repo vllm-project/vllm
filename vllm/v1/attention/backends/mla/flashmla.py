@@ -343,4 +343,16 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         o = reshape_attn_output_for_spec_decode(o)
 
+        if self.need_to_return_lse_for_decode:
+            # FlashMLA returns LSE as [batch, heads, seq_len]; the DCP reducer
+            # consumes [tokens, heads]. Flattening matters under spec-decode,
+            # where seq_len > 1. Only DCP consumes lse, so skip the copy
+            # otherwise.
+            num_decodes, q_num_heads, seq_len = lse.shape
+            lse = (
+                lse.permute(0, 2, 1)
+                .reshape(num_decodes * seq_len, q_num_heads)
+                .contiguous()
+            )
+
         return o, lse
