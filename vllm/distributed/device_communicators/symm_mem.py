@@ -103,16 +103,30 @@ class SymmMemCommunicator:
                 str(e),
             )
             return
-        if handle.multicast_ptr == 0:
+        # Only the multimem kernel needs a multicast pointer; the two-shot
+        # kernel does not. Disable solely when multimem is what would run.
+        if handle.multicast_ptr == 0 and self._uses_multimem(force_multimem):
             logger.warning(
-                "SymmMemCommunicator: symmetric memory "
-                "multicast operations are not supported."
+                "SymmMemCommunicator: symmetric memory multicast operations "
+                "are not supported, and multimem is the configured algorithm "
+                "for device capability %s at world size %d; communicator is "
+                "not available.",
+                self.device_capability,
+                self.world_size,
             )
             return
         self.force_multimem = force_multimem
         self.disabled = False
         if envs.VLLM_BATCH_INVARIANT:
             self.disabled = True
+
+    def _uses_multimem(self, force_multimem: bool | None) -> bool:
+        """Whether `all_reduce` dispatches to the multimem kernel."""
+        if force_multimem is not None:
+            return force_multimem
+        return self.world_size in self._WORLD_SIZES_MULTIMEM.get(
+            self.device_capability, []
+        )
 
     def should_use_symm_mem(self, inp: torch.Tensor):
         if self.disabled:
@@ -133,18 +147,7 @@ class SymmMemCommunicator:
             out = torch.empty_like(inp)
         self.buffer[: inp.numel()].copy_(inp.view(-1))
 
-        # Determine which algorithm to use
-        use_multimem = False
-        if self.force_multimem is not None:
-            # Test override: use forced setting
-            use_multimem = self.force_multimem
-        else:
-            # Normal logic: use multimem for supported world sizes
-            use_multimem = (
-                self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]
-            )
-
-        if use_multimem:
+        if self._uses_multimem(self.force_multimem):
             torch.ops.symm_mem.multimem_all_reduce_(
                 self.buffer[: inp.numel()], "sum", self.group.group_name
             )
