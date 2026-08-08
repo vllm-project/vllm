@@ -97,6 +97,24 @@ def test_gate_reads_use_eagle_at_call_time(make, use_eagle, expected, monkeypatc
     assert manager._ghost_block_guard_enabled is expected
 
 
+@pytest.mark.parametrize("make", [_full_manager, _mla_manager])
+def test_mode_2_covers_every_group_regardless_of_use_eagle(make, monkeypatch):
+    """Mode 2 is why the env var is tri-state rather than a bool.
+
+    Upstream gates on use_eagle, having framed this as a spec-decode issue. On
+    DeepSeek-V4 only the sliding-window groups carry the eagle flag, so mode 1
+    measured 2 of 5 managers active and left MLAAttentionManager -- the main
+    attention path -- unguarded. The race is in block publication and does not
+    care about spec decode, so mode 2 covers every group.
+    """
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", 2, raising=False
+    )
+    manager = make(_pool())
+    manager.use_eagle = False  # the case mode 1 leaves unguarded
+    assert manager._ghost_block_guard_enabled is True
+
+
 def test_mamba_guard_is_always_on(monkeypatch):
     """Mamba's guard predates the env var (#29387) and must ignore it."""
     monkeypatch.setattr(

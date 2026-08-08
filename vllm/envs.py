@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
-    VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT: bool = False
+    VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT: int = 0
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
@@ -650,8 +650,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # against this since #29387; every other manager -- including the MLA ones
     # DeepSeek-V4 uses -- does not. When True, defer such a reader by one
     # scheduling step. Off by default; only active when spec decode is enabled.
-    "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT": lambda: bool(
-        int(os.getenv("VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", "0"))
+    # 0 = off, 1 = upstream semantics (gated on use_eagle), 2 = every group.
+    # 2 exists because on DeepSeek-V4 only the sliding-window groups carry the
+    # eagle flag, so 1 guards 2 of 5 managers and leaves the main MLA path open.
+    "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT": lambda: int(
+        os.getenv("VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", "0")
     ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on

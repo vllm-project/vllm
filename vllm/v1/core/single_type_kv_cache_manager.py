@@ -149,7 +149,16 @@ class SingleTypeKVCacheManager(ABC):
         construction time would always see ``False`` and silently disable the
         guard. ``MambaManager`` overrides this to always-on (PR #29387).
         """
-        return envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT and self.use_eagle
+        mode = envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT
+        # 2 = every group, ignoring use_eagle. Upstream gates on use_eagle
+        # because it framed this as a spec-decode issue, but the race is in
+        # block publication and applies to any group with prefix caching on.
+        # On DeepSeek-V4 only the sliding-window groups are flagged as eagle
+        # groups, so upstream's gate leaves MLAAttentionManager -- the main
+        # attention path -- unguarded (measured: 2/5 managers active).
+        if mode >= 2:
+            return True
+        return bool(mode) and self.use_eagle
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
