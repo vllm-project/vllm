@@ -2101,9 +2101,25 @@ class DPEngineCoreProc(EngineCoreProc):
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
+            was_running = self.engines_running
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
+
+            if (
+                self.has_coordinator
+                and self.dp_rank == 0
+                and self.engines_running
+                and not was_running
+                and not self.pending_pause
+            ):
+                # Notify the coordinator that the engines have started,
+                # mirroring the wave_complete notification below. It must
+                # observe both edges rather than assume that a START_DP_WAVE
+                # it sent was acted upon, since paused engines discard it.
+                self.output_queue.put_nowait(
+                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                )
 
             if self.eep_scaling_state is not None:
                 state = self.eep_scaling_state

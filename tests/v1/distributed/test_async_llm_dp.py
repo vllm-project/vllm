@@ -300,6 +300,53 @@ async def test_dp_pause_resume_basic(expert_parallel: bool):
 
 
 @pytest.mark.asyncio
+async def test_dp_pause_late_request_does_not_block_drain():
+    """A request arriving after pause must not leave the coordinator believing
+    the engines are running.
+
+    Paused engines discard START_DP_WAVE, so nothing can report wave
+    completion afterwards; if forwarding the wake also marks the engines as
+    running, drain has no way back and can only end in a timeout.
+
+    MoE only: wave coordination is enabled iff the model is MoE, so a dense
+    model never reaches the coordinator state this exercises.
+    """
+    with ExitStack() as after:
+        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        # Run a wave first, so the engines are quiesced by the pause rather
+        # than by never having started, and drain has something to observe.
+        async for _ in engine.generate(
+            request_id="warmup",
+            prompt=DP_PAUSE_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+
+        await engine.pause_generation(mode="abort")
+        await engine.wait_for_requests_to_drain(drain_timeout=30)
+
+        # Awaiting add_request guarantees the new-request notification has
+        # reached the coordinator - the message that used to latch the flag.
+        collector = await engine.add_request(
+            request_id="late",
+            prompt=DP_PAUSE_PROMPT,
+            params=SamplingParams(max_tokens=5),
+        )
+
+        await engine.wait_for_requests_to_drain(drain_timeout=30)
+
+        # The late request was held rather than dropped: it completes on resume.
+        await engine.resume_generation()
+        while True:
+            out = await asyncio.wait_for(collector.get(), timeout=60)
+            if out.finished:
+                break
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("expert_parallel", [False, True])
 async def test_dp_pause_abort(expert_parallel: bool):
     """Pause with abort from one client aborts in-flight requests on all DP ranks."""
