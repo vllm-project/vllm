@@ -907,15 +907,19 @@ def create_fast_prefill_custom_backend(
 
 
 def compute_causal_conv1d_metadata(
-    query_start_loc_p_cpu: torch.Tensor, *, device: torch.device
+    query_start_loc_p_cpu: torch.Tensor,
+    *,
+    device: torch.device,
+    block_sizes: tuple[int, ...] = (8,),
 ) -> tuple[dict[int, dict[str, Any]], torch.Tensor, torch.Tensor]:
     # Needed for causal_conv1d. Use the CPU query_start_loc to avoid DtoH sync.
     assert query_start_loc_p_cpu.device.type == "cpu"
+    assert 8 in block_sizes
     seqlens = query_start_loc_p_cpu.diff()
     nums_dict: dict[int, dict[str, Any]] = {}
     batch_ptr = None
     token_chunk_offset_ptr = None
-    for BLOCK_M in [8]:  # cover all BLOCK_M values
+    for BLOCK_M in block_sizes:
         nums = -(-seqlens // BLOCK_M)
         nums_dict[BLOCK_M] = {}
         nums_dict[BLOCK_M]["nums"] = nums
@@ -931,27 +935,22 @@ def compute_causal_conv1d_metadata(
         offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
 
-        if batch_ptr is None:
-            # Update default value after class definition
-            batch_ptr = torch.full(
-                (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device
-            )
-            token_chunk_offset_ptr = torch.full(
-                (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device
-            )
-        else:
-            if batch_ptr.nelement() < MAX_NUM_PROGRAMS:
-                batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
-                assert token_chunk_offset_ptr is not None
-                token_chunk_offset_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+        block_batch_ptr = torch.full(
+            (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device
+        )
+        block_token_chunk_offset_ptr = torch.full(
+            (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=device
+        )
+        block_batch_ptr[0:mlist_len].copy_(mlist, non_blocking=True)
+        block_token_chunk_offset_ptr[0:mlist_len].copy_(offsetlist, non_blocking=True)
+        nums_dict[BLOCK_M]["batch_ptr"] = block_batch_ptr
+        nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = block_token_chunk_offset_ptr
+        if BLOCK_M == 8:
+            batch_ptr = block_batch_ptr
+            token_chunk_offset_ptr = block_token_chunk_offset_ptr
 
-        assert batch_ptr is not None
-        batch_ptr[0:mlist_len].copy_(mlist, non_blocking=True)
-        assert token_chunk_offset_ptr is not None
-        token_chunk_offset_ptr[0:mlist_len].copy_(offsetlist, non_blocking=True)
-        nums_dict[BLOCK_M]["batch_ptr"] = batch_ptr
-        nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr
-
+    assert batch_ptr is not None
+    assert token_chunk_offset_ptr is not None
     return nums_dict, batch_ptr, token_chunk_offset_ptr
 
 
