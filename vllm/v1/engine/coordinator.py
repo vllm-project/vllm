@@ -5,6 +5,7 @@ import multiprocessing
 import multiprocessing.connection
 import time
 import weakref
+from dataclasses import dataclass
 
 import msgspec.msgpack
 import zmq
@@ -14,10 +15,192 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 logger = init_logger(__name__)
+
+_PREFILL_ALIGNMENT_OBSERVE = 1
+_PREFILL_ALIGNMENT_ACTUAL = 2
+
+
+@dataclass(frozen=True)
+class PrefillAlignmentRelease:
+    wave: int
+    release_id: int
+    target_step: int
+    reason: str
+
+
+class PrefillAlignmentCoordinator:
+    """Nonblocking coordinator state for adaptive DP prefill alignment."""
+
+    def __init__(
+        self,
+        engine_count: int,
+        max_delay_passes: int = 30,
+        target_step_lead: int = 2,
+    ) -> None:
+        self.engine_count = engine_count
+        self.max_delay_passes = max_delay_passes
+        self.target_step_lead = target_step_lead
+        self.current_wave = 0
+        self.current_release_id = 0
+        self.delayed_passes = 0
+        self.pending_release: PrefillAlignmentRelease | None = None
+        self.pending_acks: set[int] = set()
+        self.snapshots: dict[int, dict[int, SchedulerStats]] = {}
+        self.last_actual_prefill: dict[int, tuple[int, int]] = {}
+        self.skip_first_delay = True
+        self.first_completion_logged = False
+
+    def reset_wave(self, wave: int) -> None:
+        self.current_wave = wave
+        self.current_release_id = 0
+        self.delayed_passes = 0
+        self.pending_release = None
+        self.pending_acks.clear()
+        self.snapshots.clear()
+        self.last_actual_prefill.clear()
+        self.skip_first_delay = True
+
+    def resize(self, engine_count: int) -> None:
+        self.engine_count = engine_count
+        self.reset_wave(self.current_wave)
+
+    def update(
+        self, engine_index: int, stats: SchedulerStats
+    ) -> PrefillAlignmentRelease | None:
+        if stats.current_wave < self.current_wave:
+            return None
+        if stats.current_wave > self.current_wave:
+            self.reset_wave(stats.current_wave)
+
+        if stats.prefill_alignment_ack_generation >= 0:
+            self._acknowledge(engine_index, stats)
+
+        if stats.prefill_alignment_phase == _PREFILL_ALIGNMENT_ACTUAL:
+            return None
+        if stats.prefill_alignment_phase != _PREFILL_ALIGNMENT_OBSERVE:
+            return None
+
+        if self.pending_release is not None:
+            if (
+                stats.step_counter - self.pending_release.target_step
+                < self.max_delay_passes
+            ):
+                return None
+            logger.warning(
+                "Prefill alignment release %d timed out waiting for acks; "
+                "advancing and broadcasting a fail-open resync.",
+                self.pending_release.release_id,
+            )
+            self._finish_release()
+            return self._release(stats.step_counter, "ack_timeout_resync")
+
+        if stats.prefill_alignment_generation != self.current_release_id:
+            return None
+
+        step_snapshots = self.snapshots.setdefault(stats.step_counter, {})
+        step_snapshots[engine_index] = stats
+        if len(step_snapshots) < self.engine_count:
+            return None
+
+        self.snapshots = {
+            step: values
+            for step, values in self.snapshots.items()
+            if step > stats.step_counter
+        }
+        ordered = [step_snapshots[i] for i in range(self.engine_count)]
+        num_prefillable = sum(item.prefill_deferred for item in ordered)
+        if num_prefillable == 0:
+            self.delayed_passes = 0
+            return None
+
+        if any(item.prefill_force_allow for item in ordered):
+            return self._release(stats.step_counter, "capacity_force_allow")
+
+        if num_prefillable == self.engine_count:
+            max_running = max(item.prefill_running_batch for item in ordered)
+            max_prefill = max(item.prefill_max_batch for item in ordered)
+            max_running_requests = max(
+                item.prefill_max_running_requests for item in ordered
+            )
+            slot_limited = max_running_requests - max_running < max_prefill
+            if slot_limited:
+                if self.skip_first_delay:
+                    self.skip_first_delay = False
+                    return self._release(stats.step_counter, "first_delay_skip")
+                self.delayed_passes += 1
+                if self.delayed_passes >= self.max_delay_passes:
+                    return self._release(stats.step_counter, "max_delay_fail_open")
+                return None
+            return self._release(stats.step_counter, "all_prefillable")
+
+        self.delayed_passes += 1
+        if self.delayed_passes >= self.max_delay_passes:
+            return self._release(stats.step_counter, "max_delay_fail_open")
+        return None
+
+    def _release(self, step: int, reason: str) -> PrefillAlignmentRelease:
+        release = PrefillAlignmentRelease(
+            wave=self.current_wave,
+            release_id=self.current_release_id,
+            target_step=step + self.target_step_lead,
+            reason=reason,
+        )
+        self.pending_release = release
+        self.pending_acks.clear()
+        self.last_actual_prefill.clear()
+        self.delayed_passes = 0
+        return release
+
+    def _acknowledge(self, engine_index: int, stats: SchedulerStats) -> None:
+        release = self.pending_release
+        if release is None:
+            return
+        if (
+            stats.prefill_alignment_ack_generation != release.release_id
+            or stats.prefill_alignment_ack_target_step != release.target_step
+        ):
+            return
+        self.pending_acks.add(engine_index)
+        self.last_actual_prefill[engine_index] = (
+            stats.actual_prefill_requests,
+            stats.actual_prefill_tokens,
+        )
+        if stats.prefill_alignment_release_late:
+            logger.warning(
+                "Prefill alignment late release application: "
+                "engine=%d release_id=%d target_step=%d current_step=%d",
+                engine_index,
+                release.release_id,
+                release.target_step,
+                stats.step_counter,
+            )
+        if len(self.pending_acks) == self.engine_count:
+            if not self.first_completion_logged:
+                logger.info(
+                    "Prefill alignment first release completed across all "
+                    "%d engines: release_id=%d actual=%s",
+                    self.engine_count,
+                    release.release_id,
+                    self.last_actual_prefill,
+                )
+                self.first_completion_logged = True
+            logger.debug(
+                "Prefill alignment release %d completed: %s",
+                release.release_id,
+                self.last_actual_prefill,
+            )
+            self._finish_release()
+
+    def _finish_release(self) -> None:
+        self.current_release_id += 1
+        self.pending_release = None
+        self.pending_acks.clear()
+        self.snapshots.clear()
 
 
 class DPCoordinator:
@@ -77,7 +260,12 @@ class DPCoordinator:
             zmq_addr_pipe.close()
 
     def __init__(
-        self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
+        self,
+        parallel_config: ParallelConfig,
+        enable_wave_coordination: bool = True,
+        enable_prefill_alignment: bool = False,
+        prefill_alignment_max_delay_passes: int = 30,
+        prefill_alignment_target_step_lead: int = 2,
     ):
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
@@ -108,6 +296,13 @@ class DPCoordinator:
                 "back_publish_address": back_publish_address,
                 "zmq_addr_pipe": child_zmq_addr_pipe,
                 "enable_wave_coordination": enable_wave_coordination,
+                "enable_prefill_alignment": enable_prefill_alignment,
+                "prefill_alignment_max_delay_passes": (
+                    prefill_alignment_max_delay_passes
+                ),
+                "prefill_alignment_target_step_lead": (
+                    prefill_alignment_target_step_lead
+                ),
             },
             daemon=True,
         )
@@ -149,6 +344,9 @@ class DPCoordinatorProc:
         engine_count: int,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
+        enable_prefill_alignment: bool = False,
+        prefill_alignment_max_delay_passes: int = 30,
+        prefill_alignment_target_step_lead: int = 2,
     ):
         set_process_title("DPCoordinator")
         self.ctx = zmq.Context()
@@ -157,6 +355,15 @@ class DPCoordinatorProc:
 
         self.stats_update_interval_ms = min_stats_update_interval_ms
         self.enable_wave_coordination = enable_wave_coordination
+        self.prefill_alignment = (
+            PrefillAlignmentCoordinator(
+                engine_count,
+                prefill_alignment_max_delay_passes,
+                prefill_alignment_target_step_lead,
+            )
+            if enable_prefill_alignment
+            else None
+        )
 
     @staticmethod
     def run_coordinator(
@@ -167,11 +374,17 @@ class DPCoordinatorProc:
         zmq_addr_pipe=None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
+        enable_prefill_alignment: bool = False,
+        prefill_alignment_max_delay_passes: int = 30,
+        prefill_alignment_target_step_lead: int = 2,
     ):
         coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms,
             enable_wave_coordination=enable_wave_coordination,
+            enable_prefill_alignment=enable_prefill_alignment,
+            prefill_alignment_max_delay_passes=(prefill_alignment_max_delay_passes),
+            prefill_alignment_target_step_lead=(prefill_alignment_target_step_lead),
         )
         try:
             coordinator.process_input_socket(
@@ -342,6 +555,8 @@ class DPCoordinatorProc:
                                 current_count,
                                 new_engine_count,
                             )
+                        if self.prefill_alignment is not None:
+                            self.prefill_alignment.resize(new_engine_count)
                         continue  # Skip normal engine notification processing
 
                     # Wave coordination: handle new-request messages from front-end.
@@ -375,10 +590,14 @@ class DPCoordinatorProc:
 
                     eng_index = outputs.engine_index
                     scheduler_stats = outputs.scheduler_stats
-                    if scheduler_stats:
-                        # Elastic EP stats may arrive while the engine list changes.
-                        if eng_index >= len(self.engines):
-                            continue
+                    # Elastic EP stats may arrive while the engine list changes.
+                    if scheduler_stats and eng_index >= len(self.engines):
+                        continue
+
+                    if scheduler_stats and (
+                        scheduler_stats.prefill_alignment_phase
+                        != _PREFILL_ALIGNMENT_ACTUAL
+                    ):
                         # 1. Updated request load stats - update our local
                         # state with these.
                         stats = self.engines[eng_index].request_counts
@@ -416,6 +635,13 @@ class DPCoordinatorProc:
                         stats[2] = scheduler_stats.kv_cache_usage
                         stats_changed = True
 
+                    if scheduler_stats and self.prefill_alignment is not None:
+                        release = self.prefill_alignment.update(
+                            eng_index, scheduler_stats
+                        )
+                        if release is not None:
+                            self._send_prefill_alignment_release(publish_back, release)
+
                     # Wave coordination: handle wave completion and start notifications
                     # Only process these when wave coordination is enabled
                     if self.enable_wave_coordination:
@@ -433,6 +659,8 @@ class DPCoordinatorProc:
                                 current_wave = new_wave
                                 engines_running = False
                                 wave_state_changed = True
+                                if self.prefill_alignment is not None:
+                                    self.prefill_alignment.reset_wave(new_wave)
                         elif (wave := outputs.start_wave) is not None and (
                             wave > current_wave
                             or (wave == current_wave and not engines_running)
@@ -465,6 +693,22 @@ class DPCoordinatorProc:
         """
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart((EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
+
+    @staticmethod
+    def _send_prefill_alignment_release(
+        socket: zmq.Socket, release: PrefillAlignmentRelease
+    ) -> None:
+        payload = msgspec.msgpack.encode(
+            (
+                release.wave,
+                release.release_id,
+                release.target_step,
+                release.reason,
+            )
+        )
+        socket.send_multipart(
+            (EngineCoreRequestType.PREFILL_ALIGNMENT_RELEASE.value, payload)
+        )
 
     def _get_engine_counts(self, do_copy=False) -> list[list[int | float]]:
         """Return list of [waiting, running] count lists for each engine."""

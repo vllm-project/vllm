@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.metrics.stats import SchedulerStats
+    from vllm.v1.metrics.stats import PrefillAlignmentTelemetry, SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
     from vllm.v1.structured_output import StructuredOutputManager
@@ -238,6 +238,16 @@ class SchedulerInterface(ABC):
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
+
+    def get_prefill_alignment_telemetry(
+        self,
+    ) -> "PrefillAlignmentTelemetry | None":
+        """Returns telemetry from the most recent scheduler walk."""
+        return None
+
+    def set_prefill_capacity_override_enabled(self, enabled: bool) -> None:
+        """Control whether local capacity may override prefill throttling."""
+        del enabled
 
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":

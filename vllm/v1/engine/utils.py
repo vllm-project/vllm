@@ -1105,6 +1105,15 @@ def launch_core_engines(
         coordinator = DPCoordinator(
             parallel_config,
             enable_wave_coordination=vllm_config.model_config.is_moe,
+            enable_prefill_alignment=(
+                vllm_config.scheduler_config.enable_adaptive_prefill_alignment
+            ),
+            prefill_alignment_max_delay_passes=(
+                vllm_config.scheduler_config.prefill_alignment_max_delay_passes
+            ),
+            prefill_alignment_target_step_lead=(
+                vllm_config.scheduler_config.prefill_alignment_target_step_lead
+            ),
         )
 
         addresses.coordinator_input, addresses.coordinator_output = (
