@@ -1,12 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from unittest.mock import MagicMock
+import os
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, call, patch
+from uuid import UUID
 
 import pytest
+import torch
+from pydantic import ValidationError
 
-from vllm.config import CUDAGraphMode, ProfilerConfig
+from vllm.config import (
+    CompilationConfig,
+    CUDAGraphMode,
+    ProfilerConfig,
+    VllmConfig,
+)
 from vllm.config.profiler import _is_uri_path
-from vllm.profiler.wrapper import WorkerProfiler
+from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
@@ -281,6 +292,16 @@ class TestAnnotateProfile:
             "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
         )
 
+    def test_skips_annotation_work_after_profiler_stops(self):
+        worker = MagicMock()
+        worker.profiler.is_running = False
+
+        context = Worker.annotate_profile(worker, scheduler_output=None)
+
+        worker.profiler.step.assert_called_once_with()
+        worker.profiler.annotate_context_manager.assert_not_called()
+        assert isinstance(context, nullcontext)
+
 
 def test_profiler_entered_during_capture():
     """Profiler is used as a context manager in _warmup_and_capture,
@@ -298,3 +319,412 @@ def test_profiler_entered_during_capture():
 
     mock_profiler.__enter__.assert_called_once()
     mock_profiler.__exit__.assert_called_once()
+
+
+def make_proton(session_id: int | None = 7):
+    return SimpleNamespace(
+        start=Mock(return_value=session_id),
+        activate=Mock(),
+        deactivate=Mock(),
+        finalize=Mock(),
+        scope=Mock(return_value=nullcontext()),
+    )
+
+
+def make_proton_wrapper(
+    tmp_path, proton=None, triton_version="3.6.0", **config_overrides
+):
+    proton = proton or make_proton()
+    config = ProfilerConfig(
+        profiler="proton",
+        proton_profiler_dir=str(tmp_path),
+        **config_overrides,
+    )
+
+    def import_module(name):
+        if name == "triton.profiler":
+            return proton
+        assert name == "triton"
+        return SimpleNamespace(__version__=triton_version)
+
+    with patch(
+        "vllm.profiler.wrapper.importlib.import_module", side_effect=import_module
+    ):
+        wrapper = ProtonProfilerWrapper(config, worker_name="rank_3")
+    return wrapper, proton
+
+
+class TestProtonConfig:
+    def test_normalizes_local_output_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config = ProfilerConfig(profiler="proton", proton_profiler_dir="profiles")
+        assert config.proton_profiler_dir == os.path.join(tmp_path, "profiles")
+
+    @pytest.mark.parametrize(
+        ("options", "message"),
+        [
+            ({"proton_profiler_dir": ""}, "must be set"),
+            ({"proton_profiler_dir": "s3://bucket/profiles"}, "local directory"),
+            (
+                {"proton_data": "tree", "proton_output_format": "chrome_trace"},
+                "requires proton_data",
+            ),
+            (
+                {"proton_data": "trace", "proton_output_format": "hatchet"},
+                "requires proton_data",
+            ),
+            (
+                {
+                    "proton_data": "trace",
+                    "proton_output_format": "hatchet_msgpack",
+                },
+                "requires proton_data",
+            ),
+        ],
+    )
+    def test_rejects_invalid_option_combinations(self, tmp_path, options, message):
+        kwargs = {"proton_profiler_dir": str(tmp_path), **options}
+        with pytest.raises(ValueError, match=message):
+            ProfilerConfig(profiler="proton", **kwargs)
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "proton_context",
+            "proton_data",
+            "proton_backend",
+            "proton_hook",
+            "proton_output_format",
+        ],
+    )
+    def test_rejects_invalid_typed_options(self, field, tmp_path):
+        with pytest.raises(ValidationError):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=str(tmp_path),
+                **{field: "invalid"},
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("proton_profiler_dir", "profiles"),
+            ("proton_context", "python"),
+            ("proton_data", "trace"),
+            ("proton_backend", "cupti"),
+            ("proton_mode", "pcsampling"),
+            ("proton_hook", "triton"),
+            ("proton_output_format", "chrome_trace"),
+        ],
+    )
+    def test_rejects_proton_options_for_other_profilers(self, field, value):
+        with pytest.raises(ValueError, match=f"{field} only applicable"):
+            ProfilerConfig(**{field: value})
+
+    def test_allows_proton_when_cuda_graphs_are_disabled(self, tmp_path):
+        config = VllmConfig(
+            profiler_config=ProfilerConfig(
+                profiler="proton", proton_profiler_dir=str(tmp_path)
+            ),
+            compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
+        )
+
+        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+    def test_rejects_proton_on_non_cuda_platforms(self, tmp_path):
+        with (
+            patch("vllm.platforms.current_platform.is_cuda", return_value=False),
+            pytest.raises(ValueError, match="supports NVIDIA CUDA only"),
+        ):
+            VllmConfig(
+                profiler_config=ProfilerConfig(
+                    profiler="proton", proton_profiler_dir=str(tmp_path)
+                ),
+                compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
+            )
+
+    def test_allows_proton_when_cuda_graphs_are_enabled(self, tmp_path):
+        config = VllmConfig(
+            profiler_config=ProfilerConfig(
+                profiler="proton", proton_profiler_dir=str(tmp_path)
+            ),
+            compilation_config=CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.PIECEWISE
+            ),
+        )
+
+        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+
+@pytest.mark.skipif(
+    torch.version.hip is not None,
+    reason="Proton profiling tests require an NVIDIA Triton runtime.",
+)
+class TestProtonProfilerWrapper:
+    def test_passes_config_and_global_rank_name_to_proton(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(
+            tmp_path,
+            proton_context="python",
+            proton_data="trace",
+            proton_backend="cupti",
+            proton_mode="pcsampling",
+            proton_hook="triton",
+            proton_output_format="chrome_trace",
+        )
+
+        wrapper.start()
+
+        start_args = proton.start.call_args.kwargs
+        assert start_args["name"].startswith(os.path.join(tmp_path, "proton_rank_3_"))
+        assert start_args["name"].endswith("_run0")
+        assert start_args | {"name": None} == {
+            "name": None,
+            "context": "python",
+            "data": "trace",
+            "backend": "cupti",
+            "mode": "pcsampling",
+            "hook": "triton",
+        }
+        wrapper.stop()
+        proton.finalize.assert_called_once_with(session=7, output_format="chrome_trace")
+        assert tmp_path.is_dir()
+
+    def test_finalizes_each_profile_with_unique_output_names(self, tmp_path):
+        proton = make_proton()
+        proton.start.side_effect = [7, 8]
+        wrapper, proton = make_proton_wrapper(tmp_path, proton)
+
+        wrapper.start()
+        wrapper.start()
+        wrapper.stop()
+        wrapper.start()
+        wrapper.stop()
+
+        names = [c.kwargs["name"] for c in proton.start.call_args_list]
+        assert len(names) == len(set(names)) == 2
+        assert names[0].endswith("_run0")
+        assert names[1].endswith("_run1")
+        assert proton.deactivate.call_count == 2
+        assert proton.finalize.call_args_list == [call(session=7), call(session=8)]
+
+    def test_output_names_are_unique_across_worker_restarts(self, tmp_path):
+        with patch(
+            "vllm.profiler.wrapper.uuid4",
+            side_effect=[UUID(int=1), UUID(int=2)],
+        ):
+            first, first_proton = make_proton_wrapper(tmp_path)
+            second, second_proton = make_proton_wrapper(tmp_path)
+
+        first.start()
+        second.start()
+
+        first_name = first_proton.start.call_args.kwargs["name"]
+        second_name = second_proton.start.call_args.kwargs["name"]
+        assert first_name != second_name
+        assert first_name.endswith(f"_{UUID(int=1).hex}_run0")
+        assert second_name.endswith(f"_{UUID(int=2).hex}_run0")
+
+    @pytest.mark.parametrize(
+        ("option", "value", "feature"),
+        [
+            ("proton_output_format", "hatchet_msgpack", "hatchet_msgpack"),
+            ("proton_mode", "periodic_flushing", "periodic flushing"),
+        ],
+    )
+    def test_newer_features_reject_triton_3_6(self, tmp_path, option, value, feature):
+        with pytest.raises(RuntimeError, match=feature):
+            make_proton_wrapper(tmp_path, **{option: value})
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("proton_output_format", "hatchet_msgpack"),
+            ("proton_mode", "periodic_flushing"),
+        ],
+    )
+    def test_triton_3_7_features(self, tmp_path, option, value):
+        make_proton_wrapper(tmp_path, triton_version="3.7.0", **{option: value})
+
+    def test_rejects_output_format_when_finalize_lacks_capability(self, tmp_path):
+        proton = make_proton()
+        proton.finalize = lambda session=None: None
+
+        with pytest.raises(RuntimeError, match="does not support selecting"):
+            make_proton_wrapper(tmp_path, proton, proton_output_format="hatchet")
+
+    def test_cuda_graph_capture_prepares_dormant_session(self, tmp_path):
+        proton = make_proton()
+        proton.start.side_effect = [7, 8]
+        wrapper, proton = make_proton_wrapper(tmp_path, proton, proton_mode="custom")
+
+        with wrapper.capture_cuda_graphs():
+            proton.start.assert_called_once()
+            proton.deactivate.assert_not_called()
+
+        capture_args = proton.start.call_args.kwargs
+        assert capture_args["context"] == "shadow"
+        assert capture_args["data"] == "tree"
+        proton.deactivate.assert_called_once_with(session=7)
+
+        wrapper.start()
+        wrapper.stop()
+        assert proton.finalize.call_args_list == [call(session=8)]
+
+    def test_pcsampling_rejects_cuda_graph_capture(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_mode="pcsampling")
+
+        with (
+            pytest.raises(ValueError, match="disable CUDA graphs"),
+            wrapper.capture_cuda_graphs(),
+        ):
+            pass
+
+        proton.start.assert_not_called()
+
+    def test_cuda_graph_context_deactivates_after_capture_error(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path)
+
+        with (
+            pytest.raises(RuntimeError, match="capture failed"),
+            wrapper.capture_cuda_graphs(),
+        ):
+            raise RuntimeError("capture failed")
+
+        proton.deactivate.assert_called_once_with(session=7)
+
+    def test_shutdown_finalizes_cuda_graph_capture_session(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path)
+        with wrapper.capture_cuda_graphs():
+            pass
+
+        wrapper.shutdown()
+        wrapper.shutdown()
+
+        proton.finalize.assert_called_once_with(session=7)
+
+    def test_missing_proton_has_actionable_error(self, tmp_path):
+        config = ProfilerConfig(profiler="proton", proton_profiler_dir=str(tmp_path))
+        with (
+            patch(
+                "vllm.profiler.wrapper.importlib.import_module",
+                side_effect=ImportError,
+            ),
+            pytest.raises(RuntimeError, match="requires a Triton installation"),
+        ):
+            ProtonProfilerWrapper(config, worker_name="rank_0")
+
+    def test_scope_annotations_delegate_to_proton(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path)
+        wrapper.start()
+
+        context = wrapper.annotate_context_manager("decode")
+
+        proton.scope.assert_called_once_with("decode")
+        assert context is not None
+
+
+def test_gpu_worker_creates_proton_profiler():
+    worker = MagicMock()
+    worker.rank = 1
+    worker.profiler = None
+    worker.profiler_config.profiler = "proton"
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank1",
+        ),
+        patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
+    ):
+        Worker.profile(worker)
+
+    wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
+    worker.profiler.start.assert_called_once_with()
+
+
+def test_gpu_worker_recreates_proton_profiler_for_each_run():
+    worker = MagicMock()
+    worker.rank = 1
+    worker.profiler = None
+    worker.profiler_config.profiler = "proton"
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank1",
+        ),
+        patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
+    ):
+        Worker.profile(worker, profile_prefix="first")
+        Worker.profile(worker, is_start=False)
+        Worker.profile(worker, profile_prefix="second")
+
+    assert wrapper.call_args_list == [
+        call(worker.profiler_config, worker_name="first_rank1"),
+        call(worker.profiler_config, worker_name="second_rank1"),
+    ]
+    assert wrapper.return_value.start.call_count == 2
+
+
+@pytest.mark.parametrize("runner", ["disabled", "v1", "v2"])
+def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
+    worker = MagicMock()
+    worker.profiler = None
+    worker._proton_capture_profiler = None
+    worker.profiler_config.profiler = "proton"
+    worker.vllm_config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.NONE if runner == "disabled" else CUDAGraphMode.FULL
+    )
+    if runner == "v1":
+        worker.use_v2_model_runner = False
+        worker.model_runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+        worker.model_runner.encoder_cudagraph_manager = None
+    elif runner == "v2":
+        worker.use_v2_model_runner = True
+        worker.model_runner.cudagraph_manager.needs_capture.return_value = False
+
+    context = Worker._get_proton_capture_context(worker)
+
+    assert worker.profiler is None
+    assert worker._proton_capture_profiler is None
+    if runner == "v1":
+        worker.model_runner._maybe_init_encoder_cudagraph_manager.assert_called_once()
+    with context:
+        pass
+
+
+def test_proton_initializes_before_cuda_graph_capture():
+    class FakeProtonProfiler:
+        def __init__(self, config, worker_name):
+            self.config = config
+            self.worker_name = worker_name
+            self.capture_context = nullcontext()
+
+        def capture_cuda_graphs(self):
+            return self.capture_context
+
+    worker = MagicMock()
+    worker.rank = 2
+    worker.profiler = None
+    worker._proton_capture_profiler = None
+    worker.profiler_config.profiler = "proton"
+    worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    worker.use_v2_model_runner = True
+    worker.model_runner.cudagraph_manager.needs_capture.return_value = True
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank2",
+        ),
+        patch(
+            "vllm.v1.worker.gpu_worker.ProtonProfilerWrapper",
+            FakeProtonProfiler,
+        ),
+    ):
+        context = Worker._get_proton_capture_context(worker)
+
+    assert worker.profiler is None
+    assert worker._proton_capture_profiler.config is worker.profiler_config
+    assert worker._proton_capture_profiler.worker_name == "rank2"
+    assert context is worker._proton_capture_profiler.capture_context

@@ -1217,6 +1217,9 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        if self.profiler_config.profiler == "proton" and not current_platform.is_cuda():
+            raise ValueError("The Proton profiler currently supports NVIDIA CUDA only")
+
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "

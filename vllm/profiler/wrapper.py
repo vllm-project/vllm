@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import inspect
 import json
+import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext, suppress
 from typing import Literal
+from uuid import uuid4
 
 import torch
+from packaging.version import InvalidVersion, Version
 from typing_extensions import override
 
 import vllm.version
@@ -16,6 +21,8 @@ from vllm.config.profiler import _is_uri_path
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+_TRITON_PROTON_3_7_VERSION = Version("3.7.0")
 
 
 class WorkerProfiler(ABC):
@@ -42,6 +49,11 @@ class WorkerProfiler(ABC):
         # Track when the profiler is actually running
         self._profiling_for_iters = 0
         self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the underlying profiler is currently collecting data."""
+        return self._running
 
     @abstractmethod
     def _start(self) -> None:
@@ -337,6 +349,169 @@ class TorchProfilerWrapper(WorkerProfiler):
     @override
     def annotate_context_manager(self, name: str):
         return torch.profiler.record_function(name)
+
+
+class ProtonProfilerWrapper(WorkerProfiler):
+    """Worker profiler backed by :mod:`triton.profiler` (Proton)."""
+
+    def __init__(
+        self,
+        profiler_config: ProfilerConfig,
+        worker_name: str,
+    ) -> None:
+        super().__init__(profiler_config)
+
+        try:
+            self._proton = importlib.import_module("triton.profiler")
+            triton = importlib.import_module("triton")
+        except ImportError as exc:
+            raise RuntimeError(
+                "The Proton profiler requires a Triton installation with "
+                "triton.profiler support."
+            ) from exc
+
+        self._output_dir = profiler_config.proton_profiler_dir
+        self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
+        self._context = profiler_config.proton_context
+        self._data = profiler_config.proton_data
+        self._backend = profiler_config.proton_backend
+        self._mode = profiler_config.proton_mode
+        self._hook = profiler_config.proton_hook
+        self._output_format = profiler_config.proton_output_format
+        self._triton_version_string = getattr(triton, "__version__", "unknown")
+        try:
+            self._triton_version = Version(self._triton_version_string)
+        except InvalidVersion:
+            self._triton_version = None
+        self._validate_capabilities()
+        self._session_id: int | None = None
+        # Qualify output names by process and wrapper instance so a new
+        # worker cannot overwrite profiles left by an earlier server process.
+        self._instance_id = f"pid{os.getpid()}_{uuid4().hex}"
+        self._run_id = 0
+        self._capture_session_id: int | None = None
+        self._capture_output_path = os.path.join(
+            self._output_dir,
+            f".proton_cuda_graph_capture_{worker_name}_{os.getpid()}",
+        )
+
+        logger.info_once(
+            "Proton profiling enabled. Output will be saved under: %s",
+            self._output_dir,
+        )
+
+    def _require_triton_version(self, feature: str, minimum: Version) -> None:
+        if self._triton_version is None or self._triton_version < minimum:
+            raise RuntimeError(
+                f"Proton {feature} requires Triton >= {minimum}; found "
+                f"{self._triton_version_string}."
+            )
+
+    def _validate_capabilities(self) -> None:
+        if self._output_format is not None:
+            parameters = inspect.signature(self._proton.finalize).parameters
+            supports_output_format = "output_format" in parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if not supports_output_format:
+                raise RuntimeError(
+                    "The installed Triton Proton does not support selecting "
+                    "an output format during finalize."
+                )
+
+        if self._output_format == "hatchet_msgpack":
+            self._require_triton_version(
+                "hatchet_msgpack output", _TRITON_PROTON_3_7_VERSION
+            )
+        if self._mode and self._mode.split(":", 1)[0] == "periodic_flushing":
+            self._require_triton_version(
+                "periodic flushing", _TRITON_PROTON_3_7_VERSION
+            )
+
+    def _create_session(self, output_path: str, *, capture: bool = False) -> int:
+        os.makedirs(self._output_dir, exist_ok=True)
+        session_id = self._proton.start(
+            name=output_path,
+            context="shadow" if capture else self._context,
+            data="tree" if capture else self._data,
+            backend=self._backend,
+            mode=self._mode,
+            hook=self._hook,
+        )
+        if session_id is None:
+            raise RuntimeError("Proton did not create a profiling session")
+        return session_id
+
+    @contextmanager
+    def capture_cuda_graphs(self) -> Iterator[None]:
+        """Keep a dormant session aware of CUDA graphs captured by vLLM."""
+        if self._mode and self._mode.split(":", 1)[0] == "pcsampling":
+            raise ValueError(
+                "Proton PC sampling is incompatible with CUDA graph capture; "
+                "enable eager execution or disable CUDA graphs."
+            )
+        if self._running:
+            yield
+            return
+
+        if self._capture_session_id is None:
+            self._capture_session_id = self._create_session(
+                self._capture_output_path, capture=True
+            )
+        else:
+            self._proton.activate(session=self._capture_session_id)
+
+        try:
+            yield
+        finally:
+            self._proton.deactivate(session=self._capture_session_id)
+
+    @override
+    def _start(self) -> None:
+        output_path = f"{self._output_path}_{self._instance_id}_run{self._run_id}"
+        self._session_id = self._create_session(output_path)
+        self._run_id += 1
+
+    @override
+    def _stop(self) -> None:
+        assert self._session_id is not None
+        session_id = self._session_id
+        try:
+            self._proton.deactivate(session=session_id)
+        finally:
+            try:
+                if self._output_format is None:
+                    self._proton.finalize(session=session_id)
+                else:
+                    self._proton.finalize(
+                        session=session_id, output_format=self._output_format
+                    )
+            finally:
+                self._session_id = None
+
+    @override
+    def shutdown(self) -> None:
+        super().shutdown()
+        if self._capture_session_id is not None:
+            capture_session_id = self._capture_session_id
+            self._capture_session_id = None
+            try:
+                self._proton.finalize(session=capture_session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to finalize Proton CUDA graph capture during "
+                    "worker shutdown."
+                )
+            finally:
+                with suppress(FileNotFoundError):
+                    os.remove(f"{self._capture_output_path}.hatchet")
+
+    @override
+    def annotate_context_manager(self, name: str):
+        if not self._running:
+            return nullcontext()
+        return self._proton.scope(name)
 
 
 class CudaProfilerWrapper(WorkerProfiler):
