@@ -189,6 +189,12 @@ repos:
     entry: python tools/pre_commit/mypy.py "3.13"
     <<: *mypy_common
     stages: [manual] # Only run in CI
+  - id: test-amd-hf-client-mode
+    name: Test AMD Hugging Face client mode policy
+    entry: bash .buildkite/scripts/hardware_ci/amd-hf-client-mode-self-test.sh
+    language: system
+    pass_filenames: false
+    files: ^\.buildkite/scripts/hardware_ci/(amd-hf-client-mode(-self-test)?|run-amd-test)\.sh$
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/pre_commit/shellcheck.sh

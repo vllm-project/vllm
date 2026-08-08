@@ -54,6 +54,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   mirror:
     amd:
+      hf_offline_retry: true
       device: mi250_1
       timeout_in_minutes: 55
       depends_on:

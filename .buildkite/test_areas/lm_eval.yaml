@@ -15,6 +15,7 @@ steps:
   mirror:
     amd:
       dind: false
+      hf_offline_retry: true
       device: mi300_1
       timeout_in_minutes: 45
       depends_on:

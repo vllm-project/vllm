@@ -56,6 +56,26 @@ fi
 export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS PYTEST_TIMEOUT ROCM_DOCKER_TTY
 export PYTHONFAULTHANDLER
 
+# The pipeline generator enables this only for eligible AMD jobs. Presubmit
+# jobs start cache-only, while scheduled jobs and all retries run online.
+amd_runner_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=amd-hf-client-mode.sh
+source "${amd_runner_script_dir}/amd-hf-client-mode.sh" || exit 1
+hf_offline_retry_enabled="${VLLM_CI_HF_OFFLINE_RETRY-0}"
+hf_retry_count="${BUILDKITE_RETRY_COUNT-0}"
+hf_offline_retry_disabled="${VLLM_CI_DISABLE_HF_OFFLINE_RETRY-0}"
+hf_initial_online=0
+if [[ "${NIGHTLY-0}" == "1" || "${TORCH_NIGHTLY-0}" == "1" ]]; then
+  hf_initial_online=1
+fi
+hf_client_mode=$(
+  vllm_amd_hf_resolve_mode \
+    "${hf_offline_retry_enabled}" \
+    "${hf_retry_count}" \
+    "${hf_offline_retry_disabled}" \
+    "${hf_initial_online}"
+) || exit $?
+
 # Export Python path for commands that run directly on the host. Containerized
 # tests set this to /vllm-workspace below so spawned Python processes do not
 # depend on their current working directory.
@@ -70,9 +90,27 @@ report_docker_usage() {
   docker system df || true
 }
 
+log_hf_client_mode() {
+  case "${hf_client_mode}" in
+    cache-only)
+      echo "--- :package: Hugging Face clients: cache-only first Buildkite attempt"
+      echo "HF client offline flags are enabled; network access is not isolated."
+      ;;
+    online)
+      if [[ "${hf_retry_count}" == "0" ]]; then
+        echo "--- :globe_with_meridians: Hugging Face clients: online first Buildkite attempt"
+      else
+        echo "--- :globe_with_meridians: Hugging Face clients: online Buildkite retry ${hf_retry_count}"
+      fi
+      ;;
+  esac
+}
+
 clear_ci_orchestration_env() {
   unset -v \
     VLLM_TEST_GROUP_NAME \
+    VLLM_CI_HF_OFFLINE_RETRY \
+    VLLM_CI_DISABLE_HF_OFFLINE_RETRY \
     VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE \
     VLLM_CI_ARTIFACT_STEP \
     VLLM_TEST_CACHE \
@@ -691,6 +729,10 @@ if is_native_runtime; then
   fi
 
   if is_multi_node "$commands"; then
+    if [[ "${hf_offline_retry_enabled}" == "1" ]]; then
+      echo "Hugging Face client cache-only mode is not eligible for AMD multi-node jobs" >&2
+      exit 2
+    fi
     echo "Native CI does not support multi-node jobs yet."
     exit 1
   fi
@@ -710,6 +752,8 @@ if is_native_runtime; then
   run_native_preflight || exit 1
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
+  vllm_amd_hf_apply_mode "${hf_client_mode}" || exit $?
+  log_hf_client_mode
   /bin/bash -o pipefail -c "${commands}"
   handle_pytest_exit "$?"
 fi
@@ -869,6 +913,10 @@ fi
 # --- Route: multi-node vs single-node ---
 clear_ci_orchestration_env
 if is_multi_node "$commands"; then
+  if [[ "${hf_offline_retry_enabled}" == "1" ]]; then
+    echo "Hugging Face client cache-only mode is not eligible for AMD multi-node jobs" >&2
+    exit 2
+  fi
   echo "--- Multi-node job detected"
   export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
 
@@ -913,6 +961,17 @@ if is_multi_node "$commands"; then
   fi
 else
   echo "--- Single-node job"
+  hf_client_container_args=()
+  hf_client_container_value=$(
+    vllm_amd_hf_container_offline_value "${hf_client_mode}"
+  ) || exit $?
+  if [[ "${hf_client_container_value}" != "inherit" ]]; then
+    hf_client_container_args=(
+      -e "HF_HUB_OFFLINE=${hf_client_container_value}"
+      -e "TRANSFORMERS_OFFLINE=${hf_client_container_value}"
+    )
+  fi
+  log_hf_client_mode
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker_run_terminal_args=(-i)
   if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
@@ -969,6 +1028,7 @@ else
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
     "${standalone_merge_base_env[@]}" \
+    "${hf_client_container_args[@]}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
