@@ -23,7 +23,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for NIXL transfer performance metrics.
+
+    In multi-rank deployments, each TP rank records its own per-transfer
+    telemetry. The logger process aggregates those rank-local observations
+    into this container before reducing them to the CLI log summary.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -84,7 +89,9 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        # Compute compact representative stats suitable for CLI logging
+        # Compute compact representative stats suitable for CLI logging. In
+        # multi-rank deployments, these are reduced from the combined pool of
+        # rank-local observations accumulated by aggregate().
         if self.num_successful_transfers == 0:
             # CLI logging only reports successful transfers stats. If all requests in
             # the interval were unsuccessful, Prom will report failures stats instead.
@@ -107,10 +114,18 @@ class NixlKVConnectorStats(KVConnectorStats):
         n = len(descs)
         assert n == self.num_successful_transfers
 
+        # n is the total number of rank-local transfer observations, not the
+        # number of engine-level KV transfer operations.
         total_mb = mb.sum()
+        # Average bytes per rank-local transfer over the combined observation
+        # pool. This is not the total bytes moved by one logical KV transfer
+        # across all ranks.
         avg_mb = total_mb / n
 
         total_time_seconds = xfer_time.sum()
+        # Throughput is total MB divided by total rank-local transfer time,
+        # which represents average per-rank throughput across the observation
+        # pool rather than aggregate system throughput.
         throughput_mb_s = total_mb / total_time_seconds
 
         return {
