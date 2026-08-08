@@ -157,6 +157,14 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
+    # The fused all-reduce + RMSNorm path is not batch-invariant: under tensor
+    # parallelism it reduces in a run-to-run-varying order, so with
+    # VLLM_BATCH_INVARIANT set the same request can produce different logprobs
+    # across otherwise-identical runs. Disable the fusion in that mode, mirroring
+    # the disable_custom_all_reduce guard in ParallelConfig.
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+
     if current_platform.is_rocm():
         from vllm._aiter_ops import rocm_aiter_ops
 
