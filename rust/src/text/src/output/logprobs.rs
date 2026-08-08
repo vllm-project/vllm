@@ -79,14 +79,15 @@ pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
 /// vLLM's prompt-logprobs semantics.
 pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: &T,
+    request_id: &str,
     prompt_token_ids: &[u32],
     logprobs: &Logprobs,
     skip_special_tokens: bool,
 ) -> Result<DecodedPromptLogprobs, Error> {
-    let first_token_id = prompt_token_ids
-        .first()
-        .copied()
-        .expect("prompt logprobs require at least one prompt token");
+    let first_token_id =
+        prompt_token_ids.first().copied().ok_or_else(|| Error::EmptyPromptTokenIds {
+            request_id: request_id.to_string(),
+        })?;
     let first_token = tokenizer.decode(&[first_token_id], skip_special_tokens)?;
     let scored_positions = logprobs
         .positions
@@ -193,8 +194,14 @@ mod tests {
         };
 
         assert_eq!(
-            decode_prompt_logprobs(&tokenizer, &[b'p' as u32, b'x' as u32], &logprobs, false)
-                .unwrap(),
+            decode_prompt_logprobs(
+                &tokenizer,
+                "test-request",
+                &[b'p' as u32, b'x' as u32],
+                &logprobs,
+                false,
+            )
+            .unwrap(),
             DecodedPromptLogprobs {
                 first_token_id: b'p' as u32,
                 first_token: "p".to_string(),
@@ -208,5 +215,19 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn decode_prompt_logprobs_rejects_empty_prompt() {
+        let tokenizer = TestTokenizer::new();
+        let logprobs = Logprobs { positions: vec![] };
+
+        let error = decode_prompt_logprobs(&tokenizer, "req-empty", &[], &logprobs, false)
+            .expect_err("empty prompts should return an error");
+
+        assert!(matches!(
+            error,
+            Error::EmptyPromptTokenIds { request_id } if request_id == "req-empty"
+        ));
     }
 }

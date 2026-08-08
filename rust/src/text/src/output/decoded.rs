@@ -143,6 +143,7 @@ pub async fn decoded_text_event_stream(
                     .map(|logprobs| {
                         decode_prompt_logprobs(
                             tokenizer.as_ref(),
+                            &request_id,
                             prompt_token_ids,
                             logprobs,
                             decode_options.skip_special_tokens,
