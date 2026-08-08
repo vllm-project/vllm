@@ -156,6 +156,13 @@ class StreamingParserEngine:
             for (state, terminal), tr in config.transitions.items()
             if tr.next_state in self._TOOL_STATES or state in self._TOOL_STATES
         )
+        # TOOL_CALL_END may close an inner call rather than its lexical wrapper,
+        # as in MiniMax, so identify exits from state transitions instead.
+        self._tool_exit_terminals: frozenset[str] = frozenset(
+            terminal
+            for (state, terminal), tr in config.transitions.items()
+            if state in self._TOOL_STATES and tr.next_state not in self._TOOL_STATES
+        )
 
         self.skip_tool_parsing = False
         self.reset(initial_state=initial_state)
@@ -186,6 +193,7 @@ class StreamingParserEngine:
         self._scanner.reset()
         self._lexer.reset()
         self._message_header_buffer = ""
+        self._in_skipped_tool_span = False
         self._reset_args_state()
 
     def feed(
@@ -316,39 +324,56 @@ class StreamingParserEngine:
         if transition is None:
             if self._has_drops and terminal == DROP_TERMINAL:
                 return []
+            # The projected skip state may not define the wrapper closer.
+            if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
+                self._in_skipped_tool_span = False
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
-            if self.state == ParserState.MESSAGE_HEADER:
-                self.state = ParserState.CONTENT
-                self._message_header_buffer = ""
-                return [
-                    SemanticEvent(
-                        EventType.TEXT_CHUNK,
-                        value=value,
-                        tool_index=self.tool_index,
-                    )
-                ]
-            if EventType.REASONING_END in transition.events:
-                self.state = ParserState.CONTENT
-                return [
-                    SemanticEvent(
-                        EventType.REASONING_END,
-                        value=value,
-                        tool_index=self.tool_index,
-                    ),
-                    SemanticEvent(
-                        EventType.TEXT_CHUNK,
-                        value=value,
-                        tool_index=self.tool_index,
-                    ),
-                ]
-            content_type = self.config.content_events.get(self.state)
-            if content_type is not None:
-                return [
-                    SemanticEvent(content_type, value=value, tool_index=self.tool_index)
-                ]
-            return []
+            # Inkling reuses one terminal for tool, text, and reasoning exits.
+            # Outside a forwarded tool span, apply its normal transition.
+            is_opener = transition.next_state in self._TOOL_STATES
+            is_exit = terminal in self._tool_exit_terminals
+            used_as_plain_closer = (
+                is_exit and not is_opener and not self._in_skipped_tool_span
+            )
+            if not used_as_plain_closer:
+                if is_opener:
+                    self._in_skipped_tool_span = True
+                elif is_exit:
+                    self._in_skipped_tool_span = False
+                if self.state == ParserState.MESSAGE_HEADER:
+                    self.state = ParserState.CONTENT
+                    self._message_header_buffer = ""
+                    return [
+                        SemanticEvent(
+                            EventType.TEXT_CHUNK,
+                            value=value,
+                            tool_index=self.tool_index,
+                        )
+                    ]
+                if EventType.REASONING_END in transition.events:
+                    self.state = ParserState.CONTENT
+                    return [
+                        SemanticEvent(
+                            EventType.REASONING_END,
+                            value=value,
+                            tool_index=self.tool_index,
+                        ),
+                        SemanticEvent(
+                            EventType.TEXT_CHUNK,
+                            value=value,
+                            tool_index=self.tool_index,
+                        ),
+                    ]
+                content_type = self.config.content_events.get(self.state)
+                if content_type is not None:
+                    return [
+                        SemanticEvent(
+                            content_type, value=value, tool_index=self.tool_index
+                        )
+                    ]
+                return []
 
         if transition.skip_in_token_id_mode and self._ever_had_token_ids:
             return self._emit_for_state(value)
