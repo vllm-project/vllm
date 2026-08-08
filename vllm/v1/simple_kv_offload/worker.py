@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
-from typing import TYPE_CHECKING
+import os
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -10,8 +11,10 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
+from vllm.v1.simple_kv_offload.cpu_copy_backend import CpuCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
+from vllm.v1.simple_kv_offload.legomem_backend import LegoMemBackend
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
@@ -36,6 +39,11 @@ class SimpleCPUOffloadWorker:
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        legomem_library_path: str = "/home/ubuntu/legomem/lib/liblegomem_kv.so",
+        legomem_host: str = "127.0.0.1",
+        legomem_port: int = 9999,
+        legomem_num_nodes: int = 16,
+        legomem_node_capacity_bytes: int = 256 * 1024**2,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -44,7 +52,13 @@ class SimpleCPUOffloadWorker:
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
         self.use_page_cache = use_page_cache
+        self.kv_offload_backend = kv_offload_backend
         self.disk_mode = kv_offload_backend == "disk"
+        self.legomem_library_path = legomem_library_path
+        self.legomem_host = legomem_host
+        self.legomem_port = legomem_port
+        self.legomem_num_nodes = legomem_num_nodes
+        self.legomem_node_capacity_bytes = legomem_node_capacity_bytes
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -55,11 +69,13 @@ class SimpleCPUOffloadWorker:
         self.load_stream: torch.cuda.Stream | None = None
         self.store_stream: torch.cuda.Stream | None = None
 
-        self._backend: DmaCopyBackend | DiskBackend | None = None
+        self._backend: (
+            DmaCopyBackend | CpuCopyBackend | DiskBackend | LegoMemBackend | None
+        ) = None
 
         # Ordered (event_idx, Event). Events pre-allocated on main thread.
-        self._load_events: list[tuple[int, torch.Event]] = []
-        self._store_events: list[tuple[int, torch.Event]] = []
+        self._load_events: list[tuple[int, Any]] = []
+        self._store_events: list[tuple[int, Any]] = []
         # High-water marks: highest event_idx completed per stream.
         # When the event list is empty, the hwm covers all prior events.
         self._load_hwm: int = -1
@@ -156,12 +172,44 @@ class SimpleCPUOffloadWorker:
 
         self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
 
-        # Use lowest priority so KV cache I/O yields to compute streams.
-        low_pri, _ = torch.cuda.Stream.priority_range()
-        self.load_stream = torch.cuda.Stream(priority=low_pri)
-        self.store_stream = torch.cuda.Stream(priority=low_pri)
-
         self.gpu_kv_caches = unique_gpu_caches
+
+        if self.kv_offload_backend == "legomem":
+            if self.device.type != "cpu":
+                raise ValueError("The LegoMem KV backend currently requires CPU KV tensors")
+            rank = int(
+                os.environ.get("RANK", os.environ.get("OMPI_COMM_WORLD_RANK", "0"))
+            )
+            logger.info(
+                "SimpleCPUOffloadWorker [LEGOMEM]: %d tensors, "
+                "%d blocks (%.2f GB), rank=%d",
+                len(unique_gpu_caches),
+                self.num_cpu_blocks,
+                (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
+                rank,
+            )
+            backend = LegoMemBackend()
+            backend.init(
+                unique_gpu_caches,
+                self.legomem_library_path,
+                self.legomem_host,
+                self.legomem_port,
+                rank,
+                self.legomem_num_nodes,
+                self.legomem_node_capacity_bytes,
+                self.cpu_capacity_bytes,
+            )
+            self._backend = backend
+            return
+
+        if self.device.type == "cpu" and self.disk_mode:
+            raise ValueError("The disk KV backend currently requires a CUDA device")
+
+        if self.device.type != "cpu":
+            # Use lowest priority so KV cache I/O yields to compute streams.
+            low_pri, _ = torch.cuda.Stream.priority_range()
+            self.load_stream = torch.cuda.Stream(priority=low_pri)
+            self.store_stream = torch.cuda.Stream(priority=low_pri)
 
         if self.disk_mode:
             self._init_disk_mode(unique_gpu_caches, total_bytes_per_block, self.device)
@@ -225,9 +273,15 @@ class SimpleCPUOffloadWorker:
             # bypass PyTorch's CUDACachingHostAllocator which rounds up to
             # the next power of 2 (e.g. 100 GB -> 128 GB).
             tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
-            if pin_memory:
+            if pin_memory and device.type != "cpu":
                 pin_tensor(tensor)
             self.cpu_kv_caches[name] = tensor
+
+        if device.type == "cpu":
+            backend = CpuCopyBackend()
+            backend.init(unique_gpu_caches, self.cpu_kv_caches)
+            self._backend = backend
+            return
 
         self._backend = DmaCopyBackend()
         self._backend.init(
@@ -288,16 +342,19 @@ class SimpleCPUOffloadWorker:
                     events_list=self._load_events,
                 )
             if metadata.store_gpu_blocks:
-                if self._store_compute_done is None:
-                    self._store_compute_done = torch.Event()
-                self._store_compute_done.record(torch.cuda.current_stream())
+                wait_event = None
+                if self.device is not None and self.device.type != "cpu":
+                    if self._store_compute_done is None:
+                        self._store_compute_done = torch.Event()
+                    self._store_compute_done.record(torch.cuda.current_stream())
+                    wait_event = self._store_compute_done
                 backend.launch_copy(
                     metadata.store_gpu_blocks,
                     metadata.store_cpu_blocks,
                     is_store=True,
                     event_idx=metadata.store_event,
                     events_list=self._store_events,
-                    wait_event=self._store_compute_done,
+                    wait_event=wait_event,
                 )
 
         # (2) Track completed transfer events

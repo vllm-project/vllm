@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import socket
 from typing import Any
 
 import torch
@@ -70,17 +71,24 @@ class CpuCommunicator(DeviceCommunicatorBase):
 
     def _all_group_ranks_share_shm_group_name(self) -> bool:
         """
-        CPUSHM requires all ranks in this group to agree on one SHM group name.
-        This is a lightweight consistency check for VLLM_DIST_IDENT/name inputs.
+        CPUSHM is a same-host optimization and supports at most eight ranks.
+
+        VLLM_DIST_IDENT is intentionally identical across an externally launched
+        multi-node job, so comparing only the generated SHM name incorrectly
+        enables CPUSHM on distinct hosts.  Include the hostname to ensure that
+        every rank actually shares the same /dev/shm namespace.
         """
+        if self.world_size > 8:
+            return False
         local_name = _CPUSHMDistributed.make_group_name(self)
-        names: list[str] = [""] * self.world_size
+        local_identity = (socket.gethostname(), local_name)
+        identities: list[tuple[str, str] | None] = [None] * self.world_size
         torch.distributed.all_gather_object(
-            names,
-            local_name,
+            identities,
+            local_identity,
             group=self.device_group,
         )
-        return len(set(names)) == 1
+        return len(set(identities)) == 1
 
     def all_reduce(self, input_):
         self.dist_module.all_reduce(input_, group=self.device_group)
