@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
+    _USE_LAYERNAME,
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
@@ -50,6 +51,18 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
 
 logger = init_logger(__name__)
+
+
+def register_kv_layer_for_compilation(
+    vllm_config: VllmConfig,
+    layer: "Attention",
+):
+    prefix = layer.layer_name
+    compilation_config = vllm_config.compilation_config
+    if prefix in compilation_config.static_forward_context:
+        raise ValueError("Duplicate layer name: {}".format(prefix))
+    compilation_config.static_forward_context[prefix] = layer
+    compilation_config.static_all_kv_layers.append(prefix)
 
 
 def validate_kv_sharing_target(
@@ -321,6 +334,7 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self.quant_config = quant_config
         self.layer_name = prefix
+        register_kv_layer_for_compilation(vllm_config, self)
 
         self.num_heads = num_heads
         self.head_size = head_size
@@ -536,9 +550,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 and key is not None
                 and value is not None
             ):
-                kv_cache_dummy_dep = unified_kv_cache_update(
-                    key, value, self.layer_name
+                layer_name = (
+                    "from_forward_context" if not _USE_LAYERNAME else self.layer_name
                 )
+                kv_cache_dummy_dep = unified_kv_cache_update(key, value, layer_name)
             unified_attention_with_output(
                 query,
                 key,
@@ -556,8 +571,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 and key is not None
                 and value is not None
             ):
+                layer_name = "from_forward_context" if not _USE_LAYERNAME else encoded
                 kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                    key, value, encoded
+                    key, value, layer_name
                 )
             torch.ops.vllm.unified_attention_with_output(
                 query,
@@ -722,6 +738,21 @@ def unified_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    if layer_name == "from_forward_context":
+        forward_context = get_forward_context()
+        all_kv_layers = forward_context.all_kv_layers
+        assert all_kv_layers is not None, (
+            "all_kv_layers must be set in ForwardContext when using "
+            "'from_forward_context' sentinel"
+        )
+        kv_layer_index = forward_context.kv_layer_index
+        if kv_layer_index >= len(all_kv_layers):
+            raise AssertionError(
+                "We expected the number of KV layers in `all_kv_layers` "
+                "to be equal to the number of unified_kv_cache_update calls."
+            )
+        layer_name = all_kv_layers[kv_layer_index]
+        forward_context.kv_layer_index += 1
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
