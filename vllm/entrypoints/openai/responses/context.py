@@ -305,8 +305,10 @@ class ParsableContext(ConversationContext):
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
         self.num_reasoning_tokens = 0
-        # not implemented yet for ParsableContext
+        self.num_tool_output_tokens = 0
+        self.current_turn_metrics = TurnMetrics()
         self.all_turn_metrics: list[TurnMetrics] = []
+        self.is_first_turn = True
 
         self.response_messages: list[ResponseInputOutputItem] = response_messages
         self.num_init_messages = len(response_messages)
@@ -334,9 +336,11 @@ class ParsableContext(ConversationContext):
         self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
-        self.num_prompt_tokens = len(output.prompt_token_ids or [])
-        self.num_cached_tokens = output.num_cached_tokens or 0
-        self.num_output_tokens += len(output.outputs[0].token_ids or [])
+        self._update_prefill_token_usage(output)
+        self._update_decode_token_usage(output)
+        self.all_turn_metrics.append(self.current_turn_metrics.copy())
+        self.current_turn_metrics.reset()
+
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
 
@@ -406,6 +410,42 @@ class ParsableContext(ConversationContext):
                     tokens=completion.token_ids,
                 )
             )
+
+    def _update_prefill_token_usage(self, output: RequestOutput) -> None:
+        if output.prompt_token_ids is None:
+            input_tokens = 0
+            logger.error("RequestOutput appended contains no prompt_token_ids.")
+        else:
+            input_tokens = len(output.prompt_token_ids)
+
+        self.current_turn_metrics.input_tokens = input_tokens
+        self.num_prompt_tokens += input_tokens
+
+        if self.is_first_turn:
+            self.is_first_turn = False
+        else:
+            previous_turn = self.all_turn_metrics[-1]
+            tool_output_tokens = (
+                input_tokens - previous_turn.input_tokens - previous_turn.output_tokens
+            )
+            if tool_output_tokens < 0:
+                logger.error(
+                    "Negative tool output tokens calculated: %d. Setting to 0.",
+                    tool_output_tokens,
+                )
+                tool_output_tokens = 0
+
+            self.num_tool_output_tokens += tool_output_tokens
+            self.current_turn_metrics.tool_output_tokens = tool_output_tokens
+
+        cached_input_tokens = output.num_cached_tokens or 0
+        self.num_cached_tokens += cached_input_tokens
+        self.current_turn_metrics.cached_input_tokens = cached_input_tokens
+
+    def _update_decode_token_usage(self, output: RequestOutput) -> None:
+        output_tokens = sum(len(item.token_ids) for item in output.outputs)
+        self.num_output_tokens += output_tokens
+        self.current_turn_metrics.output_tokens = output_tokens
 
     def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
         self.response_messages.extend(output)
