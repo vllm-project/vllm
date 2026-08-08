@@ -414,6 +414,25 @@ class DelegatingParser(Parser):
         state.history_tool_call_cnt += 1
         return tool_call_id
 
+    @contextlib.contextmanager
+    def _tool_syntax_as_content(self):
+        """Emit tool-call syntax as plain content.
+
+        The engine still parses reasoning; only tool terminals pass
+        through as text (the same mechanism the reasoning adapters use
+        for reasoning-only extraction).
+        """
+        engine = getattr(self._tool_parser, "_parser_engine", None)
+        if engine is None:
+            yield
+            return
+        saved = engine.skip_tool_parsing
+        engine.skip_tool_parsing = True
+        try:
+            yield
+        finally:
+            engine.skip_tool_parsing = saved
+
     def _extract_tool_calls(
         self,
         content: str | None,
@@ -425,7 +444,13 @@ class DelegatingParser(Parser):
             return [], content
 
         if request.tool_choice == "none":
-            if self._engine_based:
+            # Engine-backed parsers strip tool syntax from the content, but
+            # only when the request declared tools: there, "none" is an
+            # explicit opt-out. Without tools, "none" is just the protocol
+            # default and tool semantics were never in play, so the text
+            # passes through unmodified like it does for legacy parsers
+            # (#49254).
+            if self._engine_based and getattr(request, "tools", None):
                 result = self.extract_tool_calls(content or "", request=request)
                 return [], result.content
             return [], content
@@ -662,18 +687,29 @@ class DelegatingParser(Parser):
         if request.tool_choice == "none":
             if self._engine_based:
                 # Engine-backed parsers route content extraction through
-                # extract_tool_calls_streaming, so run the full pipeline
-                # and strip tool_calls after.
-                delta_message = self.extract_tool_calls_streaming(
-                    previous_text,
-                    current_text,
-                    delta_text,
-                    previous_token_ids,
-                    current_token_ids,
-                    delta_token_ids,
-                    request,  # type: ignore[arg-type]
+                # extract_tool_calls_streaming, so run the full pipeline.
+                # With tools declared, "none" is an explicit opt-out: strip
+                # any tool calls after. Without tools, "none" is just the
+                # protocol default and tool semantics were never in play, so
+                # keep tool syntax as content like legacy parsers (#49254);
+                # the engine still extracts reasoning either way.
+                declared_tools = getattr(request, "tools", None)
+                ctx = (
+                    contextlib.nullcontext()
+                    if declared_tools
+                    else self._tool_syntax_as_content()
                 )
-                if delta_message:
+                with ctx:
+                    delta_message = self.extract_tool_calls_streaming(
+                        previous_text,
+                        current_text,
+                        delta_text,
+                        previous_token_ids,
+                        current_token_ids,
+                        delta_token_ids,
+                        request,  # type: ignore[arg-type]
+                    )
+                if declared_tools and delta_message:
                     delta_message.tool_calls = []
                 return delta_message, False
             return (DeltaMessage(content=delta_text) if delta_text else None), False
