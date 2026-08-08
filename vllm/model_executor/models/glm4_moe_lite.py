@@ -535,6 +535,10 @@ class Glm4MoeLiteForCausalLM(
             dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
         )
 
+        # `packed_modules_mapping` is a class attribute, so mutating it in place would
+        # leak this instance's fused-layer entries into every later instance of the same
+        # class. Copy it onto the instance first.
+        self.packed_modules_mapping = dict(self.packed_modules_mapping)
         if self.use_mha:
             self.packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
 
