@@ -736,10 +736,13 @@ def _check_enough_kv_cache_memory(
 ):
     if available_memory <= 0:
         raise ValueError(
-            "No available memory for the cache blocks. "
-            "Try increasing `gpu_memory_utilization` when initializing the engine "
-            "(this flag also controls CPU memory reservation on the CPU "
-            "backend, despite its name). "
+            "No available memory for the cache blocks after loading model "
+            "weights. The model is likely too large for the current GPU memory "
+            "budget. Consider: "
+            "(1) using a smaller or quantized model (AWQ/GPTQ), "
+            "(2) adding --cpu-offload-gb to offload weights to CPU RAM, or "
+            "(3) increasing --gpu-memory-utilization if free GPU memory is "
+            "available. "
             "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             "for more details."
         )

@@ -453,14 +453,19 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     )
 
     if init_snapshot.free_memory < requested_memory:
+        max_safe = init_snapshot.free_memory / init_snapshot.total_memory
         raise ValueError(
             f"Free memory on device {init_snapshot.device_} "
             f"({format_gib(init_snapshot.free_memory)}/"
             f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
             f"is less than desired GPU memory utilization "
             f"({cache_config.gpu_memory_utilization}, "
-            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
-            f"utilization or reduce GPU memory used by other processes."
+            f"{format_gib(requested_memory)} GiB). "
+            f"The maximum safe value for your current free memory is "
+            f"{max_safe:.2f} (e.g. --gpu-memory-utilization "
+            f"{max_safe - 0.02:.2f}). "
+            f"Decrease GPU memory utilization or reduce GPU memory "
+            f"used by other processes."
         )
 
     return requested_memory
