@@ -1023,8 +1023,14 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
 
-        qrep_enabled = (
+        # The env var predates the config field and still wins if set explicitly.
+        qrep_requested = (
             envs.VLLM_DCP_Q_REPLICATE
+            if envs.is_set("VLLM_DCP_Q_REPLICATE")
+            else bool(vllm_config.parallel_config.dcp_q_replicate)
+        )
+        qrep_enabled = (
+            qrep_requested
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.prefill_context_parallel_size <= 1
         )
