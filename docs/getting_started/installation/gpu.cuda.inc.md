@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD041 MD051 -->
 --8<-- [start:installation]
 
-vLLM contains pre-compiled C++ and CUDA (12.9) binaries.
+vLLM contains pre-compiled C++ and CUDA (13.0) binaries.
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
@@ -27,21 +27,24 @@ uv pip install vllm --torch-backend=auto
 
 ??? console "pip"
     ```bash
-    # Install vLLM with CUDA 12.9.
-    pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
+    # Install vLLM with CUDA 13.0.
+    pip install vllm --extra-index-url https://download.pytorch.org/whl/cu130
     ```
 
 We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu130`), set `--torch-backend=cu130` (or `UV_TORCH_BACKEND=cu130`). If this doesn't work, try running `uv self update` to update `uv` first.
 
 !!! note
+    `--torch-backend` only selects the PyTorch build; it does not change the CUDA version the vLLM wheel itself is compiled with. `pip install vllm` (or `uv pip install vllm`) always installs the default CUDA 13.0 vLLM wheel. To use a vLLM wheel built for a different CUDA version, install a specific CUDA build as shown below.
+
+!!! note
     NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
 
-As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.0, and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 13.0 and public PyTorch release versions by default. We also provide vLLM binaries compiled with other CUDA versions (e.g., 12.9) and public PyTorch release versions:
 
 ```bash
-# Install vLLM with a specific CUDA version (e.g., 13.0).
+# Install vLLM with a specific CUDA version (e.g., 12.9).
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-export CUDA_VERSION=130 # or other
+export CUDA_VERSION=129 # or other
 export CPU_ARCH=$(uname -m) # x86_64 or aarch64
 uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
 ```
@@ -50,8 +53,8 @@ uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VE
 
 LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.5.3` on <https://wheels.vllm.ai/nightly>. There are multiple indices that could be used:
 
-- `https://wheels.vllm.ai/nightly`: the default variant (CUDA with version specified in `VLLM_MAIN_CUDA_VERSION`) built with the last commit on the `main` branch. Currently it is CUDA 12.9.
-- `https://wheels.vllm.ai/nightly/<variant>`: all other variants. Now this includes `cu130`, and `cpu`. The default variant (`cu129`) also has a subdirectory to keep consistency.
+- `https://wheels.vllm.ai/nightly`: the default variant (CUDA with version specified in `VLLM_MAIN_CUDA_VERSION`) built with the last commit on the `main` branch. Currently it is CUDA 13.0.
+- `https://wheels.vllm.ai/nightly/<variant>`: all other variants. Now this includes `cu129`, and `cpu`. The default variant (`cu130`) also has a subdirectory to keep consistency.
 
 To install from nightly index, run:
 
