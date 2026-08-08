@@ -3,6 +3,7 @@
 import dataclasses
 import random
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -30,6 +31,50 @@ IMAGE_TOKEN_ID = 999
 VIDEO_TOKEN_ID = 888
 VISION_START_TOKEN_ID = 777
 VISION_END_TOKEN_ID = 778
+
+
+def test_qwen3_vl_empty_deepstack_buffers_match_inputs_embeds():
+    model = Qwen3VLForConditionalGeneration.__new__(Qwen3VLForConditionalGeneration)
+    model.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=8))
+    model.deepstack_num_level = 2
+    model.deepstack_input_embeds = [
+        torch.zeros(4, 8),
+        torch.zeros(4, 8),
+    ]
+    model.deepstack_input_embeds_num_tokens = 0
+    inputs_embeds = torch.empty(2, 8, device="meta", dtype=torch.float16)
+
+    deepstack_input_embeds = model._get_deepstack_input_embeds(
+        num_tokens=2, inputs_embeds=inputs_embeds
+    )
+
+    assert deepstack_input_embeds is not None
+    for tensor in deepstack_input_embeds.tensors.values():
+        assert tensor.shape == (2, 8)
+        assert tensor.device == inputs_embeds.device
+        assert tensor.dtype == inputs_embeds.dtype
+
+
+def test_qwen3_vl_deepstack_payload_matches_payload_dtype():
+    model = Qwen3VLForConditionalGeneration.__new__(Qwen3VLForConditionalGeneration)
+    model.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=8))
+    model.deepstack_num_level = 2
+    model.deepstack_input_embeds = [
+        torch.zeros(4, 8),
+        torch.zeros(4, 8),
+    ]
+    model.deepstack_input_embeds_num_tokens = 0
+    payload = torch.arange(2 * 3 * 8, dtype=torch.float16).reshape(2, 3, 8)
+
+    model._set_deepstack_input_embeds(payload)
+    deepstack_input_embeds = model._get_deepstack_input_embeds(
+        num_tokens=3, inputs_embeds=torch.empty(3, 8, dtype=torch.float16)
+    )
+
+    assert deepstack_input_embeds is not None
+    for idx, tensor in enumerate(deepstack_input_embeds.tensors.values()):
+        assert tensor.dtype == payload.dtype
+        assert torch.equal(tensor, payload[idx])
 
 
 @dataclass
