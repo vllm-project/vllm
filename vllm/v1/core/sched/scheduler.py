@@ -887,6 +887,17 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
+                    # Hybrid-Mamba P/D decoders recompute the final prompt token.
+                    # Keep that one-token handoff step out of speculative padding.
+                    kv_transfer_config = self.vllm_config.kv_transfer_config
+                    is_disagg_mamba_first_fallback = (
+                        self.has_mamba_layers
+                        and kv_transfer_config is not None
+                        and kv_transfer_config.kv_role == "kv_consumer"
+                        and request.num_output_tokens == 0
+                        and num_computed_tokens == request.num_prompt_tokens - 1
+                    )
+
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
@@ -895,6 +906,7 @@ class Scheduler(SchedulerInterface):
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
+                        and not is_disagg_mamba_first_fallback
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
                         if (

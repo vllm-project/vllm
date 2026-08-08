@@ -1597,6 +1597,83 @@ def test_spec_decode_padding_first_decode_step():
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
+@pytest.mark.parametrize(
+    ("kv_role", "expect_placeholder_drafts"),
+    [
+        pytest.param("kv_consumer", False, id="disagg-consumer"),
+        pytest.param("kv_both", True, id="aggregated-both"),
+    ],
+)
+def test_mamba_first_fallback_spec_padding_scope(
+    kv_role: str,
+    expect_placeholder_drafts: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Only a P/D Mamba handoff skips speculative padding."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    num_spec = 3
+    block_size = 16
+    num_prompt_tokens = 33
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=False,
+        block_size=block_size,
+        use_kv_connector=mock_kv(num_prompt_tokens, True),
+        kv_role=kv_role,
+        kv_cache_spec=MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="all",
+        ),
+    )
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=num_prompt_tokens, max_tokens=16
+    )
+
+    # Promote r1 through its remote-KV handoff, then make it a steady MTP decode.
+    scheduler.add_request(r1)
+    _step_until_kv_transfer_finished(scheduler, [r1.request_id])
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r1.request_id] == 1
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    # Complete r2's full remote-KV transfer while r1 verifies real drafts.
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    assert r2.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(
+        out,
+        create_model_runner_output([r1], finished_recving={r2.request_id}),
+    )
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[4, 5, 6]]))
+
+    post_handoff_computed_tokens: list[int] = []
+    update_waiting_for_remote_kv = scheduler._update_waiting_for_remote_kv
+
+    def capture_handoff(request: Request) -> None:
+        update_waiting_for_remote_kv(request)
+        if request is r2:
+            post_handoff_computed_tokens.append(request.num_computed_tokens)
+
+    monkeypatch.setattr(scheduler, "_update_waiting_for_remote_kv", capture_handoff)
+    out = scheduler.schedule()
+
+    assert r2.num_output_tokens == 0
+    assert post_handoff_computed_tokens == [r2.num_prompt_tokens - 1]
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [4, 5, 6]
+    assert out.num_scheduled_tokens[r2.request_id] == (
+        1 + num_spec if expect_placeholder_drafts else 1
+    )
+    if expect_placeholder_drafts:
+        assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    else:
+        assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_spec_decode_padding_skipped_for_diffusion():
     """Diffusion spec tokens are the fixed-size denoising canvas, not
     rejectable drafts: a first-decode-step request must keep its 1-token span
