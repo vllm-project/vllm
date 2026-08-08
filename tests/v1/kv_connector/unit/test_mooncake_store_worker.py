@@ -2221,7 +2221,9 @@ def _make_bare_worker(
     # path; everything flows through the coordinator).
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
+        KVCacheConfig,
         KVCacheGroupSpec,
+        KVCacheTensor,
     )
 
     worker.disk_offload_buffer_budget_bytes = None
@@ -2236,6 +2238,16 @@ def _make_bare_worker(
     )
     group = KVCacheGroupSpec(["layer0", "__cross_layer__"], spec)
     worker._kv_cache_groups = [group]
+    worker._kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes * num_gpu_blocks,
+                shared_by=["layer0"],
+            )
+        ],
+        kv_cache_groups=[group],
+    )
     worker.pcp_size = 1
     worker.dcp_size = 1
     worker.hash_block_size = block_size
@@ -2255,6 +2267,35 @@ def _make_bare_worker(
     )
     _refresh_group_tp_replication_factors(worker)
     return worker
+
+
+def _configure_bare_worker_groups(
+    worker: mooncake_store_worker.MooncakeStoreWorker,
+    groups,
+    kv_cache_tensors,
+) -> None:
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    worker._kv_cache_groups = groups
+    worker._kv_cache_config = KVCacheConfig(
+        num_blocks=worker.cache_config.num_gpu_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=groups,
+    )
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=g_idx),
+            block_size=group.kv_cache_spec.block_size,
+            hash_block_size=worker.hash_block_size,
+        )
+        for g_idx, group in enumerate(groups)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=worker.block_size,
+        hash_block_size=worker.hash_block_size,
+    )
+    _refresh_group_tp_replication_factors(worker)
 
 
 def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
@@ -2764,6 +2805,241 @@ def test_register_kv_caches_kv_first_two_segments():
     base = tensor.untyped_storage().data_ptr()
     assert db.kv_caches_base_addr == [base, base + seg_stride]
     assert db.block_len == [seg_stride // num_blocks] * 2
+
+
+def test_register_kv_caches_isolates_k3_shaped_groups():
+    """K3-shaped HMA layout: one storage per column, one layer per group in it.
+
+    The hybrid allocator emits ``group_size`` column tensors; column ``i`` is
+    shared by ``layer_names[i]`` of every group that reaches that slot, and an
+    uneven layer split leaves the last group short of the final column. Each
+    group must describe only the columns its own layers occupy, and only its
+    own spec's unpadded page bytes within them.
+    """
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MambaSpec,
+        MLAAttentionSpec,
+    )
+
+    num_blocks = 8
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks, block_size=1)
+    mla_spec = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=32,
+        dtype=torch.float16,
+    )
+    column_bytes = mla_spec.page_size_bytes
+    # Live KDA state per block: conv (4) + recurrent (8) fp16 elements = 24B,
+    # padded up to the 64B attention page the column is sized for.
+    kda_shapes = ((4,), (8,))
+    kda_spec = MambaSpec(
+        block_size=1,
+        shapes=kda_shapes,
+        dtypes=(torch.float16, torch.float16),
+        page_size_padded=column_bytes,
+    )
+    kda_state_bytes = sum(shape[0] * 2 for shape in kda_shapes)
+    groups = [
+        KVCacheGroupSpec(["mla.0", "mla.1", "mla.2"], mla_spec),
+        KVCacheGroupSpec(["kda_a.0", "kda_a.1", "kda_a.2"], kda_spec),
+        KVCacheGroupSpec(["kda_b.0", "kda_b.1", "kda_b.2"], kda_spec),
+        # 8 KDA layers over 3 groups: this one has no layer in column 2.
+        KVCacheGroupSpec(["kda_c.0", "kda_c.1"], kda_spec),
+    ]
+
+    columns = [
+        torch.zeros(num_blocks * column_bytes, dtype=torch.uint8) for _ in range(3)
+    ]
+    tensor_configs = [
+        KVCacheTensor(
+            size=column.untyped_storage().nbytes(),
+            shared_by=[
+                group.layer_names[col]
+                for group in groups
+                if col < len(group.layer_names)
+            ],
+        )
+        for col, column in enumerate(columns)
+    ]
+    _configure_bare_worker_groups(worker, groups, tensor_configs)
+
+    def _layer_view(layer_name: str, column: torch.Tensor):
+        elems = column.view(torch.float16)
+        if layer_name.startswith("mla"):
+            return elems.view(num_blocks, column_bytes // 2)
+        # Each state is a strided view over the front of the padded column
+        # page; the tail of the page is padding no layer reads.
+        offsets = [0, kda_shapes[0][0]]
+        return [
+            torch.as_strided(
+                elems,
+                size=(num_blocks, shape[0]),
+                stride=(column_bytes // 2, 1),
+                storage_offset=offset,
+            )
+            for shape, offset in zip(kda_shapes, offsets, strict=True)
+        ]
+
+    kv_caches: dict[str, torch.Tensor | list[torch.Tensor]] = {
+        layer_name: _layer_view(layer_name, column)
+        for config, column in zip(tensor_configs, columns, strict=True)
+        for layer_name in config.shared_by
+    }
+    _register_with_mocked_threads(worker, kv_caches)
+
+    bases = [column.untyped_storage().data_ptr() for column in columns]
+    assert [db.kv_caches_base_addr for db in worker.token_dbs] == [
+        bases,
+        bases,
+        bases,
+        bases[:2],
+    ]
+    assert [db.block_len for db in worker.token_dbs] == [
+        [column_bytes] * 3,
+        [kda_state_bytes] * 3,
+        [kda_state_bytes] * 3,
+        [kda_state_bytes] * 2,
+    ]
+    assert [db.block_stride for db in worker.token_dbs] == [
+        [column_bytes] * 3,
+        [column_bytes] * 3,
+        [column_bytes] * 3,
+        [column_bytes] * 2,
+    ]
+    # Pre-fix every group carried the union of all columns at full column
+    # width, storing the whole per-block footprint once per group.
+    assert [sum(db.block_len) for db in worker.token_dbs] == [
+        3 * column_bytes,
+        3 * kda_state_bytes,
+        3 * kda_state_bytes,
+        2 * kda_state_bytes,
+    ]
+
+    block_hash = BlockHash(b"same-hash")
+    assert len({db.key_for(block_hash) for db in worker.token_dbs}) == len(groups)
+    addrs, sizes = worker.token_dbs[3].prepare_value_for_block(5)
+    assert addrs == [base + 5 * column_bytes for base in bases[:2]]
+    assert sizes == [kda_state_bytes] * 2
+
+    registered_addrs = {
+        call.args[0] for call in worker.store.register_buffer.call_args_list
+    }
+    assert registered_addrs == set(bases)
+
+
+def test_register_kv_caches_uses_unpadded_length_and_physical_stride():
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+    )
+
+    num_blocks = 10
+    physical_page_size = 16
+    transferred_page_size = 8
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks, block_size=1)
+    spec = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+        page_size_padded=physical_page_size,
+    )
+    group = KVCacheGroupSpec(["mla.0"], spec)
+    backing = torch.zeros(num_blocks * physical_page_size, dtype=torch.uint8)
+    view = torch.as_strided(
+        backing.view(torch.float16),
+        size=(num_blocks, transferred_page_size // 2),
+        stride=(physical_page_size // 2, 1),
+    )
+    _configure_bare_worker_groups(
+        worker,
+        [group],
+        [
+            KVCacheTensor(
+                size=backing.untyped_storage().nbytes(),
+                shared_by=["mla.0"],
+            )
+        ],
+    )
+
+    _register_with_mocked_threads(worker, {"mla.0": view})
+
+    db = worker.token_dbs[0]
+    assert db.block_len == [transferred_page_size]
+    assert db.block_stride == [physical_page_size]
+    addrs, sizes = db.prepare_value_for_block(3)
+    assert addrs == [backing.untyped_storage().data_ptr() + 3 * physical_page_size]
+    assert sizes == [transferred_page_size]
+    addrs, sizes, block_id = db.prepare_value(3, 4, [0, 1, 2, 3])
+    assert block_id == 3
+    assert addrs == [backing.untyped_storage().data_ptr() + 3 * physical_page_size]
+    assert sizes == [transferred_page_size]
+
+
+def test_register_kv_caches_isolates_packed_group_offsets():
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+    )
+
+    num_blocks = 10
+    page_size = 8
+    block_stride = 2 * page_size
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks, block_size=1)
+    spec = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+    )
+    groups = [
+        KVCacheGroupSpec(["mla.0"], spec),
+        KVCacheGroupSpec(["mla.1"], spec),
+    ]
+    backing = torch.zeros(num_blocks * block_stride, dtype=torch.uint8)
+    views = [
+        torch.as_strided(
+            backing.view(torch.float16),
+            size=(num_blocks, page_size // 2),
+            stride=(block_stride // 2, 1),
+            storage_offset=offset // 2,
+        )
+        for offset in (0, page_size)
+    ]
+    tensor_configs = [
+        KVCacheTensor(
+            size=backing.untyped_storage().nbytes(),
+            shared_by=[f"mla.{g_idx}"],
+            offset=g_idx * page_size,
+            block_stride=block_stride,
+        )
+        for g_idx in range(2)
+    ]
+    _configure_bare_worker_groups(worker, groups, tensor_configs)
+
+    _register_with_mocked_threads(
+        worker,
+        {"mla.0": views[0], "mla.1": views[1]},
+    )
+
+    base_addr = backing.untyped_storage().data_ptr()
+    assert [db.kv_caches_base_addr for db in worker.token_dbs] == [
+        [base_addr],
+        [base_addr + page_size],
+    ]
+    assert [db.block_len for db in worker.token_dbs] == [[page_size], [page_size]]
+    assert [db.block_stride for db in worker.token_dbs] == [
+        [block_stride],
+        [block_stride],
+    ]
+    worker.store.register_buffer.assert_called_once_with(
+        base_addr, backing.untyped_storage().nbytes()
+    )
 
 
 def test_register_kv_caches_cross_layer_single_segment():

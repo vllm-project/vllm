@@ -65,6 +65,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -1521,9 +1522,6 @@ class MooncakeStoreWorker:
         self.num_blocks = self.cache_config.num_gpu_blocks
 
         seen_ptrs: set[int] = set()
-        addrs: list[int] = []
-        block_lens: list[int] = []
-
         for value in kv_caches.values():
             cache = _repr_tensor(value)
             cache_storage = cache.untyped_storage()
@@ -1542,36 +1540,171 @@ class MooncakeStoreWorker:
                     ret,
                 )
 
+        tensor_config_by_layer = {
+            layer_name: tensor_config
+            for tensor_config in self._kv_cache_config.kv_cache_tensors
+            for layer_name in tensor_config.shared_by
+        }
+
+        def _layer_spec(group: KVCacheGroupSpec, layer_name: str) -> KVCacheSpec:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                return spec.kv_cache_specs[layer_name]
+            return spec
+
+        def _unpadded_page_size(spec: KVCacheSpec) -> int:
+            if isinstance(spec, (AttentionSpec, MambaSpec)):
+                spec = dataclasses.replace(spec, page_size_padded=None)
+            return spec.page_size_bytes
+
+        def _regions_for_layer(
+            layer_name: str,
+            value: torch.Tensor | list[torch.Tensor],
+            group: KVCacheGroupSpec,
+        ) -> tuple[list[int], list[int], list[int]]:
+            cache = _repr_tensor(value)
+            cache_storage = cache.untyped_storage()
+            storage_base_addr = cache_storage.data_ptr()
+            tensor_config = tensor_config_by_layer.get(layer_name)
+            layer_spec = _layer_spec(group, layer_name)
+            unpadded_page_size = _unpadded_page_size(layer_spec)
+
+            if tensor_config is not None and tensor_config.block_stride > 0:
+                return (
+                    [storage_base_addr + tensor_config.offset],
+                    [unpadded_page_size],
+                    [tensor_config.block_stride],
+                )
+
+            region_len = cache_storage.nbytes()
+            page_stride_bytes = region_len // self.num_blocks
+            transfer_page_size = (
+                unpadded_page_size
+                if getattr(layer_spec, "page_size_padded", None) is not None
+                else page_stride_bytes
+            )
             # Detect layout via stride: a dim whose byte-stride exceeds
-            # page_size_bytes is an outer segment dim (e.g. the K/V dim of
+            # page_stride_bytes is an outer segment dim (e.g. the K/V dim of
             # FlashAttn's (2, num_blocks, ...)). FlashInfer/MLA's blocks-
             # outermost layout has no such dim and yields a single segment.
             el = cache.element_size()
-            page_size_bytes = region_len // self.num_blocks
             outer_dims = [
-                d for d in range(cache.ndim) if cache.stride(d) * el > page_size_bytes
+                d for d in range(cache.ndim) if cache.stride(d) * el > page_stride_bytes
             ]
             if not outer_dims:
-                # Blocks-first layout (FlashInfer / MLA): one segment.
-                addrs.append(base_addr)
-                block_lens.append(page_size_bytes)
-            else:
-                # K/V-first layout (FlashAttn / ROCm): split segments.
-                seg_stride = cache.stride(outer_dims[0]) * el
-                for idx in range(cache.shape[outer_dims[0]]):
-                    addrs.append(base_addr + idx * seg_stride)
-                    block_lens.append(seg_stride // self.num_blocks)
+                return (
+                    [storage_base_addr],
+                    [transfer_page_size],
+                    [page_stride_bytes],
+                )
+
+            # K/V-first layout (FlashAttn / ROCm): split segments.
+            outer_dim = outer_dims[0]
+            num_segments = cache.shape[outer_dim]
+            seg_stride = cache.stride(outer_dim) * el
+            block_stride = seg_stride // self.num_blocks
+            if transfer_page_size != num_segments * block_stride:
+                raise ValueError(
+                    f"Layer {layer_name} has an unsupported segmented KV cache "
+                    f"layout: transfer page size {transfer_page_size}, "
+                    f"segments {num_segments}, block stride {block_stride}"
+                )
+            return (
+                [storage_base_addr + idx * seg_stride for idx in range(num_segments)],
+                [block_stride] * num_segments,
+                [block_stride] * num_segments,
+            )
+
+        addrs_per_group: list[list[int]] = []
+        block_lens_per_group: list[list[int]] = []
+        block_strides_per_group: list[list[int]] = []
+
+        if set(kv_caches) == {"__cross_layer__"}:
+            if len(self.token_dbs) != 1:
+                raise ValueError(
+                    "Cross-layer KV cache requires exactly one cache group"
+                )
+            cache = _repr_tensor(kv_caches["__cross_layer__"])
+            storage = cache.untyped_storage()
+            addrs_per_group.append([storage.data_ptr()])
+            block_lens_per_group.append([storage.nbytes() // self.num_blocks])
+            block_strides_per_group.append([storage.nbytes() // self.num_blocks])
+        else:
+            allocated_layers = set(tensor_config_by_layer)
+            for g_idx, group in enumerate(self._kv_cache_groups):
+                addrs: list[int] = []
+                block_lens: list[int] = []
+                block_strides: list[int] = []
+                seen_regions: set[tuple[int, int]] = set()
+                expected_layers = [
+                    layer_name
+                    for layer_name in group.layer_names
+                    if not allocated_layers or layer_name in allocated_layers
+                ]
+                missing_layers = [
+                    layer_name
+                    for layer_name in expected_layers
+                    if layer_name not in kv_caches
+                ]
+                if missing_layers:
+                    raise ValueError(
+                        f"KV cache group {g_idx} is missing tensors for layers "
+                        f"{missing_layers}"
+                    )
+
+                for layer_name in expected_layers:
+                    value = kv_caches[layer_name]
+                    cache = _repr_tensor(value)
+                    tensor_config = tensor_config_by_layer.get(layer_name)
+                    offset = (
+                        tensor_config.offset
+                        if tensor_config is not None and tensor_config.block_stride > 0
+                        else 0
+                    )
+                    region_key = (cache.untyped_storage().data_ptr(), offset)
+                    if region_key in seen_regions:
+                        continue
+                    seen_regions.add(region_key)
+                    layer_addrs, layer_lens, layer_strides = _regions_for_layer(
+                        layer_name, value, group
+                    )
+                    addrs.extend(layer_addrs)
+                    block_lens.extend(layer_lens)
+                    block_strides.extend(layer_strides)
+
+                if not addrs:
+                    raise ValueError(f"KV cache group {g_idx} has no cache regions")
+                addrs_per_group.append(addrs)
+                block_lens_per_group.append(block_lens)
+                block_strides_per_group.append(block_strides)
+
+        if not (
+            len(self.token_dbs)
+            == len(addrs_per_group)
+            == len(block_lens_per_group)
+            == len(block_strides_per_group)
+        ):
+            raise ValueError("KV cache group metadata count mismatch")
 
         logger.info(
-            "Registered KV caches: num_groups=%d, num_segments=%d, num_blocks=%d",
+            "Registered KV caches: num_groups=%d, segments_per_group=%s, "
+            "bytes_per_group=%s, num_blocks=%d",
             len(self.token_dbs),
-            len(addrs),
+            [len(addrs) for addrs in addrs_per_group],
+            [sum(block_lens) for block_lens in block_lens_per_group],
             self.num_blocks,
         )
 
-        for db in self.token_dbs:
+        for db, addrs, block_lens, block_strides in zip(
+            self.token_dbs,
+            addrs_per_group,
+            block_lens_per_group,
+            block_strides_per_group,
+            strict=True,
+        ):
             db.set_kv_caches_base_addr(addrs)
             db.set_block_len(block_lens)
+            db.set_block_stride(block_strides)
 
         # Start transfer threads
         if self.kv_role in ["kv_producer", "kv_both"]:
