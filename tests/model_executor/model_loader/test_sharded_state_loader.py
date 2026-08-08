@@ -6,12 +6,15 @@ import multiprocessing as mp
 import os
 import shutil
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.config import LoadConfig
 from vllm.model_executor.model_loader import ShardedStateLoader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -48,6 +51,46 @@ def test_filter_subtensors():
     for key, tensor in filtered_state_dict.items():
         # NOTE: don't use `equal` here, as the tensor might contain NaNs
         assert tensor is state_dict[key]
+
+
+def test_save_sharded_state_before_weight_postprocessing(tmp_path, monkeypatch):
+    from safetensors.torch import load_file
+
+    import vllm.distributed
+    import vllm.model_executor.model_loader.base_loader as base_loader
+
+    class TestModelLoader(BaseModelLoader):
+        def download_model(self, model_config):
+            pass
+
+        def load_weights(self, model, model_config):
+            values = torch.arange(4, dtype=model.weight.dtype).reshape(2, 2)
+            model.weight.data.copy_(values)
+
+    model = torch.nn.Linear(2, 2, bias=False)
+    save_path = tmp_path / "sharded_state"
+    load_config = LoadConfig(save_sharded_state_path=str(save_path))
+    vllm_config = SimpleNamespace(
+        device_config=SimpleNamespace(device="cpu"),
+        load_config=load_config,
+    )
+    model_config = SimpleNamespace(dtype=torch.float32)
+
+    monkeypatch.setattr(base_loader, "initialize_model", lambda **kwargs: model)
+
+    def reshape_weight(model, model_config, target_device):
+        model.weight = torch.nn.Parameter(model.weight.reshape(1, 4))
+
+    monkeypatch.setattr(base_loader, "process_weights_after_loading", reshape_weight)
+    monkeypatch.setattr(vllm.distributed, "get_tensor_model_parallel_rank", lambda: 0)
+
+    loaded_model = TestModelLoader(load_config).load_model(vllm_config, model_config)
+
+    saved = load_file(
+        save_path / ShardedStateLoader.DEFAULT_PATTERN.format(rank=0, part=0)
+    )
+    assert saved["weight"].shape == (2, 2)
+    assert loaded_model.weight.shape == (1, 4)
 
 
 @pytest.fixture(scope="module")

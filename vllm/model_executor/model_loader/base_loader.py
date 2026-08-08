@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from abc import ABC, abstractmethod
 
 import torch
@@ -72,6 +73,8 @@ class BaseModelLoader(ABC):
                     format_gib(peak_memory),
                 )
 
+            self._save_sharded_state(model)
+
             # Process weights into kernel format. Note that when using online
             # quantization, weights are (typically) quantized as they are loaded.
             if _has_online_quant(model):
@@ -80,6 +83,31 @@ class BaseModelLoader(ABC):
             process_weights_after_loading(model, model_config, target_device)
 
         return model.eval()
+
+    def _save_sharded_state(self, model: nn.Module) -> None:
+        path = self.load_config.save_sharded_state_path
+        if path is None:
+            return
+        if _has_online_quant(model):
+            raise ValueError(
+                "Saving sharded state during online quantization is not supported"
+            )
+
+        from vllm.model_executor.model_loader.sharded_state_loader import (
+            ShardedStateLoader,
+        )
+
+        os.makedirs(path, exist_ok=True)
+        logger.info(
+            "Saving logical sharded state before weight post-processing to %s",
+            path,
+        )
+        ShardedStateLoader.save_model(
+            model,
+            path,
+            pattern=self.load_config.save_sharded_state_pattern,
+            max_size=self.load_config.save_sharded_state_max_size,
+        )
 
 
 def log_model_inspection(model: nn.Module) -> None:
