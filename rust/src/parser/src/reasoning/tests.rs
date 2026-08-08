@@ -7,7 +7,7 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::{
     DeepSeekR1ReasoningParser, DelimitedReasoningParser, MiniMaxM3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningParser,
+    Olmo3ReasoningParser, Qwen3ReasoningParser, ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -217,4 +217,64 @@ fn minimax_m3_uses_prompt_prefilled_end_marker() {
     let delta = parser.push("answer").unwrap();
     assert_eq!(delta.reasoning, None);
     assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn olmo3_without_prompt_markers_defaults_to_reasoning() {
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = Olmo3ReasoningParser::new(tokenizer);
+
+    let delta = parser.push("reason</think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn olmo3_prompt_end_marker_starts_in_content() {
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = Olmo3ReasoningParser::new(tokenizer);
+    parser.initialize(&[THINK_END_ID]).unwrap();
+
+    let delta = parser.push("answer").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn olmo3_tolerates_old_and_new_formats() {
+    let tokenizer = Arc::new(fake_tokenizer());
+
+    let mut old_parser = Olmo3ReasoningParser::new(tokenizer.clone());
+    let old = old_parser.push("<think>reason</think>answer").unwrap();
+    assert_eq!(old.reasoning.as_deref(), Some("reason"));
+    assert_eq!(old.content.as_deref(), Some("answer"));
+
+    let mut new_parser = Olmo3ReasoningParser::new(tokenizer);
+    new_parser.initialize(&[THINK_START_ID]).unwrap();
+    let new = new_parser.push("reason</think>answer").unwrap();
+    assert_eq!(new.reasoning.as_deref(), Some("reason"));
+    assert_eq!(new.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn olmo3_without_think_tokens_in_vocab_still_splits() {
+    let tokenizer = Arc::new(TestTokenizer::new()); // no <think>/</think> in vocab
+    let mut parser = Olmo3ReasoningParser::new(tokenizer);
+    let delta = parser.push("reason</think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn olmo3_streams_leading_think_across_chunks() {
+    let mut parser = Olmo3ReasoningParser::new(Arc::new(fake_tokenizer()));
+    assert!(parser.push("<th").unwrap().is_empty());
+    assert_eq!(
+        parser.push("ink>reason").unwrap().reasoning.as_deref(),
+        Some("reason")
+    );
+    assert_eq!(
+        parser.push("</think>answer").unwrap().content.as_deref(),
+        Some("answer")
+    );
 }
