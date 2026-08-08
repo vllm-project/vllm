@@ -2444,6 +2444,12 @@ def _get_and_verify_max_len(
             )
         else:
             max_model_len = int(derived_max_model_len)
+        if spec_target_max_model_len is not None:
+            # A speculative draft model never serves sequences longer than the
+            # target model, so bound it here rather than after the fact. This
+            # keeps the resolved (and logged) length equal to the one actually
+            # used by the drafter.
+            max_model_len = min(max_model_len, spec_target_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)
 
     # If the user specified a max length, make sure it is smaller than the
