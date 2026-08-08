@@ -19,6 +19,12 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.prefill.cpu_sdpa import (
+    CPUSDPAMLAPrefillBackend,
+)
+from vllm.v1.attention.backends.mla.prefill.selector import (
+    get_mla_prefill_backend,
+)
 
 
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
@@ -76,6 +82,7 @@ def test_cpu_mla_backend_smoke() -> None:
         max_model_len=128,
         max_num_seqs=2,
         block_size=16,
+        gpu_memory_utilization=0.25,
         hf_overrides=hf_overrides,
     )
 
@@ -86,3 +93,49 @@ def test_cpu_mla_backend_smoke() -> None:
         # `dummy` weights do not produce meaningful text, but the number
         # of generated tokens must match what we asked for.
         assert len(output.outputs[0].token_ids) == 4
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+def test_cpu_mla_prefill_backend_selected() -> None:
+    # On CPU (no device capability) the MLA prefill backend must be the
+    # SDPA-based CPU backend, not flash-attn which is unavailable on CPU.
+    backend_cls = get_mla_prefill_backend(None)
+    assert backend_cls is CPUSDPAMLAPrefillBackend
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
+def test_cpu_mla_prefill_new_tokens() -> None:
+    # The SDPA prefill must exactly match a reference causal attention over
+    # the ragged (varlen) q/k/v layout, with per-request padding handled.
+    backend = CPUSDPAMLAPrefillBackend(
+        num_heads=4,
+        scale=0.25,
+        kv_lora_rank=16,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=0,
+        v_head_dim=16,
+        vllm_config=None,
+    )
+
+    class _PrefillMeta:
+        query_start_loc = torch.tensor([0, 3, 6], dtype=torch.int32)
+
+    backend._prefill_metadata = _PrefillMeta()
+    q = torch.randn(6, 4, 16, dtype=torch.bfloat16)
+    k = torch.randn(6, 4, 16, dtype=torch.bfloat16)
+    v = torch.randn(6, 4, 16, dtype=torch.bfloat16)
+    out = backend.run_prefill_new_tokens(q, k, v, return_softmax_lse=False)
+
+    qq = q[:3].float()
+    kk = k[:3].float()
+    vv = v[:3].float()
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        qq.transpose(0, 1).unsqueeze(0),
+        kk.transpose(0, 1).unsqueeze(0),
+        vv.transpose(0, 1).unsqueeze(0),
+        is_causal=True,
+        scale=0.25,
+    )
+    ref = ref.squeeze(0).transpose(0, 1)
+    assert out[:3].float().allclose(ref, atol=2e-2)
+    assert out.shape == (6, 4, 16)
