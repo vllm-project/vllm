@@ -14,7 +14,11 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    truncate_downward_closed_groups,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -326,18 +330,43 @@ class KVCacheManager:
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0, False
 
-        fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, request.num_tokens - 1
         )
-        if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
-            # A lagging group hit deeper than full attention means its
-            # full-attention blocks were evicted; use the reconciled boundary
-            # that every group agrees on.
+        # Two questions, so two reductions over the dense groups. Both
+        # reduce to the single-group behaviour when there is only one.
+        dense_hits = [
+            per_group_hits[group_id]
+            for group_id in coordinator.full_attention_group_ids
+        ]
+        if any(hit > max(dense_hits) for hit in per_group_hits):
+            # Eviction test: a group deeper than *every* dense group means the
+            # dense blocks were evicted. Comparing against one arbitrary dense
+            # group instead would read a finer-grained sibling as eviction and
+            # give up the fast path on most hits.
             return *self.get_computed_blocks(request), False
 
-        num_local = per_group_hits[fa_group_id]
-        blocks = self.create_kv_cache_blocks(computed)
+        # Reported length: the blocks below come from the per-group lookup at
+        # each group's own hit, not from a reconciled one, so this must be a
+        # length every dense group's list actually covers. The max would name a
+        # boundary the coarser group's blocks fall short of.
+        num_local = min(dense_hits)
+        # Reducing the reported length is not enough on its own: a dense group
+        # that hit deeper keeps a block list longer than `num_local` covers,
+        # and the pair is handed straight to `add_local_computed_blocks`. Trim
+        # for the same reason the reconciling path does, at each group's own
+        # block size.
+        hit_blocks = [list(blocks) for blocks in computed]
+        truncate_downward_closed_groups(
+            ((g.spec, g.group_ids) for g in coordinator.attention_groups),
+            num_local,
+            hit_blocks,
+            # A copy on purpose: only the trimmed blocks are wanted here, and
+            # the caller-visible flag below reports on the pre-trim hits.
+            list(per_group_hits),
+            lambda gid: coordinator.single_type_managers[gid].block_size,
+        )
+        blocks = self.create_kv_cache_blocks(tuple(hit_blocks))
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
 

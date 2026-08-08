@@ -232,6 +232,25 @@ def test_coordinator_fine_grained_partial_tail_hit():
     assert hit == 48
 
 
+def test_coordinator_sliding_window_group_disables_fine_grained_hits():
+    """A sliding-window group only supports block-aligned lookup, so the
+    connector must keep the scheduler-block alignment (and stay in step with
+    core) instead of handing the manager hash-granularity hashes."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _swa(32, 64)),
+        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    hs = _hashes(4)
+    exists = {(g, bytes(h)) for g in (0, 1) for h in (hs[1], hs[3])}
+    cmap = ExternalCachedBlockPool(16, exists)
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
+    assert not coord.enable_partial_hash_hits
+    assert hit == 64
+
+
 def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
     """If only one group has the sub-block boundary, min-convergence clips the
     reconciled hit back to the block boundary (32)."""

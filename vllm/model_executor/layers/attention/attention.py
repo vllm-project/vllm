@@ -445,6 +445,11 @@ class Attention(nn.Module, AttentionLayerBase):
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
+        # Book this layer's KV as full attention while still masking to the
+        # window at compute time -- the same trade `unify_hybrid_kv_cache_specs`
+        # makes, but per layer instead of for the whole model. Opt-in; set by
+        # the model after construction (see `qwen3_dflash`).
+        self.book_sliding_window_as_full_attention = False
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
@@ -631,7 +636,18 @@ class Attention(nn.Module, AttentionLayerBase):
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend, sw_per_token, shared_page, block_size
             )
-            return SlidingWindowSpec(
+            # FullAttentionManager serves the fine-grained prefix-cache hits
+            # SlidingWindowManager asserts against. Only block bookkeeping
+            # changes: the builder reads the window off the spec either way.
+            #
+            # One constructor on purpose -- `sliding_window` is load-bearing,
+            # and dropping it here would enforce no window at all.
+            spec_cls = (
+                FullAttentionSpec
+                if self.book_sliding_window_as_full_attention
+                else SlidingWindowSpec
+            )
+            return spec_cls(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,

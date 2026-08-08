@@ -5,12 +5,14 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm import envs
-from vllm.utils.math_utils import cdiv
+from vllm.logger import init_logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    partial_hash_hits_enabled,
+    truncate_downward_closed_groups,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -25,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -579,12 +583,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     f"{type(g.kv_cache_spec).__name__}."
                 )
         # Partial hash hits are limited to full-attention + mamba ("align")
-        # without context parallelism.
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
-            for g in kv_cache_config.kv_cache_groups
+        # without context parallelism, and only when no other group forces
+        # block-aligned lookup.
+        self.enable_partial_hash_hits = partial_hash_hits_enabled(
+            kv_cache_config.kv_cache_groups,
+            hash_block_size,
+            dcp_world_size=dcp_world_size,
         )
         self.verify_and_split_kv_cache_groups()
 
@@ -642,6 +646,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.full_attention_group_id: int | None = (
             first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
         )
+        # Every full-attention group, not just the first: a model can carry
+        # more than one at different block sizes (see
+        # truncate_downward_closed_groups). Taking the first alone as the
+        # dense reference reads a granularity difference as eviction.
+        self.full_attention_group_ids: list[int] = [
+            group_id
+            for group in self.attention_groups
+            if isinstance(group.spec, FullAttentionSpec)
+            for group_id in group.group_ids
+        ]
 
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).
         for group in self.attention_groups:
@@ -795,17 +809,27 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if is_simple_hybrid:
                 break
 
-        # Truncate full attention blocks to final hit_length (if present)
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            group_block_size = self.single_type_managers[
-                first_group.group_ids[0]
-            ].block_size
-            num_blocks = cdiv(hit_length, group_block_size)
-            for group_id in first_group.group_ids:
-                if (blks := hit_blocks_by_group[group_id]) is not None:
-                    del blks[num_blocks:]
-                    hit_length_by_group[group_id] = hit_length
+        if len(self.full_attention_group_ids) > 1:
+            # Dense groups can disagree purely on block-size granularity: a
+            # finer group completes its next block sooner than a coarser one
+            # for identical progress. That is not a sparse group falling
+            # behind, so the reference is where every dense group agrees.
+            # Must precede the truncation below, which overwrites these.
+            longest_hit_length = min(
+                hit_length_by_group[gid] for gid in self.full_attention_group_ids
+            )
+
+        # Each group was looked up once against a candidate length that later
+        # iterations may have reduced. Leaving one untrimmed hands
+        # `add_local_computed_blocks` more blocks than the hit covers, which
+        # lands as a copy-on-write assertion on the first partial hit.
+        truncate_downward_closed_groups(
+            ((g.spec, g.group_ids) for g in self.attention_groups),
+            hit_length,
+            hit_blocks_by_group,
+            hit_length_by_group,
+            lambda gid: self.single_type_managers[gid].block_size,
+        )
 
         # Uncached shared prefix detection: if any attn. group cached a longer
         # prefix than the reconciled hit, it is an uncached common prefix across
