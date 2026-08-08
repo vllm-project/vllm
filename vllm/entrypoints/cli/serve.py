@@ -20,7 +20,11 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
+from vllm.v1.engine.utils import (
+    CoreEngineActorManager,
+    CoreEngineProcManager,
+    launch_core_engines,
+)
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -311,6 +315,7 @@ def run_multi_api_server(args: argparse.Namespace):
     api_server_manager: APIServerProcessManager | RustFrontendProcessManager | None = (
         None
     )
+    control_server = None
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
@@ -343,6 +348,17 @@ def run_multi_api_server(args: argparse.Namespace):
             else:
                 expected_engine_start_index = 0
                 expected_engine_count = parallel_config.data_parallel_size
+
+            control_channel_address = None
+            if is_ray_dp:
+                from vllm.v1.engine.elastic_ep_control import ControlChannelServer
+
+                assert isinstance(local_engine_manager, CoreEngineActorManager)
+                control_server = ControlChannelServer(local_engine_manager, vllm_config)
+                control_channel_address = control_server.bind(
+                    parallel_config.data_parallel_master_ip
+                )
+
             # Start rust front-end process.
             api_server_manager = RustFrontendProcessManager(
                 binary_path=rust_frontend_path,
@@ -353,6 +369,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 engine_start_index=expected_engine_start_index,
                 engine_count=expected_engine_count,
                 stats_update_address=stats_update_address,
+                control_channel_address=control_channel_address,
             )
         else:
             # Start API server(s).
@@ -376,12 +393,15 @@ def run_multi_api_server(args: argparse.Namespace):
                 )
                 addresses.inputs = actual_inputs
                 addresses.outputs = actual_outputs
-
+        
         # Set frontend processes to watch during engine startup.
         # If any of these processes exit before the engines are up, the engine startup
         # will be aborted with an error.
         engine_launch.watched_frontend_processes = api_server_manager.processes
-
+        
+    if control_server is not None:
+        control_server.start()
+        
     # Wait for API servers.
     try:
         wait_for_completion_or_failure(
@@ -390,6 +410,8 @@ def run_multi_api_server(args: argparse.Namespace):
             coordinator=coordinator,
         )
     finally:
+        if control_server is not None:
+            control_server.close()
         timeout = shutdown_by = None
         if shutdown_requested:
             timeout = vllm_config.shutdown_timeout
