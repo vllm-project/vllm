@@ -11,6 +11,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p_pytorch,
     random_sample,
+    random_sample_from_logits,
 )
 from vllm.v1.sample.sampler import Sampler
 
@@ -135,6 +136,51 @@ def test_random_sample_uses_fp64_exponential_race_when_requested():
     actual = random_sample(probs.clone(), {}, use_fp64_gumbel=True)
 
     assert torch.equal(actual, expected)
+
+
+def test_random_sample_from_logits_matches_probs_path():
+    """Same noise, same seeds: the log-space Gumbel draw must pick the same
+    tokens as the softmax+division path it replaces in forward_native."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    for use_fp64 in (False, True):
+        for n_seeded in (0, 3, 8):
+            logits = torch.randn(8, 2048, dtype=torch.float32) * 4
+            # Mask some entries like top-k/top-p would.
+            logits[logits < -2.0] = float("-inf")
+            gens = {
+                i: Generator(device=DEVICE_TYPE).manual_seed(100 + i)
+                for i in range(n_seeded)
+            }
+            gens_ref = {
+                i: Generator(device=DEVICE_TYPE).manual_seed(100 + i)
+                for i in range(n_seeded)
+            }
+
+            _seed_default_generator(42)
+            expected = random_sample(
+                logits.softmax(dim=-1, dtype=torch.float32),
+                gens_ref,
+                use_fp64_gumbel=use_fp64,
+            )
+            _seed_default_generator(42)
+            actual = random_sample_from_logits(logits, gens, use_fp64_gumbel=use_fp64)
+            assert torch.equal(actual, expected), (
+                f"use_fp64={use_fp64} n_seeded={n_seeded}"
+            )
+
+
+def test_random_sample_from_logits_never_picks_masked_tokens():
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    logits = torch.randn(64, 512, dtype=torch.float32)
+    # Keep only 4 tokens per row.
+    masked = torch.full_like(logits, float("-inf"))
+    keep = logits.topk(4, dim=-1).indices
+    masked.scatter_(1, keep, logits.gather(1, keep))
+    for _ in range(20):
+        sampled = random_sample_from_logits(masked, {})
+        assert (masked.gather(1, sampled.unsqueeze(1)) > float("-inf")).all()
 
 
 def test_topk_impl_equivalence():
