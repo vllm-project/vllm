@@ -2295,12 +2295,22 @@ class VllmConfig:
 
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
+        from vllm.platforms import current_platform
+
         unsupported: list[str] = []
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if self.parallel_config.prefill_context_parallel_size > 1 and not (
-            model_config is not None and model_config.use_mla
+        # TPU substitutes its own worker and model runner, so the V1/V2 model
+        # runners in this repo never execute there and PCP is implemented by
+        # the platform. Without this exemption a non-MLA model cannot be
+        # configured with PCP at all: use_v2_model_runner forces V2 when
+        # prefill_context_parallel_size > 1, and V2 then reports PCP as
+        # unsupported.
+        if (
+            self.parallel_config.prefill_context_parallel_size > 1
+            and not (model_config is not None and model_config.use_mla)
+            and not current_platform.is_tpu()
         ):
             unsupported.append("prefill context parallelism")
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
@@ -2376,7 +2386,12 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
-        if not HAS_TRITON:
+        from vllm.platforms import current_platform
+
+        # TPU never dispatches Triton kernels, and vllm disables Triton on TPU
+        # hosts (installed, but no active driver), so this requirement does not
+        # apply there.
+        if not HAS_TRITON and not current_platform.is_tpu():
             raise ValueError("Model Runner V2 requires Triton.")
 
         unsupported = self._get_v2_model_runner_unsupported_features()
