@@ -46,6 +46,7 @@ logger = init_logger(__name__)
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
     extra_async_saves: dict[str, int] | None = None
+    extra_async_loads: dict[str, int] | None = None
 
 
 @dataclass
@@ -193,15 +194,32 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             or self._all_support_hma
         ), "HMA should not be enabled unless all sub-connectors support it"
 
-        # A mapping from request id to the index of the connector chosen to
-        # load the request from (if any).
-        self._requests_to_connector: dict[str, int] = {}
+        # Whether to let sub-connectors *compose* their hits for one request:
+        # each connector is offered the tokens the earlier ones did not cover,
+        # instead of the first one with a hit taking the whole request. Opt-in
+        # because it changes how many tokens each sub-connector is asked to
+        # load; see `get_num_new_matched_tokens`.
+        self._compose_connectors = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "compose_connectors", False
+            )
+        )
+
+        # A mapping from request id to {connector index: number of tokens that
+        # connector is loading}. Without composition this holds at most one
+        # entry -- the connector chosen to load the request.
+        self._requests_to_connector: dict[str, dict[int, int]] = {}
 
         # Keeps track of *additional* remaining async saves (beyond 1) to be
-        # finished per request. Not needed for async loads since we only allow
-        # a single connector to load.
+        # finished per request.
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
+
+        # Same, for async loads: with composition more than one connector can
+        # be loading a single request, and the scheduler must not resume it
+        # until all of them are done. Without composition this stays empty.
+        # Propagated from scheduler to worker side via the connector metadata.
+        self._extra_async_loads: dict[str, int] = {}
 
     @property
     def prefer_cross_layer_blocks(self) -> bool:
@@ -265,6 +283,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
         if connector_metadata.extra_async_saves:
             self._extra_async_saves.update(connector_metadata.extra_async_saves)
+        if connector_metadata.extra_async_loads:
+            self._extra_async_loads.update(connector_metadata.extra_async_loads)
         for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
         super().bind_connector_metadata(connector_metadata)
@@ -321,23 +341,42 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             sending, recving = c.get_finished(finished_req_ids)
             if not recving and not sending:
                 continue
-            # Aggregate finished recving request ids.
-            finished_recving.update(recving or ())
+            # Aggregate finished recving request ids - only include once we've
+            # drained the "extra" count, exactly as for sends below. With
+            # composition more than one connector loads a single request, and
+            # the scheduler must not be told the load is complete until the
+            # last of them reports: the first report moves the request out of
+            # WAITING_FOR_REMOTE_KVS, so a second one would hit
+            # `assert RequestStatus.is_finished(req.status)` in
+            # `Scheduler._update_from_kv_xfer_finished` and kill EngineCore.
+            for req_id in recving or ():
+                if self._drain_extra(self._extra_async_loads, req_id):
+                    finished_recving.add(req_id)
             # Aggregate finished sending request ids - only include
             # once we've drained the "extra" count (for cases where
             # more than one connector is async-saving the same request).
             for req_id in sending or ():
-                extra_pending = self._extra_async_saves.get(req_id)
-                if extra_pending is None:
+                if self._drain_extra(self._extra_async_saves, req_id):
                     finished_sending.add(req_id)
-                    continue
-                assert extra_pending > 0
-                if extra_pending == 1:
-                    del self._extra_async_saves[req_id]
-                else:
-                    self._extra_async_saves[req_id] = extra_pending - 1
 
         return finished_sending or None, finished_recving or None
+
+    @staticmethod
+    def _drain_extra(extra: dict[str, int], req_id: str) -> bool:
+        """Whether this is the last connector to report `req_id`.
+
+        `extra` holds the number of reports still expected *beyond* this one.
+        A missing entry means no other connector is working on the request.
+        """
+        extra_pending = extra.get(req_id)
+        if extra_pending is None:
+            return True
+        assert extra_pending > 0
+        if extra_pending == 1:
+            del extra[req_id]
+        else:
+            extra[req_id] = extra_pending - 1
+        return False
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()
@@ -387,33 +426,77 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        to_return = (0, False)
+        """Ask each sub-connector how many tokens it can supply.
+
+        Default (`compose_connectors` off): the first connector reporting a
+        non-zero count is assigned the whole request and the rest contribute
+        nothing, even when they hold tokens the winner does not.
+
+        With `compose_connectors` on, each connector is instead offered the
+        tokens the earlier ones did not cover, by advancing the
+        `num_computed_tokens` we pass down. That is the same "everything up to
+        here is already covered" contract the scheduler uses, so a connector
+        needs no changes to participate -- it simply reports the prefix it can
+        serve beyond what it is told exists, and returning 0 opts it out.
+
+        Composition is restricted to connectors that agree with the first
+        contributor on `load_async`: the scheduler tracks one load mode per
+        request, so mixing a synchronous loader (which loads inside the forward
+        pass) with an asynchronous one (which loads between steps) is not
+        expressible. Connectors that disagree are offered nothing.
+        """
+        per_connector: dict[int, int] = {}
+        total = 0
+        load_async_mode: bool | None = None
         for i, c in enumerate(self._connectors):
+            # Only advance the offer when composing. Otherwise every connector
+            # is asked exactly the question the scheduler asked us, so the
+            # first-hit-takes-all path is bit-for-bit unchanged.
+            covered = total if self._compose_connectors else 0
             toks, load_async = c.get_num_new_matched_tokens(
-                request, num_computed_tokens
+                request, num_computed_tokens + covered
             )
             # If there is a connector still looking up the matches,
             # we return None to indicate that we are not done yet.
             if toks is None:
                 return (None, False)
-            # The first connector that has new matched tokens will be assigned
-            # to this request.
-            if to_return[0] == 0 and toks > 0:
-                self._requests_to_connector[request.request_id] = i
-                to_return = (toks, load_async)
-        return to_return
+            if toks == 0:
+                continue
+            if load_async_mode is None:
+                # First contributor decides the load mode for this request.
+                load_async_mode = load_async
+            elif not self._compose_connectors or load_async != load_async_mode:
+                # Either we are not composing (first hit takes everything), or
+                # this connector cannot be combined with the ones before it.
+                continue
+            per_connector[i] = toks
+            total += toks
+
+        if not per_connector:
+            return (0, False)
+
+        self._requests_to_connector[request.request_id] = per_connector
+        if len(per_connector) > 1:
+            self._extra_async_loads[request.request_id] = len(per_connector) - 1
+        assert load_async_mode is not None
+        return (total, load_async_mode)
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        chosen_connector = self._requests_to_connector.get(request.request_id, -1)
+        per_connector = self._requests_to_connector.get(request.request_id) or {}
+        # `num_external_tokens` is the scheduler's final say and can be lower
+        # than what we asked for; hand it out in connector order so the tail
+        # connectors are the ones that lose tokens, and pass 0 to a connector
+        # once the budget runs out so it skips its load. It is also 0 on the
+        # second call for async-load requests, which correctly tells every
+        # sub-connector there is nothing more to do.
+        budget = num_external_tokens
         for i, c in enumerate(self._connectors):
-            if i == chosen_connector:
-                # Forward call to the chosen connector (if any).
-                c.update_state_after_alloc(request, blocks, num_external_tokens)
-            else:
-                # Other connectors still receive the request's real blocks
-                c.update_state_after_alloc(request, blocks, 0)
+            share = min(per_connector.get(i, 0), budget)
+            budget -= share
+            # Every connector still receives the request's real blocks.
+            c.update_state_after_alloc(request, blocks, share)
 
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
@@ -430,6 +513,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         if self._extra_async_saves:
             metadata.extra_async_saves = self._extra_async_saves
             self._extra_async_saves = {}
+        if self._extra_async_loads:
+            metadata.extra_async_loads = self._extra_async_loads
+            self._extra_async_loads = {}
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
