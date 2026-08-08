@@ -861,6 +861,48 @@ def flashinfer_scaled_fp4_mm_out(
     return out
 
 
+_BMM_FP8_BACKEND: str | None = None
+
+
+# assume_constant_result: the backend is fixed per process (it depends only
+# on the GPU architecture), the device-capability query inside is not
+# Dynamo-traceable, and the backend must appear as a string literal in
+# compiled graphs for the AsyncTP fusion patterns to match on it.
+@torch.compiler.assume_constant_result
+def bmm_fp8_backend() -> str:
+    """Backend argument for FlashInfer's per-tensor FP8 ``bmm_fp8``.
+
+    ``"auto"`` lets FlashInfer pick from all importable backends, including
+    cuDNN whenever the ``cudnn`` python module is present (it is a
+    transitive dependency of ``nvidia-cudnn-frontend`` in
+    requirements/cuda.txt). On the sm_12x (consumer/workstation Blackwell)
+    family the cuDNN path is broken in two ways: cuDNN GEMM graphs are
+    built lazily per exact (batch, seqlen) shape on the host inside the
+    serving hot path (multi-second engine stalls on every novel prompt
+    length), and plans that build successfully can still be rejected at
+    execute time with "Plan index N is invalid"
+    (flashinfer-ai/flashinfer#3566). Pin cuBLAS there — FlashInfer's own
+    default backend for ``bmm_fp8`` — until FlashInfer builds cuDNN plans
+    off the hot path. Keep ``"auto"`` elsewhere (e.g. sm_10x datacenter
+    Blackwell), where the cuDNN runner is autotuned at warmup and
+    beneficial.
+
+    The result is memoized in a module-level constant (not
+    ``functools.cache``) so Dynamo can constant-fold the call when tracing
+    ``flashinfer_scaled_fp8_mm``: the device-capability query is not
+    traceable, and the backend must appear as a string literal in the
+    graph for the AsyncTP fusion patterns to match on it.
+    """
+    global _BMM_FP8_BACKEND
+    if _BMM_FP8_BACKEND is None:
+        _BMM_FP8_BACKEND = (
+            "cublas"
+            if current_platform.is_device_capability_family(120)
+            else "auto"
+        )
+    return _BMM_FP8_BACKEND
+
+
 def flashinfer_scaled_fp8_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -883,7 +925,7 @@ def flashinfer_scaled_fp8_mm(
         scale_a,
         scale_b,
         out_dtype,
-        "auto",
+        bmm_fp8_backend(),
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:
@@ -918,7 +960,7 @@ def flashinfer_scaled_fp8_mm_out(
         scale_b,
         out_dtype or out.dtype,
         out.unsqueeze(0),
-        "auto",
+        bmm_fp8_backend(),
     )
     return out
 
