@@ -439,6 +439,7 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        max_num_scheduled_reqs = self._get_max_num_scheduled_reqs()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -483,7 +484,11 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while (
+            req_index < len(self.running)
+            and token_budget > 0
+            and len(num_scheduled_tokens) < max_num_scheduled_reqs
+        ):
             request = self.running[req_index]
 
             if (
@@ -693,7 +698,11 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
+            while (
+                (self.waiting or self.skipped_waiting)
+                and token_budget > 0
+                and len(num_scheduled_tokens) < max_num_scheduled_reqs
+            ):
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
@@ -1120,6 +1129,7 @@ class Scheduler(SchedulerInterface):
 
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
+        assert len(num_scheduled_tokens) <= max_num_scheduled_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
@@ -1260,6 +1270,24 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def _get_max_num_scheduled_reqs(self) -> int:
+        """Return the maximum number of requests for the next batch.
+
+        Model Runner V2 pipeline parallelism keeps multiple batches in flight.
+        Spread the available request slots across the pipeline stages instead
+        of admitting all requests into the first batch. The extra async batch
+        is reserved for result propagation and is not part of this division.
+        """
+        if not self.use_pp or not self.use_v2_model_runner:
+            return self.max_num_running_reqs
+
+        num_requests = min(
+            self.max_num_running_reqs,
+            self.get_num_unfinished_requests(),
+        )
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return (num_requests + pp_size - 1) // pp_size
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput

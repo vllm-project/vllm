@@ -236,6 +236,68 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    ("max_num_seqs", "num_requests", "pp_size", "expected_batch_sizes"),
+    [
+        (25, 50, 2, [13, 12]),
+        (25, 25, 4, [7, 7, 7, 4]),
+        (25, 10, 2, [5, 5]),
+    ],
+)
+def test_pp_v2_balances_requests_across_batches(
+    async_scheduling: bool,
+    max_num_seqs: int,
+    num_requests: int,
+    pp_size: int,
+    expected_batch_sizes: list[int],
+):
+    scheduler = create_scheduler(
+        async_scheduling=async_scheduling,
+        max_num_seqs=max_num_seqs,
+        pipeline_parallel_size=pp_size,
+        use_v2_model_runner=True,
+    )
+    requests = create_requests(num_requests=num_requests)
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduled_req_ids: set[str] = set()
+    for expected_batch_size in expected_batch_sizes:
+        output = scheduler.schedule()
+        batch_req_ids = set(output.num_scheduled_tokens)
+        assert len(batch_req_ids) == expected_batch_size
+        assert batch_req_ids.isdisjoint(scheduled_req_ids)
+        scheduled_req_ids.update(batch_req_ids)
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    ("pp_size", "use_v2_model_runner"),
+    [
+        (1, True),
+        (2, False),
+    ],
+)
+def test_pp_batch_balancing_does_not_affect_pp1_or_model_runner_v1(
+    async_scheduling: bool,
+    pp_size: int,
+    use_v2_model_runner: bool,
+):
+    scheduler = create_scheduler(
+        async_scheduling=async_scheduling,
+        max_num_seqs=25,
+        pipeline_parallel_size=pp_size,
+        use_v2_model_runner=use_v2_model_runner,
+    )
+    requests = create_requests(num_requests=25)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.num_scheduled_tokens) == 25
+
+
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     """all_token_ids carries a resumed request's token ids to the connector
     for the V1 model runner, but is skipped entirely for the V2 model runner.
