@@ -291,11 +291,27 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             compress_ratio=self.compress_ratio,
             prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
         )
-        assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
+        if not chunk_plan:
+            # Every prefill-region request is a 0-token placeholder this step
+            # (e.g. KVTransfer / CPU-offload requests still loading their KV);
+            # there is nothing to compute.
+            return
         workspace_manager = current_workspace_manager()
         combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
+            # A chunk whose requests all carry no query tokens this step yields
+            # query_start == query_end. Skip it instead of passing an empty
+            # tensor to flash_mla_sparse_fwd, which fails to build the output
+            # TMA descriptor for an s_q == 0 tensor.
+            query_start = (
+                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
+            )
+            query_end = (
+                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
+            )
+            if query_end <= query_start:
+                continue
             workspace = workspace_manager.get_simultaneous(
                 ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16),
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
@@ -329,12 +345,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             )
 
             # Combine the topk indices and SWA indices for gathered KV cache
-            query_start = (
-                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
-            )
-            query_end = (
-                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
-            )
             combined_indices_out = combined_indices_out[: query_end - query_start]
             combined_lens_out = combined_lens_out[: query_end - query_start]
 

@@ -247,9 +247,24 @@ class DeepseekSparseSWAMetadata:
             )
         )
 
+        query_lens_cpu = self.prefill_query_lens_cpu
+
         chunk_plan: list[tuple[int, int, int, int]] = []
         chunk_start = 0
         while chunk_start < self.num_prefills:
+            # Requests with no query tokens this step (e.g. KVTransfer /
+            # CPU-offload load_kv_async requests scheduled with 0 tokens while
+            # their KV is being loaded) produce no output tokens. Never let one
+            # start a chunk: it would form a chunk with query_start ==
+            # query_end and feed an empty tensor to the sparse prefill kernel.
+            while (
+                chunk_start < self.num_prefills
+                and query_lens_cpu[chunk_start].item() == 0
+            ):
+                chunk_start += 1
+            if chunk_start >= self.num_prefills:
+                break
+
             chunk_max_compressed = int(compressed_lens_cpu[chunk_start].item())
             chunk_max_gather = int(gather_lens_cpu[chunk_start].item())
             chunk_end = chunk_start + 1

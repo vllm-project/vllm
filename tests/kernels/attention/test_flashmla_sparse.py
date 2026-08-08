@@ -186,6 +186,68 @@ def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
     assert chunk_plan == [(0, 5, 36, 103)]
 
 
+def test_deepseek_v4_prefill_chunk_plan_skips_zero_query_len_requests():
+    """Zero-query-len prefill requests (KVTransfer / CPU-offload load_kv_async
+    placeholders scheduled with 0 tokens) must never start their own chunk: such
+    a chunk would have query_start == query_end and feed an empty tensor to the
+    sparse prefill kernel."""
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    query_lens = torch.tensor([4, 0, 4, 4, 0, 4], dtype=torch.int32)
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int32),
+        block_size=64,
+        num_prefills=len(query_lens),
+        prefill_seq_lens_cpu=torch.tensor(
+            [400, 100, 400, 400, 100, 400], dtype=torch.int32
+        ),
+        prefill_query_lens_cpu=query_lens,
+        prefill_window_size=64,
+        prefill_max_model_len=1024,
+        prefill_max_num_batched_tokens=4,
+    )
+
+    chunk_plan = metadata.get_prefill_chunk_plan(
+        compress_ratio=4, prefill_chunk_size=1
+    )
+
+    assert chunk_plan
+    covered = []
+    for chunk_start, chunk_end, _, _ in chunk_plan:
+        # A chunk must never start on a zero-query request...
+        assert query_lens[chunk_start].item() > 0
+        # ...and must always have at least one output token.
+        assert query_lens[chunk_start:chunk_end].sum().item() > 0
+        covered.extend(range(chunk_start, chunk_end))
+    # Every compute-bearing request must still be covered by some chunk.
+    real = (query_lens > 0).nonzero().flatten().tolist()
+    assert set(real) <= set(covered)
+
+
+def test_deepseek_v4_prefill_chunk_plan_all_zero_query_len_returns_empty():
+    """When every prefill-region request is a 0-token placeholder, the chunk
+    plan must be empty so _forward_prefill returns without calling the sparse
+    prefill kernel."""
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int32),
+        block_size=64,
+        num_prefills=3,
+        prefill_seq_lens_cpu=torch.tensor([100, 100, 100], dtype=torch.int32),
+        prefill_query_lens_cpu=torch.tensor([0, 0, 0], dtype=torch.int32),
+        prefill_window_size=64,
+        prefill_max_model_len=1024,
+        prefill_max_num_batched_tokens=4,
+    )
+
+    assert metadata.get_prefill_chunk_plan(
+        compress_ratio=4, prefill_chunk_size=1
+    ) == []
+
+
 def test_flashinfer_sparse_indices_cache(monkeypatch):
     from vllm.models.deepseek_v4.nvidia import flashinfer_sparse as flashinfer_mod
     from vllm.models.deepseek_v4.sparse_mla import DeepseekV4FlashMLAMetadata
