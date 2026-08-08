@@ -31,6 +31,13 @@ def test_sm120_backend_uses_dedicated_backend_name() -> None:
     )
 
 
+def test_sm120_backend_uses_sparse_mqa_for_prefill() -> None:
+    impl_cls = FlashInferMLASparseSM120Backend.get_impl_cls()
+
+    assert impl_cls.is_sparse
+    assert not impl_cls.supports_dense_mha_prefill
+
+
 def test_v32_glm_sm120_backend_accepts_glm_block_size(
     monkeypatch,
 ) -> None:
