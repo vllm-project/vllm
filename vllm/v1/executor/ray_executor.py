@@ -108,8 +108,13 @@ class RayDistributedExecutor(Executor):
             self.forward_dag.teardown()
             import ray
 
-            for worker in self.workers:
-                ray.kill(worker)
+            # Skip the kill if Ray's atexit hook already disconnected this
+            # driver: the actors are fate-shared with the disconnected job,
+            # and ray.kill() would auto-init a new Ray job and fail with
+            # ActorHandleNotFoundError (#45318).
+            if ray.is_initialized():
+                for worker in self.workers:
+                    ray.kill(worker)
             self.forward_dag = None
 
     def _configure_ray_workers_use_nsight(self, ray_remote_kwargs) -> dict[str, Any]:
