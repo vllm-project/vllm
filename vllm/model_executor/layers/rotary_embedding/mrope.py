@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -156,6 +162,213 @@ def _triton_mrope_forward(
         tl.store(k_ptr + k_offsets, new_k_tile, mask=k_mask)
 
 
+@dataclass(frozen=True)
+class MropeWarmupConfig:
+    q_dtype: torch.dtype
+    k_dtype: torch.dtype
+    cos_dtype: torch.dtype
+    sin_dtype: torch.dtype
+    n_qh: int
+    n_kh: int
+    head_size: int
+    rotary_dim: int
+    mrope_section: tuple[int, int, int]
+    is_interleaved: bool
+    is_neox_style: bool
+
+
+class MropeKernel(VllmJitKernel["MropeKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        q_dtype: torch.dtype
+        k_dtype: torch.dtype
+        cos_dtype: torch.dtype
+        sin_dtype: torch.dtype
+        input_variant: TritonPointerInputVariant
+        num_tokens_divisible_by_16: bool
+        n_qh: int
+        n_kh: int
+        hd: int
+        rd: int
+        pad_n_qh: int
+        pad_n_kh: int
+        pad_rd: int
+        mrope_section_t: int
+        mrope_section_h: int
+        mrope_section_w: int
+        is_interleaved: bool
+        is_neox_style: bool
+        num_warps: int
+
+    kernel = _triton_mrope_forward
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        q_dtype: torch.dtype,
+        k_dtype: torch.dtype,
+        cos_dtype: torch.dtype,
+        sin_dtype: torch.dtype,
+        q_aligned: bool,
+        k_aligned: bool,
+        cos_aligned: bool,
+        sin_aligned: bool,
+        num_tokens: int,
+        n_qh: int,
+        n_kh: int,
+        head_size: int,
+        rotary_dim: int,
+        mrope_section_t: int,
+        mrope_section_h: int,
+        mrope_section_w: int,
+        is_interleaved: bool,
+        is_neox_style: bool,
+    ) -> CompileKey:
+        input_variant = TritonPointerInputVariant.from_alignment(
+            q=q_aligned,
+            k=k_aligned,
+            cos=cos_aligned,
+            sin=sin_aligned,
+        )
+        pad_rd = triton.next_power_of_2(rotary_dim)
+        use_single_wave = (
+            current_platform.is_rocm() and not is_neox_style and pad_rd <= 64
+        )
+        return self.CompileKey(
+            q_dtype=q_dtype,
+            k_dtype=k_dtype,
+            cos_dtype=cos_dtype,
+            sin_dtype=sin_dtype,
+            input_variant=input_variant,
+            num_tokens_divisible_by_16=num_tokens % 16 == 0,
+            n_qh=n_qh,
+            n_kh=n_kh,
+            hd=head_size,
+            rd=rotary_dim,
+            pad_n_qh=triton.next_power_of_2(n_qh),
+            pad_n_kh=triton.next_power_of_2(n_kh),
+            pad_rd=pad_rd,
+            mrope_section_t=mrope_section_t,
+            mrope_section_h=mrope_section_h,
+            mrope_section_w=mrope_section_w,
+            is_interleaved=is_interleaved,
+            is_neox_style=is_neox_style,
+            num_warps=1 if use_single_wave else 4,
+        )
+
+    def get_warmup_keys(self, configs: Iterable[MropeWarmupConfig]) -> list[CompileKey]:
+        keys: list[MropeKernel.CompileKey] = []
+        for config in configs:
+            keys.extend(
+                self._trace_dispatch(self.dispatch)(
+                    q_dtype=config.q_dtype,
+                    k_dtype=config.k_dtype,
+                    cos_dtype=config.cos_dtype,
+                    sin_dtype=config.sin_dtype,
+                    q_aligned=True,
+                    k_aligned=True,
+                    cos_aligned=True,
+                    sin_aligned=True,
+                    num_tokens=(1, 16),
+                    n_qh=config.n_qh,
+                    n_kh=config.n_kh,
+                    head_size=config.head_size,
+                    rotary_dim=config.rotary_dim,
+                    mrope_section_t=config.mrope_section[0],
+                    mrope_section_h=config.mrope_section[1],
+                    mrope_section_w=config.mrope_section[2],
+                    is_interleaved=config.is_interleaved,
+                    is_neox_style=config.is_neox_style,
+                )
+            )
+        return list(dict.fromkeys(keys))
+
+    def compile(self, compile_key: CompileKey) -> None:
+        variant = compile_key.input_variant
+        num_tokens = 16 if compile_key.num_tokens_divisible_by_16 else 1
+        self.kernel.warmup(
+            variant.pointer("q", compile_key.q_dtype),
+            variant.pointer("k", compile_key.k_dtype),
+            variant.pointer("cos", compile_key.cos_dtype),
+            variant.pointer("sin", compile_key.sin_dtype),
+            num_tokens,
+            n_qh=compile_key.n_qh,
+            n_kh=compile_key.n_kh,
+            hd=compile_key.hd,
+            rd=compile_key.rd,
+            pad_n_qh=compile_key.pad_n_qh,
+            pad_n_kh=compile_key.pad_n_kh,
+            pad_rd=compile_key.pad_rd,
+            mrope_section_t=compile_key.mrope_section_t,
+            mrope_section_h=compile_key.mrope_section_h,
+            mrope_section_w=compile_key.mrope_section_w,
+            is_interleaved=compile_key.is_interleaved,
+            is_neox_style=compile_key.is_neox_style,
+            num_warps=compile_key.num_warps,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        mrope_section: tuple[int, int, int],
+        head_size: int,
+        rotary_dim: int,
+        is_interleaved: bool,
+        is_neox_style: bool,
+    ) -> None:
+        num_tokens = q.size(0)
+        n_qh = q.size(1) // head_size
+        n_kh = k.size(1) // head_size
+        key = self.dispatch(
+            q_dtype=q.dtype,
+            k_dtype=k.dtype,
+            cos_dtype=cos.dtype,
+            sin_dtype=sin.dtype,
+            q_aligned=q.data_ptr() % 16 == 0,
+            k_aligned=k.data_ptr() % 16 == 0,
+            cos_aligned=cos.data_ptr() % 16 == 0,
+            sin_aligned=sin.data_ptr() % 16 == 0,
+            num_tokens=num_tokens,
+            n_qh=n_qh,
+            n_kh=n_kh,
+            head_size=head_size,
+            rotary_dim=rotary_dim,
+            mrope_section_t=mrope_section[0],
+            mrope_section_h=mrope_section[1],
+            mrope_section_w=mrope_section[2],
+            is_interleaved=is_interleaved,
+            is_neox_style=is_neox_style,
+        )
+        self.kernel[(num_tokens,)](
+            q,
+            k,
+            cos,
+            sin,
+            num_tokens,
+            n_qh=key.n_qh,
+            n_kh=key.n_kh,
+            hd=key.hd,
+            rd=key.rd,
+            pad_n_qh=key.pad_n_qh,
+            pad_n_kh=key.pad_n_kh,
+            pad_rd=key.pad_rd,
+            mrope_section_t=key.mrope_section_t,
+            mrope_section_h=key.mrope_section_h,
+            mrope_section_w=key.mrope_section_w,
+            is_interleaved=key.is_interleaved,
+            is_neox_style=key.is_neox_style,
+            num_warps=key.num_warps,
+        )
+
+
+_MROPE_KERNEL = MropeKernel()
+
+
 def triton_mrope(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -181,13 +394,6 @@ def triton_mrope(
         is_neox_style: Whether rotary pairs use split-half (NeoX) or
             adjacent (GPT-J) layout.
     """
-    n_row, n_q_head_head_dim = q.shape
-    n_q_head = n_q_head_head_dim // head_size
-    n_kv_head = k.shape[1] // head_size
-    pad_rd = triton.next_power_of_2(rotary_dim)
-    pad_n_q_head = triton.next_power_of_2(n_q_head)
-    pad_n_kv_head = triton.next_power_of_2(n_kv_head)
-
     # ensure tensors passed into the kernel are contiguous.
     # It will be no-op if they are already contiguous
     q = q.contiguous()
@@ -195,31 +401,54 @@ def triton_mrope(
     cos = cos.contiguous()
     sin = sin.contiguous()
 
-    # Small adjacent-pair tiles perform best with one wave per program on
-    # ROCm. Keep the existing launch shape for larger rotary dimensions,
-    # NeoX, and other backends.
-    use_single_wave = current_platform.is_rocm() and not is_neox_style and pad_rd <= 64
-    num_warps = 1 if use_single_wave else 4
-    _triton_mrope_forward[(n_row,)](
-        q,
-        k,
-        cos,
-        sin,
-        n_row,
-        n_q_head,
-        n_kv_head,
-        head_size,
-        rotary_dim,
-        pad_n_q_head,
-        pad_n_kv_head,
-        pad_rd,
-        mrope_section[0],
-        mrope_section[1],
-        mrope_section[2],
-        mrope_interleaved,
-        is_neox_style,
-        num_warps=num_warps,
-    )
+    if torch.compiler.is_compiling():
+        # Dynamo cannot trace the pointer-alignment checks in MropeKernel.
+        n_row, n_q_head_head_dim = q.shape
+        n_q_head = n_q_head_head_dim // head_size
+        n_kv_head = k.shape[1] // head_size
+        pad_rd = triton.next_power_of_2(rotary_dim)
+        pad_n_q_head = triton.next_power_of_2(n_q_head)
+        pad_n_kv_head = triton.next_power_of_2(n_kv_head)
+
+        # Small adjacent-pair tiles perform best with one wave per program on
+        # ROCm. Keep the existing launch shape for larger rotary dimensions,
+        # NeoX, and other backends.
+        use_single_wave = (
+            current_platform.is_rocm() and not is_neox_style and pad_rd <= 64
+        )
+        num_warps = 1 if use_single_wave else 4
+        _triton_mrope_forward[(n_row,)](
+            q,
+            k,
+            cos,
+            sin,
+            n_row,
+            n_q_head,
+            n_kv_head,
+            head_size,
+            rotary_dim,
+            pad_n_q_head,
+            pad_n_kv_head,
+            pad_rd,
+            mrope_section[0],
+            mrope_section[1],
+            mrope_section[2],
+            mrope_interleaved,
+            is_neox_style,
+            num_warps=num_warps,
+        )
+    else:
+        _MROPE_KERNEL(
+            q,
+            k,
+            cos,
+            sin,
+            mrope_section=(mrope_section[0], mrope_section[1], mrope_section[2]),
+            head_size=head_size,
+            rotary_dim=rotary_dim,
+            is_interleaved=mrope_interleaved,
+            is_neox_style=is_neox_style,
+        )
     return q, k
 
 
