@@ -45,9 +45,12 @@ BACKEND_TOL: dict[str, float] = {
 # ~0.10 text-vs-text value. Keep the relative tolerances tight and add only a
 # small absolute floor for the affected backends.
 # TRITON_ATTN: gfx942/ROCm 7.2 drifts ~0.008 abs on text-vs-text (~7.9% rel).
+# XPU(auto): observed text-vs-text drift ~0.0119 abs (~11.9% rel).
+# Apply this only to text-vs-text checks; keep image-related abs tol unchanged.
 BACKEND_ABS_TOL: dict[str, float] = {
     "default": 0.0,
     "auto": 0.007,
+    "XPU": 0.012,
     "ROCM_AITER_FA": 0.005,
     "TRITON_ATTN": 0.009,
     "FLEX_ATTENTION": 0.006,
@@ -76,9 +79,15 @@ def get_abs_tol(backend: str) -> float:
     return BACKEND_ABS_TOL.get(backend, BACKEND_ABS_TOL["default"])
 
 
+def is_text_vs_text_label(label: str) -> bool:
+    return label == "text_vs_text" or label.endswith("_text_vs_text")
+
+
 def assert_score(actual: float, expected: float, backend: str, label: str):
     tol = get_tol(backend)
     abs_tol = get_abs_tol(backend)
+    if current_platform.is_xpu() and is_text_vs_text_label(label):
+        abs_tol = BACKEND_ABS_TOL["XPU"]
     diff = abs(actual - expected)
     rel_diff = diff / abs(expected) if expected != 0 else diff
     print(
