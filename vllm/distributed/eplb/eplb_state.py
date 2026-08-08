@@ -191,9 +191,9 @@ class EplbModelState:
     """
     EPLB stats for the model.
     """
-    cuda_device_index: int | None
+    device_index: int | None
     """
-    CUDA device index for the async EPLB worker thread.
+    Device index for the async EPLB worker thread.
     """
     communicator: EplbCommunicator
     """
@@ -276,9 +276,9 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
-        self.cuda_device_index: int | None = None
+        self.device_index: int | None = None
         """
-        CUDA device index for the async EPLB worker thread.
+        Device index for the async EPLB worker thread.
         """
         self.num_valid_physical_experts: int = 0
         """
@@ -288,10 +288,10 @@ class EplbState:
         newly started EP ranks may not have physical experts
         mapped yet.
         """
-        if self.device.type == "cuda":
-            self.cuda_device_index = self.device.index
-            if self.cuda_device_index is None and torch.cuda.is_available():
-                self.cuda_device_index = torch.accelerator.current_device_index()
+        if self.device.type in ("cuda", "xpu"):
+            self.device_index = self.device.index
+            if self.device_index is None and torch.accelerator.is_available():
+                self.device_index = torch.accelerator.current_device_index()
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -485,7 +485,7 @@ class EplbState:
             expert_buffer=expert_buffer,
             rebalanced=False,
             eplb_stats=None,
-            cuda_device_index=self.cuda_device_index,
+            device_index=self.device_index,
             communicator=communicator,
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
@@ -743,8 +743,8 @@ class EplbState:
         is_main_rank = ep_rank == 0
         if is_main_rank:
             if not self.is_async or is_profile:
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
+                start_event = torch.Event(enable_timing=True)
+                end_event = torch.Event(enable_timing=True)
                 start_event.record()
             logger.info(
                 "Rearranging experts %s %s...",
