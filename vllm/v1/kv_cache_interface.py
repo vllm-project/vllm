@@ -522,11 +522,11 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
-        """Per-request admission cap, in blocks.
+        """Per-request block bound for the given in-flight allowance.
 
-        Single source of truth for both startup pool sizing
-        (`max_memory_usage_bytes`) and the runtime admission gate, so requests
-        admitted by startup can also be admitted at runtime.
+        The runtime admission gate calls this with the full global allowance;
+        startup pool sizing (`max_memory_usage_bytes`) with the request's
+        amortized share of it.
 
         `max_in_flight_tokens` is the max tokens scheduled but not yet settled
         (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
@@ -539,8 +539,13 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
         return cdiv(num_tokens, self.block_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # Amortize the global in-flight bound across the request slots; see
+        # SlidingWindowSpec.max_memory_usage_bytes for the reasoning. The
+        # runtime admission gate keeps the full allowance.
+        max_num_seqs = max(1, vllm_config.scheduler_config.max_num_seqs)
+        amortized_in_flight = cdiv(vllm_config.max_in_flight_tokens, max_num_seqs)
         max_blocks = self.max_admission_blocks_per_request(
-            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_in_flight_tokens=amortized_in_flight,
             max_model_len=vllm_config.model_config.max_model_len,
         )
         return max_blocks * self.page_size_bytes
@@ -587,13 +592,13 @@ class SlidingWindowSpec(AttentionSpec):
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
-        """Per-request admission cap, in blocks.
+        """Per-request block bound for the given in-flight allowance.
 
-        Single source of truth for both startup pool sizing
-        (`max_memory_usage_bytes`) and the runtime admission gate. Per-request
-        real-held blocks plateau at this bound because
-        `SlidingWindowManager.remove_skipped_blocks` runs from `allocate_slots`
-        before each chunk's `get_num_blocks_to_allocate`.
+        The runtime admission gate calls this with the full global allowance;
+        startup pool sizing (`max_memory_usage_bytes`) with the request's
+        amortized share of it. Per-request real-held blocks plateau at this
+        bound because `SlidingWindowManager.remove_skipped_blocks` runs from
+        `allocate_slots` before each chunk's `get_num_blocks_to_allocate`.
 
         `max_in_flight_tokens` is the max tokens scheduled but not yet settled
         (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
@@ -608,11 +613,29 @@ class SlidingWindowSpec(AttentionSpec):
         return cdiv(num_tokens, self.block_size) + 1
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        """Pool-sizing contribution per request, amortizing the in-flight bound.
+
+        `max_in_flight_tokens` is a GLOBAL bound: it caps the tokens scheduled
+        but not yet settled across ALL requests in a step, not per request.
+        Charging it to every request over-reserves the pool by roughly a factor
+        of `max_num_seqs` on the in-flight term: with R concurrent requests,
+        sum_r (sliding_window - 1 + in_flight_r)
+            <= R * (sliding_window - 1) + max_in_flight_tokens,
+        so reserving `sliding_window - 1` per request plus the global allowance
+        split across the request slots covers every distribution of in-flight
+        tokens, including one request consuming the whole allowance.
+
+        The runtime admission gate (`max_admission_blocks_per_request`) keeps
+        the true per-request worst case unchanged: a single large prefill is
+        still admitted against the full in-flight allowance.
+        """
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
             "DCP not support sliding window."
         )
+        max_num_seqs = max(1, vllm_config.scheduler_config.max_num_seqs)
+        amortized_in_flight = cdiv(vllm_config.max_in_flight_tokens, max_num_seqs)
         max_blocks = self.max_admission_blocks_per_request(
-            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_in_flight_tokens=amortized_in_flight,
             max_model_len=vllm_config.model_config.max_model_len,
         )
         return max_blocks * self.page_size_bytes

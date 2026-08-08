@@ -15,6 +15,7 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -1103,8 +1104,58 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
     return not kv_cache_spec
 
 
+def _identify_drafter_layers(
+    vllm_config: VllmConfig, layer_names: Iterable[str]
+) -> set[str]:
+    """Identify spec-decode drafter layers among `layer_names` by layer index.
+
+    EAGLE-family drafters (eagle/eagle3/mtp/dflash/dspark) register their
+    attention layers with indices continuing after the target model's layers,
+    so any layer whose index is >= the target's total layer count belongs to
+    the drafter. Returns an empty set when no such drafter is configured or
+    for layer names without a parseable index.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle():
+        return set()
+    num_target_layers = vllm_config.model_config.get_total_num_hidden_layers()
+    drafter_layers: set[str] = set()
+    for name in layer_names:
+        try:
+            if extract_layer_index(name) >= num_target_layers:
+                drafter_layers.add(name)
+        except ValueError:
+            continue
+    return drafter_layers
+
+
+def _drafter_specs_sharing_target_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    drafter_layers: set[str],
+    groups: list[KVCacheGroupSpec],
+) -> set[KVCacheSpec]:
+    """Specs whose drafter layers `groups` puts in a group with target layers.
+
+    A spec-decode drafter writes verifier-context K/V at absolute cache slots.
+    Those writes resolve through the block table of the layer's KV cache group,
+    so a drafter layer sharing a group with target layers reads back corrupted
+    context: measured on Laguna-S-2.1 + DFlash as draft acceptance falling from
+    ~27% to ~0.3%. Drafter layers in groups of their own are fine however many
+    groups that is, so a drafter is left alone unless it actually shares.
+    """
+    shared: set[KVCacheSpec] = set()
+    for group in groups:
+        names = set(group.layer_names)
+        drafter_in_group = names & drafter_layers
+        if drafter_in_group and names - drafter_layers:
+            shared.update(kv_cache_spec[name] for name in drafter_in_group)
+    return shared
+
+
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    drafter_layers: set[str] | None = None,
+    separate_drafter_specs: set[KVCacheSpec] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Generates the KV cache groups for hybrid models with multiple
@@ -1172,8 +1223,24 @@ def _get_kv_cache_groups_uniform_page_size(
     # E.g., 2 full attention layers and 3 sliding window attention layers,
     # -> (full.0, full.1), (sw.0, sw.1, sw.2).
     same_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
+    # Spec-decode drafter layers of a spec listed in `separate_drafter_specs` are
+    # kept out of the per-type split below and appended as a dedicated group
+    # instead. Only the specs whose drafter layers the split would scatter are
+    # separated: pulling out layers changes the group-size heuristic's inputs and
+    # can leave undersized groups, which costs KV capacity, so models that group
+    # correctly today keep their exact layout. `get_kv_cache_groups` decides which
+    # specs need it by grouping once without separation and checking for scatter.
+    drafter_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
-        same_type_layers[layer_spec].append(layer_name)
+        if (
+            drafter_layers
+            and layer_name in drafter_layers
+            and separate_drafter_specs
+            and layer_spec in separate_drafter_specs
+        ):
+            drafter_type_layers[layer_spec].append(layer_name)
+        else:
+            same_type_layers[layer_spec].append(layer_name)
 
     # Attempt to further merge same-type layers based on whether their KV
     # cache specs can be merged, to minimize the group count. This benefits
@@ -1243,6 +1310,8 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
+    for layers in drafter_type_layers.values():
+        grouped_layers.append(layers)
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
@@ -1811,7 +1880,18 @@ def get_kv_cache_groups(
         if fallback_groups is None:
             raise
         return fallback_groups
-    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    drafter_layers = _identify_drafter_layers(vllm_config, filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec, drafter_layers)
+    if drafter_layers:
+        # Regroup only if the layout above puts drafter layers in a group with
+        # target layers, so models that already isolate their drafter are untouched.
+        shared = _drafter_specs_sharing_target_groups(
+            filtered_spec, drafter_layers, groups
+        )
+        if shared:
+            groups = _get_kv_cache_groups_uniform_page_size(
+                filtered_spec, drafter_layers, shared
+            )
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
