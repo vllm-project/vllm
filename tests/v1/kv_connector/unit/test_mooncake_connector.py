@@ -13,6 +13,7 @@ import zmq.asyncio
 
 from vllm import envs
 from vllm.config import set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -38,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
@@ -546,31 +548,36 @@ def _make_bootstrap_vllm_config(
     (
         "tp_rank",
         "pp_rank",
+        "pcp_rank",
         "local_engines_only",
         "data_parallel_rank_local",
         "data_parallel_index",
         "expected",
     ),
     [
-        (1, 0, False, 0, 0, False),
-        (0, 1, False, 0, 0, False),
-        (0, 0, True, 0, 1, True),
-        (0, 0, True, 1, 0, False),
-        (0, 0, False, 0, 0, True),
-        (0, 0, False, 0, 1, False),
+        (1, 0, 0, False, 0, 0, False),
+        (0, 1, 0, False, 0, 0, False),
+        (0, 0, 1, False, 0, 0, False),
+        (0, 0, 0, True, 0, 1, True),
+        (0, 0, 0, True, 1, 0, False),
+        (0, 0, 0, False, 0, 0, True),
+        (0, 0, 0, False, 0, 1, False),
     ],
     ids=[
         "nonzero_tp_rank",
         "nonzero_pp_rank",
+        "nonzero_pcp_rank",
         "local_engine_rank_zero",
         "local_engine_nonzero_rank",
         "internal_lb_first_dp_engine",
         "internal_lb_nonzero_dp_engine",
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_should_launch_bootstrap_server_selects_single_owner(
     tp_rank: int,
     pp_rank: int,
+    pcp_rank: int,
     local_engines_only: bool,
     data_parallel_rank_local: int,
     data_parallel_index: int,
@@ -591,8 +598,13 @@ def test_should_launch_bootstrap_server_selects_single_owner(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
             "mooncake_connector.get_pp_group"
         ) as mock_pp_group,
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_pcp_group"
+        ) as mock_pcp_group,
     ):
         mock_pp_group.return_value.rank_in_group = pp_rank
+        mock_pcp_group.return_value.rank_in_group = pcp_rank
         assert should_launch_bootstrap_server(vllm_config) is expected
 
 
@@ -679,6 +691,9 @@ def patch_worker_dependencies():
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.get_pp_group"
         ) as mock_pp,
         patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.get_pcp_group"
+        ) as mock_pcp,
+        patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.should_launch_bootstrap_server",
             return_value=False,
         ),
@@ -691,6 +706,10 @@ def patch_worker_dependencies():
         mock_pp_group = MagicMock()
         mock_pp_group.rank_in_group = 0
         mock_pp.return_value = mock_pp_group
+
+        mock_pcp_group = MagicMock()
+        mock_pcp_group.rank_in_group = 0
+        mock_pcp.return_value = mock_pcp_group
 
         # Mock ZMQ socket
         mock_socket_object = AsyncMock()
@@ -708,7 +727,155 @@ def patch_worker_dependencies():
             "mock_socket_object": mock_socket_object,
             "mock_async_client": mock_async_client,
             "mock_http_client": mock_http_client_instance,
+            "mock_pcp": mock_pcp,
         }
+
+
+@pytest.mark.parametrize(("pcp_rank", "expected_calls"), [(0, 1), (1, 0)])
+@pytest.mark.skip_global_cleanup
+def test_prefill_worker_tracks_send_requests_only_on_canonical_pcp_rank(
+    pcp_rank: int, expected_calls: int
+):
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker.is_kv_producer = True
+    worker.is_kv_consumer = False
+    worker.pcp_rank = pcp_rank
+    worker.receiver_loop = MagicMock()
+    worker.sender_loop = MagicMock()
+    worker.record_send_reqs = MagicMock(return_value="record-send-requests")
+    worker.shutdown = MagicMock()
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_to_send["p-req-1"] = ("xfer-req-1", [])
+
+    with patch("asyncio.run_coroutine_threadsafe") as mock_run_coroutine:
+        worker.start_load_kv(metadata)
+
+    assert mock_run_coroutine.call_count == expected_calls
+    assert worker.record_send_reqs.call_count == expected_calls
+    del worker
+
+
+def _make_scheduler_vllm_config(
+    *,
+    kv_role: str,
+    tp_size: int,
+    pcp_size: int = 1,
+    dcp_size: int = 1,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            engine_id="engine-1",
+            kv_role=kv_role,
+        ),
+        parallel_config=SimpleNamespace(
+            world_size=tp_size * pcp_size,
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        ),
+        cache_config=SimpleNamespace(block_size=16),
+        scheduler_config=SimpleNamespace(
+            disable_hybrid_kv_cache_manager=False,
+        ),
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_pcp_finished_count_drives_output_aggregation():
+    vllm_config = _make_scheduler_vllm_config(
+        kv_role="kv_producer", tp_size=2, pcp_size=2
+    )
+    connector = MooncakeConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        _make_test_kv_cache_config(),
+    )
+    aggregator = KVOutputAggregator.from_connector(connector, world_size=4)
+
+    first = SimpleNamespace(
+        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
+    )
+    aggregated = aggregator.aggregate([first])
+    assert aggregated is not None
+    assert not aggregated.kv_connector_output.finished_sending
+
+    second = SimpleNamespace(
+        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
+    )
+    aggregated = aggregator.aggregate([second])
+    assert aggregated is not None
+    assert aggregated.kv_connector_output.finished_sending == {"req-1"}
+
+
+@pytest.mark.parametrize(
+    ("kv_role", "pcp_size", "dcp_size", "error_match"),
+    [
+        ("kv_producer", 2, 1, None),
+        (
+            "kv_producer",
+            2,
+            2,
+            "PCP with DCP-sharded KV requires DCP-aware worker discovery",
+        ),
+        (
+            "kv_consumer",
+            2,
+            1,
+            "Consumers and kv_both require prefill_context_parallel_size=1",
+        ),
+        (
+            "kv_both",
+            2,
+            1,
+            "Consumers and kv_both require prefill_context_parallel_size=1",
+        ),
+        ("kv_producer", 1, 2, None),
+        ("kv_consumer", 1, 2, None),
+        ("kv_both", 1, 2, None),
+    ],
+    ids=[
+        "producer_pcp2",
+        "producer_pcp2_dcp2",
+        "consumer_pcp2",
+        "both_pcp2",
+        "producer_pcp1_dcp2",
+        "consumer_pcp1_dcp2",
+        "both_pcp1_dcp2",
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_connector_validates_supported_pcp_topologies(
+    kv_role: str,
+    pcp_size: int,
+    dcp_size: int,
+    error_match: str | None,
+):
+    vllm_config = _make_scheduler_vllm_config(
+        kv_role=kv_role,
+        tp_size=2,
+        pcp_size=pcp_size,
+        dcp_size=dcp_size,
+    )
+
+    if error_match is not None:
+        with pytest.raises(NotImplementedError, match=error_match):
+            MooncakeConnector(
+                vllm_config,
+                KVConnectorRole.SCHEDULER,
+                _make_test_kv_cache_config(),
+            )
+        return
+
+    connector = MooncakeConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        _make_test_kv_cache_config(),
+    )
+    expected_count = (
+        vllm_config.parallel_config.world_size // pcp_size
+        if kv_role == "kv_producer"
+        else None
+    )
+    assert connector.get_finished_count() == expected_count
 
 
 @pytest.mark.asyncio
@@ -1145,6 +1312,78 @@ def test_register_kv_caches():
                 assert bl == tensor1.nbytes // tensor1.shape[0]
             assert worker.registered_layer_names == list(kv_caches)
             assert worker.registered_layer_indices == [0, 1]
+
+
+@pytest.mark.parametrize(("pcp_rank", "expected_calls"), [(0, 1), (1, 0)])
+@pytest.mark.skip_global_cleanup
+def test_register_kv_caches_starts_sender_only_on_canonical_pcp_rank(
+    pcp_rank: int, expected_calls: int
+):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    vllm_config.parallel_config.world_size = 2
+    vllm_config.parallel_config.prefill_context_parallel_size = 2
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies() as mocks,
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.threading.Event"
+        ) as mock_event,
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.threading.Thread"
+        ),
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.current_platform.set_device"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_current_attn_backends",
+            return_value=[FlashAttentionBackend],
+        ),
+        patch("asyncio.run_coroutine_threadsafe") as mock_run_coroutine,
+    ):
+        mocks["mock_pcp"].return_value.rank_in_group = pcp_rank
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        worker = connector.connector_worker
+        listener_token = object()
+        mock_listener = MagicMock(return_value=listener_token)
+
+        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        )
+        kv_caches = {
+            "model.layers.0.self_attn": torch.zeros(
+                *kv_cache_shape, dtype=torch.float16
+            )
+        }
+
+        with (
+            patch.object(worker.engine, "batch_register_memory", return_value=0),
+            patch.object(
+                worker,
+                "_mooncake_sender_listener",
+                new=mock_listener,
+            ),
+        ):
+            connector.register_kv_caches(kv_caches)
+
+        assert mock_listener.call_count == expected_calls
+        assert mock_run_coroutine.call_count == expected_calls
+        assert mock_event.return_value.wait.call_count == expected_calls
+
+        worker.shutdown()
+        worker.sender_loop.close()
+        worker.shutdown = MagicMock()
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():

@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
 )
 from vllm.distributed.parallel_state import (
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -477,6 +478,26 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
+        parallel_config = vllm_config.parallel_config
+        kv_role = vllm_config.kv_transfer_config.kv_role
+        if (
+            kv_role in ("kv_consumer", "kv_both")
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Mooncake MRV2 PCP currently supports producer-only PCP. "
+                "Consumers and kv_both require prefill_context_parallel_size=1."
+            )
+        if (
+            kv_role == "kv_producer"
+            and parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "Mooncake MRV2 PCP producers currently require "
+                "decode_context_parallel_size=1. PCP with DCP-sharded KV "
+                "requires DCP-aware worker discovery."
+            )
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
@@ -553,6 +574,15 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def get_finished_count(self) -> int | None:
+        if self._kv_transfer_config.kv_role != "kv_producer":
+            return None
+
+        parallel_config = self._vllm_config.parallel_config
+        return (
+            parallel_config.world_size // parallel_config.prefill_context_parallel_size
+        )
 
     ############################################################
     # Worker Side Methods
@@ -967,6 +997,7 @@ class MooncakeConnectorWorker:
         self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
+        self.pcp_rank = get_pcp_group().rank_in_group
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -1734,7 +1765,8 @@ class MooncakeConnectorWorker:
         )
 
         # No need to launch server for D node.
-        if self.is_kv_consumer:
+        # Only the canonical PCP replica owns Mooncake sending.
+        if self.is_kv_consumer or self.pcp_rank != 0:
             return
 
         ready_event = threading.Event()
@@ -2031,8 +2063,10 @@ class MooncakeConnectorWorker:
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
             )
 
-        if not self.is_kv_consumer and (
-            metadata.reqs_to_send or metadata.reqs_not_processed
+        if (
+            not self.is_kv_consumer
+            and self.pcp_rank == 0
+            and (metadata.reqs_to_send or metadata.reqs_not_processed)
         ):
             asyncio.run_coroutine_threadsafe(
                 self.record_send_reqs(metadata), self.sender_loop
@@ -2143,10 +2177,12 @@ def _async_loop(loop: asyncio.AbstractEventLoop):
 
 def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
     assert (parallel_config := vllm_config.parallel_config)
-    # Only the TP=0, PP=0 worker of the designated engine should launch it.
+    # Only the TP=0, PP=0, PCP=0 worker of the designated engine should launch it.
     if get_tensor_model_parallel_rank() != 0:
         return False
     if get_pp_group().rank_in_group != 0:
+        return False
+    if get_pcp_group().rank_in_group != 0:
         return False
 
     # In hybrid or external LB mode,
