@@ -1373,6 +1373,72 @@ def _fused_mla_dual_rms_norm_per_token_quant_fake(
     return q_out, q_scale, kv_normed
 
 
+def _fused_mla_dual_rms_norm_group_quant_impl(
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv: torch.Tensor,
+    kv_weight: torch.Tensor,
+    q_epsilon: float,
+    kv_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused MLA q/kv RMSNorm (+ FP8 group quant on q) via AITER.
+
+    Group-quant sibling of ``fused_mla_dual_rms_norm_per_token_quant`` used when
+    the q latent is FP8 quantized *per group* (a ``(M, N // group_size)`` scale
+    feeding the group-scaled ``q_b_proj`` GEMM). Only the *q* latent is FP8
+    quantized; the *kv* latent is RMS-normed and consumed by attention as bf16.
+    """
+    from aiter.ops.fused_qk_rmsnorm_group_quant import (
+        fused_qk_rmsnorm_group_quant,
+    )
+
+    mq, nq = q.shape
+    q_out = torch.empty((mq, nq), dtype=FP8_DTYPE, device=q.device)
+    q_scale = torch.empty(
+        (mq, (nq + group_size - 1) // group_size),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    kv_normed = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
+
+    fused_qk_rmsnorm_group_quant(
+        q_out_quantized=q_out,
+        q_out_scale=q_scale,
+        q=q,
+        q_weight=q_weight,
+        q_epsilon=q_epsilon,
+        k_out=kv_normed,
+        k=kv,
+        k_weight=kv_weight,
+        k_epsilon=kv_epsilon,
+        group_size=group_size,
+        transpose_scale=False,
+        gemma_norm=False,
+    )
+    return q_out, q_scale, kv_normed
+
+
+def _fused_mla_dual_rms_norm_group_quant_fake(
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv: torch.Tensor,
+    kv_weight: torch.Tensor,
+    q_epsilon: float,
+    kv_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mq, nq = q.shape
+    q_out = torch.empty((mq, nq), dtype=FP8_DTYPE, device=q.device)
+    q_scale = torch.empty(
+        (mq, (nq + group_size - 1) // group_size),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    kv_normed = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
+    return q_out, q_scale, kv_normed
+
+
 def _rocm_aiter_gemm_a8wfp4_impl(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -2180,6 +2246,13 @@ class rocm_aiter_ops:
                 fake_impl=_fused_mla_dual_rms_norm_per_token_quant_fake,
             )
 
+            direct_register_custom_op(
+                op_name="fused_mla_dual_rms_norm_group_quant",
+                op_func=_fused_mla_dual_rms_norm_group_quant_impl,
+                mutates_args=[],
+                fake_impl=_fused_mla_dual_rms_norm_group_quant_fake,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -2242,6 +2315,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_mla_dual_rms_norm_per_token_quant_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm_per_token_quant.default
+
+    @staticmethod
+    def get_fused_mla_dual_rms_norm_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm_group_quant.default
 
     @staticmethod
     def w8a8_gemm(
