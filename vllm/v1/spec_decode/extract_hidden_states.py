@@ -115,8 +115,9 @@ class ExtractHiddenStatesProposer:
             target_hidden_states: List of hidden state tensors from target model
                                 (one per aux hidden state layer)
             common_attn_metadata: Attention metadata
-            slot_mappings: Slot mappings for KV cache (unused, provided for
-                          interface compatibility)
+            slot_mappings: Per-layer slot mappings keyed by layer name,
+                          each computed with the correct block_size for
+                          its own KV cache group.
 
         Returns:
             Tuple of:
@@ -146,6 +147,30 @@ class ExtractHiddenStatesProposer:
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
 
+        # Resolve the CacheOnly layer's own slot_mapping, computed with
+        # its block_size (not the main attention group's).
+        resolved_slot_mapping = common_attn_metadata.slot_mapping
+        if slot_mappings is not None:
+            sm = slot_mappings[0] if isinstance(slot_mappings, list) else slot_mappings
+            for layer_name in self.attn_layer_names:
+                if layer_name in sm:
+                    resolved_slot_mapping = sm[layer_name]
+                    break
+        elif (
+            hasattr(self, "runner")
+            and self.runner is not None
+            and hasattr(self, "kv_cache_gid")
+            and hasattr(self.runner, "input_batch")
+            and hasattr(self.runner.input_batch, "block_table")
+        ):
+            # Fallback: some runners don't pass slot_mappings; read it
+            # from the per-group block_table instead.
+            try:
+                blk_table = self.runner.input_batch.block_table[self.kv_cache_gid]
+                resolved_slot_mapping = blk_table.slot_mapping.gpu[:num_tokens]
+            except (IndexError, AttributeError):
+                pass
+
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(num_tokens)
         )
@@ -165,7 +190,7 @@ class ExtractHiddenStatesProposer:
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=self._get_slot_mapping(
-                num_input_tokens, common_attn_metadata.slot_mapping
+                num_input_tokens, resolved_slot_mapping
             ),
         ):
             self.model(
