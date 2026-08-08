@@ -17,6 +17,12 @@ class PoolingCursor:
     prompt_lens_cpu: torch.Tensor
     seq_lens_cpu: torch.Tensor
     num_scheduled_tokens_cpu: torch.Tensor
+    # CPU mirrors of first/last_token_indices_gpu, computed at build time
+    # from the scheduled-token metadata so consumers can obtain per-request
+    # offsets without a GPU->CPU synchronization. Absolute values, so they
+    # stay valid under __getitem__ slicing.
+    first_token_indices_cpu: torch.Tensor | None = None
+    last_token_indices_cpu: torch.Tensor | None = None
 
     def __getitem__(self, indices: slice) -> "PoolingCursor":
         return PoolingCursor(
@@ -25,6 +31,16 @@ class PoolingCursor:
             prompt_lens_cpu=self.prompt_lens_cpu[indices],
             seq_lens_cpu=self.seq_lens_cpu[indices],
             num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
+            first_token_indices_cpu=(
+                self.first_token_indices_cpu[indices]
+                if self.first_token_indices_cpu is not None
+                else None
+            ),
+            last_token_indices_cpu=(
+                self.last_token_indices_cpu[indices]
+                if self.last_token_indices_cpu is not None
+                else None
+            ),
         )
 
     def is_partial_prefill(self) -> bool:
@@ -149,10 +165,16 @@ class PoolingMetadata:
                     f"hidden states: {query_start_loc_gpu.device} != {device}."
                 )
             cumsum = query_start_loc_gpu
+        # CPU mirror of the cumsum bounds (query_start_loc is by definition
+        # the running sum of scheduled tokens) — lets pooling consumers read
+        # per-request offsets without a GPU sync.
+        ends_cpu = torch.cumsum(num_scheduled_tokens_cpu, dim=0)
         self.pooling_cursor = PoolingCursor(
             first_token_indices_gpu=cumsum[:n_seq],
             last_token_indices_gpu=cumsum[1:] - 1,
             prompt_lens_cpu=prompt_lens,
             seq_lens_cpu=seq_lens_cpu,
             num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+            first_token_indices_cpu=ends_cpu - num_scheduled_tokens_cpu,
+            last_token_indices_cpu=ends_cpu - 1,
         )
