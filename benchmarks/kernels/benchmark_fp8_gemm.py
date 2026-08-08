@@ -3,6 +3,7 @@
 import argparse
 import copy
 import itertools
+import os
 
 import torch
 from weight_shapes import WEIGHT_SHAPES
@@ -14,7 +15,7 @@ from vllm.triton_utils import triton
 PROVIDER_CFGS = {
     "torch-bf16": dict(enabled=True),
     "fp8-tensor-w-token-a": dict(
-        w="tensor", a="token", no_a_quant=False, enabled=False
+        w="tensor", a="token", no_a_quant=False, enabled=True
     ),
     "fp8-tensor-w-tensor-a": dict(
         w="tensor", a="tensor", no_a_quant=False, enabled=True
@@ -23,10 +24,10 @@ PROVIDER_CFGS = {
         w="channel", a="token", no_a_quant=False, enabled=True
     ),
     "fp8-channel-w-tensor-a": dict(
-        w="channel", a="tensor", no_a_quant=False, enabled=False
+        w="channel", a="tensor", no_a_quant=False, enabled=True
     ),
     "fp8-tensor-w-token-a-noquant": dict(
-        w="tensor", a="token", no_a_quant=True, enabled=False
+        w="tensor", a="token", no_a_quant=True, enabled=True
     ),
     "fp8-tensor-w-tensor-a-noquant": dict(
         w="tensor", a="tensor", no_a_quant=True, enabled=True
@@ -35,7 +36,13 @@ PROVIDER_CFGS = {
         w="channel", a="token", no_a_quant=True, enabled=True
     ),
     "fp8-channel-w-tensor-a-noquant": dict(
-        w="channel", a="tensor", no_a_quant=True, enabled=False
+        w="channel", a="tensor", no_a_quant=True, enabled=True
+    ),
+    "fp8-block-w-block-a": dict(
+        w="block", a="block", no_a_quant=False, enabled=True
+    ),
+    "fp8-block-w-block-a-noquant": dict(
+        w="block", a="block", no_a_quant=True, enabled=True
     ),
 }
 
@@ -46,6 +53,15 @@ def _quant_weight_fp8(b: torch.Tensor, w_type: str, device: str):
     if w_type == "tensor":
         scale_b = torch.ones(1, device=device, dtype=torch.float32)
         b_fp8, scale_b_fp8 = vllm_scaled_fp8_quant(b, scale_b)
+    elif w_type == "block":
+        N, K = b.shape
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+        scale_b = (b.reshape(N // 128, 128, K // 128, 128)
+                   .abs().amax(dim=(1, 3)).to(torch.float32)
+                   / fp8_max).clamp(min=1e-12)
+        b_fp8, scale_b_fp8 = vllm_scaled_fp8_quant(
+            b, scale_b, group_shape=(128, 128))
+        return b_fp8.t(), scale_b_fp8.t()
     else:
         b_fp8, scale_b_fp8 = vllm_scaled_fp8_quant(b, use_per_token_if_dynamic=True)
     return b_fp8.t(), scale_b_fp8
@@ -63,6 +79,14 @@ def build_fp8_runner(cfg, a, b, dtype, device):
     if cfg["no_a_quant"]:
         if cfg["a"] == "tensor":
             a_fp8, scale_a_fp8 = vllm_scaled_fp8_quant(a, scale_a_const)
+        elif cfg["a"] == "block":
+            M, K = a.shape
+            fp8_max = torch.finfo(torch.float8_e4m3fn).max
+            scale_a = (a.reshape(M, K // 128, 128)
+                       .abs().amax(dim=-1).to(torch.float32)
+                       / fp8_max).clamp(min=1e-12)
+            a_fp8, scale_a_fp8 = vllm_scaled_fp8_quant(
+                a, scale_a, group_shape=(1, 128))
         else:
             a_fp8, scale_a_fp8 = vllm_scaled_fp8_quant(a, use_per_token_if_dynamic=True)
 
@@ -75,6 +99,18 @@ def build_fp8_runner(cfg, a, b, dtype, device):
 
         def run():
             a_fp8, scale_a_fp8 = vllm_scaled_fp8_quant(a, scale_a_const)
+            return vllm_scaled_mm(a_fp8, b_fp8, scale_a_fp8, scale_b_fp8, dtype)
+
+    elif cfg["a"] == "block":
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+
+        def run():
+            M, K = a.shape
+            scale_a = (a.reshape(M, K // 128, 128)
+                       .abs().amax(dim=-1).to(torch.float32)
+                       / fp8_max).clamp(min=1e-12)
+            a_fp8, scale_a_fp8 = vllm_scaled_fp8_quant(
+                a, scale_a, group_shape=(1, 128))
             return vllm_scaled_mm(a_fp8, b_fp8, scale_a_fp8, scale_b_fp8, dtype)
 
     else:
@@ -148,10 +184,12 @@ if __name__ == "__main__":
 
     for K, N, model in prepare_shapes(args):
         print(f"{model}, N={N} K={K}, BF16 vs FP8 GEMMs TFLOP/s:")
+        save_path = f"bench_fp8_res_n{N}_k{K}"
+        os.makedirs(save_path, exist_ok=True)
         benchmark.run(
             print_data=True,
             show_plots=True,
-            save_path=f"bench_fp8_res_n{N}_k{K}",
+            save_path=save_path,
             N=N,
             K=K,
         )
