@@ -151,6 +151,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    FusedInputNorm,
     get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
@@ -1747,6 +1748,7 @@ class Qwen3VLForConditionalGeneration(
     }
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     supported_video_pruning_methods = ("evs", "vidcom2")
 
@@ -1799,6 +1801,7 @@ class Qwen3VLForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
+            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         self.use_deepstack = hasattr(
             config.vision_config, "deepstack_visual_indexes"
@@ -2236,7 +2239,9 @@ class Qwen3VLForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = self.input_norm(
+                image_input["pixel_values"], self.visual.dtype
+            )
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
@@ -2258,8 +2263,8 @@ class Qwen3VLForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype
+            pixel_values_videos = self.input_norm(
+                video_input["pixel_values_videos"], self.visual.dtype
             )
             if self.use_data_parallel:
                 grid_thw_list = grid_thw.tolist()
