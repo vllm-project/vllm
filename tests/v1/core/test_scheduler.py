@@ -384,7 +384,11 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
-def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
+def _setup_remote_kv_resume(
+    num_prompt_tokens: int,
+    matched_tokens: int,
+    num_speculative_tokens: int | None = None,
+):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-
     eligible. Returns the scheduler. The connector matches `matched_tokens` of
@@ -397,6 +401,7 @@ def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
         enable_prefix_caching=True,
         use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
         block_size=BLOCK_SIZE,
+        num_speculative_tokens=num_speculative_tokens,
     )
     # Distinct prompts so r2 gets no local prefix cache hit from r1, only the
     # connector's external async load.
@@ -1547,7 +1552,7 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
 def _model_output(scheduler, output, sampled):
     """Feed `sampled` (per-request list) back to the scheduler."""
     req_ids = list(output.num_scheduled_tokens.keys())
-    scheduler.update_from_output(
+    return scheduler.update_from_output(
         output,
         ModelRunnerOutput(
             req_ids=req_ids,
@@ -1595,6 +1600,66 @@ def test_spec_decode_padding_first_decode_step():
     # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
     assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    assert out.num_invalid_spec_tokens == {r2.request_id: num_spec}
+
+    # Simulate grammar validation shortening r1's real draft to one token.
+    # Its tail padding must merge with (not overwrite) r2's graph padding.
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds([r1.request_id], [[1]]),
+        out,
+    )
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, -1, -1]
+    assert out.num_invalid_spec_tokens == {
+        r1.request_id: 2,
+        r2.request_id: num_spec,
+    }
+
+    # A complete frame for r2 replaces its graph padding, so the stale invalid
+    # count must be removed without disturbing r1's partial-padding record.
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds([r2.request_id], [[10, 11, 12]]),
+        out,
+    )
+    assert out.scheduled_spec_decode_tokens[r2.request_id] == [10, 11, 12]
+    assert out.num_invalid_spec_tokens == {r1.request_id: 2}
+
+    # Padding still executes for r1, but metrics observe only its one real
+    # draft token plus r2's complete three-token draft.
+    engine_core_outputs = _model_output(
+        scheduler,
+        out,
+        [[1, 4], [10, 11, 12, 13]],
+    )
+    stats = engine_core_outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats is not None
+    assert stats.num_drafts == 2
+    assert stats.num_draft_tokens == 4
+    assert stats.num_accepted_tokens == 4
+    assert stats.num_accepted_tokens_per_pos == [2, 1, 1]
+    assert stats.num_draft_tokens_per_pos == [2, 1, 1]
+
+
+def test_spec_decode_padding_after_remote_kv_resume_excluded_from_stats():
+    """A remote-KV resume keeps graph padding, but metrics ignore it."""
+    num_spec = 3
+    scheduler = _setup_remote_kv_resume(
+        num_prompt_tokens=32,
+        matched_tokens=32,
+        num_speculative_tokens=num_spec,
+    )
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens["r2"] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens["r2"] == [-1] * num_spec
+    assert out.num_invalid_spec_tokens == {"r2": num_spec}
+
+    req_ids = list(out.num_scheduled_tokens)
+    engine_core_outputs = _model_output(
+        scheduler,
+        out,
+        [[1000 + i] for i in range(len(req_ids))],
+    )
+    assert engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None
 
 
 def test_spec_decode_padding_skipped_for_diffusion():
