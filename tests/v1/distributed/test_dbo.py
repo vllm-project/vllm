@@ -26,7 +26,10 @@ except Exception:
     # Be conservative: if we can't detect, don't xfail by default
     IS_BLACKWELL = False
 
-MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+MODEL_NAMES = [
+    "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "Qwen/Qwen3-30B-A3B-FP8",
+]
 DP_SIZE = 2
 
 # GSM8K eval configuration
@@ -46,6 +49,7 @@ DEEPEP_BACKENDS = [
 
 
 @pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
+@pytest.mark.parametrize("model_name", MODEL_NAMES)
 @pytest.mark.parametrize("all2all_backend", DEEPEP_BACKENDS)
 @pytest.mark.xfail(
     IS_BLACKWELL,
@@ -54,7 +58,7 @@ DEEPEP_BACKENDS = [
         "(doesn't meet expectation of MIN_ACCURACY = 0.62)"
     ),
 )
-def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
+def test_dbo_dp_ep_gsm8k(model_name: str, all2all_backend: str, num_gpus_available):
     """
     Test DBO with DP+EP using GSM8K evaluation.
     """
@@ -85,7 +89,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     ]
 
     with RemoteOpenAIServer(
-        MODEL_NAME,
+        model_name,
         server_args,
         max_wait_seconds=600,  # Allow time for model loading with DP+EP
     ) as remote_server:
