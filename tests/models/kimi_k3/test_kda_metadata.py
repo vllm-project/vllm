@@ -409,3 +409,90 @@ def test_aligned_block_table_matches_shared_gdn():
     )
 
     torch.testing.assert_close(actual, expected)
+
+
+def _build_kda_with_stale_row(
+    device: torch.device,
+    full_cuda_graph: bool = False,
+    mamba_cache_mode: str = "none",
+) -> tuple[KimiK3KDAMetadata, torch.Tensor, torch.Tensor]:
+    """Build KDA metadata for a batch whose row 0 is stale (0 accepted).
+
+    Returns the metadata plus the block table before and after the build, so
+    callers can assert the runner's table was not written through.
+    """
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=3,
+        full_cuda_graph=full_cuda_graph,
+        device=device,
+        mamba_cache_mode=mamba_cache_mode,
+    )
+    batch = BatchSpec(seq_lens=[80, 96], query_lens=[4, 4])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, device).replace(
+        is_prefilling=torch.tensor([False, False])
+    )
+    block_table_before = common.block_table_tensor.clone()
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([0, 2], dtype=torch.int32, device=device),
+    )
+    return meta, block_table_before, common.block_table_tensor
+
+
+def _assert_stale_row_nulled(
+    meta: KimiK3KDAMetadata,
+    block_table_before: torch.Tensor,
+    block_table_after: torch.Tensor,
+    check_live_row: bool = True,
+) -> None:
+    assert meta.spec_state_indices_tensor is not None
+    assert meta.num_accepted_tokens is not None
+    stale_row = meta.spec_state_indices_tensor[0]
+    live_row = meta.spec_state_indices_tensor[1]
+
+    assert (stale_row == NULL_BLOCK_ID).all(), (
+        f"stale row must be nulled, got {stale_row.tolist()}"
+    )
+    if check_live_row:
+        # 'align' mode rebuilds the block table from seq_lens, so a synthetic
+        # batch legitimately yields unallocated (zero) slots in live rows too.
+        assert not (live_row == NULL_BLOCK_ID).any(), (
+            f"live row must keep its state slots, got {live_row.tolist()}"
+        )
+    assert meta.num_accepted_tokens[0].item() == 1
+    assert meta.num_accepted_tokens[1].item() == 2
+
+    torch.testing.assert_close(block_table_after, block_table_before)
+
+
+def test_zero_accepted_tokens_nulls_state_slots():
+    """KimiK3KDAMetadataBuilder overrides build() and so does not inherit the
+    shared GDN handling of stale spec rows; it needs its own. A row reporting
+    0 accepted tokens must have its state slots nulled and its count clamped,
+    without writing NULL_BLOCK_ID back into the runner's block table (the
+    packed-decode branch slices it, which can alias the caller's tensor).
+    """
+    _assert_stale_row_nulled(*_build_kda_with_stale_row(DEVICE))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+@pytest.mark.parametrize("full_cuda_graph", [False, True])
+def test_zero_accepted_tokens_nulls_state_slots_cuda(
+    mamba_cache_mode: str, full_cuda_graph: bool
+):
+    """Same contract across the CUDA-only paths: 'align' mode rebuilds the
+    block table via a Triton kernel, and full cudagraph mode stages the
+    metadata through persistent buffers. Both must preserve the nulling.
+    """
+    _assert_stale_row_nulled(
+        *_build_kda_with_stale_row(
+            torch.device("cuda"),
+            full_cuda_graph=full_cuda_graph,
+            mamba_cache_mode=mamba_cache_mode,
+        ),
+        check_live_row=mamba_cache_mode != "align",
+    )
