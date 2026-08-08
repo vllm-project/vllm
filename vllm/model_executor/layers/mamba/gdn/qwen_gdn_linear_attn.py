@@ -188,10 +188,17 @@ def fi_chunk_gated_delta_rule(
     v = v.squeeze(0).contiguous()
 
     g = g.squeeze(0).contiguous()
+
     beta = beta.squeeze(0).contiguous()
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
+
+    if q.dtype not in (torch.float16, torch.bfloat16):
+        q = q.to(torch.bfloat16)
+        k = k.to(torch.bfloat16)
+        v = v.to(torch.bfloat16)
+
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
@@ -250,7 +257,7 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
     ):
-        o, final_state = fi_chunk_gated_delta_rule(
+        o, final_state = fi_chunk_gated_delta_rule(  
             q=q,
             k=k,
             v=v,
