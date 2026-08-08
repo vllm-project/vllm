@@ -23,6 +23,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_tma_aligned_size,
+    is_deep_gemm_e8m0_used,
     per_block_cast_to_fp8,
     should_use_deepgemm_for_fp8_linear,
 )
@@ -287,7 +288,13 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     A_fp8, As_fp8 = per_token_group_quant_fp8(
         A_fp32, block_size[1], column_major_scales=True, tma_aligned_scales=True
     )
-    B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32, block_size=block_size)
+    # When the E8M0 oracle is active (default on Hopper/Blackwell), production
+    # requantizes weights to power-of-two scales before calling DeepGEMM
+    # (requant_weight_ue8m0_inplace). SM100/SM120 mxfp8 kernels require this;
+    # arbitrary float32 weight scales silently produce NaN on SM120.
+    B_fp8, Bs_fp8 = per_block_cast_to_fp8(
+        B_fp32, block_size=block_size, use_ue8m0=is_deep_gemm_e8m0_used()
+    )
 
     As = As_fp8.to(torch.float32)
     Bs = Bs_fp8.to(torch.float32)
