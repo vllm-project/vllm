@@ -118,6 +118,11 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
+        # Prefill-only (kv_producer) skips BlockInactive; decode/both/non-PD emit.
+        ktc = self.vllm_config.kv_transfer_config
+        self.enable_block_inactive_events = (
+            True if ktc is None else ktc.should_emit_block_inactive
+        )
         # Diffusion models may not sample any tokens for a denoising step.
         self.num_sampled_tokens_per_step = (
             1 if not vllm_config.model_config.is_diffusion else 0
@@ -288,6 +293,7 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
+            enable_block_inactive_events=self.enable_block_inactive_events,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.

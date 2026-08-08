@@ -15,6 +15,7 @@ import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
+    BlockInactive,
     BlockRemoved,
     BlockStored,
 )
@@ -2579,6 +2580,81 @@ def test_emit_cached_block_events_zero_cached():
     )
 
     assert pool.take_events() == []
+
+
+def test_free_blocks_emits_block_inactive_when_enabled():
+    """BlockInactive is emitted on ref_cnt→0 when enable_block_inactive_events."""
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+        enable_block_inactive_events=True,
+    )
+    req = make_request(
+        "req_inactive",
+        prompt_token_ids=list(range(block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    pool.take_events()  # drain BlockStored
+
+    pool.free_blocks(blocks)
+    events = pool.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockInactive)
+    assert events[0].medium == MEDIUM_GPU
+
+
+def test_free_blocks_skips_block_inactive_when_disabled():
+    """Prefill-style gate: Stored still works; Inactive is suppressed."""
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+        enable_block_inactive_events=False,
+    )
+    req = make_request(
+        "req_no_inactive",
+        prompt_token_ids=list(range(block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = pool.get_new_blocks(1)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=1,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+    stored = pool.take_events()
+    assert any(isinstance(e, BlockStored) for e in stored)
+
+    pool.free_blocks(blocks)
+    assert pool.take_events() == []
+
+
+def test_kv_transfer_should_emit_block_inactive():
+    from vllm.config.kv_transfer import KVTransferConfig
+
+    assert KVTransferConfig(kv_role="kv_producer").should_emit_block_inactive is False
+    assert KVTransferConfig(kv_role="kv_consumer").should_emit_block_inactive is True
+    assert KVTransferConfig(kv_role="kv_both").should_emit_block_inactive is True
+    assert KVTransferConfig().should_emit_block_inactive is True
 
 
 def test_eagle_enabled_removes_last_block():

@@ -117,5 +117,15 @@ class KVTransferConfig:
     def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and self.kv_role in get_args(KVConsumer)
 
+    @property
+    def should_emit_block_inactive(self) -> bool:
+        """Whether this instance should emit BlockInactive KV events.
+
+        Prefill-only producers (``kv_role='kv_producer'``) skip BlockInactive
+        so decode affinity load signals are not driven by prefill frees.
+        Decode (``kv_consumer``), union (``kv_both``), and non-PD setups emit.
+        """
+        return self.kv_role != "kv_producer"
+
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
