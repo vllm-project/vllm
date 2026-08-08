@@ -13,6 +13,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
+    MergedQKVParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
@@ -28,6 +29,8 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.models.qwen3_asr import Qwen3ASRForConditionalGeneration
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -133,6 +136,39 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     )
     assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
+
+
+def test_wrap_qwen3_asr_audio_qkv(default_vllm_config, dist_init, dummy_model):
+    model = dummy_model
+    model.add_module(
+        "qkv",
+        QKVParallelLinear(
+            hidden_size=64,
+            head_size=8,
+            total_num_heads=8,
+            total_num_kv_heads=8,
+            bias=True,
+        ),
+    )
+    model.packed_modules_mapping = (
+        Qwen3ASRForConditionalGeneration.packed_modules_mapping
+    )
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+        default_vllm_config,
+    )
+
+    assert isinstance(
+        manager.model.get_submodule("qkv"), MergedQKVParallelLinearWithLoRA
+    )
 
 
 def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy_model):
