@@ -163,3 +163,54 @@ def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -
                 streamed += arguments
 
     assert json.loads(streamed) == {"city": "Dallas", "state": "TX"}
+
+
+def test_streaming_arguments_span_multiple_deltas(
+    default_tokenizer: TokenizerLike,
+) -> None:
+    """Arguments split across deltas must arrive whole, not truncated.
+
+    partial_json_parser closes the object optimistically, so the quote and brace
+    that end the arguments are produced by an early parse and then treated as
+    already streamed. The concatenated deltas used to stop at `{"city": "Paris`,
+    which is not parseable JSON.
+    """
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    parser = Internlm2ToolParser(default_tokenizer)
+
+    body = '{"name": "get_weather", "parameters": {"city": "Paris"}}'
+    deltas = (
+        ["<|action_start|>", "<|plugin|>"]
+        + [body[i : i + 6] for i in range(0, len(body), 6)]
+        + ["<|action_end|>"]
+    )
+
+    streamed = ""
+    current_text = ""
+    for delta_text in deltas:
+        previous_text = current_text
+        current_text += delta_text
+        delta_message = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        if delta_message and delta_message.tool_calls:
+            arguments = delta_message.tool_calls[0].function.arguments
+            if arguments:
+                streamed += arguments
+
+    assert json.loads(streamed) == {"city": "Paris"}
