@@ -1034,6 +1034,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
        "csrc/libtorch_stable/quantization/cutlass_w4a8/w4a8_mm_entry.cu"
        "csrc/libtorch_stable/quantization/cutlass_w4a8/w4a8_grouped_mm_entry.cu"
        "csrc/libtorch_stable/quantization/cutlass_w4a8/w4a8_utils.cu"
+       "csrc/libtorch_stable/quantization/cutlass_w4afp8/w4afp8_grouped_mm_c3x.cu"
        )
 
     set_gencode_flags_for_srcs(
@@ -1042,7 +1043,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     list(APPEND VLLM_STABLE_EXT_SRC "${W4A8_SRCS}")
 
-    message(STATUS "Building W4A8 kernels for archs: ${W4A8_ARCHS}")
+    message(STATUS "Building W4A8/W4AFP8 kernels for archs: ${W4A8_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
         AND W4A8_ARCHS)

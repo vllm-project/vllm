@@ -22,6 +22,9 @@ from vllm.utils.torch_utils import set_random_seed
 IS_SUPPORTED_BY_GPU = (
     current_platform.is_cuda() and current_platform.get_device_capability()[0] >= 9
 )
+IS_W4AFP8_SUPPORTED_BY_GPU = (
+    current_platform.is_cuda() and current_platform.is_device_capability(90)
+)
 
 
 def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
@@ -341,3 +344,107 @@ def test_cutlass_w4a8_moe_mm_cuda_graph():
     g.replay()
 
     torch.testing.assert_close(out_static, out_ref, rtol=1e-2, atol=1e-2)
+
+
+def _pack_signed_int4(values: torch.Tensor) -> torch.Tensor:
+    low = values[..., 0::2] & 0x0F
+    high = values[..., 1::2] & 0x0F
+    return (low | (high << 4)).to(torch.uint8).view(torch.int8).contiguous()
+
+
+def _interleave_w4afp8_scales(scales: torch.Tensor) -> torch.Tensor:
+    experts, out_features, groups = scales.shape
+    pack = 4 if groups % 4 == 0 else 1
+    return (
+        scales.reshape(experts, out_features, groups // pack, pack)
+        .permute(0, 2, 1, 3)
+        .reshape(experts, groups // pack, out_features * pack)
+        .contiguous()
+    )
+
+
+@pytest.mark.skipif(
+    not IS_W4AFP8_SUPPORTED_BY_GPU,
+    reason="W4AFP8 grouped GEMM requires an SM90 GPU.",
+)
+@pytest.mark.parametrize(
+    ("n", "k"),
+    [
+        pytest.param(512, 6144, id="gemm1"),
+        pytest.param(6144, 256, id="gemm2"),
+    ],
+)
+def test_cutlass_w4afp8_moe_mm_matches_reference(n: int, k: int):
+    set_random_seed(42)
+    device = "cuda"
+    group_size = 128
+    topk = 8
+    expert_rows = [5, 0, 7, 4]
+    num_experts = len(expert_rows)
+    total_rows = sum(expert_rows)
+
+    activations = to_fp8(
+        torch.randn((total_rows, k), device=device, dtype=torch.float32) * 0.2
+    )
+    activation_scale = torch.tensor([0.75], device=device, dtype=torch.float32)
+    weights = torch.randint(-8, 8, (num_experts, n, k), device=device, dtype=torch.int8)
+    packed_weights = _pack_signed_int4(weights)
+    weight_scales = (
+        torch.rand(
+            (num_experts, n, k // group_size),
+            device=device,
+            dtype=torch.float32,
+        )
+        * 0.015
+        + 0.005
+    ).to(torch.bfloat16)
+    kernel_scales = _interleave_w4afp8_scales(weight_scales)
+
+    expert_offsets = torch.tensor(
+        [0, *torch.tensor(expert_rows).cumsum(0)[:-1].tolist()],
+        device=device,
+        dtype=torch.int32,
+    )
+    problem_sizes = torch.tensor(
+        [[n, rows, k] for rows in expert_rows],
+        device=device,
+        dtype=torch.int32,
+    )
+    a_strides = torch.full((num_experts, 3), k, device=device, dtype=torch.int64)
+    d_strides = torch.full((num_experts, 3), n, device=device, dtype=torch.int64)
+    output = torch.empty((total_rows, n), device=device, dtype=torch.bfloat16)
+
+    ops.cutlass_w4afp8_moe_mm(
+        output,
+        activations,
+        packed_weights,
+        activation_scale,
+        kernel_scales,
+        expert_offsets,
+        problem_sizes,
+        a_strides,
+        a_strides,
+        d_strides,
+        d_strides,
+        group_size,
+        topk,
+    )
+    torch.accelerator.synchronize()
+
+    reference = torch.empty_like(output)
+    starts = expert_offsets.cpu().tolist()
+    ends = torch.tensor(expert_rows).cumsum(0).tolist()
+    for expert, (start, end) in enumerate(zip(starts, ends)):
+        if start == end:
+            continue
+        dequantized = (
+            weights[expert].float()
+            * weight_scales[expert].repeat_interleave(group_size, dim=-1).float()
+        )
+        reference[start:end] = (
+            activations[start:end].float()
+            @ dequantized.transpose(0, 1)
+            * activation_scale.item()
+        ).to(torch.bfloat16)
+
+    torch.testing.assert_close(output, reference, rtol=3e-2, atol=3e-2)
