@@ -13,6 +13,8 @@ import torch
 from tests.kernels.utils import opcheck
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
+from vllm.model_executor.kernels.linear import MPLinearLayerConfig
+from vllm.model_executor.kernels.linear.mixed_precision import MarlinLinearKernel
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
@@ -245,24 +247,175 @@ def test_gptq_marlin_repack(
     if act_order:
         q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
 
+    is_w4a8_int8 = is_a_8bit and quant_type == scalar_types.uint4b8
+    use_ldmatrix_s4 = is_w4a8_int8 and ops.marlin_uses_ldmatrix_s4(q_w_gptq)
+
     # Pack to Marlin format
-    weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit)
+    weight_perm = get_weight_perm(quant_type.size_bits, is_a_8bit, use_ldmatrix_s4)
     marlin_q_w_1 = marlin_weights(
-        q_w, size_k, size_n, quant_type.size_bits, weight_perm, is_a_8bit
+        q_w,
+        size_k,
+        size_n,
+        quant_type.size_bits,
+        weight_perm,
+        is_a_8bit,
+        use_ldmatrix_s4,
     )
 
     opcheck(
         torch.ops._C.gptq_marlin_repack,
-        (q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit),
+        (
+            q_w_gptq,
+            sort_indices,
+            size_k,
+            size_n,
+            quant_type.size_bits,
+            is_a_8bit,
+            is_w4a8_int8,
+        ),
     )
 
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.gptq_marlin_repack(
-        q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit
+        q_w_gptq,
+        sort_indices,
+        size_k,
+        size_n,
+        quant_type.size_bits,
+        is_a_8bit,
+        is_w4a8_int8,
     )
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Marlin is only supported on CUDA.",
+)
+@pytest.mark.parametrize(
+    "partition_weight_shape",
+    [(256, 64), (128, 64)],
+    ids=["full-k", "row-parallel"],
+)
+def test_marlin_w4a8_int8_rejects_act_order(partition_weight_shape):
+    config = MPLinearLayerConfig(
+        full_weight_shape=(256, 64),
+        partition_weight_shape=partition_weight_shape,
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.int8,
+        group_size=128,
+        zero_points=False,
+        has_g_idx=True,
+    )
+
+    can_implement, reason = MarlinLinearKernel.can_implement(config)
+
+    assert not can_implement
+    assert reason == "Marlin W4A8-INT8 does not support act-order"
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+def test_gptq_marlin_repack_rejects_w4a8_int8_act_order():
+    size_k, size_n = 128, 64
+    q_weight = torch.zeros((size_k // 8, size_n), dtype=torch.int32, device="cuda")
+    perm = torch.arange(size_k, dtype=torch.int32, device="cuda")
+
+    with pytest.raises(
+        RuntimeError,
+        match="Marlin W4A8-INT8 repack does not support act-order",
+    ):
+        ops.gptq_marlin_repack(
+            q_weight,
+            perm,
+            size_k,
+            size_n,
+            num_bits=4,
+            is_a_8bit=True,
+            is_w4a8_int8=True,
+        )
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+def test_gptq_marlin_repack_ldmatrix_s4_all_nibbles():
+    size_k, size_n = 128, 64
+    linear = torch.arange(size_k * size_n, dtype=torch.int32, device="cuda").reshape(
+        size_k, size_n
+    )
+    if not ops.marlin_uses_ldmatrix_s4(linear):
+        pytest.skip("Requires the CUDA 13.4 ldmatrix.s8.s4 path.")
+
+    perm = torch.empty(0, dtype=torch.int32, device="cuda")
+    weight_perm = get_weight_perm(4, True, use_ldmatrix_s4=True)
+
+    for shift in range(0, 13, 4):
+        q_w = (linear >> shift) & 0xF
+        q_w_gptq = gptq_pack(q_w, 4, size_k, size_n)
+        expected = marlin_weights(
+            q_w,
+            size_k,
+            size_n,
+            4,
+            weight_perm,
+            is_a_8bit=True,
+            use_ldmatrix_s4=True,
+        )
+        actual = ops.gptq_marlin_repack(
+            q_w_gptq,
+            perm,
+            size_k,
+            size_n,
+            4,
+            is_a_8bit=True,
+            is_w4a8_int8=True,
+        )
+
+        torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("nk_factors", MARLIN_REPACK_NK_FACTORS)
+def test_gptq_marlin_repack_ldmatrix_s4_random(nk_factors):
+    n_factor, k_factor = nk_factors
+    size_k = MARLIN_K_CHUNKS[0] * k_factor
+    size_n = MARLIN_N_CHUNKS[0] * n_factor
+
+    q_w = torch.randint(0, 16, (size_k, size_n), dtype=torch.int32, device="cuda")
+    if not ops.marlin_uses_ldmatrix_s4(q_w):
+        pytest.skip("Requires the CUDA 13.4 ldmatrix.s8.s4 path.")
+
+    q_w_gptq = gptq_pack(q_w, 4, size_k, size_n)
+    perm = torch.empty(0, dtype=torch.int32, device="cuda")
+    expected = marlin_weights(
+        q_w,
+        size_k,
+        size_n,
+        4,
+        get_weight_perm(4, True, use_ldmatrix_s4=True),
+        is_a_8bit=True,
+        use_ldmatrix_s4=True,
+    )
+    actual = ops.gptq_marlin_repack(
+        q_w_gptq,
+        perm,
+        size_k,
+        size_n,
+        4,
+        is_a_8bit=True,
+        is_w4a8_int8=True,
+    )
+
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(
@@ -387,7 +540,14 @@ def marlin_generate_valid_test_cases():
                 continue
             args = sub_case + (size_m, size_n, size_k) + case[4:]
             if is_invalid(*args):
-                cases.append(args)
+                if (
+                    sub_case[0] == scalar_types.int8
+                    and sub_case[1] == scalar_types.uint4b8
+                    and not act_order
+                ):
+                    cases.append(pytest.param(*args, id="ldmatrix_s4"))
+                else:
+                    cases.append(args)
     return cases
 
 

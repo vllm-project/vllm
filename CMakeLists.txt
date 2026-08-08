@@ -574,7 +574,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     # marlin arches for fp16 output
     # Family-conditional 12.0f (one cubin for SM12x family) requires CUDA >= 13.0;
     # fall back to architecture-specific 12.0a;12.1a on CUDA < 13.0 (e.g. 12.8).
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+      # The expanding ldmatrix instruction requires a feature-specific target.
+      cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
+      cuda_archs_sm90plus(MARLIN_LDMATRIX_S4_ARCHS "${CUDA_ARCHS}")
+
+      set(MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS
+        VLLM_MARLIN_LDMATRIX_S4_ENABLED=1)
+      foreach(_ARCH IN LISTS MARLIN_LDMATRIX_S4_ARCHS)
+        if(_ARCH MATCHES "^([0-9]+)\\.([0-9]+)[af]$")
+          list(APPEND MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS
+            "VLLM_MARLIN_LDMATRIX_S4_SM${CMAKE_MATCH_1}${CMAKE_MATCH_2}_ENABLED=1")
+        else()
+          message(FATAL_ERROR
+            "Unexpected ldmatrix.s8.s4 CUDA architecture: ${_ARCH}")
+        endif()
+      endforeach()
+    elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
       cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
     else()
       cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
@@ -645,6 +661,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         set_gencode_flags_for_srcs(
           SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
           CUDA_ARCHS "${MARLIN_ARCHS}")
+        if(MARLIN_LDMATRIX_S4_ARCHS)
+          file(GLOB MARLIN_LDMATRIX_S4_FP16_SRC
+            "csrc/libtorch_stable/quantization/marlin/sm80_kernel_s8_u4b8_float16.cu")
+          set_gencode_flags_for_srcs(
+            SRCS "${MARLIN_LDMATRIX_S4_FP16_SRC}"
+            CUDA_ARCHS "${MARLIN_LDMATRIX_S4_ARCHS}")
+          set_property(SOURCE ${MARLIN_LDMATRIX_S4_FP16_SRC} APPEND
+            PROPERTY COMPILE_DEFINITIONS VLLM_MARLIN_LDMATRIX_S4_ENABLED=1)
+        endif()
         if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
           set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
             PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
@@ -655,6 +680,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         set_gencode_flags_for_srcs(
           SRCS "${MARLIN_TEMPLATE_BF16_KERNEL_SRC}"
           CUDA_ARCHS "${MARLIN_BF16_ARCHS}")
+        if(MARLIN_LDMATRIX_S4_ARCHS)
+          file(GLOB MARLIN_LDMATRIX_S4_BF16_SRC
+            "csrc/libtorch_stable/quantization/marlin/sm80_kernel_s8_u4b8_bfloat16.cu")
+          set_gencode_flags_for_srcs(
+            SRCS "${MARLIN_LDMATRIX_S4_BF16_SRC}"
+            CUDA_ARCHS "${MARLIN_LDMATRIX_S4_ARCHS}")
+          set_property(SOURCE ${MARLIN_LDMATRIX_S4_BF16_SRC} APPEND
+            PROPERTY COMPILE_DEFINITIONS VLLM_MARLIN_LDMATRIX_S4_ENABLED=1)
+        endif()
         if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
           set_source_files_properties(${MARLIN_TEMPLATE_BF16_KERNEL_SRC}
             PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
@@ -691,6 +725,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
          "csrc/libtorch_stable/quantization/marlin/marlin_int4_fp8_preprocess.cu"
          "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
          "csrc/libtorch_stable/quantization/marlin/awq_marlin_repack.cu")
+      if(MARLIN_LDMATRIX_S4_ARCHS)
+        set_gencode_flags_for_srcs(
+          SRCS "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
+          CUDA_ARCHS "${MARLIN_LDMATRIX_S4_ARCHS}")
+        set_property(
+          SOURCE "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
+          APPEND PROPERTY COMPILE_DEFINITIONS
+          ${MARLIN_LDMATRIX_S4_REPACK_DEFINITIONS})
+      endif()
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_SRCS}"
         CUDA_ARCHS "${MARLIN_OTHER_ARCHS}")
