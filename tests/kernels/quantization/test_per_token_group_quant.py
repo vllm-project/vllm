@@ -11,8 +11,10 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
-    "shape", [(31, 128), (32, 128), (63, 256), (64, 256), (16, 512)]
+    "shape",
+    [(31, 128), (32, 128), (63, 256), (64, 256), (16, 512), (33, 640)],
 )
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("column_major", [False, True])
 @pytest.mark.parametrize("tma_aligned", [False, True])
 @pytest.mark.parametrize("scale_ue8m0", [False, True])
@@ -21,14 +23,19 @@ from vllm.platforms import current_platform
     not current_platform.is_cuda_alike(), reason="Only test on CUDA/ROCm."
 )
 def test_per_token_group_quant_fp8(
-    shape, column_major: bool, tma_aligned: bool, scale_ue8m0: bool, group_size: int
+    shape,
+    input_dtype: torch.dtype,
+    column_major: bool,
+    tma_aligned: bool,
+    scale_ue8m0: bool,
+    group_size: int,
 ):
     device = "cuda"
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
-    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=input_dtype) * 8
 
     # cuda path
     out_q, scale = fp8_utils.per_token_group_quant_fp8(
