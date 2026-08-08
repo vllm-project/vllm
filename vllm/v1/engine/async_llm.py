@@ -1026,15 +1026,11 @@ class AsyncLLM(EngineClient):
         )
 
     async def _drain_requests_for_elastic_ep(self, drain_timeout: int) -> None:
-        try:
-            logger.info(
-                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
-                "waiting for requests to drain before scaling"
-            )
-            await self.wait_for_requests_to_drain(drain_timeout)
-        except BaseException:
-            set_scaling_elastic_ep(False)
-            raise
+        logger.info(
+            "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
+            "waiting for requests to drain before scaling"
+        )
+        await self.wait_for_requests_to_drain(drain_timeout)
 
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
@@ -1073,13 +1069,19 @@ class AsyncLLM(EngineClient):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
 
+        # ScalingMiddleware 503s every request while this is set, including the
+        # /scale_elastic_ep call that would clear it, so never leave it latched.
         set_scaling_elastic_ep(True)
-        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
-            await self._drain_requests_for_elastic_ep(drain_timeout)
+        try:
+            if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
+                await self._drain_requests_for_elastic_ep(drain_timeout)
 
-        await self.engine_core.commit_elastic_ep()
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        set_scaling_elastic_ep(False)
+            await self.engine_core.commit_elastic_ep()
+            self.vllm_config.parallel_config.data_parallel_size = (
+                new_data_parallel_size
+            )
+        finally:
+            set_scaling_elastic_ep(False)
 
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
