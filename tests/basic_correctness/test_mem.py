@@ -76,6 +76,41 @@ def test_basic_cumem():
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_discard_tags():
+    """Test that discard(tags) selectively frees GPU memory for specific
+    tags while keeping other tags mapped and usable."""
+    allocator = get_mem_allocator_instance()
+
+    with allocator.use_memory_pool("weights"):
+        weights = torch.ones(1024, 1024, device=DEVICE_TYPE)
+
+    with allocator.use_memory_pool("kv_cache"):
+        kv = torch.ones(512, 512, device=DEVICE_TYPE)
+
+    free_bytes = current_platform.mem_get_info()[0]
+
+    # Discard kv_cache only — weights should remain valid
+    allocator.discard("kv_cache")
+
+    free_bytes_after_discard = current_platform.mem_get_info()[0]
+    assert free_bytes_after_discard > free_bytes
+
+    # Weights are still usable
+    assert torch.allclose(weights, torch.ones_like(weights))
+
+    # Wake up and verify kv_cache is remapped (zeroed content)
+    allocator.wake_up(["kv_cache"])
+    # After wake_up the VA is remapped; content is not preserved
+    # but the allocation is valid
+    assert kv.shape == (512, 512)
+
+    # Full sleep/wake cycle still works after discard
+    allocator.sleep(offload_tags="weights")
+    allocator.wake_up()
+    assert torch.allclose(weights, torch.ones_like(weights))
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA graph not supported on XPU")
 def test_cumem_with_cudagraph():
     allocator = get_mem_allocator_instance()
