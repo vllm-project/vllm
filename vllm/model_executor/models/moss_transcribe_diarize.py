@@ -12,6 +12,7 @@ The checkpoint layout is:
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias
 
 import regex as re
@@ -29,6 +30,8 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
+    VerboseTranscriptionSegment,
+    VerboseTranscriptionToken,
     _require_is_multimodal,
 )
 from vllm.model_executor.models.utils import (
@@ -85,6 +88,57 @@ _MOSS_DIARIZED_HEADER_RE = re.compile(
     r"\[(?P<start>[0-9.]{1,32})\]\s*\[(?P<speaker>S[0-9]{1,15})\]"
 )
 _MOSS_DIARIZED_END_RE = re.compile(r"\[(?P<end>[0-9.]{1,32})\]\s*\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class _MossTranscriptSegment:
+    start: float
+    end: float
+    speaker: str
+    text: str
+    start_offset: int
+    end_offset: int
+
+
+def _parse_moss_transcript(text: str) -> list[_MossTranscriptSegment]:
+    headers: list[tuple[re.Match[str], float, str]] = []
+    for match in _MOSS_DIARIZED_HEADER_RE.finditer(text):
+        start = parse_diarized_timestamp(match["start"])
+        speaker = parse_diarized_speaker(match["speaker"])
+        if start is not None and speaker is not None:
+            headers.append((match, start, speaker))
+
+    if not headers:
+        return []
+
+    segments: list[_MossTranscriptSegment] = []
+    for index, (header, start, speaker) in enumerate(headers):
+        next_header_start = (
+            headers[index + 1][0].start() if index + 1 < len(headers) else len(text)
+        )
+        body = text[header.end() : next_header_start]
+        end_match = _MOSS_DIARIZED_END_RE.search(body)
+        if end_match is None:
+            return []
+
+        end = parse_diarized_timestamp(end_match["end"])
+        if end is None or end < start:
+            return []
+
+        segment_text = body[: end_match.start()].strip()
+        if segment_text:
+            segments.append(
+                _MossTranscriptSegment(
+                    start=start,
+                    end=end,
+                    speaker=speaker,
+                    text=segment_text,
+                    start_offset=header.start(),
+                    end_offset=header.end() + end_match.end(),
+                )
+            )
+
+    return segments
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
@@ -571,7 +625,8 @@ class MossTranscribeDiarizeForConditionalGeneration(
 ):
     supports_transcription = True
     supports_transcription_only = True
-    supports_segment_timestamp = False
+    supports_segment_timestamp = True
+    supports_textual_segment_timestamps = True
     supports_diarized_transcription = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
     hf_to_vllm_mapper = WeightsMapper(
@@ -644,40 +699,52 @@ class MossTranscribeDiarizeForConditionalGeneration(
     @classmethod
     def parse_diarized_transcript(cls, text: str) -> list[DiarizedTranscriptionSegment]:
         """Parse MOSS's canonical ``[start][Sxx]text[end]`` transcript."""
-        headers: list[tuple[re.Match[str], float, str]] = []
-        for match in _MOSS_DIARIZED_HEADER_RE.finditer(text):
-            start = parse_diarized_timestamp(match["start"])
-            speaker = parse_diarized_speaker(match["speaker"])
-            if start is not None and speaker is not None:
-                headers.append((match, start, speaker))
+        return [
+            DiarizedTranscriptionSegment(
+                start=segment.start,
+                end=segment.end,
+                speaker=segment.speaker,
+                text=segment.text,
+            )
+            for segment in _parse_moss_transcript(text)
+        ]
 
-        if not headers:
+    @classmethod
+    def parse_verbose_transcript(
+        cls,
+        text: str,
+        tokens: Sequence[VerboseTranscriptionToken],
+    ) -> list[VerboseTranscriptionSegment]:
+        """Parse MOSS's diarized output into verbose transcription segments."""
+        if "".join(token.text for token in tokens) != text:
             return []
 
-        segments: list[DiarizedTranscriptionSegment] = []
-        for index, (header, start, speaker) in enumerate(headers):
-            next_header_start = (
-                headers[index + 1][0].start() if index + 1 < len(headers) else len(text)
-            )
-            body = text[header.end() : next_header_start]
-            end_match = _MOSS_DIARIZED_END_RE.search(body)
-            if end_match is None:
+        token_start = 0
+        token_index = 0
+        segments: list[VerboseTranscriptionSegment] = []
+        for segment in _parse_moss_transcript(text):
+            while token_index < len(tokens) and token_start < segment.start_offset:
+                token_start += len(tokens[token_index].text)
+                token_index += 1
+            segment_token_start = token_index
+            while token_index < len(tokens) and token_start < segment.end_offset:
+                token_start += len(tokens[token_index].text)
+                token_index += 1
+            segment_tokens = tokens[segment_token_start:token_index]
+            if not segment_tokens:
                 return []
-
-            end = parse_diarized_timestamp(end_match["end"])
-            if end is None or end < start:
-                return []
-
-            segment_text = body[: end_match.start()].strip()
-            if segment_text:
-                segments.append(
-                    DiarizedTranscriptionSegment(
-                        start=start,
-                        end=end,
-                        speaker=speaker,
-                        text=segment_text,
-                    )
+            segments.append(
+                VerboseTranscriptionSegment(
+                    start=segment.start,
+                    end=segment.end,
+                    text=f"[{segment.speaker}]{segment.text}",
+                    token_ids=tuple(token.token_id for token in segment_tokens),
+                    avg_logprob=(
+                        math.fsum(token.logprob for token in segment_tokens)
+                        / len(segment_tokens)
+                    ),
                 )
+            )
 
         return segments
 

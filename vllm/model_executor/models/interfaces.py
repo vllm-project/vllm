@@ -88,6 +88,26 @@ class DiarizedTranscriptionSegment:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class VerboseTranscriptionToken:
+    """A generated token and its decoding metadata."""
+
+    token_id: int
+    text: str
+    logprob: float
+
+
+@dataclass(frozen=True, slots=True)
+class VerboseTranscriptionSegment:
+    """A timestamped segment with the generated tokens that produced it."""
+
+    start: float
+    end: float
+    text: str
+    token_ids: tuple[int, ...]
+    avg_logprob: float
+
+
 class StreamingTranscriptionPostProcessor:
     """Stateful streaming post-processor for transcription deltas."""
 
@@ -1216,6 +1236,9 @@ class SupportsTranscription(Protocol):
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
+    supports_textual_segment_timestamps: ClassVar[bool] = False
+    """Uses model-generated text, rather than Whisper timestamp tokens, for segments."""
+
     supports_diarized_transcription: ClassVar[bool] = False
     """Enables the ``diarized_json`` response format for the model."""
 
@@ -1330,6 +1353,19 @@ class SupportsTranscription(Protocol):
 
         Only models that set ``supports_diarized_transcription`` must override
         this method.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def parse_verbose_transcript(
+        cls,
+        text: str,
+        tokens: Sequence[VerboseTranscriptionToken],
+    ) -> list[VerboseTranscriptionSegment]:
+        """Parse timestamped verbose transcription segments from model output.
+
+        Only models that set ``supports_textual_segment_timestamps`` must
+        override this method.
         """
         raise NotImplementedError
 
