@@ -7,6 +7,8 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import math
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -46,8 +48,8 @@ def cdiv_fn(x, y):
 def kernel_paged_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
     query_ptr,  # [num_tokens, num_query_heads, head_size]
-    key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
-    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+    key_cache_ptr,  # [num_blks, num_kv_heads, blk_size, head_size]
+    value_cache_ptr,  # [num_blks, num_kv_heads, blk_size, head_size]
     sink_ptr,  # [num_query_heads]
     block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
     seq_lens_ptr,  # [num_seqs]
@@ -70,12 +72,10 @@ def kernel_paged_attention_2d(
     HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
-    x: tl.constexpr,  # int
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
     stride_k_cache_3: tl.int64,  # int
-    stride_k_cache_4: tl.int64,  # int
     stride_v_cache_0: tl.int64,  # int
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
@@ -156,31 +156,28 @@ def kernel_paged_attention_2d(
         # Supports non-contiguous mapping
         # from logical blocks to physical blocks
         abs_token_idx = start_n + offs_n
+        l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
+        # Vectorized loading of physical block IDs
+        p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
+        internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
         # Slots >= seq_len are unwritten KV cache and may hold NaN/garbage
         # (e.g. the tail of the last partial block). They are score-masked
         # below, but 0 * NaN = NaN would still poison the output, so exclude
         # them from the K/V loads too.
         kv_load_mask = abs_token_idx < seq_len
-        l_block_idx = abs_token_idx // PHYSICAL_BLOCK_SIZE
-        # Vectorized loading of physical block IDs
-        p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
-        internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
 
-        # 5D addressing logic of K
         k_offset = (
             p_block_idx[None, :] * stride_k_cache_0
             + kv_head_idx * stride_k_cache_1
-            + (offs_d[:, None] // x) * stride_k_cache_2
-            + internal_offsets[None, :] * stride_k_cache_3
-            + (offs_d[:, None] % x) * stride_k_cache_4
+            + internal_offsets[None, :] * stride_k_cache_2
+            + offs_d[:, None] * stride_k_cache_3
         )
 
-        # 4D addressing logic of V (Slot is innermost)
         v_offset = (
             p_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_1
-            + offs_d[None, :] * stride_v_cache_2
-            + internal_offsets[:, None] * stride_v_cache_3
+            + internal_offsets[:, None] * stride_v_cache_2
+            + offs_d[None, :] * stride_v_cache_3
         )
 
         # K : (HEAD_SIZE, BLOCK_SIZE)
@@ -301,14 +298,26 @@ def chunked_prefill_paged_decode(
         sliding_window = 0
 
     if max_query_len > 1:
+        # context_attention_fwd's paged kernel keeps its historical x-packed
+        # addressing: K as [B, H, hs//x, N, x] and V as [B, H, hs, N]. Both
+        # are pure permuted views of the standardized [B, H, N, hs] halves
+        # (the kernel threads every dim's stride), so no bytes move and no
+        # kernel changes are needed. x is just the view's vectorization width,
+        # so it only has to divide head_size: use the largest power of two
+        # that does, capped at the historical 16 bytes (which non-power-of-2
+        # head sizes like 24 don't divide).
+        head_size = key_cache.shape[3]
+        x = math.gcd(16 // key_cache.element_size(), head_size)
+        k_cache_x = key_cache.unflatten(-1, (head_size // x, x)).permute(0, 1, 3, 2, 4)
+        v_cache_t = value_cache.permute(0, 1, 3, 2)
         context_attention_fwd(
             q=query,
             k=key,
             v=value,
             o=output,
             kv_cache_dtype=kv_cache_dtype,
-            k_cache=key_cache,
-            v_cache=value_cache,
+            k_cache=k_cache_x,
+            v_cache=v_cache_t,
             b_loc=block_table,
             b_start_loc=query_start_loc,
             b_seq_len=seq_lens,
@@ -325,7 +334,7 @@ def chunked_prefill_paged_decode(
             causal=causal,
         )
 
-    block_size = value_cache.shape[3]
+    block_size = value_cache.shape[2]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
     # key may be None in cross-attention decode (already cached from encoder)
@@ -420,7 +429,7 @@ def chunked_prefill_paged_decode(
             "Cannot use ROCm custom paged attention kernel,"
             " falling back to Triton implementation."
         )
-        real_block_size = value_cache.shape[3]
+        real_block_size = value_cache.shape[2]
         # The standard model directly uses the original block_size.
         # Non-standard 544 uses 32 to accommodate integer division logic.
         # Cap at 128 to avoid exceeding GPU shared memory limits
@@ -476,12 +485,10 @@ def chunked_prefill_paged_decode(
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             USE_ALIBI_SLOPES=use_alibi_slopes,
             SLIDING_WINDOW=sliding_window,
-            x=key_cache.shape[4],
             stride_k_cache_0=key_cache.stride(0),
             stride_k_cache_1=key_cache.stride(1),
             stride_k_cache_2=key_cache.stride(2),
             stride_k_cache_3=key_cache.stride(3),
-            stride_k_cache_4=key_cache.stride(4),
             stride_v_cache_0=value_cache.stride(0),
             stride_v_cache_1=value_cache.stride(1),
             stride_v_cache_2=value_cache.stride(2),

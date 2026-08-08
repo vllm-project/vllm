@@ -24,9 +24,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
-)
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -34,6 +32,36 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+_CPU_KV_CACHE_LAYOUTS = frozenset(("LBHNC", "BLHNC", "BHLNC"))
+
+
+def _split_cpu_kv_cache(
+    kv_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a logical CPU KV cache into contiguous-token K and V views."""
+    layout = resolve_kv_cache_layout()
+    if layout.name not in _CPU_KV_CACHE_LAYOUTS:
+        raise ValueError(
+            f"CPU attention does not support KV cache layout {layout.name}. "
+            f"Supported layouts: {sorted(_CPU_KV_CACHE_LAYOUTS)}."
+        )
+    if kv_cache.ndim != 4:
+        raise ValueError(f"CPU KV cache must be 4D, got {kv_cache.ndim}D")
+
+    num_blocks, num_kv_heads, block_size, content_size = kv_cache.shape
+    if content_size % 2 != 0:
+        raise ValueError(f"CPU KV cache content size must be even, got {content_size}")
+    if kv_cache.stride(-1) != 1 or kv_cache.stride(-2) != content_size:
+        raise ValueError(
+            "CPU attention requires contiguous token and content dimensions; "
+            f"got shape {tuple(kv_cache.shape)} and strides {kv_cache.stride()}"
+        )
+
+    kv_cache = kv_cache.view(
+        num_blocks, num_kv_heads, block_size * 2, content_size // 2
+    )
+    return kv_cache.chunk(2, dim=2)
 
 
 class CPUAttentionBackend(AttentionBackend):
@@ -58,6 +86,13 @@ class CPUAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        # The CPU backend only reads head-major block interiors; declare
+        # the requirement so an NHD-style env override is corrected
+        # instead of failing at first forward (main parity).
+        return "LBHNC"
 
     @staticmethod
     def get_name() -> str:
@@ -89,20 +124,6 @@ class CPUAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["CPUAttentionMetadataBuilder"]:
         return CPUAttentionMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return num_blocks, num_kv_heads, block_size, 2 * head_size
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -358,12 +379,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
-        # KV cache size are [num_blocks, num_kv_heads, block_size,
-        # 2 * head_size]. Make a view [num_blocks, num_kv_heads,
-        # block_size * 2, head_size]. Then slice KV at dim 2
-        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
-        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
-        key_cache, value_cache = kv_cache.chunk(2, dim=2)
+        key_cache, value_cache = _split_cpu_kv_cache(kv_cache)
 
         if is_encoder_attention:
             ops.cpu_attn_reshape_and_cache(
@@ -412,9 +428,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
 
-        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
-        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
-        key_cache, value_cache = kv_cache.chunk(2, dim=2)
+        key_cache, value_cache = _split_cpu_kv_cache(kv_cache)
         ops.cpu_attn_reshape_and_cache(
             key,
             value,

@@ -628,6 +628,11 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]: the indexer kernels and
+        # kv_cache_as_quant_view index a 3-D block-major cache.
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,

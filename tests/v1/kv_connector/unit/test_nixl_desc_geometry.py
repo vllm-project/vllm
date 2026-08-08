@@ -230,6 +230,9 @@ def _make_remote_meta(
         kv_caches_base_addr=[0x10_000_000, 0x20_000_000],
         num_blocks=remote_num_logical * remote_ppl,
         block_lens=[kernel_page, kernel_page],
+        # Non-interleaved remote: consecutive blocks abut, so the stride
+        # between them equals the page length.
+        block_strides=[kernel_page, kernel_page],
         kv_cache_layout=worker.kv_cache_layout,
         block_size=remote_kernel_block_size,
         ssm_sizes=remote_ssm_sizes,

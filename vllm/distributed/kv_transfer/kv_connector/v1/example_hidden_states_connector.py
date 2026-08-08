@@ -38,8 +38,10 @@ def extract_from_kv_cache(
     num_tokens: int,
 ) -> torch.Tensor:
     """Extract data from KV cache."""
-    block_size = kv_cache.shape[1]
-    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+    block_size = kv_cache.shape[2]
+    return kv_cache[slot_mapping // block_size, :, slot_mapping % block_size][
+        :num_tokens
+    ]
 
 
 def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
@@ -99,15 +101,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     Simply extracts the hidden states from the kv cache and stores them to disk.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
-
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        """
-        Indicates whether this connector prefers KV blocks that hold KV data for all
-        layers, which can speed up KV data transfers. Defaults to False.
-        """
-        # Must be False so that drafter kv cache isn't merged with verifier's
-        return False
 
     @classmethod
     def _find_cache_kv_group_id(cls, kv_cache_config: "KVCacheConfig | None") -> int:
@@ -310,10 +303,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Block size must match the indexed buffer, else reads hit the wrong
         # slots. Raise (not assert) so the check survives `python -O`.
-        if self._block_size != self._kv_cache.shape[1]:
+        # Views are [num_blocks, num_heads, block_size, head_size], matching
+        # what extract_from_kv_cache() indexes.
+        if self._block_size != self._kv_cache.shape[2]:
             raise ValueError(
                 f"Hidden-states block-size mismatch: derived {self._block_size} "
-                f"but buffer block size is {self._kv_cache.shape[1]}; read slots "
+                f"but buffer block size is {self._kv_cache.shape[2]}; read slots "
                 "would be wrong (likely a hybrid block-size resolution bug)."
             )
 
@@ -596,7 +591,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
-            str: the required KV cache layout. e.g. HND, or NHD.
+            str: the required KV cache layout. e.g. HNC, or NHC.
             None if the connector does not require a specific layout.
         """
 
@@ -605,9 +600,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 "get_required_kvcache_layout should not be called "
                 "on the abstract base class"
             )
-        # NHD means we have (num_tokens, num_heads)
-        # HND means we have (num_heads, num_tokens)
-        # For now, we only support NHD layout since this keeps the
+        # LBNHC means we have (num_tokens, num_heads)
+        # LBHNC means we have (num_heads, num_tokens)
+        # For now, we only support LBNHC layout since this keeps the
         # hidden states for each token together in memory.
-        # HND is primarily used when sharding heads across devices.
-        return "NHD"
+        # LBHNC is primarily used when sharding heads across devices.
+        return "LBNHC"

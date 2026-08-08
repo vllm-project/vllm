@@ -42,8 +42,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
+#   7: Add block_strides
 #
-NIXL_CONNECTOR_VERSION: int = 6
+NIXL_CONNECTOR_VERSION: int = 7
 
 
 @dataclass
@@ -54,6 +55,7 @@ class NixlAgentMetadata:
     device_id: int
     num_blocks: int
     block_lens: list[int]
+    block_strides: list[int]
     kv_cache_layout: str
     block_size: int
     ssm_sizes: tuple[int, int]
@@ -123,7 +125,7 @@ def _get_speculative_compatibility_factors(
 
 
 def compute_nixl_compatibility_hash(
-    vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
+    vllm_config: VllmConfig, attn_backend_name: str
 ) -> str:
     """
     Compute compatibility hash for NIXL KV transfer.
@@ -168,7 +170,6 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
-        "cross_layers_blocks": cross_layers_blocks,
         "is_hma_enabled": is_hma_enabled,
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
     }

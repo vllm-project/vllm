@@ -32,6 +32,43 @@ KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
 OPS = [chunked_prefill_paged_decode, context_attention_fwd]
 
 
+def to_standardized_kv_cache(
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """[B, N, H, hs] -> the standardized [B, H, N, hs] the backends allocate."""
+    return (
+        k_cache.view(-1, block_size, num_kv_heads, head_size)
+        .permute(0, 2, 1, 3)
+        .contiguous(),
+        v_cache.view(-1, block_size, num_kv_heads, head_size)
+        .permute(0, 2, 1, 3)
+        .contiguous(),
+    )
+
+
+def kv_cache_for_op(
+    op, k_cache: torch.Tensor, v_cache: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Adapt the standardized [B, H, N, hs] cache to `op`'s contract.
+
+    `chunked_prefill_paged_decode` takes the standardized cache and derives the
+    x-packed views internally; `context_attention_fwd` is the lower-level entry
+    point and still takes those views directly.
+    """
+    if op is chunked_prefill_paged_decode:
+        return k_cache, v_cache
+    head_size = k_cache.shape[3]
+    x = math.gcd(16 // k_cache.element_size(), head_size)
+    return (
+        k_cache.unflatten(-1, (head_size // x, x)).permute(0, 1, 3, 2, 4),
+        v_cache.permute(0, 1, 3, 2),
+    )
+
+
 def create_causal_attention_mask_for_sdpa(
     query_lens: list[int],
     seq_lens: list[int],
@@ -208,20 +245,10 @@ def test_contexted_kv_attention(
             )
             cur_ctx += block_size
             block_id += 1
-    # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
-    k_cache = (
-        k_cache.view(-1, block_size, num_kv_heads, head_size // 8, 8)
-        .permute(0, 2, 3, 1, 4)
-        .contiguous()
+    k_cache, v_cache = to_standardized_kv_cache(
+        k_cache, v_cache, num_kv_heads, head_size, block_size
     )
-    # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
-    v_cache = (
-        v_cache.view(-1, block_size, num_kv_heads, head_size)
-        .permute(0, 2, 3, 1)
-        .contiguous()
-    )
+    k_cache_op, v_cache_op = kv_cache_for_op(op, k_cache, v_cache)
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
@@ -232,8 +259,8 @@ def test_contexted_kv_attention(
         v,
         output,
         kv_cache_dtype,
-        k_cache,
-        v_cache,
+        k_cache_op,
+        v_cache_op,
         block_table,
         b_start_loc,
         b_seq_len,
@@ -251,8 +278,8 @@ def test_contexted_kv_attention(
         v,
         output,
         kv_cache_dtype,
-        k_cache,
-        v_cache,
+        k_cache_op,
+        v_cache_op,
         block_table,
         b_start_loc,
         b_seq_len,
@@ -787,20 +814,10 @@ def test_contexted_kv_attention_alibi(
             )
             cur_ctx += block_size
             block_id += 1
-    # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
-    k_cache = (
-        k_cache.view(-1, block_size, num_kv_heads, head_size // 8, 8)
-        .permute(0, 2, 3, 1, 4)
-        .contiguous()
+    k_cache, v_cache = to_standardized_kv_cache(
+        k_cache, v_cache, num_kv_heads, head_size, block_size
     )
-    # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
-    v_cache = (
-        v_cache.view(-1, block_size, num_kv_heads, head_size)
-        .permute(0, 2, 3, 1)
-        .contiguous()
-    )
+    k_cache_op, v_cache_op = kv_cache_for_op(op, k_cache, v_cache)
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
@@ -811,8 +828,8 @@ def test_contexted_kv_attention_alibi(
         v,
         output,
         kv_cache_dtype,
-        k_cache,
-        v_cache,
+        k_cache_op,
+        v_cache_op,
         block_table,
         b_start_loc,
         b_seq_len,
@@ -830,8 +847,8 @@ def test_contexted_kv_attention_alibi(
         v,
         output,
         kv_cache_dtype,
-        k_cache,
-        v_cache,
+        k_cache_op,
+        v_cache_op,
         block_table,
         b_start_loc,
         b_seq_len,
