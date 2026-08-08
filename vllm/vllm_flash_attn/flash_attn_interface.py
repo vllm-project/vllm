@@ -423,6 +423,9 @@ def flash_attn_varlen_func(
             block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
             aux_tensor_leading_dims=aux_tensor_leading_dims,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
             output_scale=output_scale,
         )
     else:
