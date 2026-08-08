@@ -17,6 +17,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
+from vllm.v1.notifications import EngineNotification
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
 
@@ -254,6 +255,9 @@ class EngineCoreOutputs(
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
+
+    # array_like: field order is load-bearing for non-Python frontends.
+    engine_notifications: list[EngineNotification] | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:

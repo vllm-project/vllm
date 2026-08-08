@@ -16,6 +16,7 @@ from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.notifications import EngineNotification, take_worker_notifications
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -173,6 +174,10 @@ class WorkerBase:
 
     def list_loras(self) -> set[int]:
         raise NotImplementedError
+
+    def take_notifications(self) -> list["EngineNotification"]:
+        """Drain notifications published in this worker process."""
+        return take_worker_notifications() or []
 
     @property
     def vocab_size(self) -> int:
