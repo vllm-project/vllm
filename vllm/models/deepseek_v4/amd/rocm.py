@@ -372,6 +372,10 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuil
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    # Keep fused multi-step decode disabled until update_draft_decode_metadata()
+    # also refreshes the ROCm-specific ragged SWA indices and indptrs.
+    supports_draft_decode_metadata_update = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
