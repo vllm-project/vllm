@@ -288,6 +288,7 @@ def inkling_config() -> ParserEngineConfig:
         arg_converter=_inkling_arg_converter,
         stream_arg_deltas=True,
         tool_args_json=True,
+        arg_structural_chars=frozenset('{}[]":,'),
         strip_trailing_reasoning_whitespace=True,
         drop_whitespace_only_content_before_tools=True,
         strip_content_whitespace_with_tools=False,
