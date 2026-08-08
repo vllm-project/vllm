@@ -251,6 +251,32 @@ def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
     assert hit == 32
 
 
+def test_coordinator_revalidates_reconciled_partial_tail_key():
+    """A longer FA hit does not imply its reconciled partial key exists."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(32)),
+        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    hs = _hashes(4)
+    # FullAttention reaches token 64 via hs[3], while Mamba clips the joint
+    # hit to token 48 via hs[2]. FullAttention has no hs[2] object, so token
+    # 48 is not externally loadable; both groups do have token 32 via hs[1].
+    exists = {
+        (0, bytes(hs[1])),
+        (0, bytes(hs[3])),
+        (1, bytes(hs[1])),
+        (1, bytes(hs[2])),
+    }
+    cmap = ExternalCachedBlockPool(16, exists)
+
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
+
+    assert hit == 32
+
+
 # ----- store_mask -----
 
 
