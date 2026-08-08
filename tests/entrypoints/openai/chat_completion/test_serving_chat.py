@@ -2141,6 +2141,71 @@ async def test_tool_choice_validation_without_parser():
 
 
 @pytest.mark.asyncio
+async def test_tool_choice_validation_without_parser_harmony():
+    """Harmony models must also reject named/"required" tool choice with no parser.
+
+    Harmony renders tool syntax natively, so it was exempted from the tool
+    parser check entirely. But HarmonyParser only emits tool calls when a tool
+    parser is loaded, and nothing constrains generation to the tool schema
+    without one, so these requests used to be accepted and come back with an
+    empty `tool_calls` list instead of the guaranteed tool call.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    # No tool parser: enable_auto_tools=False and tool_parser=None.
+    serving_chat = _build_serving_chat(mock_engine)
+    assert serving_chat.online_renderer.use_harmony
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+    messages = [{"role": "user", "content": "What's the weather?"}]
+
+    for tool_choice in (
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ):
+        response = await serving_chat.create_chat_completion(
+            ChatCompletionRequest(
+                model=MODEL_NAME,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        )
+        assert isinstance(response, ErrorResponse)
+        assert "tool_choice" in response.error.message
+        assert "--tool-call-parser" in response.error.message
+
+    # "auto" remains best-effort on Harmony and must still be accepted.
+    auto_result = await serving_chat.render_chat_request(
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+        )
+    )
+    assert not isinstance(auto_result, ErrorResponse)
+
+
+@pytest.mark.asyncio
 async def test_streaming_n_gt1_independent_tool_parsers():
     """n>1 streaming must use independent parser instances
     and token-id histories per choice.
