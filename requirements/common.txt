@@ -6,7 +6,7 @@ numpy
 requests >= 2.26.0
 tqdm
 blake3
-py-cpuinfo
+py-cpuinfo2 ~= 10.1
 transformers >= 5.5.3
 huggingface_hub >= 1.26.0
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
