@@ -27,6 +27,11 @@ USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) >= version.parse("0
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
+# Number of prompt token ids used to prime the DecodeStream. Incremental
+# decoding only needs bounded left context, so priming with the full prompt
+# does O(prompt_len) work per request for no benefit.
+DETOKENIZATION_OFFSET = 32
+
 
 class IncrementalDetokenizer:
     def __init__(self):
@@ -177,12 +182,17 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
-        # Use native prefill to prime the decode stream with prompt tokens.
+        # Use the prompt's tail tokens to prime the decode stream.
         # Look up DecodeStream on the module so backend patches (e.g. the
         # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
         # are honored regardless of import order.
+        tail_ids = (
+            request.prompt_token_ids[-DETOKENIZATION_OFFSET:]
+            if request.prompt_token_ids
+            else None
+        )
         self.stream = tokenizers.decoders.DecodeStream(
-            ids=request.prompt_token_ids,
+            ids=tail_ids,
             skip_special_tokens=self.skip_special_tokens,
         )
 
