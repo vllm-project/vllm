@@ -319,6 +319,12 @@ class StreamingParserEngine:
             return self._emit_for_state(value)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
+            if not transition.passthrough_terminal_when_skipping_tools:
+                return [
+                    event
+                    for event in self._apply_transition(transition, value)
+                    if event.type != EventType.TEXT_CHUNK
+                ]
             if self.state == ParserState.MESSAGE_HEADER:
                 self.state = ParserState.CONTENT
                 self._message_header_buffer = ""

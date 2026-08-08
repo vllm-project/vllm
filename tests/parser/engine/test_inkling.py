@@ -19,6 +19,8 @@ from tests.parser.engine.streaming_helpers import (
     collect_function_name,
     collect_tool_arguments,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.inkling import InklingParser, _inkling_arg_converter
 from vllm.parser.parser_manager import ParserManager
@@ -134,6 +136,50 @@ def _stream_text_only(parser, request, text: str, chunk_size: int):
     if finish is not None:
         results.append((finish, text))
     return results
+
+
+def _stream_delegating(parser, request, text: str):
+    tokens = _tokenize(text)
+    results = []
+    prompt_token_ids = [_TML_VOCAB[END_MESSAGE], _TML_VOCAB[MSG_MODEL]]
+    for i, (token_id, token_text) in enumerate(tokens):
+        results.append(
+            parser.parse_delta(
+                token_text,
+                [token_id],
+                request,
+                prompt_token_ids=prompt_token_ids if i == 0 else None,
+                finished=i == len(tokens) - 1,
+            )
+        )
+    return results
+
+
+def _make_delegating_parser(
+    mock_tokenizer,
+    tools=None,
+    reasoning_effort="none",
+):
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="inkling",
+        reasoning_parser_name="inkling",
+        enable_auto_tools=True,
+    )
+    return parser_cls(
+        mock_tokenizer,
+        tools,
+        chat_template_kwargs={"reasoning_effort": reasoning_effort},
+    )
+
+
+def _make_reasoning_only_parser(mock_tokenizer, reasoning_effort="none"):
+    parser_cls = ParserManager.get_parser(
+        reasoning_parser_name="inkling",
+    )
+    return parser_cls(
+        mock_tokenizer,
+        chat_template_kwargs={"reasoning_effort": reasoning_effort},
+    )
 
 
 def _collect_reasoning(results) -> str:
@@ -515,11 +561,19 @@ class TestToolCallFiltering:
 
 class TestRegisteredAdapters:
     def test_adapters_resolve(self):
+        from vllm.parser.engine.adapters import (
+            ParserEngineReasoningAdapter,
+            ParserEngineToolAdapter,
+        )
         from vllm.reasoning import ReasoningParserManager
         from vllm.tool_parsers import ToolParserManager
 
         reasoning_cls = ReasoningParserManager.get_reasoning_parser("inkling")
         tool_cls = ToolParserManager.get_tool_parser("inkling")
+        assert ParserEngineReasoningAdapter.forward_delegating_context is False
+        assert ParserEngineToolAdapter.forward_delegating_context is False
+        assert reasoning_cls.forward_delegating_context is True
+        assert tool_cls.forward_delegating_context is True
         assert reasoning_cls._parser_engine_cls is InklingParser
         assert tool_cls._parser_engine_cls is InklingParser
         assert tool_cls.supports_required_and_named is False
@@ -533,3 +587,172 @@ class TestRegisteredAdapters:
         assert result.tools_called
         assert result.tool_calls[0].function.name == "f"
         assert json.loads(result.tool_calls[0].function.arguments) == {"a": 1}
+
+    @pytest.mark.parametrize("suffix", [END_MESSAGE, END_SAMPLING])
+    @pytest.mark.parametrize(
+        ("text", "expected_reasoning", "expected_content"),
+        [
+            ("plain response", "", "plain response"),
+            (f"{THINK_START}brief thought", "brief thought", ""),
+        ],
+    )
+    def test_reasoning_only_strips_block_end_non_streaming(
+        self,
+        mock_tokenizer,
+        mock_request,
+        suffix,
+        text,
+        expected_reasoning,
+        expected_content,
+    ):
+        parser = _make_reasoning_only_parser(mock_tokenizer)
+
+        reasoning, content, tools = parser.parse(text + suffix, mock_request)
+
+        assert (reasoning or "") == expected_reasoning
+        assert (content or "") == expected_content
+        assert not tools
+
+    @pytest.mark.parametrize("suffix", [END_MESSAGE, END_SAMPLING])
+    @pytest.mark.parametrize(
+        ("text", "expected_reasoning", "expected_content"),
+        [
+            ("plain response", "", "plain response"),
+            (f"{THINK_START}brief thought", "brief thought", ""),
+        ],
+    )
+    def test_reasoning_only_strips_block_end_streaming(
+        self,
+        mock_tokenizer,
+        mock_request,
+        suffix,
+        text,
+        expected_reasoning,
+        expected_content,
+    ):
+        parser = _make_reasoning_only_parser(mock_tokenizer)
+
+        results = _stream_delegating(parser, mock_request, text + suffix)
+
+        reasoning = "".join(
+            result.reasoning or "" for result in results if result is not None
+        )
+        content = "".join(
+            result.content or "" for result in results if result is not None
+        )
+        assert reasoning == expected_reasoning
+        assert content == expected_content
+
+    @pytest.mark.parametrize(
+        "reasoning_effort",
+        ["none", "minimal", 0, 0.0, 0.004, 0.099, 0.1],
+    )
+    @pytest.mark.parametrize("suffix", [END_MESSAGE, ""])
+    def test_plain_text_mode_streams_with_or_without_end_marker(
+        self, mock_tokenizer, mock_request, reasoning_effort, suffix
+    ):
+        parser = _make_delegating_parser(
+            mock_tokenizer,
+            reasoning_effort=reasoning_effort,
+        )
+        content = "plain response"
+        results = _stream_delegating(parser, mock_request, content + suffix)
+
+        assert [result.content for result in results if result] == list(content)
+
+    @pytest.mark.parametrize(
+        "reasoning_effort",
+        [
+            False,
+            -0.004,
+            0.994,
+            -(10**400),
+            10**400,
+            float("nan"),
+            float("inf"),
+        ],
+    )
+    def test_invalid_reasoning_effort_does_not_enable_plain_text_mode(
+        self, mock_tokenizer, reasoning_effort
+    ):
+        parser = InklingParser(
+            mock_tokenizer,
+            chat_template_kwargs={"reasoning_effort": reasoning_effort},
+        )
+
+        assert parser.parser_engine_config.initial_state == ParserState.MESSAGE_HEADER
+
+    @pytest.mark.parametrize("reasoning_effort", [0.004, 0.099])
+    def test_rounded_plain_text_mode_non_streaming(
+        self, mock_tokenizer, mock_request, reasoning_effort
+    ):
+        parser = _make_delegating_parser(
+            mock_tokenizer,
+            reasoning_effort=reasoning_effort,
+        )
+
+        reasoning, content, tools = parser.parse("plain response", mock_request)
+
+        assert reasoning is None
+        assert content == "plain response"
+        assert not tools
+
+    @pytest.mark.parametrize("suffix", [END_MESSAGE, ""])
+    def test_plain_text_after_reasoning(self, mock_tokenizer, mock_request, suffix):
+        parser = _make_delegating_parser(
+            mock_tokenizer,
+            reasoning_effort="minimal",
+        )
+        text = f"{THINK_START}brief thought{END_MESSAGE}{MSG_MODEL}final answer{suffix}"
+        results = _stream_delegating(parser, mock_request, text)
+
+        assert (
+            "".join(
+                result.reasoning for result in results if result and result.reasoning
+            )
+            == "brief thought"
+        )
+        assert (
+            "".join(result.content for result in results if result and result.content)
+            == "final answer"
+        )
+
+    def test_plain_text_mode_stays_disabled_with_tools(
+        self, mock_tokenizer, mock_request
+    ):
+        configured_tools = [{"type": "function", "function": {"name": "get_weather"}}]
+        parser = _make_delegating_parser(
+            mock_tokenizer,
+            configured_tools,
+        )
+        text = "get_weather" + _tool_block("get_weather", '{"city":"SF"}')
+        reasoning, content, tools = parser.parse(
+            text,
+            mock_request,
+            enable_auto_tools=True,
+        )
+
+        assert reasoning is None
+        assert content is None
+        assert tools[0].name == "get_weather"
+
+    def test_skip_tool_transition_clears_message_header(self, mock_tokenizer):
+        parser = InklingParser(
+            mock_tokenizer,
+            chat_template_kwargs={"reasoning_effort": "high"},
+            _delegating_tool_parser_enabled=False,
+        )
+        parser.skip_tool_parsing = True
+
+        events = parser._engine.feed(
+            f"first{END_MESSAGE}{MSG_MODEL}second",
+            [],
+        )
+        events.extend(parser._engine.finish())
+
+        assert (
+            "".join(
+                event.value for event in events if event.type == EventType.TEXT_CHUNK
+            )
+            == "second"
+        )

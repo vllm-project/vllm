@@ -172,7 +172,11 @@ def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 @functools.cache
-def inkling_config() -> ParserEngineConfig:
+def inkling_config(
+    *,
+    plain_text_mode: bool = False,
+    preserve_block_end_for_tool_parser: bool = True,
+) -> ParserEngineConfig:
     terminals = {
         "MSG_MODEL": MESSAGE_MODEL,
         "TEXT_START": CONTENT_TEXT,
@@ -183,15 +187,18 @@ def inkling_config() -> ParserEngineConfig:
         "TOOL_TEXT": CONTENT_INVOKE_TOOL_TEXT,
         "TOOL_ERROR": CONTENT_TOOL_ERROR,
     }
+    message_start_state = (
+        ParserState.CONTENT if plain_text_mode else ParserState.MESSAGE_HEADER
+    )
     transitions: dict[tuple[ParserState, str], Transition] = {
         # ── Between blocks / inside a text block ──────────────────────
         (ParserState.CONTENT, "MSG_MODEL"): Transition(
-            ParserState.MESSAGE_HEADER,
+            message_start_state,
             (),
         ),
         (ParserState.CONTENT, "TEXT_START"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,) if plain_text_mode else (),
         ),
         (ParserState.CONTENT, "THINK_START"): Transition(
             ParserState.REASONING,
@@ -213,7 +220,7 @@ def inkling_config() -> ParserEngineConfig:
         # The optional function name between the model-role and content-kind
         # markers is metadata, not visible assistant content.
         (ParserState.MESSAGE_HEADER, "MSG_MODEL"): Transition(
-            ParserState.MESSAGE_HEADER,
+            message_start_state,
             (),
         ),
         (ParserState.MESSAGE_HEADER, "TEXT_START"): Transition(
@@ -256,11 +263,17 @@ def inkling_config() -> ParserEngineConfig:
     for end in ("THINK_END", "END_SAMPLING"):
         transitions[(ParserState.CONTENT, end)] = Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,) if plain_text_mode else (),
+            passthrough_terminal_when_skipping_tools=(
+                preserve_block_end_for_tool_parser
+            ),
         )
         transitions[(ParserState.REASONING, end)] = Transition(
             ParserState.CONTENT,
             (EventType.REASONING_END,),
+            passthrough_terminal_when_skipping_tools=(
+                preserve_block_end_for_tool_parser
+            ),
         )
         transitions[(ParserState.TOOL_ARGS, end)] = Transition(
             ParserState.CONTENT,
@@ -269,14 +282,20 @@ def inkling_config() -> ParserEngineConfig:
         transitions[(ParserState.MESSAGE_HEADER, end)] = Transition(
             ParserState.CONTENT,
             (EventType.TEXT_CHUNK,),
+            passthrough_terminal_when_skipping_tools=(
+                preserve_block_end_for_tool_parser
+            ),
         )
 
     return ParserEngineConfig(
         name="inkling",
         # Normal generation continues after a prompt-prefilled
-        # `<|message_model|>`. Non-streaming parsing receives only the generated
-        # suffix, so begin in the corresponding message-header state as well.
-        initial_state=ParserState.MESSAGE_HEADER,
+        # `<|message_model|>`. With tools disabled, none/minimal reasoning emits
+        # untyped text directly; otherwise the suffix starts in the message
+        # header where an optional function name must remain hidden.
+        initial_state=(
+            ParserState.CONTENT if plain_text_mode else ParserState.MESSAGE_HEADER
+        ),
         terminals=terminals,
         # Inkling content-kind markers are the grammar. When the engine is
         # used through DelegatingParser, the reasoning pass can hand the tool
@@ -304,7 +323,41 @@ class InklingParser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
-        kwargs.setdefault("parser_engine_config", inkling_config())
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        reasoning_effort = chat_kwargs.get("reasoning_effort")
+        prompt_has_tools = chat_kwargs.get("_vllm_prompt_has_tools", bool(tools))
+        normalized_effort: object
+        if reasoning_effort == "none":
+            normalized_effort = 0.0
+        elif reasoning_effort == "minimal":
+            normalized_effort = 0.1
+        elif (
+            not isinstance(reasoning_effort, bool)
+            and isinstance(reasoning_effort, (int, float))
+            and 0.0 <= reasoning_effort <= 0.99
+        ):
+            # Match the model-visible value rendered by
+            # ``inkling_encoding._thinking_effort_text``.
+            normalized_effort = float(f"{float(reasoning_effort):.2f}")
+        else:
+            normalized_effort = reasoning_effort
+        self._plain_text_mode = (
+            not prompt_has_tools
+            and not isinstance(normalized_effort, bool)
+            and isinstance(normalized_effort, (int, float))
+            and normalized_effort in (0.0, 0.1)
+        )
+        preserve_block_end_for_tool_parser = kwargs.pop(
+            "_delegating_tool_parser_enabled",
+            True,
+        )
+        kwargs.setdefault(
+            "parser_engine_config",
+            inkling_config(
+                plain_text_mode=self._plain_text_mode,
+                preserve_block_end_for_tool_parser=(preserve_block_end_for_tool_parser),
+            ),
+        )
         super().__init__(tokenizer, tools, **kwargs)
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
@@ -330,7 +383,12 @@ class InklingParser(ParserEngine):
                 self._streaming_initialized = True
                 return
             if token_id == model_id:
-                self._engine.reset(initial_state=ParserState.MESSAGE_HEADER)
+                initial_state = (
+                    ParserState.CONTENT
+                    if self._plain_text_mode
+                    else ParserState.MESSAGE_HEADER
+                )
+                self._engine.reset(initial_state=initial_state)
                 self._streaming_initialized = True
                 return
             if token_id in special_ids:

@@ -68,7 +68,7 @@ from vllm.parser.seed_oss import SeedOssParser
 (
     InklingParserReasoningAdapter,
     InklingParserToolAdapter,
-) = make_adapters(InklingParser)
+) = make_adapters(InklingParser, forward_delegating_context=True)
 
 (
     MistralParserReasoningAdapter,

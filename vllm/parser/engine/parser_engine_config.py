@@ -40,6 +40,8 @@ class Transition:
     next_state: ParserState
     events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
+    # Preserve structural marker text for a downstream tool-parsing pass.
+    passthrough_terminal_when_skipping_tools: bool = True
 
 
 @dataclass(frozen=True)

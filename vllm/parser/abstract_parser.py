@@ -121,11 +121,30 @@ class Parser:
         self._reasoning_parser: ReasoningParser | None = None
         self._tool_parser: ToolParser | None = None
         if self.__class__.reasoning_parser_cls is not None:
-            self._reasoning_parser = self.__class__.reasoning_parser_cls(
-                tokenizer, *args, model_config=model_config, **kwargs
-            )
+            reasoning_parser_cls = self.__class__.reasoning_parser_cls
+            if getattr(reasoning_parser_cls, "forward_delegating_context", False):
+                # Engine adapters may preserve structural markers for a
+                # downstream tool-parsing pass when one is configured.
+                self._reasoning_parser = reasoning_parser_cls(
+                    tokenizer,
+                    *args,
+                    tools=tools,
+                    model_config=model_config,
+                    _delegating_tool_parser_enabled=(
+                        self.__class__.tool_parser_cls is not None
+                    ),
+                    **kwargs,
+                )
+            else:
+                self._reasoning_parser = reasoning_parser_cls(
+                    tokenizer, *args, model_config=model_config, **kwargs
+                )
         if self.__class__.tool_parser_cls is not None:
-            self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
+            tool_parser_cls = self.__class__.tool_parser_cls
+            if getattr(tool_parser_cls, "forward_delegating_context", False):
+                self._tool_parser = tool_parser_cls(tokenizer, tools, **kwargs)
+            else:
+                self._tool_parser = tool_parser_cls(tokenizer, tools)
 
         self._engine_based = (
             self._reasoning_parser is None

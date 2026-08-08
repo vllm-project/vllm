@@ -43,6 +43,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     _parser_engine_cls: type[ParserEngine]
     engine_based_streaming: bool = True
+    forward_delegating_context: bool = False
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs) -> None:
         super().__init__(tokenizer, *args, **kwargs)
@@ -138,6 +139,7 @@ class ParserEngineToolAdapter(ToolParser):
 
     _parser_engine_cls: type[ParserEngine]
     engine_based_streaming: bool = True
+    forward_delegating_context: bool = False
 
     def __init__(
         self,
@@ -192,16 +194,24 @@ class ParserEngineToolAdapter(ToolParser):
 
 def make_adapters(
     parser_engine_cls: type[ParserEngine],
+    *,
+    forward_delegating_context: bool = False,
 ) -> tuple[type[ParserEngineReasoningAdapter], type[ParserEngineToolAdapter]]:
     reasoning_adapter = type(
         f"{parser_engine_cls.__name__}ReasoningAdapter",
         (ParserEngineReasoningAdapter,),
-        {"_parser_engine_cls": parser_engine_cls},
+        {
+            "_parser_engine_cls": parser_engine_cls,
+            "forward_delegating_context": forward_delegating_context,
+        },
     )
     tool_adapter = type(
         f"{parser_engine_cls.__name__}ToolAdapter",
         (ParserEngineToolAdapter,),
-        {"_parser_engine_cls": parser_engine_cls},
+        {
+            "_parser_engine_cls": parser_engine_cls,
+            "forward_delegating_context": forward_delegating_context,
+        },
     )
     # Let the serving layer find the adapters and call adjust_request(),
     # which sets skip_special_tokens=False for the detokenizer.
