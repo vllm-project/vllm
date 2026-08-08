@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used to clamp
 # zero draws before the flipped Gumbel transform below.
@@ -82,6 +82,80 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
 
 
 @triton.jit
+def _murmur3_rotl32(value, shift: tl.constexpr):
+    return (value << shift) | (value >> (32 - shift))
+
+
+@triton.jit
+def _murmur3_mix(h, key):
+    key *= 0xCC9E2D51
+    key = _murmur3_rotl32(key, 15)
+    key *= 0x1B873593
+    h ^= key
+    h = _murmur3_rotl32(h, 13)
+    return h * 5 + 0xE6546B64
+
+
+@triton.jit
+def _murmur3_fmix32(h):
+    h ^= h >> 16
+    h *= 0x85EBCA6B
+    h ^= h >> 13
+    h *= 0xC2B2AE35
+    return h ^ (h >> 16)
+
+
+@triton.jit
+def murmur3_hash32(seed, pos, offset, domain: tl.constexpr = 0):
+    seed = seed.to(tl.int64)
+    pos = pos.to(tl.int64)
+    offset = offset.to(tl.uint32)
+    h = offset ^ offset
+    h ^= domain
+    h = _murmur3_mix(h, (seed & 0xFFFFFFFF).to(tl.uint32))
+    h = _murmur3_mix(h, ((seed >> 32) & 0xFFFFFFFF).to(tl.uint32))
+    h = _murmur3_mix(h, (pos & 0xFFFFFFFF).to(tl.uint32))
+    h = _murmur3_mix(h, offset)
+    return _murmur3_fmix32(h ^ 16)
+
+
+@triton.jit
+def murmur3_uniform32(seed, pos, offset):
+    random24 = murmur3_hash32(seed, pos, offset) >> 8
+    # random24 fits in signed int32. The intermediate cast also avoids a
+    # uint32-to-float conversion that is unsupported by Ascend BiShengIR.
+    return (random24.to(tl.int32).to(tl.float32) + 0.5) * 5.960464477539063e-08
+
+
+@triton.jit
+def murmur3_uniform64(seed, pos, offset):
+    lo = murmur3_hash32(seed, pos, offset).to(tl.uint64)
+    hi = murmur3_hash32(seed, pos, offset, domain=0x9E3779B9).to(tl.uint64)
+    random53 = ((hi << 32) | lo) >> 11
+    return (random53.to(tl.float64) + 0.5) * 1.1102230246251565e-16
+
+
+@triton.jit
+def _log1p_neg_stable(value):
+    # Preserve precision for the positive Gumbel tail without relying on a
+    # backend-specific libdevice log1p. The degree-8 series has absolute error
+    # below 6e-7 on [0, 0.25]; subtraction is well-conditioned elsewhere for
+    # the part of the distribution that can win the argmax.
+    polynomial = 1.0 / 8.0
+    polynomial = 1.0 / 7.0 + value * polynomial
+    polynomial = 1.0 / 6.0 + value * polynomial
+    polynomial = 1.0 / 5.0 + value * polynomial
+    polynomial = 1.0 / 4.0 + value * polynomial
+    polynomial = 1.0 / 3.0 + value * polynomial
+    polynomial = 1.0 / 2.0 + value * polynomial
+    polynomial = 1.0 + value * polynomial
+    series = -value * polynomial
+
+    direct = tl.log(tl.maximum(1.0 - value, 5.960464477539063e-08))
+    return tl.where(value < 0.25, series, direct)
+
+
+@triton.jit
 def gumbel_block_argmax(
     logits,
     block,
@@ -133,23 +207,21 @@ def gumbel_block_argmax(
     if USE_FP64:
         logits = logits.to(tl.float64)
     if temp != 0.0:
-        # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
         pos = tl.load(pos_ptr + token_idx)
-        gumbel_seed = tl.randint(seed, pos)
 
         if USE_FP64:
-            u = tl_rand64(gumbel_seed, block, includes_zero=False)
+            u = murmur3_uniform64(seed, pos, block)
             gumbel_noise = -tl.log(-tl.log(u))
         else:
-            u = tl_rand32(gumbel_seed, block, includes_zero=False)
+            u = murmur3_uniform32(seed, pos, block)
             # Draw the large-noise tail (which decides the argmax winner) from u -> 0,
             # where fp32 has fine resolution, instead of u -> 1, where fp32 spacing is
             # ~2**-24. The naive `-log(-log(u))` puts the winning tail at u -> 1,
             # hard-capping the noise at ~16.6 and coarsely quantizing it; using
             # `log1p(-u)` == `log(1 - u)` keeps the tail in the well-resolved region.
             # Note `1 - u` would lose precision for small u, so `log1p` is required.
-            gumbel_noise = -tl.log(-tldevice.log1p(-u))
+            gumbel_noise = -tl.log(-_log1p_neg_stable(u))
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
