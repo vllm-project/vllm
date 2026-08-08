@@ -357,6 +357,34 @@ def test_kimi_k3_auto_strict_allows_response_only(sample_tools_strict):
     assert _is_grammar_accept_string(grammar, _k3_response("Just answering."))
 
 
+# The response body must not be able to host channel markers or the terminator:
+# an unbounded any_text turns tool_choice="required" into a no-op (the model can
+# type the tool call as prose and stop). See _k3_response_prefix.
+@pytest.mark.parametrize(
+    "body",
+    [
+        # tools-open marker typed as response text, response never closed
+        _K3_RESPONSE_OPEN
+        + "I will call the tool."
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris"))),
+        # tools-open marker as prose, then a well-formed call
+        _K3_RESPONSE_OPEN
+        + "calling "
+        + _K3_TOOLS_OPEN
+        + _K3_RESPONSE_CLOSE
+        + _k3_tools(_k3_call("get_weather", _k3_arg("city", "string", "Paris"))),
+        # end-of-message token typed as response text
+        _K3_RESPONSE_OPEN + "bye<|end_of_msg|>",
+        # turn trailer smuggled into the body
+        _K3_RESPONSE_OPEN + "done<|close|>message<|sep|>",
+    ],
+)
+def test_kimi_k3_response_body_rejects_channel_markers(body: str):
+    assert not _is_grammar_accept_string(
+        _k3_grammar("required"), body, require_termination=False
+    )
+
+
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_named_tool_choice(
     model: str,

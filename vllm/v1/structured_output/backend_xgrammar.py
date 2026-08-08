@@ -26,10 +26,50 @@ from vllm.v1.structured_output.utils import (
 
 if TYPE_CHECKING:
     import xgrammar as xgr
+
+    from vllm.config import VllmConfig
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
+
+
+def _as_token_id_list(value: Any) -> list[int]:
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [v for v in value if isinstance(v, int)]
+    return []
+
+
+def engine_stop_token_ids(vllm_config: "VllmConfig", tokenizer: Any) -> list[int]:
+    """Stop tokens the engine actually stops on, for xgrammar to guard.
+
+    xgrammar infers its stop token from the tokenizer, but the engine stops on
+    the model's ``eos_token_id`` (``generation_config.json`` / ``config.json``),
+    which can be a different token: Kimi K3 has ``eos_token`` ``[EOS]`` while
+    the model terminates the turn with ``<|end_of_msg|>``. When the two
+    disagree, the grammar guards the wrong id -- the real terminator is then
+    matched as ordinary text (so a grammar that is not yet satisfied cannot
+    hold generation back) while the engine's terminator stays masked at
+    completion. Guard the union so neither id can end a request mid-grammar.
+    """
+    stop_token_ids = set(_as_token_id_list(getattr(tokenizer, "eos_token_id", None)))
+    model_config = vllm_config.model_config
+    for hf_config in (
+        getattr(model_config, "hf_text_config", None),
+        getattr(model_config, "hf_config", None),
+    ):
+        stop_token_ids.update(
+            _as_token_id_list(getattr(hf_config, "eos_token_id", None))
+        )
+    try:
+        generation_config = model_config.try_get_generation_config()
+    except Exception:
+        logger.warning("Could not read the generation config for stop token ids.")
+    else:
+        stop_token_ids.update(_as_token_id_list(generation_config.get("eos_token_id")))
+    return sorted(stop_token_ids)
 
 
 @dataclass
@@ -61,6 +101,7 @@ class XgrammarBackend(StructuredOutputBackend):
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 self.tokenizer,
                 vocab_size=self.vocab_size,
+                stop_token_ids=engine_stop_token_ids(self.vllm_config, self.tokenizer),
             )
         self.compiler = xgr.GrammarCompiler(
             tokenizer_info,
