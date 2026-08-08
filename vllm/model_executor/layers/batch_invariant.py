@@ -14,6 +14,12 @@ from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+# Upper bound on how many column-splits a single log_softmax row is reduced
+# across. Depends only on the vocab width (n_cols), never on the batch, so the
+# per-row reduction order stays batch-invariant while small-batch decode still
+# occupies many SMs.
+_LOG_SOFTMAX_MAX_SPLITS = 128
+
 
 def _matmul_launch_metadata(
     grid: Callable[..., Any], kernel: Any, args: dict[str, Any]
@@ -339,65 +345,102 @@ def bmm_kernel(
 
 
 @triton.jit
-def _log_softmax_kernel(
+def _log_softmax_stats_kernel(
     input_ptr,
-    output_ptr,
+    max_ptr,
+    sumexp_ptr,
     input_row_stride,
-    output_row_stride,
+    stats_row_stride,
     n_cols,
+    n_splits,
     BLOCK_SIZE: tl.constexpr,
 ):
+    """Reduce one column-split of one row to a partial (max, sum_exp).
+
+    Each program owns row ``program_id(0)`` and split ``program_id(1)``. The
+    split covers the fixed column range ``[split_idx * split_cols, ...)`` where
+    ``split_cols`` depends only on ``n_cols`` and ``n_splits`` (never on the
+    number of rows), so a row is always partitioned identically regardless of
+    how many rows share the launch. The partial sum_exp is rescaled to the
+    row's global max in the finalize kernel, so per-split reduction order is
+    fixed and batch-invariant.
     """
-    Compute log_softmax along the last dimension of a 2D tensor.
-    Each block handles one row of the input tensor.
-    """
-    # Get the row index for this block
     row_idx = tl.program_id(0).to(tl.int64)
+    split_idx = tl.program_id(1)
 
-    # Compute base pointers for input and output rows
+    split_cols = tl.cdiv(n_cols, n_splits)
+    col_start = split_idx * split_cols
+    col_end = min(col_start + split_cols, n_cols)
+
     row_start_ptr = input_ptr + row_idx * input_row_stride
-    output_row_start_ptr = output_ptr + row_idx * output_row_stride
 
-    # Step 1: Find maximum value in the row for numerical stability
     max_val = -float("inf")
-    for col_offset in range(0, n_cols, BLOCK_SIZE):
+    for col_offset in range(col_start, col_end, BLOCK_SIZE):
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
-        mask = col_idx < n_cols
-
-        # Load values
+        mask = col_idx < col_end
         vals = tl.load(row_start_ptr + col_idx, mask=mask, other=-float("inf"))
-
-        # Update maximum
         max_val = tl.max(tl.maximum(vals, max_val))
 
-    # Step 2: Compute sum of exp(x - max_val)
+    # Local sum of exp(x - local_max); rescaled to the global max downstream.
     sum_exp = 0.0
-    for col_offset in range(0, n_cols, BLOCK_SIZE):
+    for col_offset in range(col_start, col_end, BLOCK_SIZE):
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
-        mask = col_idx < n_cols
-
-        # Load values
-        vals = tl.load(row_start_ptr + col_idx, mask=mask, other=0.0)
-
-        # Compute exp(x - max_val) and accumulate
+        mask = col_idx < col_end
+        vals = tl.load(row_start_ptr + col_idx, mask=mask, other=-float("inf"))
         exp_vals = tl.exp(vals - max_val)
         sum_exp += tl.sum(tl.where(mask, exp_vals, 0.0))
 
-    # Compute log(sum_exp)
+    # An empty split (col_start >= n_cols) contributes max=-inf, sum_exp=0.
+    sum_exp = tl.where(max_val == -float("inf"), 0.0, sum_exp)
+
+    stats_offset = row_idx * stats_row_stride + split_idx
+    tl.store(max_ptr + stats_offset, max_val)
+    tl.store(sumexp_ptr + stats_offset, sum_exp)
+
+
+@triton.jit
+def _log_softmax_finalize_kernel(
+    input_ptr,
+    output_ptr,
+    max_ptr,
+    sumexp_ptr,
+    input_row_stride,
+    output_row_stride,
+    stats_row_stride,
+    n_cols,
+    n_splits,
+    BLOCK_SIZE: tl.constexpr,
+    SPLIT_BLOCK: tl.constexpr,
+):
+    """Combine per-split partials and write log_softmax for one row.
+
+    The combine walks splits in fixed index order (0..n_splits) with a single
+    fp32 accumulator, so the reduction order depends only on ``n_splits`` (a
+    function of ``n_cols``) and never on the batch.
+    """
+    row_idx = tl.program_id(0).to(tl.int64)
+    stats_row_ptr = max_ptr + row_idx * stats_row_stride
+    sumexp_row_ptr = sumexp_ptr + row_idx * stats_row_stride
+
+    split_ids = tl.arange(0, SPLIT_BLOCK)
+    split_mask = split_ids < n_splits
+    split_max = tl.load(stats_row_ptr + split_ids, mask=split_mask, other=-float("inf"))
+    global_max = tl.max(split_max)
+
+    # Rescale each split's local sum_exp to the global max, then reduce in a
+    # fixed split order. exp(local_max - global_max) is 0 for empty splits.
+    split_sumexp = tl.load(sumexp_row_ptr + split_ids, mask=split_mask, other=0.0)
+    rescaled = split_sumexp * tl.exp(split_max - global_max)
+    sum_exp = tl.sum(tl.where(split_mask, rescaled, 0.0))
     log_sum_exp = tl.log(sum_exp)
 
-    # Step 3: Compute final log_softmax values: x - max_val - log_sum_exp
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
     for col_offset in range(0, n_cols, BLOCK_SIZE):
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
         mask = col_idx < n_cols
-
-        # Load values
         vals = tl.load(row_start_ptr + col_idx, mask=mask)
-
-        # Compute log_softmax
-        output = vals - max_val - log_sum_exp
-
-        # Store results
+        output = vals - global_max - log_sum_exp
         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
 
 
@@ -428,18 +471,49 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
     # Allocate output tensor
     output = torch.empty_like(input_2d)
 
-    # Choose block size based on the number of columns
     BLOCK_SIZE = 1024
 
-    # Launch kernel with one block per row
-    grid = (n_rows,)
-    _log_softmax_kernel[grid](
+    # Split each row's reduction across the column dimension so rows with few
+    # tokens (decode) still occupy many SMs instead of one program per row. The
+    # split count depends only on n_cols, so a row is partitioned and reduced in
+    # an identical, batch-independent order — preserving batch invariance.
+    n_blocks = triton.cdiv(n_cols, BLOCK_SIZE)
+    n_splits = min(n_blocks, _LOG_SOFTMAX_MAX_SPLITS)
+
+    if n_splits <= 1:
+        # Single split degenerates to one program per row; combine in-kernel.
+        n_splits = 1
+
+    max_partials = torch.empty(
+        (n_rows, n_splits), dtype=torch.float32, device=input_2d.device
+    )
+    sumexp_partials = torch.empty(
+        (n_rows, n_splits), dtype=torch.float32, device=input_2d.device
+    )
+
+    _log_softmax_stats_kernel[(n_rows, n_splits)](
+        input_2d,
+        max_partials,
+        sumexp_partials,
+        input_2d.stride(0),
+        max_partials.stride(0),
+        n_cols,
+        n_splits,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    _log_softmax_finalize_kernel[(n_rows,)](
         input_2d,
         output,
+        max_partials,
+        sumexp_partials,
         input_2d.stride(0),
         output.stride(0),
+        max_partials.stride(0),
         n_cols,
+        n_splits,
         BLOCK_SIZE=BLOCK_SIZE,
+        SPLIT_BLOCK=triton.next_power_of_2(n_splits),
     )
     # Reshape output back to original shape
     return output.reshape(original_shape)
