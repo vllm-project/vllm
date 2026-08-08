@@ -11,10 +11,7 @@ from torch import fx, nn
 from transformers.activations import ACT2CLS
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import (
-    _ACTIVATION_AND_MUL_REGISTRY,
-    get_act_and_mul_fn,
-)
+from vllm.model_executor.layers.activation import _ACTIVATION_AND_MUL_REGISTRY
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.models.transformers.fusers.base import StackedFuser
 from vllm.model_executor.models.transformers.fx_utils import (
@@ -26,6 +23,7 @@ from vllm.model_executor.models.transformers.fx_utils import (
     replace_expr,
     single_self_call,
 )
+from vllm.model_executor.models.transformers.layer_registry import get_act_and_mul_fn
 from vllm.model_executor.models.transformers.utils import (
     log_replacement,
     replace_linear_class,
