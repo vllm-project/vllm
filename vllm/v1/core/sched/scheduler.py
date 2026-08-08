@@ -2382,7 +2382,9 @@ class Scheduler(SchedulerInterface):
         if not self.defer_block_free or fence_seq <= self.processed_step_seq:
             self.kv_cache_manager.block_pool.free_blocks(blocks)
             return
-        self.deferred_frees.append((fence_seq, blocks[::-1]))
+        # The immediate path above frees these as-is, so enqueue them as-is:
+        # the drain no longer reverses.
+        self.deferred_frees.append((fence_seq, blocks))
 
     def _drain_deferred_frees(self):
         """Return deferred blocks whose fence step has completed.
@@ -2396,8 +2398,9 @@ class Scheduler(SchedulerInterface):
             if fence > self.processed_step_seq:
                 break
             _, blocks = self.deferred_frees.popleft()
-            # Free in reverse order so that the tail blocks are evicted first.
-            self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+            # Already in eviction order (reversed per KV cache group by
+            # `pop_blocks_for_free`), so free as-is.
+            self.kv_cache_manager.block_pool.free_blocks(blocks)
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
