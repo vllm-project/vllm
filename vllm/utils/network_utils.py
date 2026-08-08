@@ -30,6 +30,42 @@ def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
             sock.close(linger=0)
 
 
+def get_non_loopback_ip_addresses() -> list[str]:
+    """Return routable-looking local IPs for diagnostics.
+
+    This is intentionally diagnostic only. ``get_ip()`` keeps the existing
+    address selection behavior, while callers can use this list to explain
+    ambiguous multi-NIC environments to users.
+    """
+    addresses: list[str] = []
+    seen: set[str] = set()
+
+    for addr_infos in psutil.net_if_addrs().values():
+        for addr_info in addr_infos:
+            if addr_info.family not in (socket.AF_INET, socket.AF_INET6):
+                continue
+
+            address = addr_info.address.split("%", 1)[0]
+            try:
+                ip_addr = ipaddress.ip_address(address)
+            except ValueError:
+                continue
+
+            if (
+                ip_addr.is_loopback
+                or ip_addr.is_unspecified
+                or ip_addr.is_link_local
+                or ip_addr.is_multicast
+            ):
+                continue
+
+            if address not in seen:
+                seen.add(address)
+                addresses.append(address)
+
+    return addresses
+
+
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
     if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
