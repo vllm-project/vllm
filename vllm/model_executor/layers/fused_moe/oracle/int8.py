@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -32,6 +33,9 @@ class Int8MoeBackend(Enum):
     TRITON = "TRITON"
     HUMMING = "HUMMING"
     CPU = "CPU"
+    # AMD Zen CPU backend dispatching per-expert int8 GEMMs through
+    # torch.ops.zentorch.*. Requires the zentorch package + a Zen CPU.
+    CPU_ZEN = "CPU_ZEN"
 
 
 def _get_priority_backends(
@@ -40,6 +44,21 @@ def _get_priority_backends(
     """
     Get available backends in priority order based on platform and config.
     """
+    # Prefer the zentorch-backed backend on AMD Zen CPUs, then fall back to the
+    # generic CPU backend and finally Triton; on other CPUs use the generic CPU
+    # backend first.
+    if current_platform.is_zen_cpu():
+        return [
+            Int8MoeBackend.CPU_ZEN,
+            Int8MoeBackend.CPU,
+            Int8MoeBackend.TRITON,
+        ]
+    if current_platform.is_cpu():
+        return [
+            Int8MoeBackend.CPU,
+            Int8MoeBackend.TRITON,
+            Int8MoeBackend.HUMMING,
+        ]
     return [
         Int8MoeBackend.TRITON,
         Int8MoeBackend.HUMMING,
@@ -76,6 +95,14 @@ def backend_to_kernel_cls(
         )
 
         return [ArmCPUExpertsInt8, CPUExpertsInt8]
+
+    elif backend == Int8MoeBackend.CPU_ZEN:
+        from vllm.model_executor.layers.fused_moe.cpu_int8_experts import (
+            CPUInt8Experts,
+        )
+
+        return [CPUInt8Experts]
+
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 
@@ -85,6 +112,7 @@ def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
     mapping = {
         "triton": Int8MoeBackend.TRITON,
         "humming": Int8MoeBackend.HUMMING,
+        "cpu_zen": Int8MoeBackend.CPU_ZEN,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -272,7 +300,13 @@ def convert_to_int8_moe_kernel_format(
             quant_config=_humming_int8_weight_schema(w13, layer.w13_weight_scale),
         )
         return layer.w13_weight, layer.w2_weight
-    elif int8_backend not in (Int8MoeBackend.TRITON, Int8MoeBackend.CPU):
+    elif int8_backend not in (
+        Int8MoeBackend.TRITON,
+        Int8MoeBackend.CPU,
+        Int8MoeBackend.CPU_ZEN,
+    ):
+        # CPU / CPU_ZEN keep the loaded [N, K] layout (VNNI-packed internally by
+        # CPUExpertsInt8 / packed by zentorch), so they need no conversion here.
         raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
 
     return w13, w2
