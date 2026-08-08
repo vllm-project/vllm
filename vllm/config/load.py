@@ -113,7 +113,15 @@ class LoadConfig:
     need to be double quoted for json parsing. For more details, see
     the original doc for `map_location` parameter in [`torch.load`][] parameter.
     """
-
+    shuffle_safetensors_files: bool = False
+    """
+    Whether to shuffle the safetensors checkpoint files during loading.
+    When enabled, files are randomly shuffled based on the distributed rank,
+    which can help with load balancing and improve weight loading speed in
+    startup scenarios. This reduces I/O contention by ensuring different ranks
+    load different files in a randomized order.
+    Set to True to enable shuffling. Default is False (load files in sorted order).
+    """
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
