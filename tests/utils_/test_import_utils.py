@@ -87,11 +87,15 @@ class TestHasModule:
         """``find_spec`` itself can raise for dotted names whose parent package
         fails to import. This should be treated as the module being unavailable.
         """
-        with patch(
-            "vllm.utils.import_utils.importlib.util.find_spec",
-            side_effect=ModuleNotFoundError("No module named 'fake_parent'"),
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.util.find_spec",
+                side_effect=ModuleNotFoundError("No module named 'fake_parent'"),
+            ),
+            patch("vllm.utils.import_utils.logger.warning") as mock_warning,
         ):
             assert _has_module("fake_parent.child") is False
+            mock_warning.assert_not_called()
 
     def test_result_is_cached(self):
         """Verify the @cache decorator prevents repeated imports."""
