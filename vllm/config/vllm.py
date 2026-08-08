@@ -772,6 +772,7 @@ class VllmConfig:
         self,
         hf_config: PretrainedConfig,
         architectures: list[str] | None = None,
+        copy_tie_word_embeddings: bool = True,
     ) -> "VllmConfig":
         if architectures is not None:
             hf_config = copy.deepcopy(hf_config)
@@ -815,8 +816,10 @@ class VllmConfig:
         # Therefore, the presence of tie_word_embeddings in SomeVLTextConfig cannot
         # be used as a signal for whether tie_word_embeddings should be copied from
         # hf_config to the language_model config.
-        if model_config.is_multimodal_model and hasattr(
-            model_config.hf_config, "tie_word_embeddings"
+        if (
+            copy_tie_word_embeddings
+            and model_config.is_multimodal_model
+            and hasattr(model_config.hf_config, "tie_word_embeddings")
         ):
             tie_word_embeddings = model_config.hf_config.tie_word_embeddings
             hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings

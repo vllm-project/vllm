@@ -11,6 +11,7 @@ import pydantic
 import pytest
 from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
+from transformers import Mistral3Config
 
 import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
@@ -362,6 +363,41 @@ def test_with_hf_config_leaves_unknown_model_type_without_architectures(
     updated = VllmConfig.with_hf_config(cfg, hf_config)
 
     assert updated.model_config.hf_config.architectures is None
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("copy_tie_word_embeddings", "expected_tie_word_embeddings"),
+    [(True, True), (False, False)],
+)
+def test_with_hf_config_respects_mistral3_text_config_tie_word_embeddings(
+    monkeypatch,
+    copy_tie_word_embeddings,
+    expected_tie_word_embeddings,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    outer_config = Mistral3Config(text_config={"tie_word_embeddings": False})
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=True,
+            hf_config=outer_config,
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    updated = VllmConfig.with_hf_config(
+        cfg,
+        outer_config.text_config,
+        copy_tie_word_embeddings=copy_tie_word_embeddings,
+    )
+
+    assert (
+        updated.model_config.hf_config.tie_word_embeddings
+        is expected_tie_word_embeddings
+    )
 
 
 def test_async_scheduling_with_pipeline_parallelism_is_allowed():
