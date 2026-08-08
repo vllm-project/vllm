@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 
+import numpy as np
 import torch
 from typing_extensions import override
 
@@ -110,8 +111,10 @@ class MultiModalCache:
         ):
             return cls.get_item_size(leaf.data)  # type: ignore
 
-        # sys.getsizeof doesn't work for tensors
+        # sys.getsizeof doesn't work for tensors or numpy arrays
         if isinstance(leaf, torch.Tensor):
+            return leaf.nbytes
+        if isinstance(leaf, np.ndarray):
             return leaf.nbytes
 
         return sys.getsizeof(leaf)
