@@ -346,7 +346,6 @@ ARG NIXL_BRANCH="231d56753047c989062a5cb2ac703a1ad761c7d2"
 ARG NIXL_REPO="https://github.com/ai-dynamo/nixl.git"
 ARG UCX_BRANCH="96e58a16039f6d7d213bc967b8069238742c5194"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
-ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
 ENV NIXL_HOME=/usr/local/nixl
 
@@ -442,31 +441,13 @@ RUN cd /opt/nixl && \
         /tmp/nixl_wheels/repaired/*.whl && \
     cp /tmp/nixl_wheels/repaired/*.whl /app/install
 
-# ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
-# invalidate the slow ROCShmem build.
+# ROCShmem is provided by TheRock SDK (rocm[libraries,devel]) — no from-source
+# build needed. ROCSHMEM_DIR points to the SDK install path so DeepEP can find
+# the headers, static lib, and device bitcode.
 FROM base AS build_rocshmem
-ARG ROCSHMEM_BRANCH="f0acb0c6"
-ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-# DeepEP only supports gfx942 and gfx950; build ROCShmem for the same set so
-# it can be linked against DeepEP without arch mismatches.
-ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
-ENV ROCM_PATH=/opt/rocm
-ENV ROCSHMEM_DIR=/opt/rocshmem
+ENV ROCSHMEM_DIR=${ROCM_PATH}
 
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    git clone --no-checkout --filter=blob:none ${ROCSHMEM_REPO} \
- && cd rocm-systems \
- && git sparse-checkout set --cone projects/rocshmem \
- && git checkout ${ROCSHMEM_BRANCH} \
- && mkdir -p projects/rocshmem/build \
- && cd projects/rocshmem/build \
- && CC="ccache gcc" CXX="ccache g++" INSTALL_PREFIX=${ROCSHMEM_DIR} \
-    bash ../scripts/build_configs/all_backends \
-      -DROCM_PATH=${ROCM_PATH} \
-      -DGPU_TARGETS="${DEEPEP_ROCM_ARCH}" \
-      -DUSE_EXTERNAL_MPI=OFF
-
-# DeepEP build stage - depends on ROCShmem, builds the HIP kernel wheel.
+# DeepEP build stage - uses TheRock-provided ROCShmem.
 FROM build_rocshmem AS build_deepep
 ARG DEEPEP_BRANCH="0f63d3e9"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
@@ -689,9 +670,6 @@ fi
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
     uv pip install --system /nixl_install/*.whl /deep_install/*.whl
-
-# Copy ROCShmem runtime libraries.
-COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
 
 # RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
