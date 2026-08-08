@@ -10,6 +10,10 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
+from vllm.v1.sample.ops.fused_top_logprobs import (
+    fused_top_logprobs,
+    fused_top_logprobs_enabled,
+)
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
@@ -83,9 +87,15 @@ class Sampler(nn.Module):
         # is used for sampling (after penalties and temperature scaling).
         num_logprobs = sampling_metadata.max_num_logprobs
         raw_logprobs: torch.Tensor | None = None
+        raw_logits_for_fused_top_logprobs: torch.Tensor | None = None
         if num_logprobs is not None or sampling_metadata.logprob_token_ids:
             if logprobs_mode == "raw_logprobs":
-                raw_logprobs = self.compute_logprobs(logits)
+                if self._can_use_fused_top_logprobs(num_logprobs, sampling_metadata):
+                    raw_logits_for_fused_top_logprobs = (
+                        logits.clone() if logits.dtype == torch.float32 else logits
+                    )
+                else:
+                    raw_logprobs = self.compute_logprobs(logits)
             elif logprobs_mode == "raw_logits":
                 if logits.dtype == torch.float32:
                     raw_logprobs = logits.clone()
@@ -102,6 +112,7 @@ class Sampler(nn.Module):
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
         if processed_logprobs is not None:
             raw_logprobs = processed_logprobs
+            raw_logits_for_fused_top_logprobs = None
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
         # This conversion is necessary because FlashInfer sampling operations
@@ -126,9 +137,22 @@ class Sampler(nn.Module):
             )
         else:
             # Gather the logprobs and ranks of the topk and sampled token.
-            logprobs_tensors = self.gather_logprobs(
-                raw_logprobs, num_logprobs, token_ids=sampled
-            )
+            logprobs_tensors = None
+            if raw_logits_for_fused_top_logprobs is not None:
+                logprobs_tensors = fused_top_logprobs(
+                    raw_logits_for_fused_top_logprobs,
+                    sampled,
+                    num_logprobs,
+                )
+            if logprobs_tensors is None:
+                if raw_logprobs is None:
+                    assert raw_logits_for_fused_top_logprobs is not None
+                    raw_logprobs = self.compute_logprobs(
+                        raw_logits_for_fused_top_logprobs
+                    )
+                logprobs_tensors = self.gather_logprobs(
+                    raw_logprobs, num_logprobs, token_ids=sampled
+                )
 
         # If we have both num_logprobs and logprob_token_ids, prefer
         # logprob_token_ids as it's more specific
@@ -147,6 +171,18 @@ class Sampler(nn.Module):
             logprobs_tensors=logprobs_tensors,
         )
         return sampler_output
+
+    @staticmethod
+    def _can_use_fused_top_logprobs(
+        num_logprobs: int | None,
+        sampling_metadata: SamplingMetadata,
+    ) -> bool:
+        return (
+            fused_top_logprobs_enabled()
+            and num_logprobs is not None
+            and num_logprobs != -1
+            and not sampling_metadata.logprob_token_ids
+        )
 
     def gather_specific_token_logprobs(
         self,
