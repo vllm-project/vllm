@@ -28,6 +28,41 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
 }
 
 #[test]
+fn render_args_build_supported_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--port",
+        "8080",
+        "--max-model-len",
+        "32768",
+        "--served-model-name",
+        "qwen",
+        "--tokenizer-mode",
+        "deepseek_v32",
+        "--max-logprobs",
+        "-1",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 8080);
+    assert_eq!(config.max_model_len, 32768);
+    assert_eq!(config.served_model_name, ["qwen"]);
+    assert_eq!(config.tool_call_parser, ParserSelection::Auto);
+    assert_eq!(config.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
+    assert_eq!(config.max_logprobs, Some(-1));
+}
+
+#[test]
 fn serve_args_forward_python_flags_with_separator() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
