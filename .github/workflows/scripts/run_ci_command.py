@@ -693,6 +693,7 @@ def resolve_workflow_run_pr(
 def handle_run_ci(
     *,
     actor: str,
+    allow_repeat_full_ci: bool,
     buildkite: BuildkiteClient,
     comment_id: int,
     command: str,
@@ -718,6 +719,17 @@ def handle_run_ci(
     )
     if active_build:
         return f"CI is already running for this commit: {active_build['web_url']}"
+
+    latest_build = select_latest_build(current_builds, pr["number"])
+    if (
+        latest_build
+        and latest_build.get("state") in {"failed", "passed"}
+        and not allow_repeat_full_ci
+    ):
+        return (
+            f"CI already ran for this commit: {latest_build['web_url']}. "
+            "Use `/ci retry` to retry failed jobs."
+        )
 
     current_pr = github.get_pr(pr["number"])
     if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
@@ -851,7 +863,14 @@ def run(
     comment_id = event["comment"]["id"]
     actor = event["comment"]["user"]["login"]
 
-    if is_already_handled(github, issue_number, comment_id):
+    try:
+        already_handled = is_already_handled(github, issue_number, comment_id)
+    except ApiError as error:
+        if error.status == 404:
+            print(f"Comment {comment_id} no longer exists.")
+            return
+        raise
+    if already_handled:
         print(f"Comment {comment_id} was already handled.")
         return
     add_reaction_safely(github, comment_id, "eyes")
@@ -898,6 +917,10 @@ def run(
         if command in RUN_CI_COMMAND_ENV:
             message = handle_run_ci(
                 actor=actor,
+                allow_repeat_full_ci=(
+                    is_trusted_permission(permission)
+                    or actor.casefold() in trusted_users
+                ),
                 buildkite=buildkite,
                 comment_id=comment_id,
                 command=command,
@@ -912,8 +935,11 @@ def run(
                 github=github,
                 pr=pr,
             )
+        github.add_comment(
+            issue_number,
+            f"✅ {message}\n\n{command_comment_marker(comment_id)}",
+        )
         add_reaction_safely(github, comment_id, "rocket")
-        github.add_comment(issue_number, f"✅ {message}")
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise
