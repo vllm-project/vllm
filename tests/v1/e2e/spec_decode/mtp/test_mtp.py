@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from typing import Any
 
 import pytest
@@ -64,12 +63,6 @@ def test_mtp_correctness(
     """
     method, model_name, tp_size, draft_model = model_setup
     _skip_if_insufficient_gpus_for_tp(tp_size)
-
-    if "Qwen3.5" in model_name and os.environ.get("VLLM_USE_V2_MODEL_RUNNER") == "1":
-        pytest.skip(
-            "Model Runner V2 does not yet support hybrid models "
-            "(Qwen3.5 mixes Mamba-style GDN with attention layers)."
-        )
 
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
