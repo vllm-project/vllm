@@ -54,7 +54,6 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
-from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
@@ -999,15 +998,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         When the first real inference triggers the autotuner it OOMs
         because there is not enough memory left for benchmarking.
 
-        This method runs minimal forward passes through
-        ``chunk_gated_delta_rule`` with small dummy tensors to force
-        autotuning while GPU memory is still plentiful.  The autotuner
-        results are cached globally, so only the first layer incurs
-        actual benchmarking cost.
+        This method runs a profile-sized forward pass through
+        ``chunk_gated_delta_rule`` to force autotuning while GPU memory is
+        still plentiful. The autotuner results are cached globally, so only
+        the first layer incurs actual benchmarking cost. The projected input
+        is reused for the profile-sized pass to avoid an extra input copy.
 
-        All kernels including ``chunk_fwd_kernel_o`` now use a fixed
-        ``BT = chunk_size`` (64).  A single warmup pass with T = 64
-        is sufficient to populate the autotuner cache.
+        All kernels including ``chunk_fwd_kernel_o`` use a fixed
+        ``BT = chunk_size`` (64), so the full-token pass still exercises the
+        same autotuned kernel family.
 
         The decode path uses ``gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule``
         which has fixed kernel parameters (no autotuning), so only the
@@ -1023,18 +1022,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_v_heads = self.num_v_heads // self.tp_size
         _, state_dtype = self.get_state_dtype()
 
-        # All kernels use BT = chunk_size, so a single pass with T = chunk_size
-        # is sufficient to populate every autotuner cache. Mirror the real
-        # prefill path here: build q/k/v/g/beta via fused_post_conv_prep and
-        # then run chunk_gated_delta_rule with in-kernel L2 norm disabled.
-        T = FLA_CHUNK_SIZE
-        dummy_mixed_qkv = torch.randn(
-            T, qkv_or_qkvz.shape[-1] - v_dim, device=device, dtype=dtype
-        )
+        # Profile with the full projected token extent. This keeps the profile
+        # run's activation peak representative of a long GDN prefill without
+        # building full attention metadata or executing quadratic attention.
+        T = qkv_or_qkvz.shape[0]
+        mixed_qkv = qkv_or_qkvz[..., :-v_dim] if v_dim else qkv_or_qkvz
+        # Mirror the real prefill path: build q/k/v/g/beta via
+        # fused_post_conv_prep and then run chunk_gated_delta_rule with
+        # in-kernel L2 norm disabled.
         dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
         dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
         q, k, v, g, beta = fused_post_conv_prep(
-            conv_output=dummy_mixed_qkv,
+            conv_output=mixed_qkv,
             a=dummy_a,
             b=dummy_b,
             A_log=self.A_log,
@@ -1101,7 +1100,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         finally:
             del (
-                dummy_mixed_qkv,
+                mixed_qkv,
                 q,
                 k,
                 v,
