@@ -15,7 +15,6 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
-    tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -252,10 +251,6 @@ class InternS2MobiusDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if input_is_sequence_parallel:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[:full_num_tokens]
-
         if self.layer_type == "linear_attention":
             hidden_states = self.linear_attn(hidden_states=hidden_states)
         else:
@@ -269,10 +264,6 @@ class InternS2MobiusDecoderLayer(nn.Module):
             hidden_states = hidden_states * (scale[0] + 1)
 
         if self.use_attn_reduce_scatter_for_moe:
-            tp_world_size = get_tensor_model_parallel_world_size()
-            sp_pad = (-hidden_states.shape[0]) % tp_world_size
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
-            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
             if not input_is_sequence_parallel:
                 residual = sequence_parallel_chunk(residual)
 
