@@ -246,6 +246,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
             recv_expert_num_tokens,
             device=expert_x.device,
+            num_valid_tokens=(psum_recv_per_rank[-1:] if self.use_cudagraph else None),
         )
 
         if not quant_config.is_block_quantized and not defer_input_quant:

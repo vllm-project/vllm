@@ -180,7 +180,10 @@ if TYPE_CHECKING:
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
-    VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
+    VLLM_HUMMING_MOE_GEMM_TYPE: (
+        Literal["indexed", "grouped", "grouped_contiguous", "grouped_masked", "auto"]
+        | None
+    ) = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
@@ -1475,12 +1478,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HUMMING_USE_F16_ACCUM": lambda: maybe_convert_bool(
         os.environ.get("VLLM_HUMMING_USE_F16_ACCUM", "0")
     ),
-    # Whether to use indexed gemm for humming moe
-    # if 1, force use indexed gemm
-    # if 0, force use grouped gemm
-    # if None, choose better gemm type automatically
-    "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: os.environ.get(
-        "VLLM_HUMMING_MOE_GEMM_TYPE", None
+    # Optional Humming MoE GEMM override. Unset or auto selects from the
+    # activation format and parallel configuration.
+    "VLLM_HUMMING_MOE_GEMM_TYPE": env_with_choices(
+        "VLLM_HUMMING_MOE_GEMM_TYPE",
+        None,
+        ["indexed", "grouped", "grouped_contiguous", "grouped_masked", "auto"],
+        case_sensitive=False,
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with

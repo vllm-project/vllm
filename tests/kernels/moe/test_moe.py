@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     apply_moe_activation,
+    apply_moe_activation_masked_supported,
     apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -1282,7 +1283,129 @@ def test_humming_activation_metadata_tracks_shared_apply(activation: MoEActivati
     ) == apply_moe_activation_supported(activation)
 
 
-def test_humming_delegates_to_instance_activation():
+@pytest.mark.parametrize("activation", list(MoEActivation))
+def test_batched_humming_activation_metadata_tracks_masked_apply(
+    activation: MoEActivation,
+):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        BatchedHummingGroupedExperts,
+    )
+
+    assert BatchedHummingGroupedExperts._supports_activation(
+        activation
+    ) == apply_moe_activation_masked_supported(activation)
+
+
+def test_humming_selects_grouped_masked_gemm(monkeypatch: pytest.MonkeyPatch):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        get_humming_moe_gemm_type,
+    )
+
+    monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", "grouped_masked")
+
+    assert get_humming_moe_gemm_type() == "grouped_masked"
+
+
+@pytest.mark.parametrize(
+    ("use_ep", "activation_format", "expected"),
+    [
+        (False, "Standard", "indexed"),
+        (True, "Standard", "grouped_contiguous"),
+        (True, "BatchedExperts", "grouped_masked"),
+    ],
+)
+def test_humming_selects_gemm_from_parallelism_and_format(
+    monkeypatch: pytest.MonkeyPatch,
+    use_ep: bool,
+    activation_format: str,
+    expected: str,
+):
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        get_humming_moe_gemm_type,
+    )
+
+    monkeypatch.delenv("VLLM_HUMMING_MOE_GEMM_TYPE", raising=False)
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_parallel_config.use_ep = use_ep
+
+    activation_format_enum = getattr(mk.FusedMoEActivationFormat, activation_format)
+    assert get_humming_moe_gemm_type(moe_config, activation_format_enum) == expected
+
+    monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", "auto")
+    assert get_humming_moe_gemm_type(moe_config, activation_format_enum) == expected
+
+
+def test_humming_rejects_invalid_gemm_type(monkeypatch: pytest.MonkeyPatch):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        get_humming_moe_gemm_type,
+    )
+
+    monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", "invalid")
+
+    with pytest.raises(ValueError, match="VLLM_HUMMING_MOE_GEMM_TYPE"):
+        get_humming_moe_gemm_type()
+
+
+def test_humming_rejects_deepep_low_latency(monkeypatch: pytest.MonkeyPatch):
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        BatchedHummingGroupedExperts,
+        HummingExpertsBase,
+    )
+
+    monkeypatch.setattr(
+        mk.FusedMoEExpertsModular,
+        "is_supported_config",
+        lambda *args: (True, None),
+    )
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_parallel_config.dp_size = 2
+    moe_config.moe_parallel_config.use_ep = True
+    moe_config.moe_parallel_config.all2all_backend = "deepep_low_latency"
+
+    supported, reason = HummingExpertsBase.is_supported_config(
+        BatchedHummingGroupedExperts,
+        moe_config,
+        None,
+        None,
+        mk.FusedMoEActivationFormat.BatchedExperts,
+    )
+
+    assert not supported
+    assert reason == "DeepEP low-latency does not support deferred input quantization"
+
+
+@pytest.mark.parametrize(
+    ("runtime_topk", "max_num_tokens"),
+    [(6, 1024), (1, 6144)],
+)
+def test_humming_permute_scratch_accounts_for_layout_and_dp(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_topk: int,
+    max_num_tokens: int,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+
+    scratch = Mock()
+    scratch_type = Mock(return_value=scratch)
+    monkeypatch.setattr(humming, "moe_permute_unpermute_supported", lambda: True)
+    monkeypatch.setattr(humming, "MoEPermuteScratch", scratch_type)
+    moe_config = make_dummy_moe_config(max_num_tokens=512, experts_per_token=6)
+    moe_config.moe_parallel_config.dp_size = 2
+    experts = SimpleNamespace(_permute_scratch={}, moe_config=moe_config)
+
+    result = humming.HummingExpertsBase._get_permute_scratch(experts, runtime_topk)
+
+    assert result is scratch
+    assert scratch_type.call_args.kwargs["max_num_tokens"] == max_num_tokens
+    assert scratch_type.call_args.kwargs["topk"] == runtime_topk
+
+
+def test_humming_clamped_silu_delegates_to_shared_activation():
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -1305,14 +1428,80 @@ def test_humming_delegates_to_instance_activation():
     input = torch.empty(1, 2)
     output = torch.empty(1, 1)
 
+    HummingExpertsBase.apply_activation(experts, MoEActivation.SILU, output, input)
+
+    activation_func.assert_called_once_with(
+        activation=MoEActivation.SILU,
+        input=input,
+        output=output,
+    )
+
+
+def test_batched_humming_delegates_with_valid_counts():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    activation_func = Mock()
+    experts = SimpleNamespace(activation=activation_func)
+    input = torch.empty(6, 4)
+    output = torch.empty(6, 2)
+    expert_num_tokens = torch.tensor([1, 2], dtype=torch.int32)
+
     HummingExpertsBase.apply_activation(
-        experts, MoEActivation.SWIGLUOAI_UNINTERLEAVE, output, input
+        experts,
+        MoEActivation.SITU,
+        output,
+        input,
+        expert_num_tokens,
+    )
+
+    activation_func.assert_called_once()
+    call_kwargs = activation_func.call_args.kwargs
+    assert call_kwargs.keys() == {
+        "activation",
+        "input",
+        "output",
+        "valid_token_counts",
+    }
+    assert call_kwargs["activation"] == MoEActivation.SITU
+    assert call_kwargs["input"].shape == (2, 3, 4)
+    assert call_kwargs["input"].data_ptr() == input.data_ptr()
+    assert call_kwargs["output"].shape == (2, 3, 2)
+    assert call_kwargs["output"].data_ptr() == output.data_ptr()
+    assert call_kwargs["valid_token_counts"] is expert_num_tokens
+
+
+def test_humming_delegates_with_flat_valid_prefix():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    activation_func = Mock()
+    experts = SimpleNamespace(activation=activation_func)
+    input = torch.empty(6, 4)
+    output = torch.empty(6, 2)
+    valid_token_counts = torch.tensor([3], dtype=torch.int32)
+
+    HummingExpertsBase.apply_activation(
+        experts,
+        MoEActivation.SITU,
+        output,
+        input,
+        valid_token_counts,
     )
 
     activation_func.assert_called_once_with(
-        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        activation=MoEActivation.SITU,
         input=input,
         output=output,
+        valid_token_counts=valid_token_counts,
     )
 
 
