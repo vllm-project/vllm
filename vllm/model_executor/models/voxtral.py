@@ -362,6 +362,17 @@ class VoxtralForConditionalGeneration(
             tower_model=["whisper_encoder"],
         )
 
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        # The whisper encoder runs before the `downsample_factor` packing that
+        # produces the audio tokens seen by the language model (see
+        # `embed_multimodal`), so it processes that many more tokens.
+        return num_image_tokens * self.downsample_factor
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        # The audio-language adapter consumes the packed encoder output, i.e.
+        # `downsample_factor` encoder tokens per language-model audio token.
+        return num_vision_tokens // self.downsample_factor
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
