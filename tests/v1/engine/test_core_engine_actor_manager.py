@@ -39,7 +39,11 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
     ):
         # Exercise the production Ray actor mixin without loading a model.
         EngineCoreActorMixin.__init__(
-            self, vllm_config, addresses, dp_rank, local_dp_rank
+            self,
+            vllm_config,
+            addresses,
+            dp_rank,
+            local_dp_rank,
         )
 
     def _set_visible_devices(self, vllm_config: Any, local_dp_rank: int) -> None:
@@ -55,11 +59,7 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
         return os.environ.get("VLLM_NIXL_SIDE_CHANNEL_HOST")
 
     def get_addresses(self) -> tuple[list[str], list[str]]:
-        """Return the addresses snapshot the actor was constructed with.
-
-        Used by the Ray-DP regression test to assert that no ``tcp://host:0``
-        placeholders were pickled into the actor at ``.remote()`` time.
-        """
+        """Return the addresses snapshot the actor was constructed with."""
         return list(self.addresses.inputs), list(self.addresses.outputs)
 
 
@@ -250,26 +250,10 @@ def _make_vllm_config_ray_dp_multinode() -> SimpleNamespace:
 
 @pytest.mark.timeout(120)
 @pytest.mark.usefixtures("ray_context_dp2")
-def test_ray_dp_addresses_resolved_before_actor_creation(
+def test_ray_dp_actors_start_after_frontend_bind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard for the Ray-DP + multi-API-server hang from PR #42585.
-
-    ``launch_core_engines`` Ray branch pickles ``addresses`` into each engine
-    actor at ``.remote()`` time, and ``EngineCoreActorMixin._perform_handshakes``
-    is a no-op, so the actor uses that pickled snapshot for the rest of its
-    life. If ``run_multi_api_server`` allocates ``addresses`` as
-    ``tcp://host:0`` placeholders (its default), the actors hold placeholders
-    forever and DEALER-connect to port 0 — ZMQ ``connect`` is async and does
-    not raise, so the failure mode is a deterministic hang.
-
-    The Ray-DP carve-out in ``run_multi_api_server`` forces
-    ``defer_api_server_ports=False`` when ``data_parallel_backend == "ray"``
-    so addresses are pre-allocated in the driver and Ray pickles real ports
-    into each actor. This test mirrors that call-site logic and asserts the
-    actors hold real (non-placeholder) endpoints. If the carve-out is
-    removed without an alternative fix, the test fails.
-    """
+    """Ray actors are created only after the front-end binds its endpoints."""
     created_placement_groups: list[Any] = []
 
     def create_dp_placement_groups(vllm_config: Any):
@@ -287,14 +271,9 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
 
     vllm_config = _make_vllm_config_ray_dp_multinode()
 
-    # Mirror run_multi_api_server's address-allocation logic. The Ray DP
-    # carve-out forces pre-allocation so the addresses pickled into engine
-    # actors at .remote() time are real, not ``tcp://host:0``.
-    is_ray_dp = vllm_config.parallel_config.data_parallel_backend == "ray"
-    addresses = get_engine_zmq_addresses(
-        vllm_config,
-        num_api_servers=2,
-        defer_api_server_ports=not is_ray_dp,
+    addresses = get_engine_zmq_addresses(vllm_config, num_api_servers=2)
+    assert all(
+        split_zmq_path(url)[2] == "0" for url in addresses.inputs + addresses.outputs
     )
 
     sock = socket.socket()
@@ -302,17 +281,16 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
     actor_snapshots: list[tuple[list[str], list[str]]] = []
     api_server_manager: APIServerProcessManager | None = None
     try:
-        # Ray actors are spawned here, pickling ``addresses`` into each one.
+        # Defer actor creation while front-end addresses are placeholders.
         with launch_core_engines(
             vllm_config,
             executor_class=_DummyExecutor,
             log_stats=False,
             addresses=addresses,
         ) as engine_launch:
-            engine_manager = engine_launch.engine_manager
-            assert isinstance(engine_manager, CoreEngineActorManager)
+            assert engine_launch.engine_manager is None
 
-            # API-server children bind to the pre-allocated ports.
+            # API-server children bind first and report kernel-assigned ports.
             api_server_manager = APIServerProcessManager(
                 listen_address="tcp://127.0.0.1:0",
                 sock=sock,
@@ -323,22 +301,16 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
                 target_server_fn=_bind_and_report_worker,
             )
 
-            # run_multi_api_server skips ``gather_actual_addresses`` for
-            # Ray DP (addresses are already real). Mirror that.
-            if not is_ray_dp:
-                actual_inputs, actual_outputs = (
-                    api_server_manager.gather_actual_addresses(timeout=15.0)
-                )
-                addresses.inputs = actual_inputs
-                addresses.outputs = actual_outputs
+            addresses.inputs, addresses.outputs = (
+                api_server_manager.gather_actual_addresses(timeout=15.0)
+            )
 
-            # Snapshot what each Ray actor actually holds.
-            actors = (
-                engine_manager.local_engine_actors + engine_manager.remote_engine_actors
-            )
-            actor_snapshots = ray.get(
-                [actor.get_addresses.remote() for actor in actors]
-            )
+        engine_manager = engine_launch.engine_manager
+        assert isinstance(engine_manager, CoreEngineActorManager)
+        actors = (
+            engine_manager.local_engine_actors + engine_manager.remote_engine_actors
+        )
+        actor_snapshots = ray.get([actor.get_addresses.remote() for actor in actors])
     finally:
         if api_server_manager is not None:
             api_server_manager.shutdown()
@@ -357,9 +329,7 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
             scheme, _host, port = split_zmq_path(url)
             assert scheme == "tcp", url
             assert port and int(port) > 0, (
-                f"Ray actor was pickled with placeholder address {url!r}; "
-                "``run_multi_api_server`` must pre-allocate ports for the "
-                "Ray DP backend so the actors hold real endpoints by the "
-                "time they DEALER-connect. See PR #42585 / Ray-DP "
-                "multi-API-server regression."
+                f"Ray actor was created with placeholder address {url!r}; "
+                "actors must start only after the front-end reports its "
+                "bound endpoints."
             )
