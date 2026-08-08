@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
+from typing import Any, NamedTuple, NewType, Protocol, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -668,12 +668,20 @@ def resolve_kv_cache_block_sizes(
     return scheduler_block_size, hash_block_size
 
 
+class RequestBlockHasher(Protocol):
+    """Callable that incrementally computes block hashes for a request."""
+
+    hash_block_size: int
+
+    def __call__(self, request: Request) -> list[BlockHash]: ...
+
+
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
-) -> Callable[[Request], list[BlockHash]]:
+) -> RequestBlockHasher:
     """
-    Returns a function which computes the list of un-computed block hashes
+    Returns a callable which computes the list of un-computed block hashes
     of a request.
 
     Hashes are computed at ``hash_block_size`` granularity and chained over the
@@ -685,10 +693,6 @@ def get_request_block_hasher(
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
         num_tokens = request.num_tokens
-
-        if start_token_idx + hash_block_size > num_tokens:
-            # Early stop when there no new full blocks created.
-            return []
 
         curr_mm_idx = 0
         if start_token_idx > 0:
@@ -725,7 +729,9 @@ def get_request_block_hasher(
 
         return new_block_hashes
 
-    return request_block_hasher
+    block_hasher = cast(RequestBlockHasher, request_block_hasher)
+    block_hasher.hash_block_size = hash_block_size
+    return block_hasher
 
 
 def _check_enough_kv_cache_memory(

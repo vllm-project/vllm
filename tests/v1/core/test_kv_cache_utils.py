@@ -699,6 +699,50 @@ def test_request_block_hasher(hash_fn):
     assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
 
 
+def test_request_skips_block_hasher_between_full_blocks():
+    block_size = 4
+    block_hasher = get_request_block_hasher(block_size, sha256)
+
+    class CountingBlockHasher:
+        def __init__(self) -> None:
+            self.hash_block_size = block_hasher.hash_block_size
+            self.num_calls = 0
+
+        def __call__(self, request: Request) -> list[BlockHash]:
+            self.num_calls += 1
+            return block_hasher(request)
+
+    counting_hasher = CountingBlockHasher()
+    sampling_params = SamplingParams(max_tokens=16)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    request = Request(
+        request_id="0",
+        prompt_token_ids=[0],
+        sampling_params=sampling_params,
+        pooling_params=None,
+        block_hasher=counting_hasher,
+    )
+
+    assert counting_hasher.num_calls == 0
+    request.append_output_token_ids([1, 2])
+    assert counting_hasher.num_calls == 0
+
+    request.append_output_token_ids(3)
+    assert counting_hasher.num_calls == 1
+    assert len(request.block_hashes) == 1
+
+    # A single update can cross multiple block boundaries.
+    request.append_output_token_ids([4, 5, 6, 7, 8])
+    assert counting_hasher.num_calls == 2
+    assert len(request.block_hashes) == 2
+
+    request.append_output_token_ids([9, 10])
+    assert counting_hasher.num_calls == 2
+    request.append_output_token_ids(11)
+    assert counting_hasher.num_calls == 3
+    assert len(request.block_hashes) == 3
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_tokens_different_mm_input(hash_fn):
     request1 = make_request(

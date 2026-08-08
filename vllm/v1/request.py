@@ -208,6 +208,13 @@ class Request:
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
         self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
+        hash_block_size = getattr(block_hasher, "hash_block_size", None)
+        # Only sizes greater than 1 have incomplete-token updates to skip.
+        self._hash_block_size: int | None = (
+            hash_block_size
+            if isinstance(hash_block_size, int) and hash_block_size > 1
+            else None
+        )
         self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
@@ -264,8 +271,18 @@ class Request:
 
     def update_block_hashes(self) -> None:
         """Compute block hashes for any new full blocks and append them."""
-        if self._block_hasher is not None:
-            self.block_hashes.extend(self._block_hasher(self))
+        block_hasher = self._block_hasher
+        if block_hasher is None:
+            return
+
+        block_size = self._hash_block_size
+        if (
+            block_size is not None
+            and (len(self.block_hashes) + 1) * block_size > self.num_tokens
+        ):
+            return
+
+        self.block_hashes.extend(block_hasher(self))
 
     @property
     def use_structured_output(self) -> bool:
