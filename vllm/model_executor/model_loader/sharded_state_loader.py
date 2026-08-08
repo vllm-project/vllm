@@ -26,6 +26,26 @@ from vllm.transformers_utils.utils import is_s3
 logger = init_logger(__name__)
 
 
+def _has_loaded_alias(key: str, loaded_keys: set[str]) -> bool:
+    """Check if *key* is an alias of a key that was already loaded.
+
+    During save, ``_filter_subtensors`` keeps only one key from a group of
+    tensors that share the same underlying storage.  For buffer/parameter
+    pairs that follow the ``_name`` / ``name`` convention (e.g.
+    ``_q_scale`` buffer vs ``q_scale`` parameter), the underscore-prefixed
+    version wins because it sorts first.  On a fresh model at load time
+    these tensors no longer share storage, so the loader cannot detect
+    the alias automatically.  This function bridges the gap by checking
+    whether the underscore-prefixed counterpart of *key* was loaded.
+    """
+    parts = key.rsplit(".", 1)
+    if len(parts) == 2:
+        parent, name = parts
+        if not name.startswith("_"):
+            return f"{parent}._{name}" in loaded_keys
+    return False
+
+
 class ShardedStateLoader(BaseModelLoader):
     """
     Model loader that directly loads each worker's model state dict, which
@@ -135,6 +155,7 @@ class ShardedStateLoader(BaseModelLoader):
             )
         state_dict = self._filter_subtensors(model.state_dict())
         counter_before_loading_weights = time.perf_counter()
+        loaded_keys: set[str] = set()
         for key, tensor in self.iterate_over_files(filepaths):
             # If loading with LoRA enabled, additional padding may
             # be added to certain parameters. We only load into a
@@ -153,13 +174,28 @@ class ShardedStateLoader(BaseModelLoader):
                 )
             param_data.copy_(tensor)
             state_dict.pop(key)
+            loaded_keys.add(key)
         counter_after_loading_weights = time.perf_counter()
         logger.info_once(
             "Loading weights took %.2f seconds",
             counter_after_loading_weights - counter_before_loading_weights,
         )
         if state_dict:
-            raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
+            # During save, _filter_subtensors deduplicates tensors that
+            # share storage (e.g. buffer _q_scale and parameter q_scale).
+            # The checkpoint keeps only the canonical (underscore-prefixed)
+            # key. On a fresh model these tensors have separate storage, so
+            # _filter_subtensors cannot deduplicate them at load time.
+            # Skip keys whose underscore-prefixed counterpart was loaded.
+            missing = {
+                k: v
+                for k, v in state_dict.items()
+                if not _has_loaded_alias(k, loaded_keys)
+            }
+            if missing:
+                raise ValueError(
+                    f"Missing keys {tuple(missing)} in loaded state!"
+                )
 
     def iterate_over_files(
         self, paths
