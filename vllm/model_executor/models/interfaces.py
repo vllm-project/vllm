@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
     from vllm.model_executor.models.interfaces_base import VllmModel
     from vllm.model_executor.models.utils import WeightsMapper
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
@@ -367,16 +367,32 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
             yield
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+        mm_data: "MultiModalKwargsItem | None" = None,
+    ) -> int:
         """
         Implement this function to enable LoRA support
         for the tower module of the multi-modal model.
         Given the number of image tokens, output the number of
         multi-modal encoder tokens.
+
+        `mm_data` is the raw per-item multimodal kwargs (e.g. pixel_values)
+        that will be fed to the vision tower for this item, when available.
+        Models whose encoder/connector token count cannot be derived from
+        `num_image_tokens` alone (e.g. anyres/unpad tiling schemes where the
+        final LLM-side placeholder count is not invertible back to the raw
+        tower token count) should use `mm_data` to compute the count forward
+        instead of relying on `num_image_tokens`.
         """
         ...
 
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+        mm_data: "MultiModalKwargsItem | None" = None,
+    ) -> int:
         """
         Implement this function to enable LoRA support
         for the connector module of the multi-modal model.

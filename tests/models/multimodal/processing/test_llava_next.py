@@ -5,10 +5,23 @@ import itertools
 from functools import partial
 
 import pytest
+import torch
 from PIL import Image
 from pqdm.threads import pqdm
+from transformers.models.llava_next.modeling_llava_next import (
+    get_anyres_image_grid_shape,
+)
 
+from vllm.model_executor.models.llava_next import (
+    LlavaNextForConditionalGeneration,
+    LlavaNextProcessingInfo,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+)
 from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.processing import BaseMultiModalProcessor
 
@@ -196,3 +209,112 @@ def test_processor_prompt_replacements_all(model_id, num_imgs):
         num_imgs=num_imgs,
         image_sizes=image_sizes,
     )
+
+
+class _StubModel:
+    """Carries only the attribute the token helpers read from `self`
+    (the HF config, used to look up the vision encoder's patch grid),
+    so the real methods can be exercised without constructing the full
+    `nn.Module` (vision tower, language model, etc.)."""
+
+    config: object
+
+
+def _make_mm_data(num_tiles: int, image_size: int) -> MultiModalKwargsItem:
+    """Build a `pixel_values`-only `MultiModalKwargsItem` shaped the way
+    the real processor produces it: `(num_tiles, C, H, W)`, one tile per
+    anyres grid cell plus the base (global) tile."""
+    pixel_values = torch.zeros(num_tiles, 3, image_size, image_size)
+    return MultiModalKwargsItem(
+        {
+            "pixel_values": MultiModalFieldElem(
+                data=pixel_values, field=MultiModalSharedField(batch_size=1)
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
+@pytest.mark.parametrize(
+    ("image_width", "image_height"),
+    [
+        (672, 672),  # 2x2 grid
+        (1024, 768),  # 2x2 grid, different aspect ratio -> different unpad crop
+        (768, 1024),
+        (1344, 336),  # 1x3 grid
+        (336, 1344),  # 3x1 grid (same tile count as 1x3, different final
+        # placeholder length after unpad -- this is the
+        # non-invertibility case)
+        (1000, 500),  # 1x2 grid
+        (500, 1000),  # 2x1 grid
+    ],
+)
+def test_num_mm_encoder_tokens_matches_real_tile_count(
+    model_id, image_width, image_height
+):
+    """`get_num_mm_encoder_tokens` must report the *actual* number of
+    tokens the vision tower processes for this image (tiles x
+    patches-per-tile), not the LLM-side placeholder count. LLaVA-NeXT's
+    anyres/unpad tiling makes those two numbers genuinely different
+    (unpad crops rows/cols based on aspect ratio and appends newline
+    tokens), so this must be computed forward from the real per-item
+    `pixel_values` shape via `mm_data`, not backward from
+    `num_image_tokens` alone.
+    """
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
+    info = LlavaNextProcessingInfo(ctx)
+    hf_config = info.get_hf_config()
+    vision_encoder_info = info.get_vision_encoder_info()
+    patch_grid_length = vision_encoder_info.get_patch_grid_length()
+    image_size = vision_encoder_info.get_image_size()
+
+    num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+        (image_height, image_width), hf_config.image_grid_pinpoints, image_size
+    )
+    num_tiles = num_patch_height * num_patch_width + 1  # +1 base (global) tile
+    true_tower_tokens = num_tiles * patch_grid_length**2
+
+    # The final LLM-side placeholder count -- what a naive backward-looking
+    # implementation would (incorrectly) treat as the tower token count.
+    placeholder_len = info.get_num_image_tokens(
+        image_width=image_width, image_height=image_height
+    )
+
+    stub = _StubModel()
+    stub.config = hf_config
+    mm_data = _make_mm_data(num_tiles, image_size)
+
+    get_num_mm_encoder_tokens = (
+        LlavaNextForConditionalGeneration.get_num_mm_encoder_tokens
+    )
+    get_num_mm_connector_tokens = (
+        LlavaNextForConditionalGeneration.get_num_mm_connector_tokens
+    )
+
+    encoder_tokens = get_num_mm_encoder_tokens(stub, placeholder_len, mm_data=mm_data)
+    assert encoder_tokens == true_tower_tokens
+
+    connector_tokens = get_num_mm_connector_tokens(
+        stub, encoder_tokens, mm_data=mm_data
+    )
+    assert connector_tokens == true_tower_tokens
+
+
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
+def test_num_mm_encoder_tokens_falls_back_without_mm_data(model_id):
+    """Without `mm_data` (e.g. a caller that hasn't been updated to pass
+    it through), the helper falls back to treating `num_image_tokens` as
+    the token count -- correct only for the single-tile case, but at
+    least not a crash."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
+    info = LlavaNextProcessingInfo(ctx)
+    hf_config = info.get_hf_config()
+
+    stub = _StubModel()
+    stub.config = hf_config
+
+    get_num_mm_encoder_tokens = (
+        LlavaNextForConditionalGeneration.get_num_mm_encoder_tokens
+    )
+    assert get_num_mm_encoder_tokens(stub, 577) == 577
+    assert get_num_mm_encoder_tokens(stub, 0, mm_data=None) == 0
