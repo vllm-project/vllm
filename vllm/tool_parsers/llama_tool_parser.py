@@ -127,17 +127,18 @@ class Llama3JsonToolParser(ToolParser):
                         )
                     )
                 except KeyError as e:
-                    # Missing required key
+                    # A JSON object without the required keys is surrounding
+                    # text (e.g. the model quoting arguments), not a tool call
                     missing_key = str(e).strip("'\"")
-                    logger.exception(
-                        "Couldn't extract tool call from JSON response. "
-                        "Required key '%s' not present. "
-                        "Returning output in content with empty tool calls.",
+                    logger.debug(
+                        "Skipping JSON object without required key '%s'.",
                         missing_key,
                     )
-                    return ExtractedToolCallInformation(
-                        tools_called=False, tool_calls=[], content=model_output
-                    )
+                    continue
+                except json.JSONDecodeError:
+                    # A brace in surrounding text that doesn't start a JSON
+                    # object; keep any tool calls already extracted
+                    continue
                 except Exception:
                     # Any other error during parsing
                     logger.exception(
@@ -203,7 +204,14 @@ class Llama3JsonToolParser(ToolParser):
                     is_complete.append(
                         is_complete_json(current_text[start_idx : start_idx + end_idx])
                     )
-                    start_idx += end_idx + len("; ")
+                    start_idx += end_idx
+                    # the model may separate parallel calls with ";", "; ",
+                    # or a newline; skip whatever separator is present
+                    while (
+                        start_idx < len(current_text)
+                        and current_text[start_idx] in "; \t\n"
+                    ):
+                        start_idx += 1
                     # depending on the prompt Llama can use
                     # either arguments or parameters
                     if "parameters" in obj:
