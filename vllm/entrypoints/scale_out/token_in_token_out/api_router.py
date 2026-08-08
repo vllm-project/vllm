@@ -27,6 +27,11 @@ from .serving import ServingTokens
 
 logger = init_logger(__name__)
 
+# The event loop only keeps weak references to tasks, so a task whose only
+# reference is the create_task() call can be collected before it finishes.
+# Hold a strong reference until it completes.
+_background_tasks: set[asyncio.Task] = set()
+
 
 def tokenization(request: Request) -> ServingTokenization:
     return request.app.state.serving_tokenization
@@ -96,7 +101,9 @@ def attach_router(app: FastAPI):
                     detail="Missing 'request_ids' in request body",
                 )
             # Abort requests in background
-            asyncio.create_task(engine_client(raw_request).abort(request_ids))
+            task = asyncio.create_task(engine_client(raw_request).abort(request_ids))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
             return Response(status_code=200)
 
     app.include_router(router)

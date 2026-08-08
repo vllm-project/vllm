@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
@@ -419,6 +419,11 @@ class BackgroundResources:
     stats_update_socket: zmq.asyncio.Socket | None = None
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
+    # Fire-and-forget EEP notification-callback tasks spawned from the output
+    # queue task. Held here (rather than a module-level set) so they die with
+    # the client instead of leaking process-global if still pending at
+    # shutdown.
+    notification_tasks: set[asyncio.Task] = field(default_factory=set)
     shutdown_path: str | None = None
 
     # Set if any of the engines are dead. Here so that the output
@@ -449,7 +454,11 @@ class BackgroundResources:
                 self.stats_update_socket,
             )
 
-            tasks = (self.output_queue_task, self.stats_update_task)
+            tasks = (
+                self.output_queue_task,
+                self.stats_update_task,
+                *self.notification_tasks,
+            )
 
             def close_sockets_and_tasks():
                 close_sockets(sockets)
@@ -470,6 +479,7 @@ class BackgroundResources:
                 close_sockets(sockets)
                 del self.output_queue_task
                 del self.stats_update_task
+                self.notification_tasks.clear()
         else:
             # Sync case.
 
@@ -1057,9 +1067,11 @@ class AsyncMPClient(MPClient):
                             notification_data = outputs.utility_output.result.result
                             assert isinstance(notification_data, Sequence)
                             assert len(notification_data) == 2
-                            asyncio.create_task(
+                            task = asyncio.create_task(
                                 notification_callback_handler(_self, notification_data)
                             )
+                            resources.notification_tasks.add(task)
+                            task.add_done_callback(resources.notification_tasks.discard)
                         elif outputs.utility_output.call_id == FT_STATUS_CALL_ID:
                             _self = _self_ref()
                             if not _self:
