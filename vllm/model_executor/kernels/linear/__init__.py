@@ -187,6 +187,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+    BlockWiseTorchFP8ScaledMMLinearKernel,
     ChannelWiseTorchFP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
     RowWiseTorchFP8ScaledMMLinearKernel,
@@ -281,6 +282,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
+        BlockWiseTorchFP8ScaledMMLinearKernel,
     },
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
@@ -324,6 +326,37 @@ def _filter_kernels_by_backend(
     """Filter a kernel priority list to only those matching the backend."""
     backend_kernels = _LINEAR_BACKEND_KERNEL_MAP.get(backend, set())
     return [k for k in kernels if k in backend_kernels]
+
+
+def _resolve_backend_kernels(
+    kernels: list[type],
+    layer_desc: str,
+) -> list[type]:
+    """Apply --linear-backend filtering to one layer type's kernel list.
+
+    When the requested backend has no kernel for this layer type, fall back
+    to the unfiltered list (with a WARNING log) instead of failing engine
+    startup: an explicitly requested backend usually provides kernels for a
+    single quantization scheme, while a model can contain several linear
+    layer types (e.g. NVFP4 MoE projections next to FP8 attention
+    projections).
+    """
+    linear_backend = _get_linear_backend()
+    if linear_backend == "auto":
+        return kernels
+    filtered = _filter_kernels_by_backend(linear_backend, kernels)
+    if not filtered:
+        logger.warning_once(
+            "--linear-backend=%s was requested, but no %s kernel exists for "
+            "%s layers; falling back to normal kernel selection for this "
+            "layer.",
+            linear_backend,
+            linear_backend,
+            layer_desc,
+            scope="global",
+        )
+        return kernels
+    return filtered
 
 
 # in priority/performance order (when available)
@@ -380,6 +413,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         MarlinFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
         HummingFP8ScaledMMLinearKernel,
+        BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
         AiterFp8BlockScaledMMKernel,
@@ -464,10 +498,8 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferCuteDslNvFp4LinearKernel,
-        # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
-        # upstream CUTLASS SM121 MMA op guard is resolved; use
-        # --linear-backend flashinfer_b12x to opt in explicitly.
         FlashInferCutlassNvFp4LinearKernel,
+        FlashInferB12xNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
         FlashInferTrtllmNvFp4LinearKernel,
@@ -585,15 +617,7 @@ def choose_scaled_mm_linear_kernel(
     platform_kernels = possible_kernels.get(current_platform._enum, [])
 
     # Apply --linear-backend filtering when set.
-    linear_backend = _get_linear_backend()
-    if linear_backend != "auto":
-        filtered = _filter_kernels_by_backend(linear_backend, platform_kernels)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for this layer type."
-            )
-        platform_kernels = filtered
+    platform_kernels = _resolve_backend_kernels(platform_kernels, "scaled-mm")
 
     for kernel in platform_kernels:
         is_supported_and_can_implement, failure_reason = (
@@ -749,15 +773,7 @@ def choose_mp_linear_kernel(
     platform_kernels = _POSSIBLE_KERNELS.get(current_platform._enum, [])
 
     # Apply --linear-backend filtering when set.
-    linear_backend = _get_linear_backend()
-    if linear_backend != "auto":
-        filtered = _filter_kernels_by_backend(linear_backend, platform_kernels)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for mixed-precision layers."
-            )
-        platform_kernels = filtered
+    platform_kernels = _resolve_backend_kernels(platform_kernels, "mixed-precision")
 
     failure_reasons = []
     for kernel in platform_kernels:
@@ -800,15 +816,7 @@ def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
     possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
     # Apply --linear-backend filtering when set.
-    linear_backend = _get_linear_backend()
-    if linear_backend != "auto":
-        filtered = _filter_kernels_by_backend(linear_backend, possible)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for MXFP8 layers."
-            )
-        possible = filtered
+    possible = _resolve_backend_kernels(possible, "MXFP8")
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -846,20 +854,11 @@ def init_mxfp4_linear_kernel(
         activation_quant_key=activation_quant_key,
     )
 
-    linear_backend = _get_linear_backend()
-
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
 
     # Apply --linear-backend filtering when set.
-    if linear_backend != "auto":
-        filtered = _filter_kernels_by_backend(linear_backend, possible)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for MXFP4 layers."
-            )
-        possible = filtered
+    possible = _resolve_backend_kernels(possible, "MXFP4")
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -1039,14 +1038,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         possible = [kernel for kernel in possible if kernel in a16_kernels]
 
     # Apply --linear-backend filtering when set.
-    if linear_backend != "auto":
-        filtered = _filter_kernels_by_backend(linear_backend, possible)
-        if not filtered:
-            raise ValueError(
-                f"--linear-backend={linear_backend} was requested but no "
-                f"'{linear_backend}' kernel exists for NVFP4 layers."
-            )
-        possible = filtered
+    possible = _resolve_backend_kernels(possible, "NVFP4")
 
     failure_reasons = []
     for kernel_cls in possible:
