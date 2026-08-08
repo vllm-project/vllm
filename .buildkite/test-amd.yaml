@@ -2449,6 +2449,7 @@ steps:
   # we can only upgrade after this is resolved
   # TODO(jerryzh168): resolve the above comment
   - uv pip install --system torchao==0.17.0
+  - curl -sL https://github.com/pytorch/ao/commit/5e92da482ba8f2e3aa64d74fbfa7131c259b693d.patch | patch -d $(python3 -c "import site;print(site.getsitepackages()[0])") -p1
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
@@ -3710,6 +3711,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - uv pip install --system torchao==0.17.0
+  - curl -sL https://github.com/pytorch/ao/commit/5e92da482ba8f2e3aa64d74fbfa7131c259b693d.patch | patch -d $(python3 -c "import site;print(site.getsitepackages()[0])") -p1
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
