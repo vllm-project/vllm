@@ -380,6 +380,21 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_data_parallel_rpc_port_has_fixed_default():
+    assert ParallelConfig().data_parallel_rpc_port == 29550
+
+
+@pytest.mark.parametrize("port", [1, 29550, 65535])
+def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
+    assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
+
+
+@pytest.mark.parametrize("port", [-1, 0, 65536])
+def test_data_parallel_rpc_port_rejects_invalid_ports(port: int):
+    with pytest.raises(ValidationError):
+        ParallelConfig(data_parallel_rpc_port=port)
+
+
 def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     parallel_config = ParallelConfig(
         tensor_parallel_size=8,
