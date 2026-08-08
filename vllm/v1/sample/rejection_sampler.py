@@ -800,6 +800,7 @@ def rejection_random_sample_kernel(
     )
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
+    start_idx_i64 = start_idx.to(tl.int64)
 
     rejected = False
     for pos in range(num_draft_tokens):
@@ -818,11 +819,13 @@ def rejection_random_sample_kernel(
                 else:
                     draft_prob = tl.load(
                         draft_probs_ptr
-                        + (start_idx + pos) * vocab_size
+                        + (start_idx_i64 + pos) * vocab_size
                         + draft_token_id
                     )
                 target_prob = tl.load(
-                    target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
+                    target_probs_ptr
+                    + (start_idx_i64 + pos) * vocab_size
+                    + draft_token_id
                 )
                 # NOTE(woosuk): While the draft probability should never be 0,
                 # we check it to avoid NaNs. If it happens to be 0, we reject.
@@ -897,6 +900,8 @@ def sample_recovered_tokens_kernel(
         return
 
     token_idx = start_idx + pos
+    token_idx_i64 = token_idx.to(tl.int64)
+    req_idx_i64 = req_idx.to(tl.int64)
 
     if NO_DRAFT_PROBS:
         draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
@@ -912,18 +917,18 @@ def sample_recovered_tokens_kernel(
 
         if NO_DRAFT_PROBS:
             prob = tl.load(
-                target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                target_probs_ptr + token_idx_i64 * vocab_size + vocab_offset,
                 mask=(vocab_mask & (vocab_offset != draft_token_id)),
                 other=0.0,
             )
         else:
             draft_prob = tl.load(
-                draft_probs_ptr + token_idx * vocab_size + vocab_offset,
+                draft_probs_ptr + token_idx_i64 * vocab_size + vocab_offset,
                 mask=vocab_mask,
                 other=0.0,
             )
             target_prob = tl.load(
-                target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                target_probs_ptr + token_idx_i64 * vocab_size + vocab_offset,
                 mask=vocab_mask,
                 other=0.0,
             )
@@ -932,7 +937,7 @@ def sample_recovered_tokens_kernel(
             # `tl.argmax` will select the maximum value.
 
         inv_q = tl.load(
-            inv_q_ptr + req_idx * vocab_size + vocab_offset,
+            inv_q_ptr + req_idx_i64 * vocab_size + vocab_offset,
             mask=vocab_mask,
             other=0.0,
         )
