@@ -78,6 +78,11 @@ def _discover_parsers() -> list[_ParserInfo]:
             # Inkling opts out of token-id terminal matching and has typed
             # structural blocks; its replay coverage lives in test_inkling.py.
             continue
+        if cfg.name == "granite":
+            # Granite has a JSON-array tool body with no TOOL_END terminal, so
+            # it does not fit this token-terminal harness; its replay coverage
+            # lives in test_granite.py.
+            continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
         if not tool_end:
             raise RuntimeError(
