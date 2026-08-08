@@ -189,3 +189,36 @@ def test_hunyuan_a13b_tool_parser_non_ascii():
     args = tool_calls[0].function.arguments
     assert "北京" in args
     assert "\\u" not in args
+
+
+@pytest.mark.parametrize(
+    "model_output,expected_tool_calls",
+    [
+        # Empty-args tool first: later tools' arguments must not be dropped.
+        (
+            '<tool_calls>[{"name": "a", "arguments": {}}, {"name": "b", "arguments": {"x": 42}}]</tool_calls>',
+            [make_tool_call("a", {}), make_tool_call("b", {"x": 42})],
+        ),
+        # Empty-args tool last: earlier tools' arguments must not be dropped.
+        (
+            '<tool_calls>[{"name": "a", "arguments": {"x": 42}}, {"name": "b", "arguments": {}}]</tool_calls>',
+            [make_tool_call("a", {"x": 42}), make_tool_call("b", {})],
+        ),
+    ],
+)
+def test_hunyuan_a13b_tool_parser_streaming_one_empty_args_tool(
+    model_output, expected_tool_calls
+):
+    """An empty-args tool must not clobber other tools' streamed arguments."""
+    mock_tokenizer = MagicMock()
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hunyuan_a13b")(
+        mock_tokenizer
+    )
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, list(model_output), assert_one_tool_per_delta=False
+    )
+
+    for idx in range(len(reconstructor.tool_calls)):
+        reconstructor.tool_calls[idx].id = expected_tool_calls[idx].id
+
+    assert reconstructor.tool_calls == expected_tool_calls
