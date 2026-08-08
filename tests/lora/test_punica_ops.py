@@ -461,6 +461,78 @@ def test_kernels(
         )
 
 
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_expand_cache_respects_offset_start(device: str):
+    """The cached slice offsets must match each expand invocation."""
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(0)
+
+    batches = num_loras = nslices = 2
+    rank, hidden_size, seq_length = 8, 16, 4
+    offset_start = 7
+    data = generate_data_for_nslices(
+        batches,
+        hidden_size,
+        num_loras,
+        rank,
+        seq_length,
+        nslices,
+        torch.float16,
+        "expand",
+        device,
+    )
+    _, token_nums = data.meta()
+    lora_meta = LoRAKernelMeta.make(
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
+    )
+    lora_meta.prepare_tensors(data.token_lora_mapping)
+    meta_args = lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False)
+
+    output_shape = (token_nums, offset_start + hidden_size * nslices)
+    with _dict_lock:
+        _LORA_B_PTR_DICT.clear()
+        # Populate the cache with a different offset for the same weights.
+        triton_ops.lora_expand(
+            data.inputs_tensor,
+            data.lora_weights,
+            torch.zeros(output_shape, dtype=torch.float16, device=device),
+            *meta_args,
+            offset_start=0,
+            add_inputs=False,
+        )
+
+        out_tensor = torch.zeros(output_shape, dtype=torch.float16, device=device)
+        triton_ops.lora_expand(
+            data.inputs_tensor,
+            data.lora_weights,
+            out_tensor,
+            *meta_args,
+            offset_start=offset_start,
+            add_inputs=False,
+        )
+
+    ref_out_tensor = torch.zeros_like(out_tensor)
+    seq_cpu = data.seq_len_tensor.cpu()
+    mapping_cpu = data.prompt_lora_mapping.cpu()
+    ref_cpu = ref_out_tensor.cpu()
+    for index in range(nslices):
+        _cpu_bgmv_expand(
+            data.inputs_tensor[index].cpu(),
+            data.lora_weights[index].cpu(),
+            ref_cpu,
+            seq_cpu,
+            mapping_cpu,
+            offset=offset_start + hidden_size * index,
+            add_inputs=False,
+        )
+    ref_out_tensor.copy_(ref_cpu)
+
+    assert_close(out_tensor, ref_out_tensor)
+
+
 @pytest.mark.parametrize("batches", hs_test_params["batches"])
 @pytest.mark.parametrize("num_loras", hs_test_params["num_loras"])
 @pytest.mark.parametrize("rank", hs_test_params["max_ranks"])
