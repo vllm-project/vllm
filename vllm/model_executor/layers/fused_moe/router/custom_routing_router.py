@@ -19,11 +19,13 @@ class CustomRoutingRouter(BaseRouter):
         custom_routing_function: Callable,
         eplb_state: EplbLayerState | None = None,
         renormalize: bool = True,
+        layer_idx: int = -1,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            layer_idx=layer_idx,
         )
         self.custom_routing_function = custom_routing_function
         self.renormalize = renormalize

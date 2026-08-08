@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
+    BaseRouter,
     eplb_map_to_physical_and_record,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
@@ -484,6 +485,89 @@ def test_fused_topk(
 
     # Compare results
     assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
+
+
+class TorchTopKRouter(BaseRouter):
+    @property
+    def routing_method_type(self) -> RoutingMethodType:
+        return RoutingMethodType.TopK
+
+    def _compute_routing(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del hidden_states, input_ids
+        weights, ids = torch.topk(router_logits, self.top_k, dim=-1)
+        return weights, ids.to(indices_type) if indices_type else ids
+
+
+def test_pre_topk_mask_replaces_pruned_expert():
+    router = TorchTopKRouter(top_k=2, global_num_experts=4)
+    router.prune_logit_mask = torch.tensor([0.0, float("-inf"), 0.0, 0.0])
+    hidden_states = torch.zeros(1, 4)
+    router_logits = torch.tensor([[10.0, 9.0, 8.0, 7.0]])
+
+    topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
+
+    assert topk_ids.tolist() == [[0, 2]]
+    assert topk_weights.tolist() == [[10.0, 8.0]]
+
+
+def test_post_topk_drop_preserves_selection_without_replacement_or_renorm():
+    reference = TorchTopKRouter(top_k=2, global_num_experts=4)
+    candidate = TorchTopKRouter(top_k=2, global_num_experts=4)
+    candidate.post_topk_drop_mask = torch.tensor([False, True, False, False])
+    hidden_states = torch.zeros(1, 4)
+    router_logits = torch.tensor([[10.0, 9.0, 8.0, 7.0]])
+    captured_ids = []
+    candidate.set_capture_fn(lambda ids: captured_ids.append(ids.clone()))
+
+    reference_weights, reference_ids = reference.select_experts(
+        hidden_states, router_logits
+    )
+    candidate_weights, candidate_ids = candidate.select_experts(
+        hidden_states, router_logits
+    )
+
+    assert reference_ids.tolist() == [[0, 1]]
+    assert candidate_ids.tolist() == reference_ids.tolist()
+    assert captured_ids[0].tolist() == reference_ids.tolist()
+    assert candidate_weights[0, 0] == reference_weights[0, 0]
+    assert candidate_weights[0, 1] == 0
+    assert 2 not in candidate_ids[0].tolist()
+
+
+def test_post_topk_drop_records_effective_expert_counts():
+    router = TorchTopKRouter(top_k=2, global_num_experts=4)
+    router.post_topk_drop_mask = torch.tensor([False, True, False, False])
+    router.riy_original_topk_slots_view = torch.zeros((), dtype=torch.int64)
+    router.riy_surviving_topk_slots_view = torch.zeros((), dtype=torch.int64)
+    router.riy_effective_count_histogram_view = torch.zeros(3, dtype=torch.int64)
+    router.riy_collecting_flag = torch.ones((), dtype=torch.int32)
+    hidden_states = torch.zeros(1, 4)
+    router_logits = torch.tensor([[10.0, 9.0, 8.0, 7.0]])
+
+    router.select_experts(hidden_states, router_logits)
+
+    assert router.riy_original_topk_slots_view.item() == 2
+    assert router.riy_surviving_topk_slots_view.item() == 1
+    assert router.riy_effective_count_histogram_view.tolist() == [0, 1, 0]
+
+
+def test_post_topk_drop_all_selected_experts_produces_zero_weights():
+    router = TorchTopKRouter(top_k=2, global_num_experts=4)
+    router.post_topk_drop_mask = torch.tensor([True, True, False, False])
+    hidden_states = torch.zeros(1, 4)
+    router_logits = torch.tensor([[10.0, 9.0, 8.0, 7.0]])
+
+    topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
+
+    assert topk_ids.tolist() == [[0, 1]]
+    assert topk_weights.tolist() == [[0.0, 0.0]]
 
 
 @pytest.mark.parametrize("m,k", MK_S)

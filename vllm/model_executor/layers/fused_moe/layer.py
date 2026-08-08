@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from typing import Any
 
+import regex as re
 import torch
 
 import vllm.envs as envs
@@ -264,9 +266,70 @@ def FusedMoEFactory(
 
     max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-    # Create ExpertMapManager to handle expert mapping and placement for EP.
-    # See ExpertMapManager for a detailed description of what it does and when
-    # it is required.
+    # Extract layer index from prefix (e.g. "model.layers.5.mlp" → 5)
+    from vllm.model_executor.layers.fused_moe.riy import (
+        RiyLayerPrunePlan,
+        build_riy_layer_prune_plan,
+        get_riy_state,
+        load_riy_profile,
+    )
+
+    layer_match = re.search(r"layers\.(\d+)\.", prefix)
+    layer_idx = int(layer_match.group(1)) if layer_match else -1
+    if layer_idx >= 0:
+        quantization = quant_config.__class__.__name__ if quant_config else ""
+        get_riy_state().register_layer(
+            layer_idx,
+            num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            quantization=quantization,
+            top_k=top_k,
+        )
+
+    riy_expert_filter = None
+    riy_plan: RiyLayerPrunePlan | None = None
+    riy_profile_path = vllm_config.parallel_config.riy_expert_profile or os.environ.get(
+        "RIY_EXPERT_PROFILE", ""
+    )
+    if riy_profile_path and not os.path.exists(riy_profile_path):
+        raise FileNotFoundError(f"RIY profile not found: {riy_profile_path}")
+    if riy_profile_path and layer_idx >= 0:
+        hf_config = getattr(vllm_config.model_config, "hf_config", None)
+        num_layers = getattr(hf_config, "num_hidden_layers", 0)
+        if not num_layers:
+            text_config = getattr(hf_config, "text_config", None)
+            num_layers = getattr(text_config, "num_hidden_layers", 0)
+        if not num_layers:
+            raise ValueError("RIY profiles require a known num_hidden_layers")
+        riy_profile = load_riy_profile(
+            riy_profile_path,
+            num_layers=num_layers,
+            num_experts=global_num_experts,
+        )
+        riy_plan = build_riy_layer_prune_plan(
+            riy_profile, layer_idx=layer_idx, top_k=top_k
+        )
+        if (
+            riy_plan.routing_mode == "post_topk_drop"
+            and vllm_config.kernel_config.moe_backend != "triton"
+        ):
+            raise NotImplementedError(
+                "RIY post_topk_drop currently requires --moe-backend triton"
+            )
+        if riy_plan.num_kept < global_num_experts:
+            riy_expert_filter = riy_plan.expert_filter
+        if riy_expert_filter is not None and eplb_state is not None:
+            raise NotImplementedError("RIY profile pruning does not support EPLB")
+        logger.info(
+            "RIY layer %d: routing_mode=%s, kept=%d/%d experts",
+            layer_idx,
+            riy_plan.routing_mode,
+            riy_plan.num_kept,
+            global_num_experts,
+        )
+
+    # Create ExpertMapManager to compose profile pruning with EP placement.
     expert_map_manager = ExpertMapManager(
         max_num_batched_tokens=max_num_batched_tokens,
         top_k=top_k,
@@ -278,6 +341,7 @@ def FusedMoEFactory(
         enable_eplb=eplb_state is not None,
         num_fused_shared_experts=num_fused_shared_experts,
         rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
+        expert_filter=riy_expert_filter,
     )
 
     # TODO(bnell): we should not have to create a router if the kernel is
@@ -287,6 +351,7 @@ def FusedMoEFactory(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            layer_idx=layer_idx,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
@@ -320,6 +385,49 @@ def FusedMoEFactory(
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
         )
+
+    if riy_plan is not None:
+        if riy_plan.pre_topk_logit_mask is not None:
+            router.prune_logit_mask = riy_plan.pre_topk_logit_mask.to(
+                vllm_config.device_config.device
+            )
+        if riy_plan.post_topk_drop_mask is not None:
+            router.post_topk_drop_mask = riy_plan.post_topk_drop_mask.to(
+                vllm_config.device_config.device
+            )
+
+    if layer_idx >= 0 and os.environ.get("VLLM_RIY_MONITOR", "0") == "1":
+        riy = get_riy_state()
+        if riy.enabled:
+            total_layers = 0
+            hf_config = getattr(vllm_config.model_config, "hf_config", None)
+            if hf_config is not None:
+                total_layers = getattr(hf_config, "num_hidden_layers", 0)
+                if not total_layers:
+                    text_config = getattr(hf_config, "text_config", None)
+                    if text_config is not None:
+                        total_layers = getattr(text_config, "num_hidden_layers", 0)
+            if not riy._tensors_initialized:
+                riy.initialize_tensors(
+                    vllm_config.device_config.device, num_layers=total_layers
+                )
+            freq_view = riy.get_freq_view(layer_idx)
+            weight_view = riy.get_weight_view(layer_idx)
+            if freq_view is not None:
+                router.riy_freq_view = freq_view
+                router.riy_weight_view = weight_view
+                router.riy_collecting_flag = riy._collecting_flag
+            if riy_plan is not None and riy_plan.routing_mode == "post_topk_drop":
+                router.riy_original_topk_slots_view = riy.get_original_topk_slots_view(
+                    layer_idx
+                )
+                router.riy_surviving_topk_slots_view = (
+                    riy.get_surviving_topk_slots_view(layer_idx)
+                )
+                router.riy_effective_count_histogram_view = (
+                    riy.get_effective_count_histogram_view(layer_idx)
+                )
+                router.riy_collecting_flag = riy._collecting_flag
 
     if params_dtype is None:
         params_dtype = torch.get_default_dtype()

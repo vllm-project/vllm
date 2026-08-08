@@ -18,6 +18,14 @@ class FusedMoERouter(ABC):
     def __init__(self, eplb_state: EplbLayerState | None = None):
         self._routing_replay_out: torch.Tensor | None = None
         self.eplb_state = eplb_state
+        self.prune_logit_mask: torch.Tensor | None = None
+        self.post_topk_drop_mask: torch.Tensor | None = None
+        self.riy_freq_view: torch.Tensor | None = None
+        self.riy_weight_view: torch.Tensor | None = None
+        self.riy_collecting_flag: torch.Tensor | None = None
+        self.riy_original_topk_slots_view: torch.Tensor | None = None
+        self.riy_surviving_topk_slots_view: torch.Tensor | None = None
+        self.riy_effective_count_histogram_view: torch.Tensor | None = None
 
     @abstractmethod
     def set_capture_fn(

@@ -306,11 +306,13 @@ class FusedTopKBiasRouter(BaseRouter):
         hash_indices_table: torch.Tensor | None = None,
         num_fused_shared_experts: int = 0,
         shared_expert_weight: float = 1.0,
+        layer_idx: int = -1,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            layer_idx=layer_idx,
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.renormalize = renormalize

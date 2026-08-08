@@ -173,6 +173,9 @@ class ParallelConfig:
     models."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
+    riy_expert_profile: str | None = None
+    """Path to a RIY expert profile JSON. Pruned experts are excluded from
+    routing and their weights are not allocated. See docs/design/riy.md."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
