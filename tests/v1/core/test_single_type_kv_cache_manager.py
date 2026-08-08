@@ -14,6 +14,9 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    CrossAttentionManager,
+    FullAttentionManager,
+    MambaManager,
     RSWAManager,
     SlidingWindowManager,
 )
@@ -24,6 +27,20 @@ from vllm.v1.kv_cache_interface import (
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    ("manager", "expected"),
+    [
+        (FullAttentionManager, True),
+        (SlidingWindowManager, True),
+        (ChunkedLocalAttentionManager, False),
+        (MambaManager, False),
+        (CrossAttentionManager, False),
+    ],
+)
+def test_manager_declares_eagle_cache_peek_capability(manager, expected):
+    assert manager.supports_eagle_cache_peek is expected
 
 
 def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):
