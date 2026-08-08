@@ -222,6 +222,9 @@ class AriaTextMoELayer(nn.Module):
             "silu",
             quant_config=quant_config,
             bias=config.mlp_bias,
+            # FusedMoE all-reduces the combined shared+routed output, so the
+            # shared experts must not reduce on their own.
+            reduce_results=False,
         )
 
         self.experts = FusedMoEFactory(
