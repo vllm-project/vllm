@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
@@ -13,6 +14,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponsesResponse,
     StreamingResponsesResponse,
+    _omit_openai_response_non_nullable_nulls,
 )
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -37,10 +39,14 @@ async def _convert_stream_to_sse_events(
     """Convert the generator to a stream of events in SSE format"""
     async for event in generator:
         event_type = getattr(event, "type", "unknown")
-        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
+        event_payload = _omit_openai_response_non_nullable_nulls(
+            event.model_dump(mode="json", by_alias=True)
+        )
+        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/
+        # Using_server-sent_events#event_stream_format
         event_data = (
             f"event: {event_type}\ndata: "
-            f"{event.model_dump_json(indent=None, by_alias=True)}\n\n"
+            f"{json.dumps(event_payload, separators=(',', ':'))}\n\n"
         )
         yield event_data
 
