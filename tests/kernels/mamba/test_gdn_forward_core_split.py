@@ -57,6 +57,7 @@ from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,
     QwenGatedDeltaNetAttention,
+    _gdn_overlap_supported_for_cache_mode,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
     MambaStateShapeCalculator,
@@ -68,6 +69,7 @@ from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
 from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
     FLA_CHUNK_SIZE,
 )
+from vllm.utils.multi_stream_utils import execute_in_parallel  # noqa: E402
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
 )
@@ -86,24 +88,37 @@ BLOCK_SIZE = 16
 PREFIX = "model.layers.0.linear_attn"
 
 
-def _make_vllm_config():
+def _make_vllm_config(gdn_backend: str):
     # A small, ungated GDN model whose config is cached locally; only the config
-    # (scheduler/cache/compilation/hf) is used here, never the weights. Inject
-    # linear_key_head_dim=128 and request the CuteDSL prefill backend -- the
-    # supported GDN chunk kernel on Blackwell (the Triton/FLA chunk kernel is
-    # unsupported on SM10x). CuteDSL consumes chunk_indices/chunk_offsets, so
-    # this also exercises the prefill-only chunk-metadata wiring.
+    # (scheduler/cache/compilation/hf) is used here, never the weights.
     cfg = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
         hf_config_override={"linear_key_head_dim": K},
     )
-    cfg.additional_config = {"gdn_prefill_backend": "cutedsl"}
+    cfg.additional_config = {"gdn_prefill_backend": gdn_backend}
     return cfg
 
 
+@pytest.mark.parametrize(
+    ("cache_mode", "expected"),
+    [("none", True), ("align", False), ("all", False)],
+)
+def test_gdn_overlap_requires_unshared_state_slots(
+    cache_mode: str, expected: bool
+) -> None:
+    assert _gdn_overlap_supported_for_cache_mode(cache_mode) is expected
+
+
 def _build_layer(
-    vllm_config, conv_state, ssm_state, A_log, dt_bias, conv_weight, conv_bias
+    vllm_config,
+    conv_state,
+    ssm_state,
+    A_log,
+    dt_bias,
+    conv_weight,
+    conv_bias,
+    enable_overlap: bool = False,
 ):
     """A minimal object that runs the real ``_forward_core`` bound to it."""
     layer = types.SimpleNamespace()
@@ -123,6 +138,11 @@ def _build_layer(
     layer.kv_cache = (conv_state, ssm_state)
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
+    layer.gdn_decode_prefill_overlap = enable_overlap
+    layer.gdn_overlap_stream = torch.cuda.Stream() if enable_overlap else None
+    layer.gdn_overlap_start_event = torch.cuda.Event() if enable_overlap else None
+    layer.gdn_overlap_done_event = torch.cuda.Event() if enable_overlap else None
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
@@ -150,10 +170,14 @@ def _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens):
     return core_attn_out
 
 
+@pytest.mark.parametrize("gdn_backend", ["cutedsl", "flashinfer"])
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("num_decodes,prefill_lens", [(3, [512, 300]), (4, [64, 5])])
+@pytest.mark.parametrize(
+    "num_decodes,prefill_lens", [(3, [512, 300]), (4, [64, 5]), (3, [4096])]
+)
 @pytest.mark.parametrize("fresh_prefill", [False, True])
 def test_forward_core_split_matches_unified(
+    gdn_backend: str,
     state_dtype: torch.dtype,
     num_decodes: int,
     prefill_lens: list[int],
@@ -161,7 +185,7 @@ def test_forward_core_split_matches_unified(
 ) -> None:
     torch.manual_seed(0)
     device = torch.device("cuda")
-    vllm_config = _make_vllm_config()
+    vllm_config = _make_vllm_config(gdn_backend)
 
     # Decode-first batch: D 1-token decodes (with context), then the prefills.
     decode_seq_lens = [64] * num_decodes
@@ -193,7 +217,7 @@ def test_forward_core_split_matches_unified(
     assert meta_split.num_decodes == num_decodes
     assert meta_split.num_prefills == len(prefill_lens)
     assert meta_split.num_decode_tokens == num_decodes
-    assert builder.gdn_prefill_backend == "cutedsl"
+    assert builder.gdn_prefill_backend == gdn_backend
 
     num_tokens = sum(query_lens)
 
@@ -272,6 +296,70 @@ def test_forward_core_split_matches_unified(
         conv_bias,
     )
     out_split = _run_forward_core(layer_split, meta_split, mixed_qkv, b, a, num_tokens)
+
+    # ---- Overlap path (real _forward_core, same split metadata) ----
+    conv_state_overlap = conv_state0.clone()
+    ssm_state_overlap = ssm_state0.clone()
+    layer_overlap = _build_layer(
+        vllm_config,
+        conv_state_overlap,
+        ssm_state_overlap,
+        A_log,
+        dt_bias,
+        conv_weight,
+        conv_bias,
+        enable_overlap=True,
+    )
+    with patch.object(
+        qwen_gdn_linear_attn,
+        "execute_in_parallel",
+        wraps=execute_in_parallel,
+    ) as parallel:
+        out_overlap = _run_forward_core(
+            layer_overlap, meta_split, mixed_qkv, b, a, num_tokens
+        )
+    expected_overlap = gdn_backend == "flashinfer" and sum(prefill_lens) >= 4096
+    assert parallel.call_count == int(expected_overlap)
+    torch.testing.assert_close(out_overlap, out_split, atol=0, rtol=0)
+    torch.testing.assert_close(conv_state_overlap, conv_state_split, atol=0, rtol=0)
+    torch.testing.assert_close(ssm_state_overlap, ssm_state_split, atol=0, rtol=0)
+
+    if expected_overlap:
+        captured_out = torch.zeros_like(out_overlap)
+        ctx = types.SimpleNamespace(attn_metadata={PREFIX: meta_split})
+        graph = torch.cuda.CUDAGraph()
+        torch.accelerator.synchronize()
+        with (
+            patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=ctx),
+            torch.cuda.graph(graph),
+        ):
+            layer_overlap._forward_core(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                core_attn_out=captured_out,
+            )
+        reference_layer = _build_layer(
+            vllm_config,
+            layer_overlap.kv_cache[0].clone(),
+            layer_overlap.kv_cache[1].clone(),
+            A_log,
+            dt_bias,
+            conv_weight,
+            conv_bias,
+        )
+        graph.replay()
+        expected_replay = _run_forward_core(
+            reference_layer, meta_split, mixed_qkv, b, a, num_tokens
+        )
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(captured_out, expected_replay, atol=0, rtol=0)
+        torch.testing.assert_close(
+            layer_overlap.kv_cache[0], reference_layer.kv_cache[0], atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            layer_overlap.kv_cache[1], reference_layer.kv_cache[1], atol=0, rtol=0
+        )
 
     # ---- Unified path (real _forward_core, meta_unified) ----
     conv_state_unified = conv_state0.clone()
