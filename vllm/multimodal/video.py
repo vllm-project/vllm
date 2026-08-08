@@ -1377,6 +1377,27 @@ class DynamicVideoBackend(VideoBackend):
     _sampling_suffix: ClassVar[str] = "_dynamic"
 
     @classmethod
+    def _validate_sampling_metadata(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+    ) -> None:
+        if source.total_frames_num <= 0:
+            raise ValueError(
+                "video source metadata must include a positive frame count"
+            )
+        if source.original_fps <= 0:
+            raise ValueError("video source metadata must include a positive fps")
+        if source.duration <= 0:
+            raise ValueError("video source metadata must include a positive duration")
+        if target.fps <= 0:
+            raise ValueError("video target metadata must include a positive fps")
+        if target.max_duration <= 0:
+            raise ValueError(
+                "video target metadata must include a positive max duration"
+            )
+
+    @classmethod
     def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
         # Estimate duration from frame count and fps when the container
         # does not report it (common for WebM/streaming inputs).
@@ -1398,6 +1419,7 @@ class DynamicVideoBackend(VideoBackend):
         target: VideoTargetMetadata,
         **kwargs,
     ) -> list[int]:
+        cls._validate_sampling_metadata(source, target)
         total_frames_num = source.total_frames_num
         duration = source.duration
         original_fps = source.original_fps
@@ -1409,7 +1431,7 @@ class DynamicVideoBackend(VideoBackend):
         # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
         frame_indices_list: list[int]
         if duration <= max_duration:
-            n = int(math.floor(duration * fps))
+            n = max(1, int(math.floor(duration * fps)))
             frame_indices_list = sorted(
                 {
                     min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
@@ -1417,7 +1439,7 @@ class DynamicVideoBackend(VideoBackend):
                 }
             )
         else:
-            num_samples = int(max_duration * fps)
+            num_samples = max(1, int(max_duration * fps))
             if num_samples >= total_frames_num:
                 frame_indices_list = list(range(total_frames_num))
             else:
