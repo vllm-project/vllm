@@ -82,7 +82,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsXDRoPE,
-    is_mixture_of_experts,
+    get_mixture_of_experts_model,
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
@@ -266,6 +266,23 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
+def count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
+    """Per-row NaN counts, left on device."""
+    return logits.isnan().sum(dim=-1, dtype=torch.int32)
+
+
+def nans_to_dict(counts: list[int], req_id_to_index: dict[str, int]) -> dict[str, int]:
+    """Map per-row NaN counts onto request ids.
+
+    Rows and requests need not correspond one-to-one, so requests without a
+    row are reported as 0.
+    """
+    return {
+        req_id: int(counts[i]) if i < len(counts) else 0
+        for req_id, i in req_id_to_index.items()
+    }
+
+
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -278,6 +295,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         routed_experts: RoutedExpertsTensors | None = None,
         check_ep_fault: bool = False,
+        num_nans: torch.Tensor | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -292,6 +310,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
         self._routed_experts = routed_experts
+        self._num_nans = num_nans
         self._has_fault: torch.Tensor | None = None
 
         # Initiate the copy on a separate stream, but do not synchronize it.
@@ -309,6 +328,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             self._routed_experts_cpu = (
                 self._routed_experts.to_cpu_nonblocking()
                 if self._routed_experts is not None
+                else None
+            )
+            self._num_nans_cpu = (
+                self._num_nans.to("cpu", non_blocking=True)
+                if self._num_nans is not None
                 else None
             )
             if check_ep_fault:
@@ -349,6 +373,14 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._routed_experts_cpu is not None:
             output.routed_experts = self._routed_experts_cpu.tolists()
         del self._routed_experts
+
+        if self._num_nans_cpu is not None:
+            output.num_nans_in_logits = nans_to_dict(
+                self._num_nans_cpu.tolist(), output.req_id_to_index
+            )
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(output.num_nans_in_logits)
+        del self._num_nans
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
@@ -3752,6 +3784,7 @@ class GPUModelRunner(
         num_scheduled_tokens: int,
     ) -> tuple[
         dict[str, int],
+        torch.Tensor | None,
         LogprobsLists | None,
         list[list[int]],
         dict[str, LogprobsTensors | None],
@@ -3759,9 +3792,15 @@ class GPUModelRunner(
         dict[str, int],
         list[int],
     ]:
-        num_nans_in_logits = {}
+        num_nans: torch.Tensor | None = None
+        num_nans_in_logits: dict[str, int] = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
-            num_nans_in_logits = self._get_nans_in_logits(logits)
+            if self.use_async_scheduling:
+                # Keep the counts on device; they ride the async output copy
+                # stream rather than blocking here.
+                num_nans = None if logits is None else count_nans_per_row(logits)
+            else:
+                num_nans_in_logits = self._get_nans_in_logits(logits)
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -3876,6 +3915,7 @@ class GPUModelRunner(
 
         return (
             num_nans_in_logits,
+            num_nans,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
@@ -3951,6 +3991,51 @@ class GPUModelRunner(
             if force_uniform_decode is None
             else force_uniform_decode
         )
+
+    def _allow_microbatching(
+        self, num_reqs: int, num_scheduled_tokens_np: np.ndarray
+    ) -> bool:
+        """Refuse to microbatch a step that splits a prefix from its writer.
+
+        A request can be admitted on a prefix cache hit against blocks another
+        request in the same batch is only computing now. Run whole, the step
+        issues every KV cache write before any attention read and the hit
+        holds; split, a reader in the first half would attend over blocks the
+        writer in the second half has not filled in yet. Vetoing on one rank
+        settles it for all, since ranks agree on microbatching collectively.
+        """
+        if not self.parallel_config.use_ubatching or num_reqs < 2:
+            return True
+        computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        query_lens = num_scheduled_tokens_np[:num_reqs]
+        # A decode reads nothing it was not already given in an earlier step.
+        readers = np.flatnonzero(
+            (query_lens > (self.reorder_batch_threshold or 1)) & (computed > 0)
+        )
+        if readers.size == 0:
+            return True
+
+        for block_table in self.input_batch.block_table.block_tables:
+            block_size = block_table.block_size
+            table = block_table.get_numpy_array()
+            start = computed // block_size
+            stop = (computed + query_lens + block_size - 1) // block_size
+            span = int((stop - start).max())
+            columns = start[:, None] + np.arange(span)[None, :]
+            written = np.unique(
+                np.take_along_axis(
+                    table[:num_reqs],
+                    np.minimum(columns, table.shape[1] - 1),
+                    axis=1,
+                )[columns < stop[:, None]]
+            )
+            for reader in readers:
+                # Whole blocks only: a reader ends inside a partly filled one,
+                # which is private to it and which it fills before reading.
+                whole = computed[reader] // block_size
+                if np.isin(table[reader, :whole], written).any():
+                    return False
+        return True
 
     def _determine_batch_execution_and_padding(
         self,
@@ -4295,6 +4380,9 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                allow_microbatching=self._allow_microbatching(
+                    num_reqs, num_scheduled_tokens_np
+                ),
             )
 
             logger.debug(
@@ -4758,6 +4846,7 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
                 num_nans_in_logits,
+                num_nans_device,
                 logprobs_lists,
                 valid_sampled_token_ids,
                 prompt_logprobs_dict,
@@ -4860,6 +4949,7 @@ class GPUModelRunner(
                 vocab_size=self.input_batch.vocab_size,
                 routed_experts=routed_experts_snapshot,
                 check_ep_fault=self.check_ep_fault,
+                num_nans=num_nans_device,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -5372,9 +5462,14 @@ class GPUModelRunner(
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
                     if (
-                        hasattr(self.drafter, "model")
-                        and is_mixture_of_experts(self.drafter.model)
-                        and self.parallel_config.enable_eplb
+                        self.parallel_config.enable_eplb
+                        and hasattr(self.drafter, "model")
+                        and (
+                            drafter_moe_model := get_mixture_of_experts_model(
+                                self.drafter.model
+                            )
+                        )
+                        is not None
                     ):
                         assert not self.parallel_config.enable_elastic_ep, (
                             "Elastic EP is not supported with drafter model."
@@ -5383,7 +5478,7 @@ class GPUModelRunner(
                         assert spec_config is not None
                         assert spec_config.draft_model_config is not None
                         logger.info_once(
-                            "EPLB is enabled for drafter model %s.",
+                            "EPLB is enabled for MoE part of drafter model %s.",
                             spec_config.draft_model_config.model,
                         )
                         if self.eplb_state is None:
@@ -5391,7 +5486,7 @@ class GPUModelRunner(
                                 self.parallel_config, self.device
                             )
                         self.eplb_state.add_model(
-                            self.drafter.model,
+                            drafter_moe_model,
                             spec_config.draft_model_config,
                         )
                         assert hasattr(self.drafter, "set_eplb_state")
@@ -5404,21 +5499,15 @@ class GPUModelRunner(
                 # VLM models (e.g. KimiK25ForConditionalGeneration) wrap the
                 # actual MoE language model but don't implement
                 # MixtureOfExperts themselves.
-                moe_candidate = self.model
-                if not is_mixture_of_experts(moe_candidate) and isinstance(
-                    moe_candidate, SupportsMultiModal
-                ):
-                    moe_candidate = moe_candidate.get_language_model()
-                if is_mixture_of_experts(moe_candidate):
-                    self._moe_model = moe_candidate
+                self._moe_model = get_mixture_of_experts_model(self.model)
 
                 if (
-                    self._moe_model is not None
-                    and self.parallel_config.enable_eplb
+                    self.parallel_config.enable_eplb
                     and not load_dummy_weights
+                    and self._moe_model is not None
                 ):
                     logger.info_once(
-                        "EPLB is enabled for model %s.",
+                        "EPLB is enabled for MoE part of model %s.",
                         self.model_config.model,
                     )
                     assert self.eplb_state is not None
@@ -5458,8 +5547,8 @@ class GPUModelRunner(
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
         if (
-            self._moe_model is not None
-            and self.parallel_config.enable_eplb
+            self.parallel_config.enable_eplb
+            and self._moe_model is not None
             and not load_dummy_weights
             and self.eplb_state is not None
             and self.eplb_state.is_async
@@ -5778,23 +5867,15 @@ class GPUModelRunner(
 
         return prompt_logprobs_dict
 
-    def _get_nans_in_logits(
-        self,
-        logits: torch.Tensor | None,
-    ) -> dict[str, int]:
-        try:
-            if logits is None:
-                return {req_id: 0 for req_id in self.input_batch.req_ids}
+    def _get_nans_in_logits(self, logits: torch.Tensor | None) -> dict[str, int]:
+        """Count NaNs per request, reading the result back to the host.
 
-            num_nans_in_logits = {}
-            num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
-            for req_id in self.input_batch.req_ids:
-                req_index = self.input_batch.req_id_to_index[req_id]
-                num_nans_in_logits[req_id] = (
-                    int(num_nans_for_index[req_index])
-                    if num_nans_for_index is not None and req_index < logits.shape[0]
-                    else 0
-                )
+        Only used under sync scheduling, The async path keeps the counts
+        on device instead; see`AsyncGPUModelRunnerOutput`.
+        """
+        try:
+            counts = [] if logits is None else count_nans_per_row(logits).tolist()
+            num_nans_in_logits = nans_to_dict(counts, self.input_batch.req_id_to_index)
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(num_nans_in_logits)
             return num_nans_in_logits

@@ -33,6 +33,7 @@ CacheDType = Literal[
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
+    "nvfp4_4over6",
 ]
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -80,6 +81,8 @@ class CacheConfig:
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
     bfloat16 instead, this is an invalid option for models that do not default
     to fp8.
+    "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
+    scales per 16 values by minimizing squared reconstruction error.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
