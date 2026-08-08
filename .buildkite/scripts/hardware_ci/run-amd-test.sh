@@ -56,18 +56,18 @@ fi
 export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS PYTEST_TIMEOUT ROCM_DOCKER_TTY
 export PYTHONFAULTHANDLER
 
-# The pipeline generator enables this only for eligible AMD jobs. Presubmit
-# jobs start cache-only, while scheduled jobs and all retries run online.
+# The pipeline generator enables this only for eligible AMD jobs. Non-main,
+# non-scheduled first attempts start cache-only; all other jobs run online.
 amd_runner_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=amd-hf-client-mode.sh
 source "${amd_runner_script_dir}/amd-hf-client-mode.sh" || exit 1
 hf_offline_retry_enabled="${VLLM_CI_HF_OFFLINE_RETRY-0}"
 hf_retry_count="${BUILDKITE_RETRY_COUNT-0}"
 hf_offline_retry_disabled="${VLLM_CI_DISABLE_HF_OFFLINE_RETRY-0}"
-hf_initial_online=0
-if [[ "${NIGHTLY-0}" == "1" || "${TORCH_NIGHTLY-0}" == "1" ]]; then
-  hf_initial_online=1
-fi
+hf_initial_online=$(
+  vllm_amd_hf_resolve_initial_online \
+    "${BUILDKITE_BRANCH-}" "${NIGHTLY-0}" "${TORCH_NIGHTLY-0}"
+) || exit $?
 hf_client_mode=$(
   vllm_amd_hf_resolve_mode \
     "${hf_offline_retry_enabled}" \

@@ -23,6 +23,21 @@ assert_equal() {
   fi
 }
 
+assert_initial_online() {
+  local expected=$1
+  local branch=$2
+  local nightly=$3
+  local torch_nightly=$4
+  local actual
+  local context="branch=${branch}, nightly=${nightly}, torch_nightly=${torch_nightly}"
+
+  actual=$(
+    vllm_amd_hf_resolve_initial_online \
+      "${branch}" "${nightly}" "${torch_nightly}"
+  )
+  assert_equal "${expected}" "${actual}" "${context}"
+}
+
 assert_mode() {
   local expected=$1
   local enabled=$2
@@ -62,6 +77,12 @@ environment_snapshot() {
     "${TRANSFORMERS_OFFLINE-unset}" \
     "${HF_DATASETS_OFFLINE-unset}"'
 }
+
+assert_initial_online 0 "" 0 0
+assert_initial_online 0 feature/cache-policy 0 0
+assert_initial_online 1 main 0 0
+assert_initial_online 1 feature/cache-policy 1 0
+assert_initial_online 1 feature/cache-policy 0 1
 
 assert_mode disabled 0 0 0 0
 assert_mode disabled 0 3 0 1

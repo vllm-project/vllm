@@ -3,6 +3,25 @@
 # Source-only helpers for selecting and applying the AMD Hugging Face client
 # cache mode. This does not provide network isolation.
 
+vllm_amd_hf_resolve_initial_online() {
+  if [[ $# -ne 3 ]]; then
+    echo "vllm_amd_hf_resolve_initial_online requires BRANCH, NIGHTLY," \
+      "and TORCH_NIGHTLY" >&2
+    return 2
+  fi
+
+  local branch=$1
+  local nightly=$2
+  local torch_nightly=$3
+
+  if [[ "${branch}" == "main" || "${nightly}" == "1" \
+    || "${torch_nightly}" == "1" ]]; then
+    printf '%s\n' 1
+  else
+    printf '%s\n' 0
+  fi
+}
+
 vllm_amd_hf_resolve_mode() {
   if [[ $# -ne 4 ]]; then
     echo "vllm_amd_hf_resolve_mode requires ENABLED, RETRY_COUNT," \

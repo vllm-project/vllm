@@ -28,9 +28,9 @@
 # amd_hf_offline_retry(bool): runner capability gate. Missing or false disables
 #     the cohort; individual steps still require an explicit opt-in.
 # hf_offline_retry(bool): per-step opt-in for eligible single-node AMD jobs.
-#     Presubmits use cache-only clients on the first Buildkite attempt.
-#     Scheduled jobs and all retries use online clients. This is not network
-#     isolation.
+#     Non-main, non-scheduled builds use cache-only clients on their first
+#     Buildkite attempt. Main/postmerge, scheduled, and retry jobs use online
+#     clients. This is not network isolation.
 
 # When adding a test
 # - If the test belongs to an existing group, add it there
