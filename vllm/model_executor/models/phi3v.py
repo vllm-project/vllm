@@ -56,6 +56,7 @@ from vllm.multimodal.processing.processor import (
     ResolvedPromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
@@ -266,9 +267,11 @@ class Phi3HDImageEmbedding(nn.Module):
         )
 
         batch_image_features_proj = []
+        with gpu_sync_allowed():
+            image_sizes_list = image_sizes.tolist()
         # need a for loop to process each image because of different image sizes
         # (patch arrangement is different for each image)
-        for i, img_size in enumerate(image_sizes):
+        for i, img_size in enumerate(image_sizes_list):
             h, w = img_size
             h_crop = h // 336
             w_crop = w // 336

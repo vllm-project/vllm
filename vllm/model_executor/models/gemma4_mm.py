@@ -68,6 +68,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -1318,11 +1319,14 @@ class Gemma4ForConditionalGeneration(
                     pp_tensor,
                     pad_tensor,
                 ).to(self.model_dtype)
-                encoder_outputs = vt.encoder(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=~pad_tensor,
-                    pixel_position_ids=pp_tensor,
-                )
+                # HuggingFace's mask builder probes `padding_mask.all()` to
+                # decide whether the mask can be skipped, which syncs.
+                with gpu_sync_allowed():
+                    encoder_outputs = vt.encoder(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=~pad_tensor,
+                        pixel_position_ids=pp_tensor,
+                    )
                 hidden_states = encoder_outputs.last_hidden_state
 
                 for i, (orig_idx, _, _) in enumerate(chunk_items):
@@ -1340,13 +1344,17 @@ class Gemma4ForConditionalGeneration(
             single_pos_ids = pixel_position_ids[orig_idx].unsqueeze(0)
             padding_positions = (single_pos_ids == -1).all(dim=-1)
 
-            pooled_states, valid_mask = vt.pooler(
-                hidden_states=single_hidden,
-                pixel_position_ids=single_pos_ids,
-                padding_positions=padding_positions,
-                output_length=output_length,
-            )
-            valid_states = pooled_states[valid_mask]
+            # The pooler goes through HuggingFace's mask builder, which probes
+            # `padding_mask.all()`, and the mask indexing below needs the
+            # selected count on the host.
+            with gpu_sync_allowed():
+                pooled_states, valid_mask = vt.pooler(
+                    hidden_states=single_hidden,
+                    pixel_position_ids=single_pos_ids,
+                    padding_positions=padding_positions,
+                    output_length=output_length,
+                )
+                valid_states = pooled_states[valid_mask]
 
             if getattr(vt.config, "standardize", False):
                 valid_states = (valid_states - vt.std_bias) * vt.std_scale
@@ -1397,7 +1405,9 @@ class Gemma4ForConditionalGeneration(
         pooling_k2 = vision_cfg.pooling_kernel_size**2
 
         if isinstance(frame_counts, torch.Tensor):
-            fc_list = frame_counts.tolist()
+            # Per-video frame counts drive the Python-level batching below.
+            with gpu_sync_allowed():
+                fc_list = frame_counts.tolist()
         else:
             fc_list = list(frame_counts)
 
@@ -1506,9 +1516,11 @@ class Gemma4ForConditionalGeneration(
 
         # Strip padding per-batch element: only keep valid (non-padding)
         # tokens.
+        # Boolean-mask indexing needs the selected count on the host.
         per_audio = []
-        for enc, mask in zip(audio_features, audio_mask, strict=True):
-            per_audio.append(enc[mask])  # [num_real, hidden_size]
+        with gpu_sync_allowed():
+            for enc, mask in zip(audio_features, audio_mask, strict=True):
+                per_audio.append(enc[mask])  # [num_real, hidden_size]
 
         return per_audio
 

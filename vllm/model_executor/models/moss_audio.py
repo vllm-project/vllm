@@ -55,6 +55,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -1668,15 +1669,20 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         """
         audio_data = audio_input["audio_data"]
         audio_data_seqlens = audio_input["audio_data_seqlens"]
-        last_hidden_state, deepstack = self.audio_encoder(
-            audio_data.to(self.audio_encoder.dtype),
-            feature_lens=audio_data_seqlens,
-            output_deepstack_hidden_states=len(self.deepstack_audio_merger_list) > 0,
-        )
-        audio_embeds = self.audio_adapter(last_hidden_state)
-        audio_lengths = MossAudioEncoder._compute_downsampled_length(
-            audio_data_seqlens.to(device=audio_embeds.device, dtype=torch.long)
-        ).tolist()
+        # The encoder chunks the input by per-audio feature lengths, which
+        # needs Python ints for `split`/`pad_sequence`; the D2H reads are
+        # unavoidable here.
+        want_deepstack = len(self.deepstack_audio_merger_list) > 0
+        with gpu_sync_allowed():
+            last_hidden_state, deepstack = self.audio_encoder(
+                audio_data.to(self.audio_encoder.dtype),
+                feature_lens=audio_data_seqlens,
+                output_deepstack_hidden_states=want_deepstack,
+            )
+            audio_embeds = self.audio_adapter(last_hidden_state)
+            audio_lengths = MossAudioEncoder._compute_downsampled_length(
+                audio_data_seqlens.to(device=audio_embeds.device, dtype=torch.long)
+            ).tolist()
         main_embeddings = tuple(audio_embeds.squeeze(0).split(audio_lengths, dim=0))
 
         deepstack_embeddings: list[tuple[torch.Tensor, ...]] = []

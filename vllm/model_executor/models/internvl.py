@@ -50,6 +50,7 @@ from vllm.transformers_utils.processors.internvl import (
     InternVLProcessor,
     InternVLVideoProcessor,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -734,7 +735,9 @@ class InternVLChatModel(
 
         video_token_id = kwargs["video_token_id"]
         if isinstance(video_token_id, torch.Tensor):
-            video_token_id = video_token_id.flatten().unique().item()
+            # The token id is needed as a Python int below.
+            with gpu_sync_allowed():
+                video_token_id = video_token_id.flatten().unique().item()
 
         assert isinstance(video_token_id, int)
         self.video_context_token_id = video_token_id

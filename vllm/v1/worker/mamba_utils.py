@@ -15,6 +15,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -643,101 +644,108 @@ class MambaSpecDecodeGPUContext:
         if self.is_initialized:
             return
 
-        idx = 0
-        for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
-            layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
-            for layer_name in layer_names:
-                attention = forward_context[layer_name]
-                kv_caches: list[torch.Tensor] = attention.kv_cache
+        # Each scalar assignment below targets a device-side metadata
+        # tensor, so it is a blocking H2D. One-time per worker.
+        with gpu_sync_allowed():
+            idx = 0
+            for group_local_idx, mamba_group_id in enumerate(self.mamba_group_ids):
+                layer_names = kv_cache_config.kv_cache_groups[
+                    mamba_group_id
+                ].layer_names
+                for layer_name in layer_names:
+                    attention = forward_context[layer_name]
+                    kv_caches: list[torch.Tensor] = attention.kv_cache
 
-                for state_type_idx, state in enumerate(kv_caches):
-                    # Base address
-                    self.state_base_addrs[idx] = state.data_ptr()
+                    for state_type_idx, state in enumerate(kv_caches):
+                        # Base address
+                        self.state_base_addrs[idx] = state.data_ptr()
 
-                    # Block stride (bytes between consecutive blocks)
-                    # state shape: [num_blocks, ...], stride(0) = elements per block
-                    if state.dim() > 1:
-                        block_stride_elems = state.stride(0)
-                    else:
-                        block_stride_elems = state.numel()
-                    self.state_block_strides[idx] = (
-                        block_stride_elems * state.element_size()
-                    )
-
-                    # Element size
-                    self.state_elem_sizes[idx] = state.element_size()
-
-                    copy_func = mamba_state_copy_funcs[state_type_idx]
-                    assert (
-                        copy_func is get_conv_copy_spec
-                        or copy_func is get_temporal_copy_spec
-                    ), f"unexpected copy func: {copy_func}"
-                    if copy_func is get_conv_copy_spec:
-                        if state.dim() != 3:
-                            raise ValueError(
-                                "Expected 3D conv state cache, got "
-                                f"shape {tuple(state.shape)}"
-                            )
-                        if is_conv_state_dim_first():
-                            # DS layout: state_len is the slide axis.
-                            self.state_conv_widths[idx] = state.size(2)
-                            self.state_inner_sizes[idx] = 1
-                            self.state_dim_row_count[idx] = state.size(1)
-                            self.state_dim_row_stride[idx] = (
-                                state.stride(1) * state.element_size()
-                            )
+                        # Block stride (bytes between consecutive blocks)
+                        # state shape: [num_blocks, ...], stride(0) = elements per block
+                        if state.dim() > 1:
+                            block_stride_elems = state.stride(0)
                         else:
-                            # SD layout: dim is contiguous.
-                            self.state_conv_widths[idx] = state.size(1)
-                            self.state_inner_sizes[idx] = state.stride(1)
-                    else:
-                        # Temporal state: inner_size = natural elements per
-                        # block (prod of inner dims).  The kernel uses this
-                        # to compute copy_size = inner_size * elem_size,
-                        # which gives the correct byte count even when the
-                        # state tensor is as_strided with padded page strides
-                        # (state_block_stride would be the page size, too big).
-                        self.state_conv_widths[idx] = 0
-                        self.state_inner_sizes[idx] = (
-                            state[0].numel() if state.dim() > 1 else 1
-                        )
-                        # Temporal copies are vectorized with uint64
-                        # loads/stores; base pointer and block stride must
-                        # be 8B-aligned (tail loop handles copy_size % 8).
-                        base_addr = state.data_ptr()
-                        block_stride_bytes = block_stride_elems * state.element_size()
-                        assert base_addr % 8 == 0, (
-                            f"layer {layer_name}: state.data_ptr() = "
-                            f"{base_addr:#x} is not 8B-aligned; "
-                            f"_copy_mamba_state_block uint64 "
-                            f"vectorization requires it"
-                        )
-                        assert block_stride_bytes % 8 == 0, (
-                            f"layer {layer_name}: block stride = "
-                            f"{block_stride_bytes}B is not 8B-aligned; "
-                            f"_copy_mamba_state_block uint64 "
-                            f"vectorization requires it"
+                            block_stride_elems = state.numel()
+                        self.state_block_strides[idx] = (
+                            block_stride_elems * state.element_size()
                         )
 
-                    self.state_group_indices[idx] = group_local_idx
-                    idx += 1
+                        # Element size
+                        self.state_elem_sizes[idx] = state.element_size()
 
-        # Cache per-group block-table base addresses and per-request stride.
-        # `block_tables[i]` is the persistent 2D int32 block-table tensor for
-        # `mamba_group_ids[i]`; `data_ptr()` / `stride(0)` are stable for the
-        # engine's lifetime, so we capture them once here.
-        assert len(block_tables) == self.num_groups, (
-            f"expected {self.num_groups} block tables, got {len(block_tables)}"
-        )
-        strides = {bt.stride(0) for bt in block_tables}
-        assert len(strides) == 1, (
-            f"all mamba block tables must share stride(0), got {strides}"
-        )
-        self.block_table_stride_req = int(next(iter(strides)))
-        for i, bt in enumerate(block_tables):
-            self.block_table_ptrs[i] = bt.data_ptr()
+                        copy_func = mamba_state_copy_funcs[state_type_idx]
+                        assert (
+                            copy_func is get_conv_copy_spec
+                            or copy_func is get_temporal_copy_spec
+                        ), f"unexpected copy func: {copy_func}"
+                        if copy_func is get_conv_copy_spec:
+                            if state.dim() != 3:
+                                raise ValueError(
+                                    "Expected 3D conv state cache, got "
+                                    f"shape {tuple(state.shape)}"
+                                )
+                            if is_conv_state_dim_first():
+                                # DS layout: state_len is the slide axis.
+                                self.state_conv_widths[idx] = state.size(2)
+                                self.state_inner_sizes[idx] = 1
+                                self.state_dim_row_count[idx] = state.size(1)
+                                self.state_dim_row_stride[idx] = (
+                                    state.stride(1) * state.element_size()
+                                )
+                            else:
+                                # SD layout: dim is contiguous.
+                                self.state_conv_widths[idx] = state.size(1)
+                                self.state_inner_sizes[idx] = state.stride(1)
+                        else:
+                            # Temporal state: inner_size = natural elements per
+                            # block (prod of inner dims).  The kernel uses this
+                            # to compute copy_size = inner_size * elem_size,
+                            # which gives the correct byte count even when the
+                            # state tensor is as_strided with padded page strides
+                            # (state_block_stride would be the page size, too big).
+                            self.state_conv_widths[idx] = 0
+                            self.state_inner_sizes[idx] = (
+                                state[0].numel() if state.dim() > 1 else 1
+                            )
+                            # Temporal copies are vectorized with uint64
+                            # loads/stores; base pointer and block stride must
+                            # be 8B-aligned (tail loop handles copy_size % 8).
+                            base_addr = state.data_ptr()
+                            block_stride_bytes = (
+                                block_stride_elems * state.element_size()
+                            )
+                            assert base_addr % 8 == 0, (
+                                f"layer {layer_name}: state.data_ptr() = "
+                                f"{base_addr:#x} is not 8B-aligned; "
+                                f"_copy_mamba_state_block uint64 "
+                                f"vectorization requires it"
+                            )
+                            assert block_stride_bytes % 8 == 0, (
+                                f"layer {layer_name}: block stride = "
+                                f"{block_stride_bytes}B is not 8B-aligned; "
+                                f"_copy_mamba_state_block uint64 "
+                                f"vectorization requires it"
+                            )
 
-        self.is_initialized = True
+                        self.state_group_indices[idx] = group_local_idx
+                        idx += 1
+
+            # Cache per-group block-table base addresses and per-request stride.
+            # `block_tables[i]` is the persistent 2D int32 block-table tensor for
+            # `mamba_group_ids[i]`; `data_ptr()` / `stride(0)` are stable for the
+            # engine's lifetime, so we capture them once here.
+            assert len(block_tables) == self.num_groups, (
+                f"expected {self.num_groups} block tables, got {len(block_tables)}"
+            )
+            strides = {bt.stride(0) for bt in block_tables}
+            assert len(strides) == 1, (
+                f"all mamba block tables must share stride(0), got {strides}"
+            )
+            self.block_table_stride_req = int(next(iter(strides)))
+            for i, bt in enumerate(block_tables):
+                self.block_table_ptrs[i] = bt.data_ptr()
+
+            self.is_initialized = True
 
     def run_fused_postprocess(
         self,

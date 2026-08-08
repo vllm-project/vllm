@@ -49,6 +49,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -698,7 +699,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             context = torch.nn.attention.sdpa_kernel(
                 backends=[torch.nn.attention.SDPBackend.MATH]
             )
-        with context:
+        # The underlying HuggingFace `get_image_features` implementations
+        # contain model-internal syncs (e.g. Idefics3 filters all-zero
+        # padding images via boolean-mask indexing, LlavaOnevision
+        # branches on per-sample batch counts).
+        with context, gpu_sync_allowed():
             vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
 
         # Transformers `v5`, `self.get_image_features` returns a tuple
