@@ -6,10 +6,53 @@ from typing import Any
 
 import numpy as np
 import pytest
+from transformers.video_utils import VideoMetadata
 
+from vllm.model_executor.models.qwen2_5_omni_thinker import (
+    _get_second_per_grid_ts,
+    _presampled_videos_hf_kwargs,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ...utils import build_model_context
+
+
+def test_presampled_video_uses_effective_fps() -> None:
+    metadata = VideoMetadata(
+        total_num_frames=525,
+        fps=25.0,
+        duration=525 / 25,
+        frames_indices=list(range(0, 525, 5))[:104],
+    )
+
+    mm_kwargs = _presampled_videos_hf_kwargs(
+        {"video_metadata": [metadata]},
+        {"videos_kwargs": {"max_frames": 360}},
+    )
+
+    assert mm_kwargs["videos_kwargs"] == {
+        "max_frames": 360,
+        "do_sample_frames": False,
+        "fps": 104 / (525 / 25),
+    }
+
+
+def test_video_without_loader_metadata_preserves_hf_kwargs() -> None:
+    mm_kwargs = {"videos_kwargs": {"fps": 2.0}}
+
+    assert _presampled_videos_hf_kwargs({}, mm_kwargs) is mm_kwargs
+
+
+def test_processor_timing_takes_precedence_over_request_kwargs() -> None:
+    assert (
+        _get_second_per_grid_ts(
+            {"second_per_grid_ts": [1.0019]},
+            {"second_per_grid_ts": [2.0]},
+            item_idx=0,
+            default=2.0,
+        )
+        == 1.0019
+    )
 
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen3-Omni-30B-A3B-Instruct"])

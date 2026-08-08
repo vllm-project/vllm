@@ -91,7 +91,10 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniAudioFeatureInputs,
     Qwen2_5OmniConditionalGenerationMixin,
     Qwen2_5OmniThinkerDummyInputsBuilder,
+    Qwen2_5OmniThinkerMultiModalDataParser,
     Qwen2_5OmniThinkerMultiModalProcessor,
+    _get_second_per_grid_ts,
+    _presampled_videos_hf_kwargs,
     check_interleaved_audio_video,
     merge_interleaved_embeddings,
 )
@@ -1144,6 +1147,15 @@ class Qwen3OmniMoeThinkerProcessingInfo(
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+        return Qwen2_5OmniThinkerMultiModalDataParser(
+            spatial_merge_size=self.get_hf_config().vision_config.spatial_merge_size,
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=1,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
@@ -1196,6 +1208,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
+        mm_kwargs = _presampled_videos_hf_kwargs(mm_data, mm_kwargs)
 
         def pad_to_hop_length(x: np.ndarray, hop_length: int) -> np.ndarray:
             length = x.shape[-1]
@@ -1453,11 +1466,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
             audio_in_video_item_idx += 1
 
-            second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
-            if second_per_grid_ts:
-                video_second_per_grid_t = second_per_grid_ts[item_idx]
-            else:
-                video_second_per_grid_t = 2.0
+            video_second_per_grid_t = _get_second_per_grid_ts(
+                out_mm_data,
+                hf_processor_mm_kwargs,
+                item_idx,
+                default=2.0,
+            )
 
             placeholder = self.get_updates_use_audio_in_video(
                 thinker_config=thinker_config,
