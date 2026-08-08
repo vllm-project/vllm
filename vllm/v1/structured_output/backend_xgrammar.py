@@ -222,6 +222,23 @@ STRING_SUPPORTED_FORMATS = {
 }
 
 
+def _types_of(obj: dict[str, Any]) -> set[str]:
+    """Return the JSON schema ``type`` of ``obj`` as a set of strings.
+
+    Per JSON Schema, ``type`` may be either a single string
+    (``{"type": "integer"}``) or a list of strings
+    (``{"type": ["integer", "null"]}``). Normalizing both forms to a set
+    lets feature checks match regardless of which form is used; comparing
+    the raw value against a scalar would silently miss the list form.
+    """
+    type_ = obj.get("type")
+    if isinstance(type_, str):
+        return {type_}
+    if isinstance(type_, list):
+        return {t for t in type_ if isinstance(t, str)}
+    return set()
+
+
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
@@ -229,12 +246,14 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
+        types = _types_of(obj)
+
         # Check for numeric ranges
-        if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
+        if types & {"integer", "number"} and ("multipleOf" in obj):
             return True
 
         # Check for array unsupported keywords
-        if obj.get("type") == "array" and any(
+        if "array" in types and any(
             key in obj
             for key in ("uniqueItems", "contains", "minContains", "maxContains")
         ):
@@ -242,14 +261,14 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for strings
         if (
-            obj.get("type") == "string"
+            "string" in types
             and "format" in obj
             and obj["format"] not in STRING_SUPPORTED_FORMATS
         ):
             return True
 
         # Unsupported keywords for objects
-        if obj.get("type") == "object" and any(
+        if "object" in types and any(
             key in obj for key in ("patternProperties", "propertyNames")
         ):
             return True

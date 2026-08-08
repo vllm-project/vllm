@@ -3,8 +3,10 @@
 
 import pytest
 
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
+    validate_xgrammar_grammar,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -104,3 +106,62 @@ def test_supported_json_features(supported_schema):
     assert not has_xgrammar_unsupported_json_features(supported_schema), (
         "Schema should be supported"
     )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        # JSON Schema allows ``type`` to be a list of types, not just a
+        # scalar string. The feature checks must fire for the list spelling
+        # exactly as they do for the scalar one. The trigger is that ``type``
+        # is a list at all -- not the presence of "null" -- so cover both a
+        # single-element list, the common nullable form, and a list of two
+        # real types.
+        {"type": ["integer"], "multipleOf": 120},
+        {"type": ["integer", "null"], "multipleOf": 120},
+        {"type": ["number", "integer"], "multipleOf": 120},
+        {"type": ["string", "null"], "format": "non_existing_format"},
+        {"type": ["array", "null"], "uniqueItems": True},
+        {"type": ["array", "null"], "contains": {"type": "string"}},
+        {"type": ["object", "null"], "propertyNames": {"pattern": "^[a-z]+$"}},
+        {"type": ["object", "null"], "patternProperties": {"^S": {"type": "string"}}},
+    ],
+)
+def test_unsupported_json_features_with_list_type(schema):
+    assert has_xgrammar_unsupported_json_features(schema), (
+        f"Unsupported feature must be detected for list-type schema: {schema}"
+    )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        # Normalizing ``type`` to a set must not over-flag benign list-type
+        # schemas: a list ``type`` without an unsupported feature is fine.
+        {"type": ["string", "null"]},
+        {"type": ["string", "null"], "format": "email"},
+        {"type": ["integer", "null"]},
+        {"type": ["integer", "string"]},
+        {"type": ["array", "null"], "items": {"type": "string"}},
+    ],
+)
+def test_supported_list_type_json_features(schema):
+    assert not has_xgrammar_unsupported_json_features(schema), (
+        f"Schema should be supported: {schema}"
+    )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "integer", "multipleOf": 3},
+        {"type": ["integer", "null"], "multipleOf": 3},
+    ],
+)
+def test_validate_xgrammar_grammar_rejects_unsupported_schema(schema):
+    """The gate feeds request validation: an unsupported schema must be
+    rejected the same way whether ``type`` is scalar or a list, instead of
+    slipping through to xgrammar which would silently drop the constraint."""
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
+    with pytest.raises(ValueError, match="not supported by xgrammar"):
+        validate_xgrammar_grammar(params)
