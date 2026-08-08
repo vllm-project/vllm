@@ -23,6 +23,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CrossAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     KVQuantMode,
@@ -396,6 +397,7 @@ def _align_mixed_attention_kv_cache_views(
     logical views so block IDs address the same bytes.
     """
     block_dims_by_layer: dict[str, int] = {}
+    cross_attention_layers: set[str] = set()
     for group in attn_groups:
         kv_cache_spec = group.kv_cache_spec
         if not isinstance(kv_cache_spec, AttentionSpec):
@@ -411,6 +413,8 @@ def _align_mixed_attention_kv_cache_views(
         for layer_name in group.layer_names:
             if layer_name in kv_caches:
                 block_dims_by_layer[layer_name] = block_dim
+                if isinstance(kv_cache_spec, CrossAttentionSpec):
+                    cross_attention_layers.add(layer_name)
 
     for kv_tensor in kv_cache_config.kv_cache_tensors:
         if kv_tensor.block_stride > 0:
@@ -424,17 +428,31 @@ def _align_mixed_attention_kv_cache_views(
             continue
 
         for layer_name in kv_tensor.shared_by:
-            if block_dims_by_layer.get(layer_name) == 0:
-                _restride_blocks_first_kv_cache_to_kv_first_storage(
-                    kv_caches[layer_name]
+            if block_dims_by_layer.get(layer_name) != 0:
+                continue
+            if layer_name not in cross_attention_layers:
+                raise ValueError(
+                    "Cannot align mixed K/V-first and blocks-first KV cache "
+                    f"layouts for non-cross-attention layer {layer_name!r} with "
+                    f"shape {tuple(kv_caches[layer_name].shape)}. Select attention "
+                    "backends with matching KV cache layouts. For speculative "
+                    "decoding, set `speculative_config.attention_backend` "
+                    "explicitly."
                 )
+            _restride_blocks_first_kv_cache_to_kv_first_storage(kv_caches[layer_name])
 
 
 def _restride_blocks_first_kv_cache_to_kv_first_storage(
     kv_cache: torch.Tensor,
 ) -> None:
-    assert kv_cache.ndim >= 3
-    assert kv_cache.shape[1] == 2
+    if kv_cache.ndim < 3 or kv_cache.shape[1] != 2:
+        raise ValueError(
+            "Cannot align mixed K/V-first and blocks-first KV cache layouts for "
+            f"shape {tuple(kv_cache.shape)}. The blocks-first cache must have an "
+            "explicit K/V dimension at index 1. Select attention backends with "
+            "matching KV cache layouts. For speculative decoding, set "
+            "`speculative_config.attention_backend` explicitly."
+        )
     page_size = kv_cache.shape[2:].numel()
     num_blocks = kv_cache.shape[0]
     expected_tail_stride = torch.empty(kv_cache.shape[2:]).stride()
