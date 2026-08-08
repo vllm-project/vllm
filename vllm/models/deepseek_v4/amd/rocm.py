@@ -410,7 +410,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             and base.decode_swa_lens is not None
         ):
             ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
-                base.decode_swa_indices.reshape(base.num_decode_tokens, -1),
+                base.decode_swa_indices.reshape(
+                    base.num_decode_tokens, base.decode_swa_width
+                ),
                 base.decode_swa_lens,
             )
             ragged_indices, ragged_indptr = _copy_ragged_to_graph_buffers(
@@ -419,9 +421,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
                 self.decode_swa_ragged_indices_buffer,
                 self.decode_swa_ragged_indptr_buffer,
                 base.num_decode_tokens,
-                # Actual dense width for this build: window_size (causal) or
-                # noncausal_index_width (DSpark non-causal draft).
-                base.decode_swa_indices.shape[-1],
+                base.decode_swa_width,
             )
 
         return DeepseekV4ROCMAiterSparseSWAMetadata(
