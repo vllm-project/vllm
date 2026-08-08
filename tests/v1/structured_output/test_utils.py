@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
+from types import SimpleNamespace
 
+import numpy as np
+import pytest
+import torch
+
+from vllm.v1.core.sched.output import GrammarOutput
+from vllm.v1.structured_output import utils
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
 )
@@ -104,3 +110,45 @@ def test_supported_json_features(supported_schema):
     assert not has_xgrammar_unsupported_json_features(supported_schema), (
         "Schema should be supported"
     )
+
+
+def test_apply_grammar_bitmask_with_trimmed_worker_drafts(monkeypatch):
+    """Worker-side draft trimming must not shift later requests' masks."""
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={
+            "request-0": [1],
+            "request-1": [2, 3, 4],
+        }
+    )
+    grammar_output = GrammarOutput(
+        structured_output_request_ids=["request-0", "request-1"],
+        grammar_bitmask=np.array(
+            [[10], [11], [12], [13], [20], [21], [22], [23]],
+            dtype=np.int32,
+        ),
+        num_spec_tokens=[3, 3],
+    )
+    input_batch = SimpleNamespace(req_ids=["request-0", "request-1"])
+    logits = torch.zeros((6, 32))
+    applied_bitmask = None
+
+    def capture_bitmask(logits, bitmask, indices):
+        nonlocal applied_bitmask
+        applied_bitmask = bitmask.clone()
+        assert indices is None
+
+    monkeypatch.setattr(
+        utils,
+        "xgr",
+        SimpleNamespace(apply_token_bitmask_inplace=capture_bitmask),
+    )
+
+    utils.apply_grammar_bitmask(
+        scheduler_output,
+        grammar_output,
+        input_batch,
+        logits,
+    )
+
+    assert applied_bitmask is not None
+    assert applied_bitmask[:, 0].tolist() == [10, 13, 20, 21, 22, 23]
