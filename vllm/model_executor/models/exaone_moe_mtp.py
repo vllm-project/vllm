@@ -65,6 +65,8 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         self.fc = ColumnParallelLinear(

@@ -153,6 +153,7 @@ class Gemma4DSparkModel(DFlashQwen3Model):
             config.vocab_size,
             config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
+            quant_config=quant_config,
         )
         self.register_buffer(
             "normalizer",

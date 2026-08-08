@@ -309,6 +309,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
         self.embedding = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embedding",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
