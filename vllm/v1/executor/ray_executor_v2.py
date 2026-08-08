@@ -188,6 +188,7 @@ class RayWorkerProc(WorkerProc):
         self.worker_response_mq = MessageQueue(
             n_reader=1,
             n_local_reader=n_local,
+            max_chunk_bytes=envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024,
             connect_ip=ray.util.get_node_ip_address(),
         )
         self.peer_response_handles: list[dict] = []

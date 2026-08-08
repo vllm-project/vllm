@@ -592,8 +592,14 @@ class WorkerProc:
                 input_shm_handle, self.worker.rank
             )
 
-            # Initializes a message queue for sending the model output
-            self.worker_response_mq = MessageQueue(1, 1)
+            # Initializes a message queue for sending the model output.
+            # This queue is created once per worker, so its ring buffer must be
+            # bounded by VLLM_MQ_MAX_CHUNK_BYTES_MB too -- otherwise the default
+            # dominates total /dev/shm usage and capping the broadcast queue has
+            # no effect on hosts with a small /dev/shm.
+            self.worker_response_mq = MessageQueue(
+                1, 1, max_chunk_bytes=envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+            )
             self.peer_response_handles = []
         else:
             # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
