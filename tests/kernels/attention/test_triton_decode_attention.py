@@ -323,3 +323,74 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     # Same data and same compute order; only addressing differs.
     assert torch.equal(o_ref, o_xl)
     assert torch.equal(lse_ref, lse_xl)
+
+
+def _torch_decode_attention_ref(
+    q, k_buffer, v_buffer, req_to_token, b_seq_len, sm_scale, logit_cap=0.0
+):
+    """Independent float32 decode-attention oracle; returns (out, lse)."""
+    B, H_Q, D = q.shape
+    H_KV = k_buffer.shape[1]
+    kv_group = H_Q // H_KV
+    out = torch.zeros(B, H_Q, D, device=q.device, dtype=torch.float32)
+    lse = torch.zeros(B, H_Q, device=q.device, dtype=torch.float32)
+    for b in range(B):
+        tok = req_to_token[b, : int(b_seq_len[b].item())].long()
+        k = k_buffer[tok].float()
+        v = v_buffer[tok].float()
+        for h in range(H_Q):
+            kv_h = h // kv_group
+            scores = (q[b, h].float() @ k[:, kv_h].T) * sm_scale
+            if logit_cap > 0:
+                scores = logit_cap * torch.tanh(scores / logit_cap)
+            lse[b, h] = torch.logsumexp(scores, dim=-1)
+            out[b, h] = torch.softmax(scores, dim=-1) @ v[:, kv_h]
+    return out, lse
+
+
+@pytest.mark.parametrize("H_Q,H_KV", [(8, 8), (8, 2)])  # MHA, GQA
+@pytest.mark.parametrize("L", [32, 64])
+@pytest.mark.parametrize("logit_cap", [0.0, 1.0])
+def test_decode_attention_vs_torch_ref(H_Q, H_KV, L, logit_cap):
+    """Absolute correctness vs a float32 oracle, covering the logit_cap>0
+    tanh branch. logit_cap~1 (scores are ~unit-variance) so the cap bites."""
+    torch.manual_seed(0)
+    B = 4
+    D = 64
+    CACHE_SIZE = 4096
+    num_kv_splits = 4
+    dtype = torch.bfloat16
+    sm_scale = 1.0 / (D**0.5)
+
+    req_to_token = (
+        torch.rand(B, CACHE_SIZE, device=DEVICE_TYPE).argsort(dim=-1)[:, :L].int()
+    )
+    q = torch.randn(B, H_Q, D, dtype=dtype, device=DEVICE_TYPE)
+    k_buffer = torch.randn(CACHE_SIZE, H_KV, D, dtype=dtype, device=DEVICE_TYPE)
+    v_buffer = torch.randn(CACHE_SIZE, H_KV, D, dtype=dtype, device=DEVICE_TYPE)
+    o = torch.zeros(B, H_Q, D, dtype=dtype, device=DEVICE_TYPE)
+    lse = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+    b_seq_len = torch.tensor([L - 3 * i for i in range(B)], device=DEVICE_TYPE)
+    attn_logits = torch.empty(
+        (B, H_Q, num_kv_splits, D + 1), dtype=torch.float32, device=DEVICE_TYPE
+    )
+
+    decode_attention_fwd(
+        q,
+        k_buffer,
+        v_buffer,
+        o,
+        lse,
+        req_to_token,
+        b_seq_len,
+        attn_logits,
+        num_kv_splits,
+        sm_scale,
+        logit_cap=logit_cap,
+    )
+
+    ref_o, ref_lse = _torch_decode_attention_ref(
+        q, k_buffer, v_buffer, req_to_token, b_seq_len, sm_scale, logit_cap
+    )
+    torch.testing.assert_close(o.float(), ref_o, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(lse.float(), ref_lse, atol=2e-2, rtol=2e-2)
