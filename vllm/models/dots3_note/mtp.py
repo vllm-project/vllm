@@ -108,7 +108,34 @@ class Dot3NoteMultiTokenPredictor(DeepseekV32MultiTokenPredictor):
             config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
+        self.register_buffer(
+            "max_token_id",
+            torch.tensor(config.vocab_size - 1, dtype=torch.int64),
+            persistent=False,
+        )
         self.logits_processor = LogitsProcessor(config.vocab_size)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        input_ids = torch.minimum(input_ids, self.max_token_id)
+        return self.embed_tokens(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_input_ids(input_ids)
+        return super().forward(
+            input_ids,
+            positions,
+            previous_hidden_states,
+            inputs_embeds,
+            spec_step_idx,
+        )
 
 
 class Dot3NoteMTP(DeepseekV32MTP):
