@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import platform
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
@@ -15,7 +16,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -111,6 +112,16 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     )
     r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
     return r
+
+
+@cache
+def _get_wsl_kernel_version() -> tuple[int, ...] | None:
+    try:
+        release = platform.uname().release
+        parts = release.split("-")[0].split(".")
+        return tuple(int(part) for part in parts[:3])
+    except (TypeError, ValueError):
+        return None
 
 
 def _sync_hip_cuda_env_vars():
@@ -534,6 +545,21 @@ class RocmPlatform(Platform):
         # Import ROCm-specific extension
         with contextlib.suppress(ImportError):
             import vllm._rocm_C  # noqa: F401
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        if in_wsl():
+            version = _get_wsl_kernel_version()
+            if version is None or version < (4, 19, 121):
+                # warning_once() causes a circular import on WSL, see #48397.
+                logger.warning(
+                    "Using 'pin_memory=False' as WSL is detected and the "
+                    "WSL2 kernel version is below 4.19.121. This may slow "
+                    "down performance. Please run `wsl --update`."
+                )
+                return False
+
+        return True
 
     @classmethod
     def get_valid_backends(
