@@ -73,6 +73,19 @@ fn factory_routes_seed_oss_models() {
 }
 
 #[test]
+fn factory_resolves_hy_v3_to_qwen3_alias() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("tencent/Hy3-preview"),
+        Some(names::HY_V3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("hy_v3"),
+        Some(names::HY_V3)
+    );
+}
+
+#[test]
 fn factory_resolves_minimax_m3_before_generic_minimax() {
     let factory = ReasoningParserFactory::new();
     assert_eq!(
