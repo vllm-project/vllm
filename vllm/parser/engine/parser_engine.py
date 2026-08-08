@@ -677,18 +677,39 @@ class ParserEngine(Parser):
 
     # ── Non-streaming: parse ───────────────────────────────────────────
 
+    def _parse_non_streaming(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        model_output_token_ids: Sequence[int],
+        *,
+        initial_state: ParserState | None = None,
+    ) -> tuple[str | None, str | None, ExtractedToolCallInformation]:
+        """Parse model output before converting tool calls for callers."""
+        return self._single_pass_parse(
+            model_output,
+            model_output_token_ids,
+            initial_state=initial_state,
+        )
+
     def parse(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
+        *,
+        # Internal override for tool-only adapters, which must parse
+        # reasoning-stripped output from the CONTENT state.
+        _initial_state: ParserState | None = None,
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
         self._check_skip_tool_parsing(request)
-        reasoning, content, tool_call_info = self._single_pass_parse(
+        reasoning, content, tool_call_info = self._parse_non_streaming(
             model_output,
+            request,
             model_output_token_ids,
+            initial_state=_initial_state,
         )
 
         tool_calls: list[FunctionCall] | None = None

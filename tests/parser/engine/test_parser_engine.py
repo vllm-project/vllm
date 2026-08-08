@@ -892,6 +892,63 @@ class _CombinedDelegating(DelegatingParser):
     tool_parser_cls = _CombinedToolAdapter
 
 
+class _ToolOnlyDelegating(DelegatingParser):
+    reasoning_parser_cls = None
+    tool_parser_cls = _CombinedToolAdapter
+
+
+def test_delegating_parse_preserves_literal_tool_tag_with_token_ids():
+    tokenizer = make_mock_tokenizer(_VOCAB)
+    parser = _CombinedDelegating(tokenizer)
+    request = _make_delegating_request()
+    arguments = '{"name": "f", "arguments": {}}'
+    literal_content = "Use <tool_call> literally."
+    model_output = (
+        f"thinking</think>{literal_content}<tool_call>{arguments}</tool_call>"
+    )
+    token_ids = [*map(ord, "thinking"), 201]
+    token_ids.extend(map(ord, literal_content))
+    token_ids.append(202)
+    token_ids.extend(map(ord, arguments))
+    token_ids.append(203)
+
+    reasoning, content, tool_calls = parser.parse(
+        model_output,
+        request,
+        enable_auto_tools=True,
+        model_output_token_ids=token_ids,
+    )
+
+    assert reasoning == "thinking"
+    assert content == literal_content
+    assert tool_calls is not None
+    assert [(call.name, call.arguments) for call in tool_calls] == [("f", "{}")]
+
+
+def test_tool_only_delegating_parse_starts_from_content():
+    tokenizer = make_mock_tokenizer(_VOCAB)
+    parser = _ToolOnlyDelegating(tokenizer)
+    request = _make_delegating_request()
+    arguments = '{"name": "f", "arguments": {}}'
+    literal_content = "Use <tool_call> literally."
+    model_output = f"{literal_content}<tool_call>{arguments}</tool_call>"
+    token_ids = [*map(ord, literal_content), 202]
+    token_ids.extend(map(ord, arguments))
+    token_ids.append(203)
+
+    reasoning, content, tool_calls = parser.parse(
+        model_output,
+        request,
+        enable_auto_tools=True,
+        model_output_token_ids=token_ids,
+    )
+
+    assert reasoning is None
+    assert content == literal_content
+    assert tool_calls is not None
+    assert [(call.name, call.arguments) for call in tool_calls] == [("f", "{}")]
+
+
 def _make_delegating_request():
     req = MagicMock(spec=ChatCompletionRequest)
     req.tools = []

@@ -414,6 +414,31 @@ class DelegatingParser(Parser):
         state.history_tool_call_cnt += 1
         return tool_call_id
 
+    def _classify_tool_choice(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool,
+    ) -> tuple[bool, bool, bool]:
+        tool_choice = request.tool_choice
+        is_named = isinstance(
+            tool_choice,
+            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+        )
+        is_required = tool_choice == "required"
+        tool_parser = self._tool_parser
+        is_auto = bool(
+            tool_parser
+            and enable_auto_tools
+            and (
+                tool_choice in (None, "auto")
+                or (
+                    not tool_parser.supports_required_and_named
+                    and (is_named or is_required)
+                )
+            )
+        )
+        return is_named, is_required, is_auto
+
     def _extract_tool_calls(
         self,
         content: str | None,
@@ -431,18 +456,13 @@ class DelegatingParser(Parser):
             return [], content
 
         supports_required_and_named = tool_parser.supports_required_and_named
-        is_named_tool_choice = request.tool_choice and isinstance(
-            request.tool_choice,
-            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
-        )
-        is_required_tool_choice = request.tool_choice == "required"
-        is_auto_tool_choice = enable_auto_tools and (
-            request.tool_choice == "auto"
-            or request.tool_choice is None
-            or (
-                not supports_required_and_named
-                and (is_named_tool_choice or is_required_tool_choice)
-            )
+        (
+            is_named_tool_choice,
+            is_required_tool_choice,
+            is_auto_tool_choice,
+        ) = self._classify_tool_choice(
+            request,
+            enable_auto_tools,
         )
 
         tool_calls = list[FunctionCall]()
@@ -790,6 +810,53 @@ class DelegatingParser(Parser):
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
+        tool_parser = self._tool_parser
+        engine_parser = self._reasoning_parser or tool_parser
+        engine_parse = getattr(engine_parser, "parse_model_output", None)
+        tool_engine_cls = getattr(tool_parser, "_parser_engine_cls", None)
+        reasoning_engine_cls = getattr(
+            self._reasoning_parser, "_parser_engine_cls", None
+        )
+        _, _, uses_tool_parser = self._classify_tool_choice(
+            request,
+            enable_auto_tools,
+        )
+        uses_engine_tool_parse = uses_tool_parser or (
+            tool_parser is not None and request.tool_choice == "none"
+        )
+        # One pass keeps text aligned with token IDs, preventing literal marker
+        # text from being mistaken for structural tokens.
+        # TODO: Support mixed engines after reasoning returns token-aligned content.
+        can_parse_in_one_pass = self._reasoning_parser is None or (
+            reasoning_engine_cls is not None and reasoning_engine_cls is tool_engine_cls
+        )
+        if (
+            model_output_token_ids
+            and engine_parse is not None
+            and can_parse_in_one_pass
+            and uses_engine_tool_parse
+        ):
+            try:
+                result = engine_parse(
+                    model_output,
+                    request,
+                    model_output_token_ids,
+                    parse_reasoning=self._reasoning_parser is not None,
+                )
+            except Exception as e:
+                record_tool_parser_invocation(
+                    is_tool_called=e,
+                    is_streaming=False,
+                    request=request,
+                )
+                raise
+            record_tool_parser_invocation(
+                is_tool_called=bool(result[2]),
+                is_streaming=False,
+                request=request,
+            )
+            return result
+
         reasoning, content = self.extract_reasoning(model_output, request)
         tool_calls, content = self._extract_tool_calls(
             content=content,

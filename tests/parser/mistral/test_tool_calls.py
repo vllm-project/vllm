@@ -25,6 +25,7 @@ from mistral_common.protocol.instruct.tool_calls import (
 )
 from partial_json_parser.core.options import Allow
 
+from tests.parser.engine.replay_harness import MockTokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -61,6 +62,17 @@ def mistral_pre_v11_tokenizer():
 def mistral_tokenizer():
     MODEL = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
     return get_tokenizer(tokenizer_name=MODEL, tokenizer_mode="mistral")
+
+
+@pytest.fixture(scope="module")
+def mistral_v11_tokenizer():
+    model = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
+    revision = "95a6d26c4bfb886c58daf9d3f7332c857cb27b43"
+    return get_tokenizer(
+        tokenizer_name=model,
+        tokenizer_mode="mistral",
+        revision=revision,
+    )
 
 
 @pytest.fixture
@@ -2169,6 +2181,107 @@ def test_reasoning_active_no_think_block_no_leak(
         for tc_id, name, args in zip(tool_call_ids, function_names, function_args_strs)
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
+
+
+# ---------------------------------------------------------------------------
+# Non-streaming DelegatingParser token-ID passthrough.
+# ---------------------------------------------------------------------------
+
+
+def test_delegating_parse_preserves_pre_v11_legacy_tool_call_format():
+    marker = "[TOOL_CALLS]"
+    arguments = {"a": 1, "b": 2}
+    payload = json.dumps([{"name": "add", "arguments": arguments}])
+    model_output = marker + payload
+    tokenizer = MockTokenizer(
+        vocab={marker: 1},
+        tokens=[(1, marker), (100, payload)],
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="mistral",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(tokenizer, None)
+
+    reasoning, content, tool_calls = parser.parse(
+        model_output,
+        _ENGINE_REQUEST,
+        enable_auto_tools=True,
+        model_output_token_ids=[1, 100],
+    )
+
+    assert reasoning is None
+    assert content is None
+    assert tool_calls is not None
+    assert [(call.name, call.arguments) for call in tool_calls] == [
+        ("add", json.dumps(arguments))
+    ]
+
+
+def test_delegating_parse_preserves_literal_marker_for_tool_choice_none():
+    literal_content = "hello [TOOL_RESULTS] world"
+    tokenizer = MockTokenizer(
+        vocab={"[TOOL_CALLS]": 1, "[ARGS]": 2, "[TOOL_RESULTS]": 3},
+        tokens=[(100, literal_content)],
+    )
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="mistral",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(tokenizer, None)
+
+    output = parser.parse(
+        literal_content,
+        _make_request(tool_choice="none"),
+        enable_auto_tools=True,
+        model_output_token_ids=[100],
+    )
+
+    assert (output[0], output[1], output[2] or []) == (None, literal_content, [])
+
+
+@pytest.mark.parametrize("literal_marker", ["[TOOL_CALLS]", "[TOOL_RESULTS]"])
+def test_delegating_parse_preserves_literal_markers_in_tool_args(
+    mistral_v11_tokenizer,
+    literal_marker,
+):
+    mistral_tokenizer = mistral_v11_tokenizer
+    arguments = json.dumps({"note": f"literal {literal_marker} marker"})
+    argument_ids = mistral_tokenizer.encode(arguments, add_special_tokens=False)
+    vocab = mistral_tokenizer.get_vocab()
+    assert vocab[literal_marker] not in argument_ids
+
+    model_output = f"[TOOL_CALLS]record_note[ARGS]{arguments}"
+    token_ids = [vocab["[TOOL_CALLS]"]]
+    token_ids.extend(mistral_tokenizer.encode("record_note", add_special_tokens=False))
+    token_ids.append(vocab["[ARGS]"])
+    token_ids.extend(argument_ids)
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="mistral",
+        reasoning_parser_name=None,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(mistral_tokenizer, None)
+
+    reasoning, content, tool_calls = parser.parse(
+        model_output,
+        _ENGINE_REQUEST,
+        enable_auto_tools=True,
+        model_output_token_ids=token_ids,
+    )
+
+    assert reasoning is None
+    assert content is None
+    assert tool_calls is not None
+    assert [(call.name, call.arguments) for call in tool_calls] == [
+        ("record_note", arguments)
+    ]
 
 
 # ---------------------------------------------------------------------------
