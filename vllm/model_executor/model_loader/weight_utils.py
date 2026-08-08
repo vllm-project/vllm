@@ -288,6 +288,45 @@ def get_quant_config(
         ):
             pass  # fall through to file-based loading below
         else:
+            # Bug fix for issue #45568: Some pre-quantized checkpoints use
+            # quant_method names that collide with online quantization shorthands
+            # (e.g., "mxfp8"). Detect this case and reroute to the appropriate
+            # checkpoint-capable config class.
+            from vllm.model_executor.layers.quantization.online.base import (
+                OnlineQuantizationConfig,
+            )
+
+            if (
+                quant_cls is OnlineQuantizationConfig
+                and isinstance(hf_quant_config, dict)
+            ):
+                # Check if this looks like a pre-quantized checkpoint rather than
+                # an online quantization request. Pre-quantized MXFP8 checkpoints
+                # contain weight_block_size.
+                if "weight_block_size" in hf_quant_config:
+                    # This is a pre-quantized MXFP8 checkpoint. Reroute to
+                    # ModelOptMxFp8Config which can load from checkpoints.
+                    # Transform the config format to match what ModelOpt expects.
+                    quant_method_str = hf_quant_config.get("quant_method", "")
+                    if quant_method_str.lower() == "mxfp8":
+                        from vllm.model_executor.layers.quantization.modelopt import (
+                            ModelOptMxFp8Config,
+                        )
+
+                        # Transform MiniMax format to ModelOpt format
+                        modelopt_config = {
+                            "quantization": {
+                                "quant_algo": "MXFP8",
+                                "kv_cache_quant_algo": hf_quant_config.get(
+                                    "kv_cache_quant_algo"
+                                ),
+                                "exclude_modules": hf_quant_config.get(
+                                    "ignored_layers", []
+                                ),
+                            }
+                        }
+                        return ModelOptMxFp8Config.from_config(modelopt_config)
+
             return quant_cls.from_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
