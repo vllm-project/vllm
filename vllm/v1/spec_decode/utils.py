@@ -575,6 +575,15 @@ def update_num_computed_tokens_for_batch_change(
 
     Requests that had drafts: corrected = prev_gpu + valid_count.
     New requests or non-draft (e.g. prefills): use CPU value directly.
+
+    NOTE: valid_sampled_token_count is 0 for rows whose sampled tokens were
+    discarded (see eagle_prepare_next_token_padded_kernel), so this can write
+    0 into num_accepted_tokens even though its normal range is
+    1..1+num_speculative_tokens. That 0 is the staleness signal: mamba/GDN
+    metadata builders and kernels that index state slots with
+    num_accepted_tokens - 1 must treat 0 as "stale row, do not touch state"
+    (see GDNAttentionMetadataBuilder.build) rather than assume the count is
+    always positive.
     """
     # Clamp because prev_positions can be -1 for new requests
     gather_indices = prev_positions.clamp(min=0)

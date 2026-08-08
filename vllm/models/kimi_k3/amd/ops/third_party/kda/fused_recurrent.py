@@ -183,7 +183,11 @@ def fused_recurrent_kda_fwd_kernel(
     m_state = m_v[:, None] & m_k[None, :]
 
     if IS_SPEC_DECODING:
-        initial_token = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+        # num_accepted_tokens can be 0 for stale rows whose sampled tokens
+        # were discarded; clamp so the index stays in bounds.
+        initial_token = tl.maximum(
+            tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1, 0
+        )
     else:
         initial_token = 0
     state_index = tl.load(state_indices + i_n * stride_indices_seq + initial_token).to(
