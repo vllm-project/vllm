@@ -63,6 +63,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
 
+        if envs.VLLM_BATCH_INVARIANT:
+            # Only all-reduce backends with an audited, batch-size-independent
+            # reduction order may run under batch invariance. vLLM's custom
+            # all-reduce qualifies (1-stage kernel, forced in the dispatcher);
+            # FlashInfer / AITER / QuickReduce carry no such guarantee.
+            use_flashinfer_allreduce = False
+            use_aiter_allreduce = False
+
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
