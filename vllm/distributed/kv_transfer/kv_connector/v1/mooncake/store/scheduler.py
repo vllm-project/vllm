@@ -78,6 +78,8 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        # The final successor hash is known after this step's connector metadata
+        # is built, so carry its save metadata into the next scheduler step.
         self._pending_finished_saves: dict[str, ReqMeta] = {}
 
     def _publishable_hashes(self, request: Request) -> list[BlockHash]:

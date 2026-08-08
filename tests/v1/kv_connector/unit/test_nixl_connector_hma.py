@@ -980,6 +980,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     scheduler = object.__new__(Scheduler)
     scheduler.connector = MagicMock()
+    scheduler.use_eagle_prefix_cache_hashing = False
     scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
     scheduler.kv_cache_manager.cache_blocks = MagicMock()
@@ -1078,6 +1079,20 @@ def test_mamba_n1_p_side_truncation():
 
     fa_sched.get_num_new_matched_tokens(fa_req, num_computed_tokens=0)
     assert len(fa_req.prompt_token_ids) == fa_original
+
+    # A successor hash proves the N-1 boundary without mutating the prompt.
+    successor_sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+    successor_sched.use_eagle_prefix_cache_hashing = True
+    successor_req = create_request(num_tokens=10, do_remote_decode=True)
+    successor_tokens = list(successor_req.prompt_token_ids)
+
+    successor_sched.get_num_new_matched_tokens(
+        successor_req, num_computed_tokens=len(successor_tokens) - 1
+    )
+
+    assert successor_req.prompt_token_ids == successor_tokens
+    assert successor_req.num_prompt_tokens == len(successor_tokens)
+    assert "_p_side_truncated" not in successor_req.kv_transfer_params
 
 
 @pytest.mark.cpu_test

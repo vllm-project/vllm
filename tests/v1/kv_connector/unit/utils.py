@@ -514,6 +514,7 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._is_hma_required = is_hma_required
+    sched.use_eagle_prefix_cache_hashing = False
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -572,6 +573,7 @@ def make_nixl_push_scheduler(
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
+    sched.use_eagle_prefix_cache_hashing = False
 
     # vllm_config is consulted for parallel_config.tensor_parallel_size.
     vllm_config = MagicMock()

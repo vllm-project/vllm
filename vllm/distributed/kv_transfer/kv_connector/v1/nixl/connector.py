@@ -85,6 +85,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         # select the same protocol when another connector shares hashes.
         return True
 
+    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
+        super().set_eagle_prefix_cache_hashing(enabled)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.use_eagle_prefix_cache_hashing = enabled
+
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         if any(
