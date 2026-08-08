@@ -1103,6 +1103,22 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             )
 
         uses_paged_kv = not isinstance(self.kv_cache_spec, EncoderOnlyAttentionSpec)
+        # The flex-attention kernel gathers paged K/V with `token_index *
+        # stride_kn` computed in int32, and K and V share one buffer so stride_kn
+        # spans both. Once that product reaches 2**31 it wraps negative and the
+        # kernel reads ~4 GiB below the KV cache: an illegal memory access, or
+        # silently wrong output when that address happens to be mapped.
+        # See https://github.com/vllm-project/vllm/issues/50427.
+        kv_stride = 2 * self.kv_cache_spec.num_kv_heads * self.kv_cache_spec.head_size
+        max_num_gpu_blocks = 2**31 // (block_size * kv_stride)
+        if uses_paged_kv and num_gpu_blocks > max_num_gpu_blocks:
+            raise ValueError(
+                f"FlexAttention cannot address {num_gpu_blocks} KV cache blocks: "
+                f"paged K/V offsets overflow int32 above {max_num_gpu_blocks} "
+                f"blocks. Lower --gpu-memory-utilization, or set "
+                f"--num-gpu-blocks-override to at most {max_num_gpu_blocks}."
+            )
+
         logical_mask_mod = (
             bidirectional_mask_mod
             if uses_paged_kv and not common_attn_metadata.causal
