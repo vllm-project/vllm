@@ -35,6 +35,9 @@ from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
 )
+from vllm.model_executor.warmup.turboquant_triton_warmup import (
+    turboquant_triton_warmup,
+)
 from vllm.model_executor.warmup.v1_block_table_warmup import (
     warm_v1_block_table_kernels,
 )
@@ -129,6 +132,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         kimi_k3_triton_warmup(worker)
         fa4_cutedsl_warmup(worker)
         sparse_mla_triton_warmup(worker)
+        turboquant_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
