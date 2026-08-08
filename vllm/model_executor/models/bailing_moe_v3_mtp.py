@@ -30,7 +30,6 @@ from vllm.model_executor.models.bailing_moe_v3 import (
     BailingMoeV3MLAAttention,
     BailingMoeV3MoE,
     _configure_ling_fp8_quant_config,
-    _maybe_pad_block_fp8_shared_expert_checkpoint_tensor,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
@@ -364,12 +363,6 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
             if spec_layer is None:
                 continue
             name = normalize_name(name)
-            loaded_weight = _maybe_pad_block_fp8_shared_expert_checkpoint_tensor(
-                self.quant_config,
-                self.config,
-                name,
-                loaded_weight,
-            )
 
             loaded = False
             for param_name, weight_name, stacked_shard_id in stacked_params_mapping:

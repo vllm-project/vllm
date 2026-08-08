@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
+import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
@@ -80,6 +82,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -87,6 +90,104 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
+
+
+def _fp8_block_shard(
+    size: int,
+    block_size: int,
+    tp_rank: int,
+    is_tp_split: bool,
+) -> tuple[int, int, int]:
+    start = tp_rank * size if is_tp_split else 0
+    offset = start % block_size if is_tp_split else 0
+    padded_size = round_up(offset + size, block_size)
+    return start, offset, padded_size
+
+
+def _load_padded_fp8_block_parameter(
+    param: torch.nn.Parameter,
+    loaded_weight: torch.Tensor,
+    loaded_shard_id: tuple[int, ...] | int | None = None,
+    *,
+    layer: torch.nn.Module,
+    block_size: tuple[int, int],
+    is_scale: bool = False,
+) -> None:
+    block_n, block_k = block_size
+    output_dim = param.output_dim
+    input_dim = param.input_dim
+    tp_size = layer.tp_size
+    tp_rank = layer.tp_rank
+    output_is_tp_split = tp_size > 1 and layer.output_size == (
+        sum(layer.output_partition_sizes) * tp_size
+    )
+    input_is_tp_split = tp_size > 1 and layer.input_size == (
+        layer.input_size_per_partition * tp_size
+    )
+    global_output_sizes = getattr(layer, "output_sizes", [layer.output_size])
+    output_spans = [
+        _fp8_block_shard(size, block_n, tp_rank, output_is_tp_split)
+        for size in layer.output_partition_sizes
+    ]
+    input_start, input_offset, padded_input_size = _fp8_block_shard(
+        layer.input_size_per_partition,
+        block_k,
+        tp_rank,
+        input_is_tp_split,
+    )
+
+    if is_scale:
+        source_output_sizes = [
+            round_up(size, block_n) // block_n for size in global_output_sizes
+        ]
+        target_output_sizes = [
+            round_up(span[2], block_n) // block_n for span in output_spans
+        ]
+        input_source_start = input_start // block_k
+        input_target_start = 0
+        input_count = round_up(padded_input_size, block_k) // block_k
+    else:
+        source_output_sizes = global_output_sizes
+        target_output_sizes = [span[2] for span in output_spans]
+        input_source_start = input_start
+        input_target_start = input_offset
+        input_count = layer.input_size_per_partition
+
+    shard_ids = (
+        tuple(range(len(source_output_sizes)))
+        if loaded_shard_id is None
+        else (
+            loaded_shard_id
+            if isinstance(loaded_shard_id, tuple)
+            else (loaded_shard_id,)
+        )
+    )
+
+    source_offset = 0
+    target_offsets = [0]
+    for size in target_output_sizes:
+        target_offsets.append(target_offsets[-1] + size)
+
+    for shard_id in shard_ids:
+        source_size = source_output_sizes[shard_id]
+        source = loaded_weight.narrow(output_dim, source_offset, source_size)
+        source_offset += source_size
+        output_start, output_offset, _ = output_spans[shard_id]
+        if is_scale:
+            output_start //= block_n
+            output_offset = 0
+            output_count = target_output_sizes[shard_id]
+        else:
+            output_count = layer.output_partition_sizes[shard_id]
+        target = param.data.narrow(
+            output_dim,
+            target_offsets[shard_id] + output_offset,
+            output_count,
+        ).narrow(input_dim, input_target_start, input_count)
+        source = source.narrow(output_dim, output_start, output_count).narrow(
+            input_dim, input_source_start, input_count
+        )
+        target.copy_(source)
 
 
 class Fp8Config(QuantizationConfig):
@@ -308,22 +409,67 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
+        block_padding = False
+        padded_input_size = input_size_per_partition
+        padded_output_partition_sizes = output_partition_sizes
 
         if self.block_quant:
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
+            block_n, block_k = self.weight_block_size
+            tp_size = getattr(layer, "tp_size", 1)
+            input_is_tp_split = (
+                tp_size > 1 and input_size == input_size_per_partition * tp_size
+            )
+            output_is_tp_split = tp_size > 1 and output_size == (
+                output_size_per_partition * tp_size
+            )
+            _, _, padded_input_size = _fp8_block_shard(
+                input_size_per_partition,
+                block_k,
+                layer.tp_rank,
+                input_is_tp_split,
+            )
+            padded_output_partition_sizes = [
+                _fp8_block_shard(
+                    size,
+                    block_n,
+                    layer.tp_rank,
+                    output_is_tp_split,
+                )[2]
+                for size in output_partition_sizes
+            ]
+            block_padding = (
+                padded_input_size != input_size_per_partition
+                or padded_output_partition_sizes != output_partition_sizes
+            )
+            layer.fp8_block_padding = block_padding
             validate_fp8_block_shape(
                 layer,
-                input_size,
-                output_size,
-                input_size_per_partition,
-                output_partition_sizes,
+                padded_input_size * tp_size if input_is_tp_split else input_size,
+                (
+                    sum(padded_output_partition_sizes) * tp_size
+                    if output_is_tp_split
+                    else output_size
+                ),
+                padded_input_size,
+                padded_output_partition_sizes,
                 self.weight_block_size,
             )
 
+        if block_padding:
+            weight_loader = partial(
+                _load_padded_fp8_block_parameter,
+                layer=layer,
+                block_size=tuple(self.weight_block_size),
+            )
         weight = create_fp8_weight_parameter(
-            output_size_per_partition, input_size_per_partition, weight_loader
+            sum(padded_output_partition_sizes),
+            padded_input_size,
+            weight_loader,
         )
+        if block_padding:
+            weight.data.zero_()
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
@@ -339,14 +485,24 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             assert not self.act_q_static
             assert self.weight_block_size is not None
+            scale_loader = weight_loader
+            if block_padding:
+                scale_loader = partial(
+                    _load_padded_fp8_block_parameter,
+                    layer=layer,
+                    block_size=tuple(self.weight_block_size),
+                    is_scale=True,
+                )
             scale = create_fp8_scale_parameter(
                 BlockQuantScaleParameter,
-                output_partition_sizes,
-                input_size_per_partition,
+                padded_output_partition_sizes,
+                padded_input_size,
                 self.weight_block_size,
-                weight_loader,
+                scale_loader,
                 scale_dtype=(torch.float8_e8m0fnu if self.is_scale_e8m0 else None),
             )
+            if block_padding:
+                scale.data.fill_(1)
             # The weight_scale_inv name is intentional for deepseekv3
             layer.register_parameter("weight_scale_inv", scale)
 
@@ -421,44 +577,95 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        block_padding = getattr(layer, "fp8_block_padding", False)
+        padded_output_sizes = layer.output_partition_sizes
+        output_offsets = [0] * len(padded_output_sizes)
+        kernel_bias = bias
+        if block_padding:
+            assert self.weight_block_size is not None
+            block_n, block_k = self.weight_block_size
+            tp_size = layer.tp_size
+            input_is_tp_split = tp_size > 1 and layer.input_size == (
+                layer.input_size_per_partition * tp_size
+            )
+            output_is_tp_split = tp_size > 1 and layer.output_size == (
+                sum(layer.output_partition_sizes) * tp_size
+            )
+            _, input_offset, padded_input_size = _fp8_block_shard(
+                layer.input_size_per_partition,
+                block_k,
+                layer.tp_rank,
+                input_is_tp_split,
+            )
+            if padded_input_size != layer.input_size_per_partition:
+                x = F.pad(
+                    x,
+                    (
+                        input_offset,
+                        padded_input_size
+                        - input_offset
+                        - layer.input_size_per_partition,
+                    ),
+                )
+            output_spans = [
+                _fp8_block_shard(
+                    size,
+                    block_n,
+                    layer.tp_rank,
+                    output_is_tp_split,
+                )
+                for size in layer.output_partition_sizes
+            ]
+            output_offsets = [span[1] for span in output_spans]
+            padded_output_sizes = [span[2] for span in output_spans]
+            if padded_output_sizes != layer.output_partition_sizes:
+                kernel_bias = None
+
         # if batch invariant mode is enabled, prefer direct FP8 path
         # we will use BF16 dequant when direct FP8 is not supported.
-        if envs.VLLM_BATCH_INVARIANT:
-            if self.block_quant:
-                assert self.weight_block_size is not None
-                return self.fp8_linear.apply_weights(
-                    layer,
-                    x,
-                    bias,
-                )
+        if envs.VLLM_BATCH_INVARIANT and not self.block_quant:
+            if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
+                return self.fp8_linear.apply_weights(layer, x, bias)
+
+            # per-tensor/channel: dequant to BF16 and run GEMM
+            weight_fp8 = layer.weight.to(torch.bfloat16)
+            weight_scale = layer.weight_scale.to(torch.bfloat16)
+            if weight_scale.numel() == 1:
+                # Per-tensor: simple scalar multiplication
+                weight_bf16 = weight_fp8 * weight_scale
             else:
-                if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
-                    return self.fp8_linear.apply_weights(layer, x, bias)
-
-                # per-tensor/channel: dequant to BF16 and run GEMM
-                weight_fp8 = layer.weight.to(torch.bfloat16)
-                weight_scale = layer.weight_scale.to(torch.bfloat16)
-                if weight_scale.numel() == 1:
-                    # Per-tensor: simple scalar multiplication
-                    weight_bf16 = weight_fp8 * weight_scale
+                # Multiple scales (fused modules like QKV)
+                # Try to infer correct broadcasting
+                # weight is [K, N], scale could be [num_logical_weights]
+                # Need to figure out how to broadcast - for now just try
+                # direct multiplication
+                if (
+                    weight_scale.dim() == 1
+                    and weight_scale.shape[0] == weight_fp8.shape[0]
+                ):
+                    # Per-row scaling
+                    weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
                 else:
-                    # Multiple scales (fused modules like QKV)
-                    # Try to infer correct broadcasting
-                    # weight is [K, N], scale could be [num_logical_weights]
-                    # Need to figure out how to broadcast - for now just try
-                    # direct multiplication
-                    if (
-                        weight_scale.dim() == 1
-                        and weight_scale.shape[0] == weight_fp8.shape[0]
-                    ):
-                        # Per-row scaling
-                        weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
-                    else:
-                        # Fallback
-                        weight_bf16 = weight_fp8 * weight_scale
-                return torch.nn.functional.linear(x, weight_bf16.t(), bias)
+                    # Fallback
+                    weight_bf16 = weight_fp8 * weight_scale
+            return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
-        return self.fp8_linear.apply_weights(layer, x, bias)
+        output = self.fp8_linear.apply_weights(layer, x, kernel_bias)
+        if padded_output_sizes != layer.output_partition_sizes:
+            output = torch.cat(
+                [
+                    shard[..., offset : offset + size]
+                    for shard, offset, size in zip(
+                        output.split(padded_output_sizes, dim=-1),
+                        output_offsets,
+                        layer.output_partition_sizes,
+                    )
+                ],
+                dim=-1,
+            )
+            if bias is not None:
+                output = output + bias
+        return output
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
