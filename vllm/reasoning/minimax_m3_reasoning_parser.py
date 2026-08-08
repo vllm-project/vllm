@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Sequence
+from threading import Lock
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
@@ -10,6 +11,13 @@ from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+
+_MARKER_TOKEN_TEXT_CACHE: dict[
+    tuple[int, tuple[str, str]],
+    tuple[object, tuple[tuple[int, str], ...]],
+] = {}
+_MARKER_TOKEN_TEXT_CACHE_LOCK = Lock()
 
 
 class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
@@ -40,7 +48,20 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         self._start_token_ids = self._encode_marker(self.start_token)
         self._end_token_ids = self._encode_marker(self.end_token)
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._initial_in_reasoning = chat_kwargs.get("thinking_mode") == "enabled"
+        self._thinking_mode = chat_kwargs.get("thinking_mode", "adaptive")
+        self._continue_final_message = bool(
+            chat_kwargs.get("_vllm_continue_final_message", False)
+        )
+        self._continue_final_message_content = chat_kwargs.get(
+            "_vllm_continue_final_message_content"
+        )
+        self._continue_final_message_reasoning = chat_kwargs.get(
+            "_vllm_continue_final_message_reasoning"
+        )
+        self._continue_final_message_reasoning_ended = chat_kwargs.get(
+            "_vllm_continue_final_message_reasoning_ended"
+        )
+        self._initial_in_reasoning = self._thinking_mode == "enabled"
         self._reasoning_ended_streaming = False
         self._reasoning_active_streaming = self._initial_in_reasoning
         self._pending_marker_streaming = False
@@ -63,6 +84,67 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             )
         except TypeError:
             return self.model_tokenizer.decode(list(token_ids))
+
+    def reasoning_marker_token_state(
+        self, output_token_ids: Sequence[int]
+    ) -> tuple[bool, tuple[int, ...]]:
+        """Return decoded marker completion state and valid next token IDs.
+
+        The tokenizer exposes atomic marker encodings, but runtime output can
+        use smaller vocabulary tokens. Cache the vocabulary fragments shared
+        by this tokenizer so every decoded marker tokenization is admitted
+        without repeating the vocabulary scan for each request.
+        """
+        output_prefix = tuple(output_token_ids)
+        marker_sequences = (self._start_token_ids, self._end_token_ids)
+        marker_complete = any(
+            len(output_prefix) >= len(marker) and output_prefix[: len(marker)] == marker
+            for marker in marker_sequences
+        )
+        next_token_ids = {
+            marker[len(output_prefix)]
+            for marker in marker_sequences
+            if len(output_prefix) < len(marker)
+            and output_prefix == marker[: len(output_prefix)]
+        }
+
+        markers = (self.start_token, self.end_token)
+        prefix_text = self._decode_text(output_prefix)
+        if any(prefix_text.startswith(marker) for marker in markers):
+            return True, ()
+
+        cache_key = (id(self.model_tokenizer), markers)
+        with _MARKER_TOKEN_TEXT_CACHE_LOCK:
+            cached = _MARKER_TOKEN_TEXT_CACHE.get(cache_key)
+            if cached is not None and cached[0] is self.model_tokenizer:
+                marker_token_texts = cached[1]
+            else:
+                marker_token_texts_list: list[tuple[int, str]] = []
+                for token_id in set(self.vocab.values()):
+                    try:
+                        token_text = self._decode_text([token_id])
+                    except Exception:
+                        continue
+                    if token_text and any(
+                        token_text in marker or token_text.startswith(marker)
+                        for marker in markers
+                    ):
+                        marker_token_texts_list.append((token_id, token_text))
+                marker_token_texts = tuple(marker_token_texts_list)
+                _MARKER_TOKEN_TEXT_CACHE[cache_key] = (
+                    self.model_tokenizer,
+                    marker_token_texts,
+                )
+
+        for token_id, _token_text in marker_token_texts:
+            candidate_text = self._decode_text([*output_prefix, token_id])
+            if any(
+                marker.startswith(candidate_text) or candidate_text.startswith(marker)
+                for marker in markers
+            ):
+                next_token_ids.add(token_id)
+
+        return marker_complete, tuple(sorted(next_token_ids))
 
     def _content_suffix_token_ids(
         self,
@@ -200,14 +282,13 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if self._reasoning_ended_streaming:
             return True
 
-        if self._reasoning_active_streaming or self._pending_marker_streaming:
-            return False
-
         delta_ids = tuple(delta_ids)
         if self._contains_token_sequence(delta_ids, self._end_token_ids):
             return True
         if self._contains_token_sequence(input_ids, self._end_token_ids):
             return True
+        if self._reasoning_active_streaming or self._pending_marker_streaming:
+            return False
         if self._initial_in_reasoning:
             return False
         if self._ends_with_token_sequence_prefix(input_ids, self._start_token_ids):
@@ -318,3 +399,36 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if start_index < 0:
             return True
         return end_index > start_index
+
+    def is_reasoning_end_from_prompt(
+        self, prompt_token_ids: Sequence[int]
+    ) -> bool | None:
+        if self._continue_final_message:
+            content = self._continue_final_message_content
+            if isinstance(self._continue_final_message_reasoning_ended, bool):
+                reasoning_ended = self._continue_final_message_reasoning_ended
+            elif isinstance(content, str):
+                start_index = content.rfind(self.start_token)
+                end_index = content.rfind(self.end_token)
+                if start_index >= 0 or end_index >= 0:
+                    reasoning_ended = not (start_index >= 0 and start_index > end_index)
+                elif content:
+                    reasoning_ended = True
+                elif (
+                    isinstance(self._continue_final_message_reasoning, str)
+                    and self._continue_final_message_reasoning
+                ):
+                    reasoning_ended = False
+                else:
+                    reasoning_ended = self._thinking_mode != "enabled"
+            else:
+                reasoning_ended = False if self._thinking_mode == "enabled" else None
+            if reasoning_ended is not None:
+                self._initial_in_reasoning = not reasoning_ended
+                self._reasoning_active_streaming = self._initial_in_reasoning
+            return reasoning_ended
+        if self._thinking_mode == "disabled":
+            return True
+        if self._thinking_mode == "enabled":
+            return False
+        return None

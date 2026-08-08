@@ -17,6 +17,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    make_reasoning_parser_chat_template_kwargs,
     make_tool_call_id,
 )
 from vllm.entrypoints.generate.base.serving import (
@@ -189,6 +190,15 @@ class OpenAIServingChat(GenerateBaseServing):
             .chat_template_kwargs
         )
 
+    def _reasoning_parser_chat_template_kwargs(
+        self, request: ChatCompletionRequest
+    ) -> dict[str, Any]:
+        return make_reasoning_parser_chat_template_kwargs(
+            self._effective_chat_template_kwargs(request),
+            request.continue_final_message,
+            request.messages[-1] if request.messages else None,
+        )
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
@@ -240,7 +250,7 @@ class OpenAIServingChat(GenerateBaseServing):
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
-        chat_template_kwargs = self._effective_chat_template_kwargs(request)
+        chat_template_kwargs = self._reasoning_parser_chat_template_kwargs(request)
         parser: Parser | None = None
         if self.parser_cls is not None:
             parser = self.parser_cls(
@@ -338,7 +348,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     # non-reasoning outputs.
                     reasoning_ended = True
                 elif parser is not None and parser.reasoning_parser is not None:
-                    reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
+                    reasoning_ended = parser.is_reasoning_end_from_prompt(
+                        prompt_token_ids or []
+                    )
                 else:
                     reasoning_ended = None
 

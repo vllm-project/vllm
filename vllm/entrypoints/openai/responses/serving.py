@@ -30,6 +30,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    make_reasoning_parser_chat_template_kwargs,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
@@ -269,6 +270,18 @@ class OpenAIServingResponses(GenerateBaseServing):
             model_config=self.model_config,
         )
 
+    def _reasoning_parser_chat_template_kwargs(
+        self,
+        request: ResponsesRequest,
+        messages: list[ChatCompletionMessageParam],
+    ) -> dict[str, Any]:
+        kwargs = self._effective_chat_template_kwargs(request)
+        return make_reasoning_parser_chat_template_kwargs(
+            kwargs,
+            bool(kwargs.get("continue_final_message")),
+            messages[-1] if messages else None,
+        )
+
     def _validate_generator_input(
         self,
         engine_input: EngineInput,
@@ -453,7 +466,9 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
             session_id = self._get_session_id(request, raw_request)
 
-            chat_template_kwargs = self._effective_chat_template_kwargs(request)
+            chat_template_kwargs = self._reasoning_parser_chat_template_kwargs(
+                request, messages
+            )
             response_parser = self._make_response_parser(
                 request, tokenizer, chat_template_kwargs
             )
@@ -487,10 +502,18 @@ class OpenAIServingResponses(GenerateBaseServing):
                         response_parser=response_parser,
                     )
 
+            reasoning_ended = None
+            reasoning_parser_kwargs = None
             if (
                 context.response_parser is not None
                 and context.response_parser.reasoning_parser is not None
             ):
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_input
+                ).token_ids
+                reasoning_ended = context.response_parser.is_reasoning_end_from_prompt(
+                    prompt_token_ids or []
+                )
                 reasoning_parser_kwargs = {
                     "chat_template_kwargs": chat_template_kwargs,
                 }
@@ -518,9 +541,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
-                reasoning_parser_kwargs=reasoning_parser_kwargs
-                if self.parser and self.parser.reasoning_parser_cls is not None
-                else None,
+                reasoning_ended=reasoning_ended,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
             generators.append(generator)
 
@@ -672,6 +694,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
+        reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
@@ -697,6 +720,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 trace_headers=trace_headers,
                 priority=priority,
                 session_id=session_id,
+                reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
@@ -733,6 +757,29 @@ class OpenAIServingResponses(GenerateBaseServing):
                     context.chat_template_content_format,
                 )
 
+                if reasoning_parser_kwargs is not None:
+                    parser_chat_template_kwargs = reasoning_parser_kwargs.get(
+                        "chat_template_kwargs"
+                    )
+                    if isinstance(parser_chat_template_kwargs, dict):
+                        next_chat_template_kwargs = (
+                            make_reasoning_parser_chat_template_kwargs(
+                                parser_chat_template_kwargs,
+                                continue_final_message=False,
+                                final_message=None,
+                            )
+                        )
+                        reasoning_parser_kwargs = {
+                            **reasoning_parser_kwargs,
+                            "chat_template_kwargs": next_chat_template_kwargs,
+                        }
+                        if context.response_parser is not None:
+                            context.response_parser = self._make_response_parser(
+                                context.request,
+                                context.tokenizer,
+                                next_chat_template_kwargs,
+                            )
+
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,
                     context.request.max_output_tokens,
@@ -746,6 +793,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             # OPTIMIZATION
             priority = orig_priority - 1
+            reasoning_ended = None
             sub_request += 1
 
     def _make_request_with_harmony(
