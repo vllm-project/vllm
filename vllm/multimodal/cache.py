@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import operator
 import sys
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from multiprocessing.synchronize import Lock as LockType
@@ -647,6 +648,10 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
             mm_config.mm_processor_cache_gb,
             MultiModalKwargsItem,
         )
+        # EngineCore mutates this cache from the input socket thread
+        # (`preprocess_add_request`) while `reset_mm_cache` runs on the
+        # busy loop thread; LRUCache is not thread-safe (#47958).
+        self._lock = threading.Lock()
 
     @override
     def get_and_update_item(
@@ -654,13 +659,14 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
-        if (cached_item := self._cache.get(mm_hash)) is not None:
-            return cached_item
+        with self._lock:
+            if (cached_item := self._cache.get(mm_hash)) is not None:
+                return cached_item
 
-        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+            assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = mm_item
-        return mm_item
+            self._cache[mm_hash] = mm_item
+            return mm_item
 
     @override
     def touch_receiver_cache_item(
@@ -668,11 +674,13 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         mm_hash: str,
         mm_item: MultiModalKwargsItem | None = None,
     ) -> None:
-        self._cache.touch(mm_hash)
+        with self._lock:
+            self._cache.touch(mm_hash)
 
     @override
     def clear_cache(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
 
 class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
