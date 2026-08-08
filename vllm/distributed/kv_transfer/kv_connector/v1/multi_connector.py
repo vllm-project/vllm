@@ -118,11 +118,10 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for connector_id, stats_data in transfer_stats_data.items():
-            assert connector_id in self._prom_metrics, (
-                f"{connector_id} is not contained in the list of registered connectors "
-                f"with Prometheus metrics support: {self._prom_metrics.keys()}"
-            )
-            self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
+            prom_metrics = self._prom_metrics.get(connector_id)
+            if prom_metrics is None:
+                continue
+            prom_metrics.observe(stats_data["data"], engine_idx)
 
 
 class MultiConnector(KVConnectorBase_V1, SupportsHMA):
