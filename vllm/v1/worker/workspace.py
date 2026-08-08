@@ -11,7 +11,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_enabled
 
 logger = init_logger(__name__)
 
@@ -56,6 +56,12 @@ class WorkspaceManager:
 
         After locking, any attempt to allocate a larger workspace will raise
         an assertion error. This ensures workspace size is fixed during execution.
+
+        Slots are kept the same size as they grow (see ``_ensure_workspace_size``)
+        so they are already in sync by the time this is called. Locking therefore
+        only has to flip the flag -- it never reallocates a buffer, which would be
+        unsafe here because CUDA graphs captured before locking may already point
+        at the existing buffers.
         """
         self._locked = True
         if envs.VLLM_DEBUG_WORKSPACE:
@@ -161,21 +167,40 @@ class WorkspaceManager:
                     "Workspace growth is not allowed after locking."
                 )
 
-            # Only resize the requesting ubatch's workspace.  Other
-            # ubatches resize lazily on their next get_simultaneous call.
-            # Resizing all ubatches here would orphan the other ubatch's
-            # old tensor when it still holds views into it (DBO leak).
-            self._current_workspaces[ubatch_id] = None
+            # Decide which ubatch slots to grow. Outside an active DBO
+            # region only one ubatch runs at a time and no sibling slot
+            # holds live views, so we grow every slot together and keep
+            # them in sync. Finalizing all slot sizes here -- during
+            # warmup/capture, before any CUDA graph is captured against the
+            # buffers -- means lock() never has to relocate a buffer a graph
+            # already points at. Inside an active DBO region the sibling
+            # ubatch may still hold views into its slot, so reallocating it
+            # would orphan that tensor (DBO leak); there we only resize the
+            # requesting ubatch's slot and let the others grow lazily on
+            # their next get_simultaneous call.
+            if dbo_enabled():
+                resize_ubatch_ids = [ubatch_id]
+            else:
+                resize_ubatch_ids = list(range(self._num_ubatches))
+
+            # Drop references to every undersized slot first, then release
+            # the freed segments back to the accelerator so the caching
+            # allocator can reuse the memory for the larger allocations
+            # below. Without this, each resize may leave a dead segment in
+            # reserved memory which can cause higher peak memory usage.
             del current_workspace
-            # Release the freed segment back to CUDA so the caching
-            # allocator can reuse the GPU memory for the larger
-            # allocation below. Without this, each resize may leave a
-            # dead segment in reserved memory which can cause higher peak
-            # memory usage.
+            for resize_id in resize_ubatch_ids:
+                if (
+                    self._workspace_size_bytes(self._current_workspaces[resize_id])
+                    < required_bytes
+                ):
+                    self._current_workspaces[resize_id] = None
             torch.accelerator.empty_cache()
-            self._current_workspaces[ubatch_id] = torch.empty(
-                (required_bytes,), dtype=torch.uint8, device=self._device
-            )
+            for resize_id in resize_ubatch_ids:
+                if self._current_workspaces[resize_id] is None:
+                    self._current_workspaces[resize_id] = torch.empty(
+                        (required_bytes,), dtype=torch.uint8, device=self._device
+                    )
             current_workspace = self._current_workspaces[ubatch_id]
 
             if envs.VLLM_DEBUG_WORKSPACE:
