@@ -170,6 +170,39 @@ def test_base_router_capture_pre_eplb_mapping():
     assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
 
 
+def test_base_router_masks_padding_before_capture_and_eplb():
+    router = _make_router()
+    captured = []
+    is_padding = torch.tensor([False, True])
+
+    router.set_capture_fn(lambda ids: captured.append(ids.clone()))
+    with (
+        patch(
+            "vllm.model_executor.layers.fused_moe.router.base_router."
+            "is_forward_context_available",
+            return_value=True,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.router.base_router."
+            "get_forward_context",
+            return_value=SimpleNamespace(is_padding=is_padding),
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.router.base_router."
+            "envs.VLLM_MOE_SKIP_PADDING",
+            True,
+        ),
+    ):
+        topk_weights, topk_ids = router.select_experts(
+            hidden_states=torch.empty(1),
+            router_logits=torch.empty(1),
+        )
+
+    assert torch.equal(captured[0], torch.tensor([[1, 2], [-1, -1]]))
+    assert torch.equal(topk_ids, torch.tensor([[11, 12], [9, 9]]))
+    assert torch.equal(topk_weights, torch.tensor([[1.0, 1.0], [0.0, 0.0]]))
+
+
 def test_base_router_capture_with_eplb_enabled():
     eplb_state = EplbLayerState()
     eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
