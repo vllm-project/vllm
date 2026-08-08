@@ -17,6 +17,7 @@ from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_ip,
+    get_open_port,
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
@@ -325,12 +326,19 @@ class RayDistributedExecutor(Executor):
             "update_environment_variables", args=(self._get_env_vars_to_be_updated(),)
         )
 
-        # Rank 0 owns the TCPStore, so it must both select the port and
-        # advertise its own reachable address. The Ray driver can be on a
-        # different node (including a CPU-only head node).
-        rank_zero_ip = sorted_worker_metadata[0].ip
-        port = ray.get(self.workers[0].get_open_port.remote())  # type: ignore[attr-defined]
-        distributed_init_method = get_distributed_init_method(rank_zero_ip, port)
+        if len(node_physical_gpu_ids) == 1:
+            # in single node case, we don't need to get the IP address.
+            # the loopback address is sufficient
+            # NOTE: a node may have several IP addresses, one for each
+            # network interface. `get_ip()` might return any of them,
+            # while they might not work for communication inside the node
+            # if the network setup is complicated. Using the loopback address
+            # solves this issue, as it always works for communication inside
+            # the node.
+            driver_ip = "127.0.0.1"
+        distributed_init_method = get_distributed_init_method(
+            driver_ip, get_open_port()
+        )
 
         # Initialize the actual workers inside worker wrapper.
         all_kwargs = []
