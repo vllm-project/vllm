@@ -419,11 +419,18 @@ class IterationStats:
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
             req_stats.first_token_ts = engine_core_timestamp
-        else:
+        elif num_new_generation_tokens > 0:
             itl = engine_core_timestamp - req_stats.last_token_ts
-            self.inter_token_latencies_iter.append(itl)
+            per_token_itl = itl / num_new_generation_tokens
+            self.inter_token_latencies_iter.extend(
+                [per_token_itl] * num_new_generation_tokens
+            )
 
-        req_stats.last_token_ts = engine_core_timestamp
+        # The first output may carry no tokens (pooling requests, aborted or
+        # failed prefills); last_token_ts must still advance so finished
+        # request latencies stay non-negative.
+        if is_prefilling or num_new_generation_tokens > 0:
+            req_stats.last_token_ts = engine_core_timestamp
 
     def update_from_events(
         self,
