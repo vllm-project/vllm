@@ -653,45 +653,108 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
     assert not _is_req_scheduled(model_runner, req_ids[1])
 
 
-def test_replayssm_spec_commits_accepted_window_after_sampling():
-    """Accepted state is folded before scheduling can remove a request row."""
-    metadata = Mock()
-    committer = Mock()
-    attn_group = SimpleNamespace(
-        layer_names=["mamba_layer"],
-        speculative_state_committer=committer,
-    )
-    runner = SimpleNamespace(
-        speculative_config=object(),
-        model_config=SimpleNamespace(is_hybrid=True),
-        cache_config=SimpleNamespace(
-            use_replayssm_spec=True,
-            mamba_cache_mode="none",
-        ),
-        num_accepted_tokens=SimpleNamespace(gpu=torch.zeros(3, dtype=torch.int32)),
-        input_batch=SimpleNamespace(
-            num_accepted_tokens_cpu_tensor=torch.zeros(3, dtype=torch.int32)
-        ),
-        num_accepted_tokens_event=Mock(),
-        _attn_group_iterator=lambda: iter((attn_group,)),
-    )
-    output_token_ids = torch.tensor([[10, 11, -1], [20, -1, -1]], dtype=torch.int32)
+def test_replayssm_request_unscheduled_preserves_deferred_state(
+    model_runner, dist_init
+):
+    """A cache-resident request must keep its ring anchor and pending
+    acceptance while it is temporarily outside the persistent batch."""
+    req_ids = ("req_0", "req_1")
+    model_runner.use_async_scheduling = True
+    model_runner.cache_config.use_replayssm_spec = True
+    model_runner.input_batch.use_replayssm = True
+    model_runner._update_states(_schedule_new_request(*req_ids))
 
-    GPUModelRunner._update_states_after_model_execute(
-        runner,
-        output_token_ids,
-        Mock(),
-        {"mamba_layer": metadata},
+    req_id = req_ids[1]
+    req_index = model_runner.input_batch.req_id_to_index[req_id]
+    model_runner.requests[req_id].output_token_ids.append(99)
+    model_runner.input_batch.num_computed_tokens_cpu[req_index] = 4
+    model_runner.input_batch.replayssm_decode_base[req_index] = 3
+    model_runner.num_accepted_tokens.gpu[req_index] = 3
+    accepted_tokens_event = Mock()
+    model_runner.num_accepted_tokens_event = accepted_tokens_event
+
+    model_runner._update_states(
+        SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={req_ids[0]: 1},
+            total_num_scheduled_tokens=1,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
     )
 
-    committed_metadata, accepted = committer.call_args.args
-    assert committed_metadata is metadata
-    expected = torch.tensor([2, 1], dtype=torch.int32)
-    torch.testing.assert_close(accepted[:2], expected)
-    torch.testing.assert_close(
-        runner.input_batch.num_accepted_tokens_cpu_tensor[:2],
-        expected,
+    decode_base, deferred = model_runner._replayssm_spec_deferred_state[req_id]
+    assert decode_base == 3
+    assert deferred.item() == 3
+    accepted_tokens_event.synchronize.assert_not_called()
+
+    resume_output = _schedule_cached_requests(
+        req_ids=[req_id],
+        num_scheduled_tokens={req_id: 1},
+        new_token_ids=[[]],
+        num_computed_tokens=[4],
+        num_output_tokens=[1],
     )
+    resume_output.scheduled_cached_reqs.all_token_ids[req_id] = [1, 2, 3, 99]
+    model_runner._update_states(resume_output)
+
+    req_index = model_runner.input_batch.req_id_to_index[req_id]
+    model_runner.num_accepted_tokens.gpu[req_index] = 1
+    model_runner._restore_replayssm_spec_deferred_state()
+    assert model_runner.input_batch.replayssm_decode_base[req_index] == 3
+    assert model_runner.num_accepted_tokens.gpu[req_index].item() == 3
+    assert req_id not in model_runner._replayssm_spec_deferred_state
+
+
+def test_replayssm_preemption_discards_deferred_state(model_runner, dist_init):
+    """A true preemption frees the cache block and recomputes on resume, so
+    request-scoped ReplaySSM metadata must not follow it to the new block."""
+    req_id = "req_0"
+    model_runner.use_async_scheduling = False
+    model_runner.cache_config.use_replayssm_spec = True
+    model_runner.input_batch.use_replayssm = True
+    model_runner._update_states(_schedule_new_request(req_id))
+
+    req_index = model_runner.input_batch.req_id_to_index[req_id]
+    model_runner.input_batch.replayssm_decode_base[req_index] = 3
+    model_runner.num_accepted_tokens.gpu[req_index] = 3
+    model_runner._update_states(
+        SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={},
+            total_num_scheduled_tokens=0,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+    )
+
+    decode_base, deferred = model_runner._replayssm_spec_deferred_state[req_id]
+    assert decode_base == 3
+    assert deferred.item() == 3
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+        preempted_req_ids={req_id},
+    )
+    model_runner._update_states(scheduler_output)
+
+    assert req_id not in model_runner._replayssm_spec_deferred_state
 
 
 def test_update_states_pp_non_async_multi_request_keeps_token_buffers_consistent(

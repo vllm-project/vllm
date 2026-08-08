@@ -489,9 +489,6 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
-    # Stateful backends may need forward metadata after sampling to commit the
-    # accepted prefix without retaining row-keyed state across model steps.
-    state_commit_attn_metadata: AttnMetadataDict | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
 
 
@@ -718,6 +715,7 @@ class GPUModelRunner(
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        self._replayssm_spec_deferred_state: dict[str, tuple[int, torch.Tensor]] = {}
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
@@ -771,7 +769,8 @@ class GPUModelRunner(
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
-            use_replayssm=self.cache_config.use_replayssm,
+            use_replayssm=self.cache_config.use_replayssm
+            or self.cache_config.use_replayssm_spec,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -1233,6 +1232,59 @@ class GPUModelRunner(
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self.encoder_cache.pop(mm_hash, None)
 
+    def _save_replayssm_spec_deferred_state(
+        self,
+        unscheduled_req_ids: set[str],
+        preempted_req_ids: set[str] | None,
+    ) -> None:
+        """Preserve ReplaySSM metadata only while its cache block survives.
+
+        A temporarily unscheduled request keeps its physical block, so save its
+        decode anchor and pending GPU acceptance before removing the batch row.
+        A preempted request loses that block and will recompute; discard any
+        saved metadata instead of attaching it to a future allocation.
+        """
+        if not self.cache_config.use_replayssm_spec:
+            return
+
+        preempted_req_ids = preempted_req_ids or set()
+        for req_id in preempted_req_ids:
+            self._replayssm_spec_deferred_state.pop(req_id, None)
+
+        for req_id in unscheduled_req_ids - preempted_req_ids:
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                continue
+            self._replayssm_spec_deferred_state[req_id] = (
+                int(self.input_batch.replayssm_decode_base[req_index]),
+                self.num_accepted_tokens.gpu[req_index].clone(),
+            )
+
+    def _restore_replayssm_spec_deferred_state(self) -> None:
+        """Restore a cache-resident request after persistent-batch removal.
+
+        Speculative acceptance is consumed by the following model step. If a
+        request is unscheduled between those steps, its physical cache block
+        and ReplaySSM ring survive, but its row-keyed accepted count does not.
+        Copy the count to the request's new row and retain its original decode
+        anchor so the next metadata build commits the pending state once. The
+        count stays on the GPU to avoid synchronizing async scheduling.
+        """
+        deferred_state = self._replayssm_spec_deferred_state
+        if not self.cache_config.use_replayssm_spec or not deferred_state:
+            return
+
+        restored_req_ids: list[str] = []
+        for req_id, (decode_base, num_accepted_tokens) in deferred_state.items():
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                continue
+            self.input_batch.replayssm_decode_base[req_index] = decode_base
+            self.num_accepted_tokens.gpu[req_index].copy_(num_accepted_tokens)
+            restored_req_ids.append(req_id)
+        for req_id in restored_req_ids:
+            deferred_state.pop(req_id)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -1246,6 +1298,7 @@ class GPUModelRunner(
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             req_state = self.requests.pop(req_id, None)
+            self._replayssm_spec_deferred_state.pop(req_id, None)
             self._on_request_state_removed(req_id, req_state)
             self.num_prompt_logprobs.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
@@ -1293,6 +1346,9 @@ class GPUModelRunner(
         # consecutive batches contain mostly the same requests. If batches
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
+        self._save_replayssm_spec_deferred_state(
+            unscheduled_req_ids, scheduler_output.preempted_req_ids
+        )
         for req_id in unscheduled_req_ids:
             self.input_batch.remove_request(req_id)
 
@@ -1610,10 +1666,7 @@ class GPUModelRunner(
             return None
 
     def _update_states_after_model_execute(
-        self,
-        output_token_ids: torch.Tensor,
-        scheduler_output: "SchedulerOutput",
-        state_commit_attn_metadata: AttnMetadataDict | None,
+        self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
         """Update the cached states after model execution.
 
@@ -1631,15 +1684,6 @@ class GPUModelRunner(
         # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
-
-        if self.cache_config.use_replayssm_spec:
-            assert state_commit_attn_metadata is not None
-            for attn_group in self._attn_group_iterator():
-                committer = attn_group.speculative_state_committer
-                if committer is None:
-                    continue
-                metadata = state_commit_attn_metadata[attn_group.layer_names[0]]
-                committer(metadata, self.num_accepted_tokens.gpu)
 
         if self.cache_config.mamba_cache_mode == "align":
             # Fused GPU postprocess: state copies + per-request accepted-token
@@ -1701,6 +1745,7 @@ class GPUModelRunner(
         self.late_interaction_runner.register_request(req_id, req_state.pooling_params)
         req_state.block_ids = new_req_data.block_ids
         req_state.num_computed_tokens = new_req_data.num_computed_tokens
+        self._replayssm_spec_deferred_state.pop(req_id, None)
         req_state.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
@@ -2196,6 +2241,8 @@ class GPUModelRunner(
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
 
+        self._restore_replayssm_spec_deferred_state()
+
         if self.mamba_prev_last_scheduled_idx is not None:
             mamba_utils.preprocess_mamba_all_specdec(
                 scheduler_output,
@@ -2432,7 +2479,11 @@ class GPUModelRunner(
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
             seq_lens_cpu = None
-            num_computed_tokens_cpu = None
+            # ReplaySSM uses the CPU count only to compare against the fixed
+            # decode anchor. Optimistic async drift is monotonic after entry,
+            # so it cannot spuriously re-trigger the first-decode reset.
+            if not self.cache_config.use_replayssm_spec:
+                num_computed_tokens_cpu = None
 
         # Compute mm_prefix bidirectional ranges before building
         # attention metadata so builders handle them during build().
@@ -2477,7 +2528,7 @@ class GPUModelRunner(
             rswa_prefix_lens = num_prompt_tokens_cpu
 
         replayssm_decode_base_cpu = None
-        if self.cache_config.use_replayssm:
+        if self.cache_config.use_replayssm or self.cache_config.use_replayssm_spec:
             replayssm_decode_base_cpu = (
                 self.input_batch.replayssm_decode_base_cpu_tensor[:num_reqs_padded]
             )
@@ -2554,8 +2605,9 @@ class GPUModelRunner(
 
             extra_attn_metadata_args = {}
             # use_spec_decode is step-level: it is False whenever the drafter
-            # proposed nothing anywhere in the batch. ReplaySSM still uses the
-            # Mamba speculative convolution path on those steps.
+            # proposed nothing anywhere in the batch. ReplaySSM-spec still needs
+            # the cursors on those steps, or the rows fall through to the
+            # baseline kernel and advance a checkpoint the ring has moved past.
             needs_replayssm_spec_args = (
                 self.cache_config.use_replayssm_spec
                 and isinstance(builder, Mamba2AttentionMetadataBuilder)
@@ -4620,10 +4672,6 @@ class GPUModelRunner(
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
-        state_commit_attn_metadata = None
-        if self.cache_config.use_replayssm_spec:
-            assert isinstance(attn_metadata, dict)
-            state_commit_attn_metadata = attn_metadata
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
             logits,
@@ -4634,7 +4682,6 @@ class GPUModelRunner(
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
-            state_commit_attn_metadata,
             slot_mappings,
         )
         self.kv_connector_output = kv_connector_output
@@ -4686,7 +4733,6 @@ class GPUModelRunner(
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
-            state_commit_attn_metadata,
             slot_mappings,
         ) = self.execute_model_state
         # Clear ephemeral state.
@@ -4702,9 +4748,7 @@ class GPUModelRunner(
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         self._update_states_after_model_execute(
-            sampler_output.sampled_token_ids,
-            scheduler_output,
-            state_commit_attn_metadata,
+            sampler_output.sampled_token_ids, scheduler_output
         )
         if self.use_async_scheduling:
             pp = get_pp_group()
@@ -7393,7 +7437,8 @@ class GPUModelRunner(
                 is_pooling_model=self.is_pooling_model,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                 reasoning_config=self.vllm_config.reasoning_config,
-                use_replayssm=self.cache_config.use_replayssm,
+                use_replayssm=self.cache_config.use_replayssm
+                or self.cache_config.use_replayssm_spec,
                 slot_mapping_modes=slot_mapping_modes,
             )
 
@@ -7688,11 +7733,6 @@ class GPUModelRunner(
             self.kv_caches,
             num_attn_module,
         )
-        for attn_group in self._attn_group_iterator():
-            attn_group.initialize_speculative_state_committer(
-                self.compilation_config.static_forward_context,
-                self.vllm_config,
-            )
         return kv_caches
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -101,60 +100,6 @@ class Mamba2AttentionBackend(AttentionBackend):
     @classmethod
     def is_ssm(cls) -> bool:
         return True
-
-    @classmethod
-    def make_speculative_state_committer(
-        cls,
-        layers: Sequence[Any],
-        vllm_config: VllmConfig,
-    ) -> Callable[[Any, torch.Tensor], None] | None:
-        if not vllm_config.cache_config.use_replayssm_spec:
-            return None
-
-        from vllm.model_executor.layers.mamba.mamba_utils import (
-            is_conv_state_dim_first,
-        )
-        from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
-            ReplaySSMSpecCommitContext,
-        )
-
-        ngroups = {layer.n_groups // layer.tp_size for layer in layers}
-        if len(ngroups) != 1:
-            raise ValueError(
-                "ReplaySSM layers in one attention group need matching groups"
-            )
-        conv_states = [layer.kv_cache[0] for layer in layers]
-        if not is_conv_state_dim_first():
-            conv_states = [state.transpose(-1, -2) for state in conv_states]
-        context = ReplaySSMSpecCommitContext.create(
-            conv_states,
-            [layer.kv_cache[1] for layer in layers],
-            [layer.kv_cache[2] for layer in layers],
-            [layer.kv_cache[3] for layer in layers],
-            [layer.kv_cache[4] for layer in layers],
-            [layer.A for layer in layers],
-            [layer.dt_bias for layer in layers],
-            ngroups=ngroups.pop(),
-            spec_query_len=1 + vllm_config.num_speculative_tokens,
-        )
-
-        def commit(
-            attn_metadata: Mamba2AttentionMetadata,
-            num_accepted_tokens: torch.Tensor,
-        ) -> None:
-            if attn_metadata.num_decodes == 0:
-                return
-            assert attn_metadata.state_indices_tensor_d is not None
-            assert attn_metadata.query_start_loc_d is not None
-            num_decodes = attn_metadata.num_decodes
-            context.commit(
-                num_accepted_tokens[:num_decodes],
-                attn_metadata.state_indices_tensor_d[:num_decodes, 0],
-                attn_metadata.query_start_loc_d[: num_decodes + 1],
-                force_commit=attn_metadata.spec_force_commit_d,
-            )
-
-        return commit
 
 
 @dataclass

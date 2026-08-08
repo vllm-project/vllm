@@ -504,23 +504,28 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
-        self.use_replayssm_spec = (
-            cache_config.use_replayssm_spec if cache_config is not None else False
-        )
         self.use_replayssm = (
             cache_config.use_replayssm if cache_config is not None else False
         )
+        self.use_replayssm_spec = (
+            cache_config.use_replayssm_spec if cache_config is not None else False
+        )
         self.replayssm_buffer_len = (
             cache_config.replayssm_buffer_len
-            if cache_config is not None and self.use_replayssm
+            if cache_config is not None
+            and (cache_config.use_replayssm or cache_config.use_replayssm_spec)
             else None
         )
         self.mamba_config = vllm_config.mamba_config
-        if self.use_replayssm and self.num_heads % self.tp_size != 0:
+        if (
+            self.use_replayssm or self.use_replayssm_spec
+        ) and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "ReplaySSM requires tensor-parallel heads to divide evenly"
             )
-        _n_state = 5 if self.use_replayssm else 2
+        # ReplaySSM uses the same head-major x/dt/B ring layout for standard and
+        # speculative decode.
+        _n_state = 5 if self.use_replayssm or self.use_replayssm_spec else 2
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
 
         self.num_spec = vllm_config.num_speculative_tokens
@@ -726,7 +731,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             ssm_state = self.kv_cache[1]
             x_cache = dt_cache = B_cache = None
-            if self.use_replayssm:
+            if self.use_replayssm or self.use_replayssm_spec:
                 x_cache, dt_cache, B_cache = self.kv_cache[2:]
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
@@ -1062,10 +1067,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_decode_tokens, -1, self.head_dim
             )
             if self.use_replayssm_spec:
+                assert self.replayssm_buffer_len is not None
                 assert x_cache is not None
                 assert dt_cache is not None
                 assert B_cache is not None
                 assert query_start_loc_d is not None
+                assert attn_metadata.spec_write_pos_d is not None
                 selective_state_update_replayssm_spec(
                     ssm_state,
                     x_cache,
@@ -1076,8 +1083,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     B_d,
                     C_d,
                     A_d,
+                    write_pos=attn_metadata.spec_write_pos_d,
+                    post_conv_state_pos=attn_metadata.spec_post_origin_d,
+                    is_flush=attn_metadata.spec_is_flush_d,
                     query_start_loc=query_start_loc_d,
                     state_batch_indices=state_indices_tensor_d_input[:, 0],
+                    max_cache_len=self.replayssm_buffer_len + self.spec_query_len,
                     spec_query_len=self.spec_query_len,
                     D=D_d,
                     z=None,
@@ -1144,7 +1155,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
-        if self.use_replayssm:
+        if self.use_replayssm or self.use_replayssm_spec:
             return MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype, self.model_config.dtype
             )
@@ -1162,11 +1173,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
         )
-        if self.use_replayssm:
-            ring_len = self.spec_query_len
-            if not self.use_replayssm_spec:
-                assert self.replayssm_buffer_len is not None
-                ring_len = self.replayssm_buffer_len
+        if self.use_replayssm or self.use_replayssm_spec:
+            assert self.replayssm_buffer_len is not None
+            ring_len = (
+                MambaStateShapeCalculator.replayssm_spec_ring_len(
+                    self.replayssm_buffer_len, self.num_spec
+                )
+                if self.use_replayssm_spec
+                else self.replayssm_buffer_len
+            )
             return MambaStateShapeCalculator.append_replayssm_ring(
                 base_shape,
                 self.n_groups,

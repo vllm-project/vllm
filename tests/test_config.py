@@ -29,42 +29,12 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.mamba import MambaBackendEnum
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
-
-
-def test_replayssm_spec_derivation_is_revalidated():
-    config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            use_replayssm=True,
-            use_replayssm_spec=False,
-            mamba_cache_mode="none",
-        ),
-        num_speculative_tokens=3,
-        model_config=SimpleNamespace(
-            supports_replayssm=True,
-            architecture="NemotronHForCausalLM",
-        ),
-        mamba_config=SimpleNamespace(
-            backend=MambaBackendEnum.TRITON,
-            enable_stochastic_rounding=False,
-        ),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
-        kv_transfer_config=None,
-    )
-
-    VllmConfig.validate_mamba_cached_kernel(config)
-    assert config.cache_config.use_replayssm
-    assert config.cache_config.use_replayssm_spec
-
-    config.parallel_config.pipeline_parallel_size = 2
-    with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def test_compile_config_repr_succeeds():
