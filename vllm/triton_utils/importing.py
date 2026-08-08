@@ -20,12 +20,23 @@ if HAS_TRITON:
     try:
         from triton.backends import backends
 
-        # It's generally expected that x.driver exists and has
-        # an is_active method.
-        # The `x.driver and` check adds a small layer of safety.
-        active_drivers = [
-            x.driver for x in backends.values() if x.driver and x.driver.is_active()
-        ]
+        # Avoid driver.is_active() for known backends: triton 3.8's nvidia
+        # probe calls cuInit(0), poisoning forked-child CUDA init (#46996).
+        _platform_active = {
+            "nvidia": current_platform.is_cuda,
+            "amd": current_platform.is_rocm,
+            "cpu": current_platform.is_cpu,
+        }
+        active_drivers = []
+        for name, backend in backends.items():
+            if not backend.driver:
+                continue
+            check = _platform_active.get(name)
+            if check is None:
+                if backend.driver.is_active():
+                    active_drivers.append(backend.driver)
+            elif check():
+                active_drivers.append(backend.driver)
 
         # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
         # or HIP_VISIBLE_DEVICES might be temporarily empty (e.g., Ray sets it to ""
