@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from vllm import LLM
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -148,6 +152,68 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}"
             )
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+def test_llm_engine_parallel_sampling_output_kind(
+    vllm_runner,
+    output_kind: RequestOutputKind,
+) -> None:
+    """Test LLMEngine parallel sampling with each output kind."""
+    n = 3
+    max_tokens = 8
+    request_id = f"parallel-sampling-{output_kind.name.lower()}"
+    sampling_params = SamplingParams(
+        temperature=0.7,
+        top_p=0.95,
+        seed=33,
+        n=n,
+        max_tokens=max_tokens,
+        ignore_eos=True,
+        output_kind=output_kind,
+    )
+
+    with _vllm_model(False, vllm_runner) as vllm_model:
+        llm: LLM = vllm_model.llm
+        engine = llm.llm_engine
+        engine.add_request(request_id, "Hello my name is", sampling_params)
+
+        outputs = []
+        while engine.has_unfinished_requests():
+            outputs.extend(engine.step())
+
+    assert outputs
+    assert outputs[-1].finished
+
+    token_counts = dict.fromkeys(range(n), 0)
+    finished_indices: set[int] = set()
+
+    for request_output in outputs:
+        assert request_output.request_id == request_id
+
+        if output_kind == RequestOutputKind.FINAL_ONLY:
+            # FINAL_ONLY buffers children until all samples have finished.
+            assert request_output.finished
+            assert len(request_output.outputs) == n
+        else:
+            assert 1 <= len(request_output.outputs) <= n
+
+        for completion in request_output.outputs:
+            assert completion.index in token_counts
+            num_tokens = len(completion.token_ids)
+
+            if output_kind == RequestOutputKind.DELTA:
+                token_counts[completion.index] += num_tokens
+            else:
+                # CUMULATIVE and FINAL_ONLY report the full generated prefix.
+                assert num_tokens >= token_counts[completion.index]
+                token_counts[completion.index] = num_tokens
+
+            if completion.finished():
+                finished_indices.add(completion.index)
+
+    assert token_counts == dict.fromkeys(range(n), max_tokens)
+    assert finished_indices == set(range(n))
 
 
 def test_engine_metrics(vllm_runner, example_prompts):
