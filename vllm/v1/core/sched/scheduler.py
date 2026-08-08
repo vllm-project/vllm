@@ -2058,6 +2058,7 @@ class Scheduler(SchedulerInterface):
                 perf_stats,
             )
         ) is not None:
+            stats.num_iteration_tokens = scheduler_output.total_num_scheduled_tokens
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request

@@ -752,7 +752,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # See: https://github.com/vllm-project/vllm/pull/18053
         histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
-            documentation="Histogram of number of tokens per engine_step.",
+            documentation=(
+                "Histogram of model input tokens scheduled per model execution."
+            ),
             buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
             labelnames=labelnames,
         )
@@ -1122,6 +1124,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
+            if scheduler_stats.num_iteration_tokens:
+                self.histogram_iteration_tokens[engine_idx].observe(
+                    scheduler_stats.num_iteration_tokens
+                )
+
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
             )
@@ -1201,10 +1208,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
-        )
-        self.histogram_iteration_tokens[engine_idx].observe(
-            iteration_stats.prompt_token_stats.computed
-            + iteration_stats.num_generation_tokens
         )
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:

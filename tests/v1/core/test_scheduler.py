@@ -195,8 +195,47 @@ def test_scheduler_stats_route_to_existing_output_client():
     engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
 
     assert 0 not in engine_core_outputs
-    assert engine_core_outputs[1].scheduler_stats is not None
+    stats = engine_core_outputs[1].scheduler_stats
+    assert stats is not None
+    assert stats.num_iteration_tokens == scheduler_output.total_num_scheduled_tokens
     assert len(engine_core_outputs[1].outputs) == 1
+
+
+def test_iteration_tokens_track_scheduled_tokens_for_chunked_prefill():
+    """Record every scheduler batch, including prefill-only iterations."""
+    scheduler = create_scheduler(
+        max_num_seqs=1, max_num_batched_tokens=4, max_model_len=16
+    )
+    request = create_requests(num_requests=1, num_tokens=10, max_tokens=2)[0]
+    scheduler.add_request(request)
+
+    iteration_tokens: list[int] = []
+    sampled_token_ids_per_step: list[list[list[int]]] = [
+        [[]],
+        [[]],
+        [[1000]],
+        [[1001]],
+    ]
+    for sampled_token_ids in sampled_token_ids_per_step:
+        scheduler_output = scheduler.schedule()
+        model_output = ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=sampled_token_ids,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+        engine_core_outputs = scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+        stats = next(iter(engine_core_outputs.values())).scheduler_stats
+        assert stats is not None
+        assert stats.num_iteration_tokens is not None
+        iteration_tokens.append(stats.num_iteration_tokens)
+
+    assert iteration_tokens == [4, 4, 2, 1]
 
 
 def test_schedule_multimodal_requests():

@@ -2,12 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.output_processor import OutputProcessorOutput
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
@@ -103,6 +108,30 @@ def _get_test_sampling_params(
         )
         for n in n_list
     ], n_list
+
+
+def test_stats_only_step_is_logged():
+    engine = object.__new__(LLMEngine)
+    engine.should_execute_dummy_batch = False
+    engine.log_stats = True
+    engine.engine_core = Mock()
+    engine.output_processor = Mock()
+    engine.logger_manager = Mock()
+    engine.renderer = Mock()
+    engine.do_log_stats_with_interval = Mock()
+
+    scheduler_stats = SchedulerStats(num_iteration_tokens=4)
+    engine.engine_core.get_output.return_value = EngineCoreOutputs(
+        scheduler_stats=scheduler_stats
+    )
+    engine.output_processor.process_outputs.return_value = OutputProcessorOutput([], [])
+
+    assert engine.step() == []
+
+    engine.logger_manager.record.assert_called_once()
+    call_kwargs = engine.logger_manager.record.call_args.kwargs
+    assert call_kwargs["scheduler_stats"] is scheduler_stats
+    assert isinstance(call_kwargs["iteration_stats"], IterationStats)
 
 
 def test_compatibility_with_skip_tokenizer_init(

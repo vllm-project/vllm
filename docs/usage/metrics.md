@@ -17,7 +17,7 @@ Then query the endpoint to get the latest metrics from the server:
     ```console
     $ curl http://0.0.0.0:8000/metrics
 
-    # HELP vllm:iteration_tokens_total Histogram of number of tokens per engine_step.
+    # HELP vllm:iteration_tokens_total Histogram of model input tokens scheduled per model execution.
     # TYPE vllm:iteration_tokens_total histogram
     vllm:iteration_tokens_total_sum{model_name="unsloth/Llama-3.2-1B-Instruct"} 0.0
     vllm:iteration_tokens_total_bucket{le="1.0",model_name="unsloth/Llama-3.2-1B-Instruct"} 3.0
