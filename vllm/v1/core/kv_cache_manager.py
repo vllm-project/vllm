@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
+    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -783,17 +784,23 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
+        An external hit can supply the final Mamba state even when the local
+        Mamba group ends before this endpoint. Other groups must cover it.
         Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
-        for group_blocks, manager in zip(
+        for group_blocks, manager, group in zip(
             blocks.blocks,
             self.coordinator.single_type_managers,
+            self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            assert num_blocks <= len(group_blocks)
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                num_blocks = min(num_blocks, len(group_blocks))
+            else:
+                assert num_blocks <= len(group_blocks)
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 

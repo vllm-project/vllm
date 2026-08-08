@@ -14,6 +14,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
 )
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -27,6 +28,10 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     _is_tp_sharded,
 )
 from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
+from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineLinearMethod,
+    Mxfp4OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
@@ -39,6 +44,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
+    def on_gfx942() -> bool:
+        return False
+
+
+DEVICE = current_platform.device_type
 
 
 @pytest.mark.skipif(
@@ -82,6 +100,12 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
         ),
+        (
+            "mxfp4",
+            None,
+            Mxfp4OnlineLinearMethod,
+            Mxfp4OnlineMoEMethod,
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -104,8 +128,14 @@ def test_online_quantization(
     Does not test performance, peak memory usage, etc.
     """
 
-    if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    # TODO: Relax this condition once there is a native MXFP4_MXFP4
+    # linear/moe backend supported on cuda.
+    if quant_scheme == "mxfp4" and not (on_gfx950() or on_gfx942()):
+        pytest.skip("mxfp4 online quantization is only tested on AMD gfx942, gfx950.")
+
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
+        rocm_aiter_ops.refresh_env_variables()
 
     if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
         pytest.skip("Skip test for online fp8_per_block on XPU platform.")
@@ -142,7 +172,10 @@ def test_online_quantization(
             if moe is not None:
                 assert isinstance(moe._quant_method, expected_moe_cls)
 
-            if current_platform.is_cuda() or current_platform.is_xpu():
+            if quant_scheme == "mxfp4":
+                # Packed e2m1 values, two per byte.
+                assert o_proj.weight.dtype == torch.uint8
+            elif current_platform.is_cuda() or current_platform.is_xpu():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn
             elif current_platform.is_rocm():
                 assert o_proj.weight.dtype == current_platform.fp8_dtype()
@@ -260,7 +293,7 @@ def test_online_linear_tp_weight_quant_matches_unsharded(
 ) -> None:
     """TP shards pack the same FP8 values and scales as the unsharded weight."""
     torch.manual_seed(0)
-    weight = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(32, 64, device=DEVICE, dtype=torch.bfloat16)
     weight[-1, -1] = 64.0
 
     full_weight, full_scale = _quantize_linear(weight, scheme, False)
@@ -306,17 +339,20 @@ def _quantize_moe(weight, scheme, moe_tp_size):
 def test_online_moe_tp_weight_quant_matches_ep(monkeypatch, scheme: str) -> None:
     """TP shards of w2 pack the same values and scales as full experts."""
     if scheme == "nvfp4":
-        if not (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability_family(100)
+        if (
+            not (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(100)
+            )
+            or current_platform.is_xpu()
         ):
             pytest.skip("NVFP4 weight quantization needs a Blackwell (SM100) GPU.")
     elif not is_quant_method_supported("fp8"):
         pytest.skip("FP8 is not supported on this GPU type.")
 
     torch.manual_seed(0)
-    weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
-    weight[:, -1, -1] = torch.tensor([32.0, 64.0], device="cuda")
+    weight = torch.randn(2, 32, 32, device=DEVICE, dtype=torch.bfloat16)
+    weight[:, -1, -1] = torch.tensor([32.0, 64.0], device=DEVICE)
 
     ep_out = _quantize_moe(weight, scheme, 1)
 
