@@ -6,6 +6,7 @@ from math import lcm
 from typing import NamedTuple
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -26,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -672,6 +675,24 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if group.use_eagle:
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
+
+        # Report the same-step ghost-block guard's actual state (PR #42359).
+        # The guard is `env AND use_eagle`, and use_eagle is only set for groups
+        # in `eagle_group_ids`, so whether it is live for a given model is not
+        # something to assume from the env var alone. Logging the per-manager
+        # count makes an A/B of the flag verifiable instead of assumed: with the
+        # env off this must report 0 active.
+        active = [
+            type(m).__name__
+            for m in self.single_type_managers
+            if m._ghost_block_guard_enabled
+        ]
+        logger.info(
+            "Same-step ghost-block guard: %d/%d managers active%s",
+            len(active),
+            len(self.single_type_managers),
+            f" ({', '.join(sorted(set(active)))})" if active else "",
+        )
 
         # The LCM of the block sizes of all attention types.
         # The cache hit length must be a multiple of the LCM of the block sizes
