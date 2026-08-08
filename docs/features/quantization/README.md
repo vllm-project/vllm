@@ -228,4 +228,42 @@ from vllm import LLM
 llm = LLM(model="your-model", quantization="my_quant")
 ```
 
+#### Registering from an entry point
+
+The import above registers the method only where it runs, which leaves out `vllm serve` and any other path where you do not own the code that builds the engine. Declaring a general plugin instead makes vLLM load it in every process it creates:
+
+```toml
+# pyproject.toml
+[project.entry-points."vllm.general_plugins"]
+register_my_quant = "my_quant_plugin:register"
+```
+
+```python
+# my_quant_plugin/__init__.py
+def register():
+    from my_quant_plugin.config import MyQuantConfig  # noqa: F401
+```
+
+`@register_quantization_config` runs at import time, so `register()` only has to import the module that defines the config. Keep it re-entrant: it can be called more than once in a process.
+
+#### Selecting the method from the checkpoint
+
+When the model's `config.json` contains a `quantization_config` whose `quant_method` matches your registered name, vLLM resolves the method from it and `quantization` does not have to be passed:
+
+```json
+{
+  "quantization_config": {
+    "quant_method": "my_quant"
+  }
+}
+```
+
+```bash
+vllm serve /path/to/my-quantized-model
+```
+
+The whole `quantization_config` dict is handed to your `from_config` classmethod, so per-checkpoint settings such as bit widths or group sizes belong there. Passing `--quantization my_quant` as well is accepted, but a value that disagrees with the checkpoint is rejected rather than treated as an override.
+
+For a worked implementation of the entry point and the config together, see [DynQuant](https://github.com/kambojvikram/dynquant), which serves mixed-bit-width checkpoints this way.
+
 For more information on the plugin system, see the [Plugin System documentation](../../design/plugin_system.md).
