@@ -5,7 +5,7 @@
 import copy
 import json as json_mod
 import math
-from dataclasses import field
+from dataclasses import field, replace
 from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Annotated, Any
@@ -109,6 +109,34 @@ class StructuredOutputsParams:
                 "You must use one kind of structured outputs constraint "
                 f"but none are specified: {self.__dict__}"
             )
+
+    def anonymized(self) -> "StructuredOutputsParams":
+        """Return a copy with user-supplied content redacted.
+
+        The schema/regex/grammar/structural_tag carry request content and must
+        not be logged (e.g. in ``dump_engine_exception``). Content is replaced
+        with a length marker while the constraint kind is preserved, so exactly
+        one constraint stays set and ``__post_init__`` still validates.
+        """
+
+        def _redact(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return f"<redacted len={len(value)}>"
+            if isinstance(value, (dict, list)):
+                return f"<redacted n={len(value)}>"
+            return "<redacted>"
+
+        return replace(
+            self,
+            json=_redact(self.json),
+            regex=_redact(self.regex),
+            choice=_redact(self.choice),
+            grammar=_redact(self.grammar),
+            whitespace_pattern=_redact(self.whitespace_pattern),
+            structural_tag=_redact(self.structural_tag),
+        )
 
     def all_constraints_none(self) -> bool:
         """
