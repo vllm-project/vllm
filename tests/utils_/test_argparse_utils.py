@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 
+import argparse
 import json
 import os
 
@@ -377,6 +378,85 @@ def test_load_config_file(tmp_path):
     # Assert that the processed arguments match the expected output
     assert processed_args == expected_args
     os.remove(str(config_file_path))
+
+
+@pytest.mark.parametrize(
+    ("action", "default", "config_value"),
+    [
+        (argparse.BooleanOptionalAction, True, False),
+        (argparse.BooleanOptionalAction, False, True),
+        ("store_true", False, True),
+        ("store_true", False, False),
+        ("store_false", True, True),
+        ("store_false", True, False),
+    ],
+)
+@pytest.mark.parametrize("use_subparser", [False, True])
+def test_load_config_file_boolean_values(
+    tmp_path, action, default, config_value, use_subparser
+):
+    config_file_path = tmp_path / "config.yaml"
+    config_file_path.write_text(yaml.safe_dump({"enable_feature": config_value}))
+
+    parser = FlexibleArgumentParser()
+    cli_args: list[str] = []
+    target_parser = parser
+    if use_subparser:
+        target_parser = parser.add_subparsers().add_parser("serve")
+        target_parser.add_argument("model")
+        cli_args.extend(("serve", "model"))
+
+    target_parser.add_argument("--config")
+    target_parser.add_argument("--enable-feature", action=action, default=default)
+
+    args = parser.parse_args([*cli_args, "--config", str(config_file_path)])
+
+    assert args.enable_feature is config_value
+
+
+def test_load_config_file_selects_registered_negative_option(tmp_path):
+    config_file_path = tmp_path / "config.yaml"
+    config_file_path.write_text(yaml.safe_dump({"enable_feature": False}))
+
+    parser = FlexibleArgumentParser()
+    action = parser.add_argument(
+        "--enable-feature", action=argparse.BooleanOptionalAction
+    )
+    negative_option = next(
+        option for option in action.option_strings if option.startswith("--no-")
+    )
+
+    assert parser.load_config_file(str(config_file_path)) == [negative_option]
+
+
+@pytest.mark.parametrize("use_subparser", [False, True])
+def test_cli_overrides_boolean_config_value(tmp_path, use_subparser):
+    config_file_path = tmp_path / "config.yaml"
+    config_file_path.write_text(yaml.safe_dump({"enable_feature": False}))
+
+    parser = FlexibleArgumentParser()
+    cli_args: list[str] = []
+    target_parser = parser
+    if use_subparser:
+        target_parser = parser.add_subparsers().add_parser("serve")
+        target_parser.add_argument("model")
+        cli_args.extend(("serve", "model"))
+
+    target_parser.add_argument("--config")
+    target_parser.add_argument(
+        "--enable-feature", action=argparse.BooleanOptionalAction, default=True
+    )
+
+    args = parser.parse_args(
+        [
+            *cli_args,
+            "--config",
+            str(config_file_path),
+            "--enable-feature",
+        ]
+    )
+
+    assert args.enable_feature is True
 
 
 def test_load_config_file_nested(tmp_path):
