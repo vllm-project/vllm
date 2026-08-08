@@ -261,14 +261,25 @@ class TestExtractTypesFromSchema:
         result = set(extract_types_from_schema(schema))
         assert result == {"array", "object"}
 
-    def test_none_schema_defaults_to_string(self):
-        assert extract_types_from_schema(None) == ["string"]
+    def test_none_schema_allows_any_type(self):
+        # No schema info -> any type allowed per JSON Schema spec
+        any_type = {"string", "number", "integer", "boolean", "null", "object", "array"}
+        assert set(extract_types_from_schema(None)) == any_type
 
-    def test_non_dict_schema_defaults_to_string(self):
-        assert extract_types_from_schema("string") == ["string"]
+    def test_non_dict_schema_allows_any_type(self):
+        any_type = {"string", "number", "integer", "boolean", "null", "object", "array"}
+        assert set(extract_types_from_schema("string")) == any_type
 
-    def test_empty_dict_defaults_to_string(self):
-        assert extract_types_from_schema({}) == ["string"]
+    def test_empty_dict_allows_any_type(self):
+        # {} has no type constraint -> any type allowed (fixes #47557)
+        any_type = {"string", "number", "integer", "boolean", "null", "object", "array"}
+        assert set(extract_types_from_schema({})) == any_type
+
+    def test_schema_without_type_allows_any_type(self):
+        # Property schema with description but no type -> any type allowed
+        any_type = {"string", "number", "integer", "boolean", "null", "object", "array"}
+        schema = {"description": "Enter the requested value here."}
+        assert set(extract_types_from_schema(schema)) == any_type
 
     def test_nested_anyof(self):
         schema = {
