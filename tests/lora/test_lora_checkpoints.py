@@ -7,6 +7,7 @@ from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import parse_fine_tuned_lora_name
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+from vllm.model_executor.models.gemma4_mm import Gemma4ForConditionalGeneration
 from vllm.model_executor.models.utils import WeightsMapper
 
 lora_lst = ["baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"]
@@ -154,3 +155,65 @@ def test_gemma4_moe_lora_weights_mapping():
         "model.layers.9.moe.gate_up_proj",
         False,
     )
+
+
+@pytest.mark.parametrize(
+    "model_cls,prefix",
+    [
+        (Gemma4ForCausalLM, "model"),
+        (Gemma4ForConditionalGeneration, "language_model.model"),
+    ],
+)
+def test_gemma4_stacked_expert_lora_weights_mapping(model_cls, prefix):
+    """Stacked (PEFT ``target_parameters``) expert LoRA tensors must be
+    rewritten onto the ``.moe.experts`` parent module.
+
+    These adapters store the expert deltas as two tensor pairs per layer that
+    name the ``experts`` module itself rather than a child module:
+    ``...experts.base_layer.lora_{A,B}`` (gate_up_proj) and
+    ``...experts.lora_{A,B}`` (down_proj). ``_convert_3d_to_2d_moe_lora``
+    looks these up under the registered module name, which carries the
+    ``.moe.`` segment, so the mapper has to add it here as well.
+    """
+    mapper = model_cls.hf_to_vllm_mapper
+    base = "base_model.model.model.language_model.layers.9.experts"
+    assert parse_fine_tuned_lora_name(f"{base}.base_layer.lora_A.weight", mapper) == (
+        f"{prefix}.layers.9.moe.experts.base_layer",
+        True,
+    )
+    assert parse_fine_tuned_lora_name(f"{base}.base_layer.lora_B.weight", mapper) == (
+        f"{prefix}.layers.9.moe.experts.base_layer",
+        False,
+    )
+    assert parse_fine_tuned_lora_name(f"{base}.lora_A.weight", mapper) == (
+        f"{prefix}.layers.9.moe.experts",
+        True,
+    )
+    assert parse_fine_tuned_lora_name(f"{base}.lora_B.weight", mapper) == (
+        f"{prefix}.layers.9.moe.experts",
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        # ModelOpt `quantized_layers` entries name the parent module exactly.
+        ("model.language_model.layers.9.experts", "model.layers.9.moe.experts"),
+        # Already-normalized names are not rewritten twice.
+        ("model.layers.9.moe.experts", "model.layers.9.moe.experts"),
+        # Non-LoRA children of `experts` keep their names.
+        (
+            "model.language_model.layers.9.experts.gate_up_proj",
+            "model.layers.9.experts.gate_up_proj",
+        ),
+        (
+            "model.language_model.layers.9.experts.down_proj_packed",
+            "model.layers.9.experts.down_proj_packed",
+        ),
+    ],
+)
+def test_gemma4_expert_parent_mapper_non_lora_names(name, expected):
+    """The expert-parent rewrite stays limited to the parent module itself and
+    to stacked expert LoRA tensors."""
+    assert Gemma4ForCausalLM.hf_to_vllm_mapper._map_name(name) == expected
