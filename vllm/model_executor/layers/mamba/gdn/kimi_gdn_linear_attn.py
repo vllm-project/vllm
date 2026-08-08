@@ -314,16 +314,6 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def rearrange_mixed_qkv(
-        self, mixed_qkv: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        seq_len = mixed_qkv.shape[0]
-        qkv = mixed_qkv.view(seq_len, 3, self.local_num_heads, self.head_dim)
-        # Materialize all three row-strided inputs with one token-major to
-        # QKV-major permutation. Each unbound tensor is then contiguous.
-        qkv = qkv.permute(1, 0, 2, 3).contiguous().unsqueeze(1)
-        return qkv.unbind(0)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -365,14 +355,30 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-
-        self._forward(
-            mixed_qkv=mixed_qkv,
-            g1=g1,
-            g2=g2,
-            beta=beta,
-            core_attn_out=core_attn_out,
-        )
+        if current_platform.is_xpu() and hasattr(torch.ops._xpu_C, "kda_attention"):
+            # The XPU kernel fuses the causal conv1d, so it consumes the fused
+            # projection directly and applies the output norm afterwards. The
+            # three slices stay row-strided views into `mixed_qkv`, which avoids
+            # materializing a QKV-major copy of the whole projection.
+            q, k, v = mixed_qkv.split(self.local_projection_size, dim=-1)
+            torch.ops.vllm.kda_attention_core_xpu(
+                core_attn_out,
+                q,
+                k,
+                v,
+                g1,
+                beta,
+                self.prefix,
+            )
+            core_attn_out = self.o_norm(core_attn_out, g2)
+        else:
+            self._forward(
+                mixed_qkv=mixed_qkv,
+                g1=g1,
+                g2=g2,
+                beta=beta,
+                core_attn_out=core_attn_out,
+            )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
