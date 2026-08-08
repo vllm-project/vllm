@@ -292,6 +292,7 @@ fn handshake_test_config(
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
+            session_path: None,
         },
         coordinator_mode,
         model_name: model_name.to_string(),
@@ -1405,6 +1406,161 @@ async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reattach_drops_stale_output_and_serves_new_request() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let session_dir = tempfile::tempdir().unwrap();
+    let session_path = session_dir.path().join("engine-session.json");
+    let handshake_address = ipc.handshake_endpoint();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+    let engine_id = EngineId::from_engine_index(0).into_frame().to_vec();
+
+    let (old_request_tx, old_request_rx) = oneshot::channel();
+    let (reconnect_tx, reconnect_rx) = oneshot::channel();
+    let (new_request_completed_tx, new_request_completed_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_id = engine_id.clone();
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            let (_, mut initial_dealer, initial_push) =
+                setup_mock_engine_with_init(engine_handshake, engine_id.clone()).await;
+
+            let old_add = recv_engine_message(&mut initial_dealer).await;
+            assert_eq!(old_add[0].as_ref(), &[0x00]);
+            let old_request: EngineCoreRequest = rmp_serde::from_slice(&old_add[1]).unwrap();
+            assert_eq!(old_request.request_id, "req-before-reattach");
+            old_request_tx.send(()).unwrap();
+
+            reconnect_rx.await.unwrap();
+            drop((initial_dealer, initial_push));
+
+            // The pure-Rust mock sockets do not reconnect automatically after
+            // their bind peer disappears. Reopen only the data sockets to
+            // model libzmq's reconnect behavior in Python EngineCore.
+            let (mut dealer, mut push) =
+                setup_bootstrapped_mock_engine(input_address, output_address, engine_id).await;
+
+            send_outputs(
+                &mut push,
+                RequestBatchOutputs {
+                    outputs: vec![request_output(&old_request.request_id, vec![41], None)],
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+
+            let add = recv_engine_message(&mut dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+            let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+            assert_eq!(request.client_index, 7);
+            assert_eq!(request.request_id, "req-after-reattach");
+            send_outputs(
+                &mut push,
+                RequestBatchOutputs {
+                    outputs: vec![request_output(
+                        &request.request_id,
+                        vec![42],
+                        Some(EngineCoreFinishReason::Length),
+                    )],
+                    finished_requests: Some(BTreeSet::from([request.request_id])),
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+            new_request_completed_rx.await.unwrap();
+
+            // Keep the original request live until the replacement frontend
+            // has completed its own request, then finish it. Both of its
+            // outputs are stale from the replacement's point of view.
+            send_outputs(
+                &mut push,
+                RequestBatchOutputs {
+                    outputs: vec![request_output(
+                        &old_request.request_id,
+                        vec![43],
+                        Some(EngineCoreFinishReason::Length),
+                    )],
+                    finished_requests: Some(BTreeSet::from([old_request.request_id])),
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+            shutdown_rx.await.unwrap();
+        }
+    });
+
+    let mut initial_config = handshake_test_config(
+        handshake_address,
+        1,
+        "test-model",
+        Duration::from_secs(2),
+        7,
+        None,
+    );
+    let TransportMode::HandshakeOwner {
+        session_path: path, ..
+    } = &mut initial_config.transport_mode
+    else {
+        unreachable!("handshake_test_config returns handshake-owned transport")
+    };
+    *path = Some(session_path.clone());
+
+    let initial_client = connect_client_with_ipc(initial_config, &ipc).await;
+    assert_eq!(initial_client.input_address(), input_address);
+    assert_eq!(initial_client.output_address(), output_address);
+    assert!(session_path.exists());
+    let old_stream = initial_client
+        .call(sample_request_with_id("req-before-reattach"))
+        .await
+        .unwrap();
+    old_request_rx.await.unwrap();
+    initial_client.shutdown().await.unwrap();
+    drop(old_stream);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let reattach_task = tokio::spawn(EngineCoreClient::connect(EngineCoreClientConfig {
+        transport_mode: TransportMode::Reattach {
+            path: session_path,
+            ready_timeout: Duration::from_secs(2),
+        },
+        coordinator_mode: None,
+        model_name: "test-model".to_string(),
+        client_index: 7,
+    }));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    reconnect_tx.send(()).unwrap();
+    let reattached_client = reattach_task.await.unwrap().unwrap();
+
+    assert_eq!(reattached_client.input_address(), input_address);
+    assert_eq!(reattached_client.output_address(), output_address);
+    assert_eq!(
+        reattached_client.engine_identities(),
+        vec![engine_id.as_slice()]
+    );
+    assert!(reattached_client.is_healthy());
+
+    let mut stream = reattached_client
+        .call(sample_request_with_id("req-after-reattach"))
+        .await
+        .unwrap();
+    let output = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
+    assert_eq!(output.new_token_ids, vec![42]);
+    assert_eq!(output.finish_reason, Some(EngineCoreFinishReason::Length));
+    new_request_completed_tx.send(()).unwrap();
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    reattached_client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

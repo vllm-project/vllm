@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,16 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("transport error")]
     Transport(#[from] zeromq::ZmqError),
+    #[error("engine session `{path}` failed: {message}")]
+    EngineSession { path: PathBuf, message: String },
+    #[error("timed out after {timeout:?} waiting to reattach engine session `{path}`: {message}")]
+    ReattachTimeout {
+        path: PathBuf,
+        timeout: Duration,
+        message: String,
+    },
+    #[error("ZMQ {socket} monitor closed while waiting for engine reattach")]
+    ReattachMonitorClosed { socket: &'static str },
     #[error("ZMQ runtime task failed")]
     ZmqRuntimeTask(#[from] tokio::task::JoinError),
     #[error("engine core reported fatal failure")]

@@ -512,8 +512,43 @@ impl SharedRuntimeArgs {
         engine_count: usize,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
+        session_path: Option<PathBuf>,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
+        self.into_standalone_config(
+            listener_mode,
+            TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host,
+                engine_count,
+                ready_timeout,
+                local_input_address,
+                local_output_address,
+                session_path,
+            },
+        )
+    }
+
+    fn into_reattach_config(
+        self,
+        listener_mode: HttpListenerMode,
+        session_path: PathBuf,
+    ) -> Config {
+        let ready_timeout = self.ready_timeout();
+        self.into_standalone_config(
+            listener_mode,
+            TransportMode::Reattach {
+                path: session_path,
+                ready_timeout,
+            },
+        )
+    }
+
+    fn into_standalone_config(
+        self,
+        listener_mode: HttpListenerMode,
+        transport_mode: TransportMode,
+    ) -> Config {
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
@@ -522,14 +557,7 @@ impl SharedRuntimeArgs {
         let profiler = self.profiler();
 
         Config {
-            transport_mode: TransportMode::HandshakeOwner {
-                handshake_address,
-                advertised_host,
-                engine_count,
-                ready_timeout,
-                local_input_address,
-                local_output_address,
-            },
+            transport_mode,
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
             served_model_name: self.served_model_name,
@@ -701,6 +729,12 @@ pub struct ServeArgs {
     #[arg(long)]
     pub uds: Option<String>,
 
+    /// Development session used to reconnect this frontend to a running EngineCore.
+    ///
+    /// This implies frontend-only external-engine mode.
+    #[arg(long)]
+    pub engine_session: Option<PathBuf>,
+
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
     #[arg(long, hide = true, env = "VLLM_RS_DEBUG_CLI")]
@@ -716,12 +750,14 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Build the OpenAI-server runtime config used after the managed Python
-    /// engine starts.
+    /// Return whether the Rust frontend should connect to an externally owned
+    /// EngineCore instead of spawning a managed local engine.
+    pub fn uses_external_engine(&self) -> bool {
+        self.engine_session.is_some() || self.managed_engine.data_parallel_size_local == Some(0)
+    }
+
+    /// Build the OpenAI-server runtime config for the selected engine transport.
     pub fn to_frontend_config(&self, handshake_address: String) -> Config {
-        // Prefer IPC sockets for local engine input/output.
-        let (local_input_address, local_output_address) =
-            self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -730,6 +766,16 @@ impl ServeArgs {
             },
         };
 
+        if let Some(session_path) = self.engine_session.as_ref()
+            && session_path.exists()
+        {
+            return self.runtime.clone().into_reattach_config(listener_mode, session_path.clone());
+        }
+
+        // Prefer IPC sockets for local engine input/output.
+        let (local_input_address, local_output_address) =
+            self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
+
         self.runtime.clone().into_managed_config(
             listener_mode,
             handshake_address,
@@ -737,6 +783,7 @@ impl ServeArgs {
             self.managed_engine.data_parallel_size,
             local_input_address,
             local_output_address,
+            self.engine_session.clone(),
         )
     }
 

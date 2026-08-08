@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
+use crate::session;
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
@@ -49,6 +51,8 @@ pub enum TransportMode {
         local_input_address: Option<String>,
         /// Optional explicit bind address for the output PULL socket.
         local_output_address: Option<String>,
+        /// Optional development session file written after startup completes.
+        session_path: Option<PathBuf>,
     },
 
     /// The Python supervisor has already chosen the frontend transport
@@ -67,6 +71,14 @@ pub enum TransportMode {
         /// Total number of engines expected to register on this transport.
         engine_count: usize,
         /// Maximum time to wait for all expected engines to register.
+        ready_timeout: Duration,
+    },
+
+    /// Restore a previously handshaken frontend transport from a development session file.
+    Reattach {
+        /// Path written by a handshake-owned frontend from the same running engine.
+        path: PathBuf,
+        /// Maximum time to wait for both engine data sockets to reconnect.
         ready_timeout: Duration,
     },
 }
@@ -108,6 +120,7 @@ impl EngineCoreClientConfig {
                 ready_timeout: Duration::from_secs(30),
                 local_input_address: None,
                 local_output_address: None,
+                session_path: None,
             },
             coordinator_mode: None,
             model_name: String::new(),
@@ -232,6 +245,7 @@ impl EngineCoreClient {
                 ready_timeout,
                 local_input_address,
                 local_output_address,
+                session_path,
             } => {
                 let enable_inproc_coordinator = match config.coordinator_mode {
                     None => false,
@@ -241,7 +255,7 @@ impl EngineCoreClient {
                     }
                 };
 
-                transport::connect_handshake(
+                let connected = transport::connect_handshake(
                     handshake_address,
                     *engine_count,
                     advertised_host,
@@ -250,7 +264,12 @@ impl EngineCoreClient {
                     enable_inproc_coordinator,
                     *ready_timeout,
                 )
-                .await?
+                .await?;
+                if let Some(path) = session_path {
+                    session::write(path, &connected)?;
+                    info!(path = %path.display(), "wrote engine reattach session");
+                }
+                connected
             }
 
             TransportMode::Bootstrapped {
@@ -269,6 +288,26 @@ impl EngineCoreClient {
                     output_address,
                     *engine_start_index,
                     *engine_count,
+                    *ready_timeout,
+                )
+                .await?
+            }
+            TransportMode::Reattach {
+                path,
+                ready_timeout,
+            } => {
+                if config.coordinator_mode.is_some() {
+                    return Err(Error::EngineSession {
+                        path: path.clone(),
+                        message: "reattach sessions do not support a coordinator".to_string(),
+                    });
+                }
+                let (input_address, output_address, engines) = session::read(path)?;
+                transport::connect_reattach(
+                    path,
+                    &input_address,
+                    &output_address,
+                    engines,
                     *ready_timeout,
                 )
                 .await?

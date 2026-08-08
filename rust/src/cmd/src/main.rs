@@ -121,11 +121,22 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
+            if args.engine_session.is_some()
+                && args
+                    .managed_engine
+                    .data_parallel_size_local
+                    .is_some_and(|local_size| local_size != 0)
+            {
+                bail!("--engine-session conflicts with non-zero --data-parallel-size-local");
+            }
+            if args.engine_session.is_some() && args.managed_engine.data_parallel_size != 1 {
+                bail!("--engine-session currently requires --data-parallel-size 1");
+            }
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
-            if args.managed_engine.data_parallel_size_local == Some(0) {
+            if args.uses_external_engine() {
                 if args.headless {
-                    bail!("cannot combine `--headless` with `--data-parallel-size-local 0`");
+                    bail!("cannot combine `--headless` with an external-engine frontend");
                 }
 
                 let handshake_address = args.managed_engine.handshake_address(handshake_port);

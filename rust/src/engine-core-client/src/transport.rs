@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
+use futures::StreamExt;
 use thiserror_ext::AsReport;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
-use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage};
+use zeromq::{PullSocket, RouterSendHalf, RouterSocket, SocketEvent, ZmqError, ZmqMessage};
 
 use crate::coordinator::CoordinatorBootstrap;
 use crate::error::{Error, Result, bail_unexpected_handshake_message};
@@ -154,17 +155,14 @@ pub async fn connect_handshake(
 
     info!(
         engine_count,
-        handshake_address, "waiting for engines to connect"
+        handshake_address,
+        ?ready_timeout,
+        "waiting for engines to connect"
     );
 
     // 1. Bind shared local input/output sockets first so every engine receives the same data-plane
     //    addresses during handshake.
-    debug!(
-        local_host,
-        ?ready_timeout,
-        engine_count,
-        "binding shared transport sockets"
-    );
+    debug!(local_host, engine_count, "binding shared transport sockets");
     let (input_address, mut input_socket, output_address, output_socket) =
         bind_local_sockets(local_host, local_input_address, local_output_address).await?;
     info!(%input_address, %output_address, "bound local transport sockets");
@@ -365,6 +363,109 @@ pub async fn connect_bootstrapped(
         input_send,
         output_socket,
     })
+}
+
+/// Bind a saved frontend transport and wait for both engine data sockets to reconnect.
+pub async fn connect_reattach(
+    session_path: &std::path::Path,
+    input_address: &str,
+    output_address: &str,
+    engines: Vec<ConnectedEngine>,
+    ready_timeout: Duration,
+) -> Result<ConnectedTransport> {
+    let mut input_socket = RouterSocket::new();
+    let mut output_socket = PullSocket::new();
+
+    // Subscribe before binding either endpoint so a fast reconnect cannot race
+    // with monitor setup.
+    let mut input_events = input_socket.monitor();
+    let mut output_events = output_socket.monitor();
+
+    let input_address = input_socket.bind(input_address).await?.to_string();
+    let output_address = output_socket.bind(output_address).await?.to_string();
+
+    let expected_engine = engines.first().ok_or_else(|| Error::EngineSession {
+        path: session_path.to_path_buf(),
+        message: "reattach session does not contain an engine".to_string(),
+    })?;
+
+    info!(
+        path = %session_path.display(),
+        %input_address,
+        %output_address,
+        ?ready_timeout,
+        "waiting for engine transport to reattach"
+    );
+
+    timeout(ready_timeout, async {
+        tokio::try_join!(
+            wait_for_accepted_peer(
+                &mut input_events,
+                "input ROUTER",
+                Some(&expected_engine.engine_id),
+            ),
+            wait_for_accepted_peer(&mut output_events, "output PULL", None),
+        )
+    })
+    .await
+    .map_err(|_| Error::ReattachTimeout {
+        path: session_path.to_path_buf(),
+        timeout: ready_timeout,
+        message: "ZMQ monitors did not observe both engine data connections".to_string(),
+    })??;
+
+    info!(
+        %input_address,
+        %output_address,
+        "reattached engine transport"
+    );
+    // zeromq has no monitor-unregister API. Dropping the receivers closes its
+    // bounded channels; the sockets retain only a closed sender whose later
+    // `try_send` calls fail immediately and are ignored.
+    drop((input_events, output_events));
+    let (input_send, _) = input_socket.split();
+
+    Ok(ConnectedTransport {
+        input_address,
+        output_address,
+        engines,
+        coordinator: None,
+        input_send,
+        output_socket,
+    })
+}
+
+/// Wait until a bound socket accepts a fully handshaken peer.
+async fn wait_for_accepted_peer(
+    events: &mut futures::channel::mpsc::Receiver<SocketEvent>,
+    socket: &'static str,
+    expected_engine: Option<&EngineId>,
+) -> Result<()> {
+    while let Some(event) = events.next().await {
+        match event {
+            SocketEvent::Accepted(_, peer_id) => {
+                if let Some(expected_engine) = expected_engine
+                    && peer_id.as_ref() != &expected_engine[..]
+                {
+                    return Err(Error::UnexpectedHandshakeIdentity {
+                        expected: expected_engine.to_vec(),
+                        actual: peer_id.as_ref().to_vec(),
+                    });
+                }
+                return Ok(());
+            }
+            SocketEvent::AcceptFailed(error) => {
+                debug!(
+                    %socket,
+                    error = %error.as_report(),
+                    "ignored rejected peer while waiting for engine reattach"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Err(Error::ReattachMonitorClosed { socket })
 }
 
 /// Bind new input and output sockets.
@@ -585,7 +686,10 @@ pub async fn run_output_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::bind_local_sockets;
+    use super::*;
+    use crate::mock_engine::default_ready_response;
+    use crate::test_utils::IpcNamespace;
+    use zeromq::{DealerSocket, PushSocket, SocketOptions};
 
     #[tokio::test]
     async fn bind_local_sockets_resolves_zero_port_bindings() {
@@ -595,5 +699,95 @@ mod tests {
         assert!(input_address.starts_with("tcp://127.0.0.1:"));
         assert!(output_address.starts_with("tcp://127.0.0.1:"));
         assert_ne!(input_address, output_address);
+    }
+
+    #[tokio::test]
+    async fn reattach_returns_after_both_data_sockets_are_connected() {
+        let ipc = IpcNamespace::new().unwrap();
+        let input_address = ipc.input_endpoint();
+        let output_address = ipc.output_endpoint();
+        let engine_id = EngineId::from_engine_index(0);
+        let session_path = std::path::PathBuf::from("test-engine-session.json");
+
+        let connect_input = input_address.clone();
+        let connect_output = output_address.clone();
+        let connect_engine = engine_id.clone();
+        let mut reattach_task = tokio::spawn(async move {
+            connect_reattach(
+                &session_path,
+                &connect_input,
+                &connect_output,
+                vec![ConnectedEngine {
+                    engine_id: connect_engine,
+                    ready_response: default_ready_response(),
+                }],
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        });
+
+        tokio::task::yield_now().await;
+        for endpoint in [&input_address, &output_address] {
+            let socket_path = endpoint.strip_prefix("ipc://").unwrap();
+            timeout(Duration::from_secs(1), async {
+                loop {
+                    match tokio::net::UnixStream::connect(socket_path).await {
+                        Ok(stream) => {
+                            drop(stream);
+                            break;
+                        }
+                        Err(_) => tokio::task::yield_now().await,
+                    }
+                }
+            })
+            .await
+            .expect("reattach endpoint was not bound");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !reattach_task.is_finished(),
+            "a rejected non-ZMTP peer must not fail reattach"
+        );
+
+        let mut options = SocketOptions::default();
+        options.peer_identity(PeerIdentity::try_from(engine_id.clone()).unwrap());
+        let mut dealer = DealerSocket::with_options(options);
+        dealer.connect(&input_address).await.unwrap();
+        assert!(
+            !reattach_task.is_finished(),
+            "reattach must also wait for the output PUSH connection"
+        );
+
+        let mut push = PushSocket::new();
+        push.connect(&output_address).await.unwrap();
+        let mut connected = timeout(Duration::from_secs(2), &mut reattach_task)
+            .await
+            .expect("reattach timed out")
+            .unwrap();
+
+        send_message(
+            &mut connected.input_send,
+            &engine_id,
+            Bytes::from_static(b"request-type"),
+            b"request-payload".to_vec(),
+        )
+        .await
+        .unwrap();
+        let input = timeout(Duration::from_secs(1), dealer.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .into_vec();
+        assert_eq!(input[0].as_ref(), b"request-type");
+        assert_eq!(input[1].as_ref(), b"request-payload");
+
+        push.send(ZmqMessage::from(b"output-payload".to_vec())).await.unwrap();
+        let output = timeout(Duration::from_secs(1), connected.output_socket.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .into_vec();
+        assert_eq!(output[0].as_ref(), b"output-payload");
     }
 }
