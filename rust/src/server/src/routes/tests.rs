@@ -728,7 +728,7 @@ async fn test_dev_mode_app_with_ready(
 ) -> (axum::Router, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-world-size".to_vec();
+    let engine_id = EngineId::from_engine_index(ready_response.data_parallel_rank);
 
     let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
