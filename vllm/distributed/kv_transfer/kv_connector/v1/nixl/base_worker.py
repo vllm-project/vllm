@@ -1170,9 +1170,22 @@ class NixlBaseConnectorWorker:
             if not is_mla_region:
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
-                assert tensor_size_bytes == curr_tensor_size_bytes, (
-                    "All non-MLA kv cache tensors must have the same size"
-                )
+                elif tensor_size_bytes != curr_tensor_size_bytes:
+                    # Hybrid models can have legitimately heterogeneous
+                    # non-MLA regions (e.g. MiniMax M3: lightning-attention
+                    # KV, full-attention KV and the sparse-indexer cache).
+                    # Registration is already per-region (caches_data uses
+                    # curr_tensor_size_bytes, block_len_per_layer is
+                    # per-layer) and the NIXL compatibility hash still
+                    # guards genuine P/D mismatches.
+                    logger.warning_once(
+                        "Heterogeneous non-MLA kv cache tensor sizes: "
+                        "%s vs %s (layer %s) - proceeding with per-region "
+                        "registration.",
+                        tensor_size_bytes,
+                        curr_tensor_size_bytes,
+                        layer_name,
+                    )
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
