@@ -2,17 +2,21 @@
 # Fetch vLLM Buildkite CI logs (public; no login required).
 #
 # Usage:
-#   ci-fetch-log.sh [--soft|--all] --pr [<PR>]  failed jobs in the PR's latest
+#   ci-fetch-log.sh [--soft|--all] [--pipeline <slug>] --pr [<PR>]
+#                                               failed jobs in the PR's latest
 #                                               build (current branch if omitted)
-#   ci-fetch-log.sh [--soft|--all] <build_url>  failed jobs in that build
+#   ci-fetch-log.sh [--soft|--all] <build_url>  failed jobs in that build;
+#                                               pipeline is inferred from URL
 #   ci-fetch-log.sh <job_url> [output]          one job; both #<job_uuid> and
 #                                               ?sid=<id> URL forms work
-#   ci-fetch-log.sh <build> <job_uuid> [output]
+#   ci-fetch-log.sh [--pipeline <slug>] <build> <job_uuid> [output]
 #
 # --soft also fetches soft-failed jobs; --all fetches every finished job.
-# Saves each log as ci-<build>-<job-name>.log (ANSI/timestamps stripped) and
-# prints "<file>\t<job name>" per job. [output] is single-job only; "-"
-# streams to stdout. Existing files are kept; CI_FETCH_LOG_FORCE=1 refetches.
+# Saves each log as ci-<build>-<job-name>.log for the default ci pipeline, or
+# ci-<pipeline>-<build>-<job-name>.log for other pipelines (ANSI/timestamps
+# stripped), and prints "<file>\t<job name>" per job. [output] is single-job
+# only; "-" streams to stdout. Existing files are kept; CI_FETCH_LOG_FORCE=1
+# refetches.
 
 set -euo pipefail
 
@@ -22,7 +26,7 @@ UA="vllm-ci-fetch-log"
 UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 usage() {
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -38,6 +42,15 @@ while :; do
     case "${1:-}" in
     --soft) SCOPE="soft" ;;
     --all) SCOPE="all" ;;
+    --pipeline)
+        shift
+        [ -n "${1:-}" ] || die "--pipeline requires a Buildkite pipeline slug"
+        PIPELINE="$1"
+        ;;
+    --pipeline=*)
+        PIPELINE="${1#*=}"
+        [ -n "$PIPELINE" ] || die "--pipeline requires a Buildkite pipeline slug"
+        ;;
     *) break ;;
     esac
     shift
@@ -56,6 +69,10 @@ case "${1:-}" in
     ;;
 https://*)
     BUILD=$(echo "$1" | sed -nE 's#.*/builds/([0-9]+).*#\1#p')
+    ORG_FROM_URL=$(echo "$1" | sed -nE 's#https://buildkite.com/([^/]+)/([^/]+)/builds/[0-9]+.*#\1#p')
+    PIPELINE_FROM_URL=$(echo "$1" | sed -nE 's#https://buildkite.com/([^/]+)/([^/]+)/builds/[0-9]+.*#\2#p')
+    [ -z "$ORG_FROM_URL" ] || ORG="$ORG_FROM_URL"
+    [ -z "$PIPELINE_FROM_URL" ] || PIPELINE="$PIPELINE_FROM_URL"
     JOB=$(echo "$1" | grep -oE "#${UUID_RE}" | head -n 1 | cut -c2- || true)
     SID=$(echo "$1" | grep -oE "[?&]sid=${UUID_RE}" | head -n 1 | sed 's/.*sid=//' || true)
     OUT="${2:-}"
@@ -120,11 +137,19 @@ fetch_job() { # <job_uuid> <output_file>
     bash "$(dirname "$0")/ci-clean-log.sh" "$2"
 }
 
+log_prefix() {
+    if [ "$PIPELINE" = "ci" ]; then
+        printf 'ci-%s' "$BUILD"
+    else
+        printf 'ci-%s-%s' "$PIPELINE" "$BUILD"
+    fi
+}
+
 if [ -n "$JOB" ]; then
     # Single-job mode.
     NAME=$(awk -F'\t' -v j="$JOB" '$1 == j {print $7; exit}' "$JOBS_TSV")
     SLUG=$(awk -F'\t' -v j="$JOB" '$1 == j {print $6; exit}' "$JOBS_TSV")
-    [ -n "$OUT" ] || OUT="ci-${BUILD}-${SLUG:-${JOB:0:13}}.log"
+    [ -n "$OUT" ] || OUT="$(log_prefix)-${SLUG:-${JOB:0:13}}.log"
     if [ "$OUT" = "-" ]; then
         TMP=$(mktemp)
         fetch_job "$JOB" "$TMP"
@@ -158,10 +183,10 @@ FOUND=0
 EMITTED=" "
 while IFS=$'\t' read -r job_id _ _ _ _ slug name; do
     FOUND=$((FOUND + 1))
-    out="ci-${BUILD}-${slug:-${job_id:0:13}}.log"
+    out="$(log_prefix)-${slug:-${job_id:0:13}}.log"
     # Retries share a name with the original job; disambiguate by uuid.
     case "$EMITTED" in
-    *" $out "*) out="ci-${BUILD}-${slug:-job}-${job_id:0:13}.log" ;;
+    *" $out "*) out="$(log_prefix)-${slug:-job}-${job_id}.log" ;;
     esac
     EMITTED="${EMITTED}${out} "
     if [ -e "$out" ] && [ -z "${CI_FETCH_LOG_FORCE:-}" ]; then
