@@ -1420,22 +1420,38 @@ class ModelConfig:
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
-            if tensor_parallel_size <= total_num_kv_heads:
+            prefill_context_parallel_size = (
+                parallel_config.prefill_context_parallel_size
+            )
+            # KV cache duplication comes from two independent sources: TP
+            # replicates KV heads when tensor_parallel_size exceeds the
+            # number of KV heads, and PCP always replicates the full KV
+            # cache across every PCP rank. DCP can reclaim either.
+            max_dcp_size = (
+                max(1, tensor_parallel_size // total_num_kv_heads)
+                * prefill_context_parallel_size
+            )
+            if max_dcp_size <= 1:
                 raise ValueError(
                     "Decode context parallelism for GQA/MQA requires "
                     f"`--tensor-parallel-size` ({tensor_parallel_size}) to be "
                     "greater than the model's total number of KV heads "
-                    f"({total_num_kv_heads}). Increase `--tensor-parallel-size` "
-                    "or set `--decode-context-parallel-size 1`."
+                    f"({total_num_kv_heads}), or "
+                    "`--prefill-context-parallel-size` "
+                    f"({prefill_context_parallel_size}) to be greater than 1. "
+                    "Increase `--tensor-parallel-size` or "
+                    "`--prefill-context-parallel-size`, or set "
+                    "`--decode-context-parallel-size 1`."
                 )
 
-            max_dcp_size = tensor_parallel_size // total_num_kv_heads
             if decode_context_parallel_size > max_dcp_size:
                 raise ValueError(
                     "`--decode-context-parallel-size` "
                     f"({decode_context_parallel_size}) exceeds the maximum "
                     f"supported value ({max_dcp_size}) for "
-                    f"`--tensor-parallel-size` ({tensor_parallel_size}) and "
+                    f"`--tensor-parallel-size` ({tensor_parallel_size}), "
+                    "`--prefill-context-parallel-size` "
+                    f"({prefill_context_parallel_size}), and "
                     f"{total_num_kv_heads} model KV heads."
                 )
 
