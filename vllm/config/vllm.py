@@ -1004,6 +1004,27 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+            if (
+                self.model_config.use_mla
+                and self.attention_config.decode_backend is not None
+            ):
+                # MLA splits each batch into prefill and decode portions
+                # instead of routing whole batches; `prefill_backend` selects
+                # the MLA decode backend, so fold decode_backend into it.
+                decode_backend = self.attention_config.decode_backend
+                prefill_backend = self.attention_config.prefill_backend
+                if prefill_backend is not None and prefill_backend != decode_backend:
+                    raise ValueError(
+                        f"attention_config.prefill_backend ({prefill_backend.name}) "
+                        f"conflicts with attention_config.decode_backend "
+                        f"({decode_backend.name}): for MLA models both select "
+                        "the MLA decode backend, and "
+                        "attention_config.mla_prefill_backend selects the "
+                        "prefill backend."
+                    )
+                self.attention_config.prefill_backend = decode_backend
+                self.attention_config.decode_backend = None
+
         if (
             self.model_config is not None
             and self.model_config.enable_return_routed_experts

@@ -418,6 +418,10 @@ class TritonAttentionImpl(AttentionImpl):
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
 
+    def reset_kv_cache_views(self) -> None:
+        self._k_scale_cache = None
+        self._v_scale_cache = None
+
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
         """Extract per-head scale views from the padded content dimension.
 
