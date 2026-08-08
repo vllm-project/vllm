@@ -175,9 +175,29 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
             ));
         }
         DatasetName::Hf => {
-            return Err(BenchError::Config(
-                "HF dataset multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
-            ));
+            let tok = tokenizer
+                .as_ref()
+                .ok_or_else(|| BenchError::Config("HF dataset requires a tokenizer".into()))?;
+            let dataset_id = config.dataset_path.as_deref().ok_or_else(|| {
+                BenchError::Config("--dataset-path is required for --dataset-name hf".into())
+            })?;
+            let (downloaded_path, _config, _split) =
+                crate::datasets::hf_dataset::download_hf_dataset(
+                    dataset_id,
+                    config.hf_subset.as_deref(),
+                    config.hf_split.as_deref(),
+                    config.num_prompts,
+                )
+                .await?;
+            crate::datasets::multi_turn::load_sharegpt_multi_turn(
+                tok,
+                &downloaded_path,
+                config.num_prompts,
+                config.hf_output_len,
+                config.sharegpt_multi_turn_max_turns,
+                config.seed,
+                &config.request_id_prefix,
+            )?
         }
     };
 
