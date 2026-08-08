@@ -96,17 +96,20 @@ impl TestTokenizer {
     ///
     /// Configured tokens must use ids outside the byte range and may be marked
     /// special or regular.
+    #[must_use]
     pub fn with_token(mut self, token: impl Into<String>, id: u32, kind: TestTokenKind) -> Self {
         self.insert_token(token, id, kind);
         self
     }
 
     /// Add a special configured token and return the updated tokenizer.
+    #[must_use]
     pub fn with_special_token(self, token: impl Into<String>, id: u32) -> Self {
         self.with_token(token, id, TestTokenKind::Special)
     }
 
     /// Add a regular configured token and return the updated tokenizer.
+    #[must_use]
     pub fn with_regular_token(self, token: impl Into<String>, id: u32) -> Self {
         self.with_token(token, id, TestTokenKind::Regular)
     }
@@ -116,6 +119,7 @@ impl TestTokenizer {
     /// This also registers the token in the normal token/id maps so
     /// `token_to_id`, `id_to_token`, `decode`, and `is_special_id` stay
     /// consistent for the inserted id.
+    #[must_use]
     pub fn with_bos_token(mut self, token: impl Into<String>, id: u32) -> Self {
         self.insert_token(token, id, TestTokenKind::Special);
         self.bos_token_id = Some(id);
@@ -123,6 +127,7 @@ impl TestTokenizer {
     }
 
     /// Set decode behavior for unknown non-byte ids.
+    #[must_use]
     pub fn with_unknown_decode(mut self, behavior: UnknownDecode) -> Self {
         self.unknown_decode = behavior;
         self
@@ -132,6 +137,7 @@ impl TestTokenizer {
     ///
     /// Use this when a test needs a model-like vocabulary bound that differs
     /// from the highest configured token id plus one.
+    #[must_use]
     pub fn with_vocab_size(mut self, vocab_size: usize) -> Self {
         self.vocab_size = Some(vocab_size);
         self

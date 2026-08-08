@@ -142,6 +142,7 @@ impl ToolParserOutput {
     /// which delegates through the incremental parser lifecycle and then
     /// needs to collapse streaming-style argument fragments into one final
     /// tool call.
+    #[must_use]
     pub fn coalesce(self) -> Self {
         let mut merged = BTreeMap::<usize, ToolCallDelta>::new();
         let mut order = Vec::new();

@@ -116,18 +116,21 @@ impl EngineCoreClientConfig {
     }
 
     /// Set the model name used by frontend-side metrics and diagnostics.
+    #[must_use]
     pub fn with_model_name(mut self, model_name: impl Into<String>) -> Self {
         self.model_name = model_name.into();
         self
     }
 
     /// Override the client index stamped onto every outgoing request.
+    #[must_use]
     pub fn with_client_index(mut self, client_index: u32) -> Self {
         self.client_index = client_index;
         self
     }
 
     /// Override the optional coordinator mode for this client config.
+    #[must_use]
     pub fn with_coordinator_mode(mut self, coordinator_mode: Option<CoordinatorMode>) -> Self {
         self.coordinator_mode = coordinator_mode;
         self
@@ -138,6 +141,7 @@ impl EngineCoreClientConfig {
     ///
     /// This is primarily used by tests that want deterministic IPC endpoints
     /// while still exercising the handshake-owned startup path.
+    #[must_use]
     pub fn with_local_input_output_addresses(
         mut self,
         local_input_address: Option<String>,
