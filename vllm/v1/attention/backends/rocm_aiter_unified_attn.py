@@ -25,6 +25,31 @@ from vllm.v1.attention.backends.rocm_attn import (
 
 logger = init_logger(__name__)
 
+try:
+    from triton.runtime.errors import OutOfResources as _TritonOutOfResources
+except ImportError:
+    _TritonOutOfResources = None
+
+
+def _is_lds_overflow_error(exc: BaseException) -> bool:
+    """Check whether an exception is Triton's shared-memory (LDS) overflow.
+
+    Matches on the exception class when Triton exposes it, falling back to a
+    message match otherwise: the class has moved across Triton versions but
+    the message text has not. The fallback requires both markers so it cannot
+    swallow an unrelated failure such as a register overflow.
+
+    Args:
+        exc: Exception raised while launching a Triton kernel.
+
+    Returns:
+        True if the exception reports exhausted shared memory.
+    """
+    if _TritonOutOfResources is not None and isinstance(exc, _TritonOutOfResources):
+        return True
+    msg = str(exc).lower()
+    return "out of resource" in msg and "shared memory" in msg
+
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
@@ -146,6 +171,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         from aiter.ops.triton.unified_attention import unified_attention
 
         self.unified_attention = unified_attention
+        self._aiter_lds_overflow = False
         self.supports_quant_query_input = True
 
     def _split_kv_cache(
@@ -153,6 +179,61 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+
+    def _forward_triton_unified(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: RocmAttentionMetadata,
+        layer: torch.nn.Module,
+        num_actual_tokens: int,
+        output_scale: torch.Tensor | None,
+    ) -> None:
+        """Run the in-tree Triton unified-attention kernel into ``output``.
+
+        Serves both the non-causal path (the aiter kernel is causal-only) and
+        the causal LDS-overflow fallback, since it honors ``causal`` from the
+        metadata.
+
+        Args:
+            query: Query tensor, sliced to ``num_actual_tokens`` internally.
+            key_cache: Key cache in NHD layout.
+            value_cache: Value cache in NHD layout.
+            output: Destination tensor, written in place.
+            attn_metadata: Attention metadata for this forward.
+            layer: The attention layer, read for KV descale factors.
+            num_actual_tokens: Token count excluding padding.
+            output_scale: Optional fused output-quantization scale.
+        """
+        from vllm.v1.attention.ops.triton_unified_attention import (
+            unified_attention as triton_unified_attention,
+        )
+
+        cu_seqlens_q = attn_metadata.query_start_loc
+        descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
+        triton_unified_attention(
+            q=query[:num_actual_tokens],
+            k=key_cache,
+            v=value_cache,
+            out=output[:num_actual_tokens],
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=attn_metadata.max_query_len,
+            seqused_k=attn_metadata.seq_lens,
+            max_seqlen_k=attn_metadata.max_seq_len,
+            softmax_scale=self.scale,
+            causal=attn_metadata.causal,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=attn_metadata.block_table,
+            softcap=self.logits_soft_cap,
+            q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+            k_descale=layer._k_scale.expand(descale_shape),
+            v_descale=layer._v_scale.expand(descale_shape),
+            sinks=self.sinks,
+            output_scale=output_scale,
+        )
 
     def forward(
         self,
@@ -227,58 +308,54 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        if attn_metadata.causal:
-            self.unified_attention(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=softmax_scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
-                k_descale=layer._k_scale,
-                v_descale=layer._v_scale,
-                sinks=self.sinks,
-                output_scale=output_scale,
-            )
-        else:
-            # The aiter kernel is causal-only. Non-causal cross-attention
-            # (ENCODER_DECODER, e.g. Whisper) falls back to the vLLM Triton
-            # unified kernel, which shares this layout and honors the flag.
-            from vllm.v1.attention.ops.triton_unified_attention import (
-                unified_attention as triton_unified_attention,
-            )
+        if attn_metadata.causal and not self._aiter_lds_overflow:
+            try:
+                self.unified_attention(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=softmax_scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+                    k_descale=layer._k_scale,
+                    v_descale=layer._v_scale,
+                    sinks=self.sinks,
+                    output_scale=output_scale,
+                )
+                return output
+            except Exception as exc:  # noqa: BLE001 - re-raised unless LDS overflow
+                if not _is_lds_overflow_error(exc):
+                    raise
+                logger.warning_once(
+                    "AITER unified-attention 3D kernel exceeds the LDS/shared-"
+                    "memory limit on this device; falling back to the in-tree "
+                    "Triton unified-attention kernel for the rest of this "
+                    "process. See "
+                    "https://github.com/vllm-project/vllm/issues/48723."
+                )
+                self._aiter_lds_overflow = True
 
-            descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
-            triton_unified_attention(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=softmax_scale,
-                causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-                sinks=self.sinks,
-                output_scale=output_scale,
-            )
+        # Reached when the kernel is non-causal (aiter is causal-only) or when
+        # the aiter kernel does not fit in LDS on this device.
+        self._forward_triton_unified(
+            query,
+            key_cache,
+            value_cache,
+            output,
+            attn_metadata,
+            layer,
+            num_actual_tokens,
+            output_scale,
+        )
 
         return output
 
