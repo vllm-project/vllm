@@ -2,14 +2,44 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.chat_completion.batch_serving import (
+    OpenAIServingChatBatch,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
+)
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+class _FakeRender:
+    use_harmony = False
+    chat_template = None
+    chat_template_content_format = "auto"
+    default_chat_template_kwargs: dict = {}
+    tool_parser = None
+    trust_request_chat_template = False
+
+    def __init__(self):
+        self.preprocessed_requests = []
+        self.reasoning_parser_args = []
+
+    def validate_chat_template(self, **kwargs):
+        return None
+
+    async def preprocess_chat(self, single_request, messages, **kwargs):
+        self.preprocessed_requests.append(single_request)
+        self.reasoning_parser_args.append(kwargs["reasoning_parser"])
+        single_request.skip_special_tokens = False
+        return messages, [{"prompt_token_ids": [1, 2]}]
 
 
 @pytest.fixture(scope="module")
@@ -28,6 +58,37 @@ def default_server_args():
 def server(default_server_args):
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_batch_render_uses_adjusted_reasoning_requests() -> None:
+    request = BatchChatCompletionRequest(
+        model="test-model",
+        messages=[
+            [{"role": "user", "content": "one"}],
+            [{"role": "user", "content": "two"}],
+        ],
+    )
+    reasoning_parser_cls = object()
+
+    handler = object.__new__(OpenAIServingChatBatch)
+    handler._check_model = AsyncMock(return_value=None)
+    handler.engine_client = SimpleNamespace(errored=False)
+    handler.openai_serving_render = _FakeRender()
+    handler.reasoning_parser_cls = reasoning_parser_cls
+
+    result = await handler.render_batch_chat_request(request)
+
+    conversations, engine_prompts, adjusted_requests = result
+    assert conversations == request.messages
+    assert engine_prompts == [{"prompt_token_ids": [1, 2]}] * 2
+    assert handler.openai_serving_render.preprocessed_requests == adjusted_requests
+    assert handler.openai_serving_render.reasoning_parser_args == [
+        reasoning_parser_cls,
+        reasoning_parser_cls,
+    ]
+    assert [r.messages for r in adjusted_requests] == request.messages
+    assert [r.skip_special_tokens for r in adjusted_requests] == [False, False]
 
 
 @pytest.mark.asyncio
