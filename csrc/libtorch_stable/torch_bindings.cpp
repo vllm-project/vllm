@@ -583,6 +583,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
 
+#ifndef USE_ROCM
+  // Fused SiLU+gating + dynamic per-token FP8 quantization.
+  // Derives each token's scale from its own activation absmax — more
+  // accurate than silu_and_mul_quant for batches with variable dynamic range.
+  ops.def(
+      "silu_and_mul_dynamic_per_token_quant("
+      "Tensor! out, Tensor! scales, Tensor input, Tensor? scale_ub=None"
+      ") -> ()");
+#endif  // !USE_ROCM
+
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
 
@@ -805,6 +815,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&persistent_masked_m_silu_mul_quant));
   ops.impl("weak_ref_tensor", TORCH_BOX(&weak_ref_tensor));
   ops.impl("silu_and_mul_quant", TORCH_BOX(&silu_and_mul_quant));
+#ifndef USE_ROCM
+  ops.impl("silu_and_mul_dynamic_per_token_quant",
+           TORCH_BOX(&silu_and_mul_dynamic_per_token_quant));
+#endif  // !USE_ROCM
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
   ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
   ops.impl("gelu_and_mul", TORCH_BOX(&gelu_and_mul));

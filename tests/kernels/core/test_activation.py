@@ -274,3 +274,81 @@ def test_activation(
 
     out = torch.empty_like(x)
     opcheck(fn, (out, x))
+
+
+# ---------------------------------------------------------------------------
+# Tests for silu_and_mul_dynamic_per_token_quant
+# ---------------------------------------------------------------------------
+
+FP8_DTYPES = [torch.float8_e4m3fn]
+DYNAMIC_QUANT_DTYPES = [torch.half, torch.bfloat16]
+DYNAMIC_QUANT_NUM_TOKENS = [1, 7, 64, 256]
+DYNAMIC_QUANT_D = [64, 512, 4096]
+
+
+@pytest.mark.parametrize("num_tokens", DYNAMIC_QUANT_NUM_TOKENS)
+@pytest.mark.parametrize("d", DYNAMIC_QUANT_D)
+@pytest.mark.parametrize("dtype", DYNAMIC_QUANT_DTYPE := DYNAMIC_QUANT_DTYPES)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_silu_and_mul_dynamic_per_token_quant(
+    default_vllm_config,
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+    fp8_dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    """Validate fused SiLU+gating + dynamic per-token FP8 quantization.
+
+    Strategy:
+      1. Compute a float32 reference:  ref = silu(gate) * up
+      2. Compute the expected per-token scale from ref's absmax:
+             scale[t] = max(absmax_per_token[t], 1e-12) / fp8_max
+      3. Dequantize kernel output back to float32.
+      4. Assert scales match and dequantized output is within FP8
+         quantization tolerance of the float32 reference.
+    """
+    set_random_seed(seed)
+    torch.set_default_device(device)
+
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype)
+
+    # ---- reference computation in float32 ----
+    x_f32 = x.to(torch.float32)
+    gate = x_f32[:, :d]
+    up = x_f32[:, d:]
+    ref = torch.sigmoid(gate) * gate * up  # silu(gate) * up
+
+    fp8_max = torch.finfo(fp8_dtype).max  # 448.0 for e4m3fn
+
+    # Per-token scale: absmax / fp8_max
+    per_token_absmax = ref.abs().max(dim=1).values  # [num_tokens]
+    ref_scales = torch.clamp(per_token_absmax, min=1e-12) / fp8_max
+
+    # ---- kernel under test ----
+    from vllm._custom_ops import silu_and_mul_dynamic_per_token_quant
+
+    fp8_out, scales = silu_and_mul_dynamic_per_token_quant(x, fp8_dtype)
+
+    assert fp8_out.shape == (num_tokens, d), (
+        f"Expected shape ({num_tokens}, {d}), got {fp8_out.shape}"
+    )
+    assert scales.shape == (num_tokens,), (
+        f"Expected scales shape ({num_tokens},), got {scales.shape}"
+    )
+    assert fp8_out.dtype == fp8_dtype
+    assert scales.dtype == torch.float32
+
+    # ---- scale correctness ----
+    torch.testing.assert_close(scales, ref_scales.to(device), rtol=1e-4, atol=1e-6)
+
+    # ---- dequantized output vs float32 reference ----
+    # Tolerance: FP8 e4m3fn has ~3 mantissa bits → max relative error ≈ 1/8
+    # of the ULP for the quantised range.  In practice the error is bounded by
+    # 1 FP8 ULP = fp8_max / 2^(mantissa_bits) / scale.
+    dequant = fp8_out.to(torch.float32) * scales.unsqueeze(1)
+    torch.testing.assert_close(dequant, ref.to(device), rtol=0.125, atol=1e-3)
