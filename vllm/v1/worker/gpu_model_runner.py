@@ -5731,7 +5731,8 @@ class GPUModelRunner(
 
             # Set up target LogprobsTensors object.
             logprobs_tensors = request.in_progress_prompt_logprobs_cpu
-            if logprobs_tensors is None:
+            is_new = logprobs_tensors is None
+            if is_new:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
                 logprobs_tensors = LogprobsTensors.empty_cpu(
@@ -5753,7 +5754,14 @@ class GPUModelRunner(
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
-                prompt_logprobs_dict[req_id] = logprobs_tensors
+                if not is_new or num_logits > 0:
+                    # Ship the tensor only when there is something to fill now,
+                    # or a prior chunk already filled it. When this is the first
+                    # entry (is_new) with num_logits <= 0, the prompt was
+                    # externally pre-filled (e.g. PD disagg / LMCache) and no
+                    # local logits exist; shipping the unfilled empty_cpu tensor
+                    # would OverflowError in tokenizer.decode (see vllm#21951).
+                    prompt_logprobs_dict[req_id] = logprobs_tensors
 
             if num_logits <= 0:
                 # This can happen for the final chunk if we prefilled exactly
