@@ -537,9 +537,19 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
             "last": "LAST",
         }
 
-        pooling_type = pooling_type_map.get(hf_config.pooling)
+        pooling = getattr(hf_config, "pooling", None)
+        if pooling is None:
+            raise ValueError(
+                "This bidirectional model requires a 'pooling' field in its HF "
+                "config (one of 'avg', 'cls', 'last'), but none was found. "
+                "Unlike the VL variants, no default is assumed here because "
+                "silently picking a pooling for an embedding model can produce "
+                "wrong embeddings."
+            )
+
+        pooling_type = pooling_type_map.get(pooling)
         if pooling_type is None:
-            raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
+            raise ValueError(f"pool_type {pooling!r} not supported")
 
         model_config.pooler_config.seq_pooling_type = pooling_type
 
