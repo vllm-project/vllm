@@ -144,6 +144,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         engine_inputs = result
 
+        if len(engine_inputs) > 1 and request.kv_transfer_params:
+            return self.create_error_response(
+                "Multi-prompt completion requests are not supported "
+                "with disaggregated serving (kv_transfer_params). "
+                "Submit one prompt per request."
+            )
+
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
 

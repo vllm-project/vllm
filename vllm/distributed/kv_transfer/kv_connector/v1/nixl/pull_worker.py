@@ -289,12 +289,23 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             == len(local_block_ids)
             == len(self.kv_cache_config.kv_cache_groups)
         )
-        local_block_ids, remote_block_ids = self._apply_prefix_caching(
-            decode_block_ids=local_block_ids,
-            prefill_block_ids=remote_block_ids,
-            decode_physical_per_logical=self._physical_blocks_per_logical_kv_block,
-            prefill_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
-        )
+        try:
+            local_block_ids, remote_block_ids = self._apply_prefix_caching(
+                decode_block_ids=local_block_ids,
+                prefill_block_ids=remote_block_ids,
+                decode_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+                prefill_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+            )
+        except ValueError as e:
+            self._log_failure(
+                failure_type="block_validation_failed",
+                req_id=request_id,
+                msg="Remote/local block count mismatch",
+                error=e,
+                dst_engine_id=dst_engine_id,
+            )
+            self._handle_failed_transfer(request_id, None)
+            return
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp

@@ -2427,7 +2427,12 @@ class NixlBaseConnectorWorker:
         if not self._has_mamba:
             for i, prefill_group in enumerate(prefill_block_ids):
                 num_decode_blocks = len(decode_block_ids[i])
-                assert num_decode_blocks <= len(prefill_group)
+                if num_decode_blocks > len(prefill_group):
+                    raise ValueError(
+                        f"Group {i}: decode has {num_decode_blocks} "
+                        f"blocks but prefill has only "
+                        f"{len(prefill_group)}"
+                    )
                 if num_decode_blocks < len(prefill_group):
                     prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
         else:
@@ -2459,10 +2464,12 @@ class NixlBaseConnectorWorker:
                     # already has (prefix hit) -> take its tail; a longer decode
                     # list holds the position D recomputes itself, which gets
                     # no prefill state.
-                    assert num_decode_blocks - num_prefill_blocks <= 1, (
-                        f"Group {i}: unpairable SSM state slots, "
-                        f"decode={num_decode_blocks} prefill={num_prefill_blocks}"
-                    )
+                    if num_decode_blocks - num_prefill_blocks > 1:
+                        raise ValueError(
+                            f"Group {i}: unpairable SSM state slots, "
+                            f"decode={num_decode_blocks} "
+                            f"prefill={num_prefill_blocks}"
+                        )
                     num_blocks = min(num_decode_blocks, num_prefill_blocks)
                     if num_decode_blocks < num_prefill_blocks:
                         prefill_block_ids[i] = prefill_group[-num_blocks:]
@@ -2484,10 +2491,11 @@ class NixlBaseConnectorWorker:
                     max_padding = (
                         decode_physical_per_logical + prefill_physical_per_logical
                     )
-                    assert abs(num_decode_blocks - num_prefill_blocks) <= max_padding, (
-                        f"Group {i}: |{num_decode_blocks} - "
-                        f"{num_prefill_blocks}| > {max_padding}"
-                    )
+                    if abs(num_decode_blocks - num_prefill_blocks) > max_padding:
+                        raise ValueError(
+                            f"Group {i}: |{num_decode_blocks} - "
+                            f"{num_prefill_blocks}| > {max_padding}"
+                        )
                     num_blocks = min(num_decode_blocks, num_prefill_blocks)
                     decode_block_ids[i] = decode_block_ids[i][:num_blocks]
                     prefill_block_ids[i] = prefill_group[:num_blocks]
