@@ -366,6 +366,18 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
+### HyperCLOVAX-SEED-Think Models (`hyperclovax_seed_think`)
+
+Supported models:
+
+* [`naver-hyperclovax/HyperCLOVAX-SEED-Think-32B`](https://huggingface.co/naver-hyperclovax/HyperCLOVAX-SEED-Think-32B)
+
+Tool calls are emitted in the model's native XML format
+(`<tool_call>name\n<arg_key>k</arg_key>\n<arg_value>v</arg_value>...</tool_call>`),
+with a JSON-list fallback for `tool_choice="required"` and named tool_choice.
+
+Flags: `--tool-call-parser hyperclovax_seed_think --reasoning-parser hyperclovax_seed_think --enable-auto-tool-choice`
+
 ### Cohere Command A Reasoning (`cohere_command3`)
 
 Supported models:
