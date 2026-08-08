@@ -166,6 +166,13 @@ repos:
     language: python
     entry: python tools/pre_commit/generate_nightly_torch_test.py
     files: ^requirements/test/cuda\.(in|txt)$
+  - id: check-label-rules
+    name: Check auto-label rules still match real files
+    language: python
+    entry: python tools/pre_commit/check_label_rules.py
+    files: ^\.github/mergify\.yml$
+    pass_filenames: false
+    additional_dependencies: [PyYAML]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py "3.10"
