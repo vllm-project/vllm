@@ -291,8 +291,10 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         init_info: IPCTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
-        source: WeightSource,
+        source: WeightSource | None = None,
     ) -> Self:
+        if source is None:
+            raise ValueError("IPC trainer weight transfer requires a WeightSource.")
         engine = cls(
             client=client,
             source=source,
@@ -307,6 +309,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         return engine
 
     def send_weights(self) -> None:
+        assert self.source is not None
         source = self.source
         if self.is_sender:
             self.client.start_weight_update()

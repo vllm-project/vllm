@@ -415,6 +415,7 @@ class FlashInferBackend(AttentionBackend):
         "fp8_e4m3",
         "fp8_e5m2",
         "nvfp4",
+        "nvfp4_4over6",
     ]
 
     @staticmethod
@@ -424,7 +425,7 @@ class FlashInferBackend(AttentionBackend):
         head_size_v: int | None,
     ) -> bool:
         return (
-            cache_dtype_str == "nvfp4"
+            cache_dtype_str.startswith("nvfp4")
             and head_size_v is not None
             and head_size_v != head_size
         )
@@ -480,7 +481,7 @@ class FlashInferBackend(AttentionBackend):
         cache_dtype_str: str = "auto",
         head_size_v: int | None = None,
     ) -> tuple[int, ...]:
-        if cache_dtype_str == "nvfp4":
+        if cache_dtype_str.startswith("nvfp4"):
             if FlashInferBackend._use_mixed_nvfp4_layout(
                 cache_dtype_str, head_size, head_size_v
             ):
@@ -527,7 +528,7 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
-        elif kv_cache_dtype == "nvfp4":
+        elif kv_cache_dtype.startswith("nvfp4"):
             return torch.uint8
         else:
             raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
@@ -794,7 +795,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype = self.cache_config.cache_dtype
             # Cannot use self.kv_cache_spec.dtype here because kv_cache_spec
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
-            self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
+            self.is_kvcache_nvfp4 = self.cache_dtype.startswith("nvfp4")
             self.kv_cache_dtype = FlashInferBackend.get_dtype_for_flashinfer(
                 self.cache_dtype
             )
@@ -960,7 +961,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             ) or current_platform.is_device_capability_family(100):
                 return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
             return self.model_config.dtype
-        if cache_dtype == "nvfp4":
+        if cache_dtype.startswith("nvfp4"):
             # NVFP4 KV uses FP8-Q only on the trtllm-gen path. Native FA2
             # prefill/decode, including SM8x and SM90 fallback, consumes
             # model-dtype Q.
@@ -1713,7 +1714,7 @@ class FlashInferImpl(AttentionImpl):
             self.sliding_window[0] if self.sliding_window is not None else -1
         )
         self.kv_cache_dtype = kv_cache_dtype
-        self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
+        self.is_kvcache_nvfp4 = kv_cache_dtype.startswith("nvfp4")
         self.use_native_nvfp4_kv_cache_update = False
         if self.is_kvcache_nvfp4 and self.head_size_v == self.head_size:
             self.use_native_nvfp4_kv_cache_update = can_use_trtllm_attention(

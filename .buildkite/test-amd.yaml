@@ -163,6 +163,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/utils/import_utils.py
+  - scripts/benchmark_helion_kernels.py
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
@@ -636,7 +637,7 @@ steps:
   - tests/compile
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+  - pytest -v -s compile/fullgraph/test_full_graph.py
 
 - label: Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
@@ -1529,6 +1530,26 @@ steps:
   - pytest -v -s tests/ir
   - pytest -v -s tests/kernels/ir
 
+- label: Kernels MLA (MI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  - tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+  commands:
+  - rocm-smi
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1612,8 +1633,12 @@ steps:
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
+  - csrc/rocm/
   - tests/kernels/moe
+  - tests/kernels/utils.py
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
@@ -1633,12 +1658,17 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/
+  - csrc/rocm/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
-  - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
   - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/model_executor/kernels/
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -3313,6 +3343,29 @@ steps:
   - export VLLM_USE_DEEP_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
+- label: LM Eval Large Models (8xB200-8xMI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_8
+  optional: true
+  num_gpus: 8
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/model_executor/layers/layernorm.py
+  - csrc/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/evals/
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-gfx950-large.txt
+
 #---------------------------------------------------------  mi355 · examples  ----------------------------------------------------------#
 
 - label: Examples # TBD
@@ -3377,6 +3430,26 @@ steps:
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
 
+- label: Kernels MLA (MI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  - tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+  commands:
+  - rocm-smi
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3405,8 +3478,12 @@ steps:
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
+  - csrc/rocm/
   - tests/kernels/moe
+  - tests/kernels/utils.py
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
@@ -3425,12 +3502,17 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/
+  - csrc/rocm/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
-  - tests/kernels/quantization/test_rocm_skinny_gemms.py
+  - tests/kernels/quant_utils.py
+  - tests/kernels/utils.py
   - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/envs.py
   - vllm/platforms/rocm.py
   - vllm/model_executor/kernels/
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
