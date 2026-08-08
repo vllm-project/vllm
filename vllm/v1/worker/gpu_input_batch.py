@@ -914,6 +914,9 @@ class InputBatch:
             or bool(self.bad_words_token_ids)
             or self.logitsprocs_need_output_token_ids
             or thinking_budget_tracks_reqs
+            # Builtin processors report dynamically, e.g. DRY only while
+            # a request in the batch enables it.
+            or any(p.needs_output_token_ids() for p in self.logitsprocs.all)
         )
         output_token_ids = (
             cast(list[list[int]], self.req_output_token_ids)

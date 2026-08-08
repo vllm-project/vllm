@@ -31,6 +31,14 @@ MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
+DEFAULT_DRY_SEQUENCE_BREAKERS = ["\n", ":", '"', "*"]
+"""llama.cpp's default DRY sequence breakers."""
+
+MAX_DRY_SEQUENCE_BREAKERS = 64
+"""Upper bound on `SamplingParams.dry_sequence_breakers` list length. Each
+previously-unseen breaker string costs a containment scan over the
+vocabulary (cached afterwards)."""
+
 
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
     """Validate ``thinking_token_budget``; return ``None`` if unset."""
@@ -233,6 +241,28 @@ class SamplingParams(
     """Penalizes new tokens based on whether they appear in the prompt and the
     generated text so far. Values > 1 encourage the model to use new tokens,
     while values < 1 encourage the model to repeat tokens."""
+    dry_multiplier: float = 0.0
+    """DRY (Don't Repeat Yourself) penalty multiplier. Penalizes tokens that
+    would extend a token sequence already present in the context, with a
+    penalty growing exponentially in the repetition length. Set to 0 (the
+    default) to disable. A typical enabled value is 0.8. Parameter names,
+    defaults and matching semantics follow llama.cpp."""
+    dry_base: float = 1.75
+    """Exponential base for the DRY penalty. Values below 1.0 disable DRY,
+    matching llama.cpp."""
+    dry_allowed_length: int = 2
+    """Repetitions up to this length are not penalized by DRY."""
+    dry_penalty_last_n: int = -1
+    """How many tokens of context DRY scans for repetitions. -1 (the
+    default) scans the whole context; 0 disables. The scan cost is linear
+    in this window."""
+    dry_sequence_breakers: list[str] = msgspec.field(
+        default_factory=lambda: list(DEFAULT_DRY_SEQUENCE_BREAKERS)
+    )
+    """Strings that interrupt DRY's sequence matching, so repetition is not
+    tracked across structural boundaries such as lines or chat turns. Every
+    vocabulary token whose text contains one of these strings acts as a
+    breaker, following llama.cpp."""
     temperature: float = 1.0
     """Controls the randomness of the sampling. Lower values make the model
     more deterministic, while higher values make the model more random. Zero
@@ -344,6 +374,12 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
+    # DRY sequence breakers resolved to token ids by update_from_tokenizer
+    # in the engine frontend (llama.cpp containment semantics; see
+    # vllm/v1/sample/dry_utils.py). None until resolved; when unresolved
+    # (e.g. skip_tokenizer_init or direct library use) the sampler-side
+    # DRY implementations warn once and proceed without breakers.
+    _dry_breaker_ids: list[int] | None = None
 
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
@@ -363,6 +399,11 @@ class SamplingParams(
         presence_penalty: float | None = 0.0,
         frequency_penalty: float | None = 0.0,
         repetition_penalty: float | None = 1.0,
+        dry_multiplier: float | None = 0.0,
+        dry_base: float | None = 1.75,
+        dry_allowed_length: int | None = 2,
+        dry_penalty_last_n: int | None = -1,
+        dry_sequence_breakers: list[str] | None = None,
         temperature: float | None = 1.0,
         top_p: float | None = 1.0,
         top_k: int = 0,
@@ -425,6 +466,13 @@ class SamplingParams(
             repetition_penalty=1.0
             if repetition_penalty is None
             else repetition_penalty,
+            dry_multiplier=0.0 if dry_multiplier is None else dry_multiplier,
+            dry_base=1.75 if dry_base is None else dry_base,
+            dry_allowed_length=2 if dry_allowed_length is None else dry_allowed_length,
+            dry_penalty_last_n=-1 if dry_penalty_last_n is None else dry_penalty_last_n,
+            dry_sequence_breakers=list(DEFAULT_DRY_SEQUENCE_BREAKERS)
+            if dry_sequence_breakers is None
+            else dry_sequence_breakers,
             temperature=1.0 if temperature is None else temperature,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
@@ -543,6 +591,69 @@ class SamplingParams(
             raise VLLMValidationError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
+            )
+        # bool is an int subclass, so isinstance-based numeric checks alone
+        # would accept JSON true/false for the dry_* numeric parameters.
+        for _dry_name in (
+            "dry_multiplier",
+            "dry_base",
+            "dry_allowed_length",
+            "dry_penalty_last_n",
+        ):
+            _dry_value = getattr(self, _dry_name)
+            if isinstance(_dry_value, bool) or not isinstance(_dry_value, (int, float)):
+                raise VLLMValidationError(
+                    f"{_dry_name} must be a number, got {type(_dry_value).__name__}.",
+                    parameter=_dry_name,
+                    value=_dry_value,
+                )
+        if not math.isfinite(self.dry_multiplier) or self.dry_multiplier < 0.0:
+            raise VLLMValidationError(
+                "dry_multiplier must be non-negative and finite, got "
+                f"{self.dry_multiplier}.",
+                parameter="dry_multiplier",
+                value=self.dry_multiplier,
+            )
+        if not math.isfinite(self.dry_base) or self.dry_base < 0.0:
+            raise VLLMValidationError(
+                f"dry_base must be non-negative and finite, got {self.dry_base}.",
+                parameter="dry_base",
+                value=self.dry_base,
+            )
+        if not isinstance(self.dry_allowed_length, int) or self.dry_allowed_length < 0:
+            raise VLLMValidationError(
+                "dry_allowed_length must be a non-negative integer, got "
+                f"{self.dry_allowed_length}.",
+                parameter="dry_allowed_length",
+                value=self.dry_allowed_length,
+            )
+        if not isinstance(self.dry_penalty_last_n, int) or self.dry_penalty_last_n < -1:
+            raise VLLMValidationError(
+                "dry_penalty_last_n must be an integer: -1 (whole context), "
+                f"0 (disable), or positive, got {self.dry_penalty_last_n}.",
+                parameter="dry_penalty_last_n",
+                value=self.dry_penalty_last_n,
+            )
+        if self.dry_sequence_breakers is not None and (
+            not isinstance(self.dry_sequence_breakers, (list, tuple))
+            or any(not isinstance(s, str) for s in self.dry_sequence_breakers)
+        ):
+            raise VLLMValidationError(
+                "dry_sequence_breakers must be a list of strings, got "
+                f"{self.dry_sequence_breakers!r}.",
+                parameter="dry_sequence_breakers",
+                value=self.dry_sequence_breakers,
+            )
+        if (
+            self.dry_sequence_breakers is not None
+            and len(self.dry_sequence_breakers) > MAX_DRY_SEQUENCE_BREAKERS
+        ):
+            raise VLLMValidationError(
+                f"dry_sequence_breakers supports at most "
+                f"{MAX_DRY_SEQUENCE_BREAKERS} entries, got "
+                f"{len(self.dry_sequence_breakers)}.",
+                parameter="dry_sequence_breakers",
+                value=len(self.dry_sequence_breakers),
             )
         if not math.isfinite(self.temperature):
             raise VLLMValidationError(
@@ -674,6 +785,13 @@ class SamplingParams(
                     self.stop_token_ids = list(eos_ids)
 
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
+        if self.dry_multiplier and self.dry_sequence_breakers:
+            # Deferred import: sampling_params is imported nearly everywhere.
+            from vllm.v1.sample.dry_utils import resolve_dry_breakers
+
+            self._dry_breaker_ids = resolve_dry_breakers(
+                tokenizer, tuple(self.dry_sequence_breakers)
+            )
         if not self.bad_words:
             return
         self._bad_words_token_ids = []

@@ -74,6 +74,11 @@ class CompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    dry_multiplier: float | None = None
+    dry_base: float | None = None
+    dry_allowed_length: int | None = None
+    dry_penalty_last_n: int | None = None
+    dry_sequence_breakers: list[str] | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
@@ -365,6 +370,11 @@ class CompletionRequest(OpenAIBaseModel):
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
+            dry_multiplier=self.dry_multiplier,
+            dry_base=self.dry_base,
+            dry_allowed_length=self.dry_allowed_length,
+            dry_penalty_last_n=self.dry_penalty_last_n,
+            dry_sequence_breakers=self.dry_sequence_breakers,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
