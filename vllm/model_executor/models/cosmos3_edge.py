@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from functools import lru_cache
 
 import torch
 import torch.nn as nn
@@ -18,14 +19,25 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.evs import (
+    compute_mrope_for_media,
+    compute_retention_mask,
+)
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
+    SupportsMultiModalPruning,
     SupportsPP,
 )
 from .lfm2_siglip2 import Siglip2VisionTransformer
@@ -51,6 +63,7 @@ from .qwen3_vl import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    _merge_multimodal_embeddings,
     maybe_prefix,
 )
 from .vision import (
@@ -492,6 +505,7 @@ class Cosmos3EdgeForConditionalGeneration(
     SupportsMultiModal,
     SupportsPP,
     SupportsMRoPE,
+    SupportsMultiModalPruning,
 ):
     """
     Cosmos3 Edge model with a SigLIP2 vision encoder.
@@ -499,6 +513,9 @@ class Cosmos3EdgeForConditionalGeneration(
     Architecture:
         - self.visual: SigLIP2 encoder + patch merger + projector
         - self.language_model: Cosmos3EdgeForCausalLM (pure attention + RoPE)
+
+    EVS (Efficient Video Sampling) reuses the Qwen3-VL prune + mRoPE path:
+    enable with ``--video-pruning-rate``.
     """
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -565,7 +582,12 @@ class Cosmos3EdgeForConditionalGeneration(
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.video_pruning_rate = multimodal_config.video_pruning_rate
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Cosmos3EdgeVisionModel(
@@ -626,6 +648,7 @@ class Cosmos3EdgeForConditionalGeneration(
         video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
         second_per_grid_ts = kwargs.pop("second_per_grid_ts", None)
+        timestamps = kwargs.pop("timestamps", None)
 
         if pixel_values_videos is None and video_embeds is None:
             return None
@@ -636,6 +659,7 @@ class Cosmos3EdgeForConditionalGeneration(
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
                 second_per_grid_ts=second_per_grid_ts,
+                timestamps=timestamps,
             )
 
         if video_embeds is not None:
@@ -643,6 +667,7 @@ class Cosmos3EdgeForConditionalGeneration(
                 type="video_embeds",
                 video_embeds=video_embeds,
                 video_grid_thw=video_grid_thw,
+                timestamps=timestamps,
             )
 
     def _process_image_input(
@@ -693,23 +718,200 @@ class Cosmos3EdgeForConditionalGeneration(
             modalities["video"] = video_input
         return modalities
 
+    def _postprocess_image_embeds_evs(
+        self,
+        image_embeds_split: tuple[torch.Tensor, ...],
+        image_input: Qwen2_5_VLImageInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """Append mRoPE position channels so images stay aligned after video EVS."""
+        if not self.is_multimodal_pruning_enabled:
+            return image_embeds_split
+
+        merge_size = self.visual.spatial_merge_size
+        grid_thw_list = image_input["image_grid_thw"].tolist()
+        image_embeds_out = []
+        for emb, size in zip(image_embeds_split, grid_thw_list):
+            positions = compute_mrope_for_media(size, merge_size).to(
+                emb.device, non_blocking=True
+            )
+            # Dummy fifth channel to match video embed layout (5 channels).
+            positions = torch.cat(
+                [positions, torch.zeros_like(positions[:, 0:1])],
+                dim=1,
+            )
+            image_embeds_out.append(torch.cat([emb, positions], dim=1))
+        return tuple(image_embeds_out)
+
+    def _postprocess_video_embeds_evs(
+        self,
+        video_embeds_split: tuple[torch.Tensor, ...],
+        video_input: Qwen2_5_VLVideoInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """Prune video embeddings with EVS and append mRoPE metadata channels."""
+        grid_thw = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+        merge_size = self.visual.spatial_merge_size
+
+        video_embeds_out = []
+        for video_idx, (emb, size) in enumerate(zip(video_embeds_split, grid_thw_list)):
+            assert video_input.timestamps is not None, (
+                "timestamps are required when video_pruning_rate > 0"
+            )
+            timestamps = video_input.timestamps[video_idx]
+            t, h, w = size
+            retention_mask = compute_retention_mask(
+                emb,
+                size,
+                spatial_merge_size=merge_size,
+                q=self.video_pruning_rate,
+            )
+            emb = emb[retention_mask]
+
+            num_frames, rows, cols = t, h // merge_size, w // merge_size
+            retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
+            num_tokens_per_frame = retention_mask_thw.sum(dim=(1, 2)).long().tolist()
+
+            emb = self._create_final_video_embeddings(
+                video_embeddings=emb,
+                num_tokens_per_frame=num_tokens_per_frame,
+                timestamps=timestamps,
+                video_grid_thw=size,
+                retention_mask=retention_mask,
+            )
+            video_embeds_out.append(emb)
+
+        return tuple(video_embeds_out)
+
+    def _create_final_video_embeddings(
+        self,
+        video_embeddings: torch.Tensor,
+        num_tokens_per_frame: list[int],
+        timestamps: list[float],
+        video_grid_thw: list[int],
+        retention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Interleave pruned video embeds with timestamp / structural text embeds."""
+        device = video_embeddings.device
+
+        video_repl = Qwen3VLMultiModalProcessor.get_video_repl(
+            tokens_per_frame=num_tokens_per_frame,
+            tokenizer=self._tokenizer,
+            timestamps=timestamps,
+            vision_start_token_id=self.config.vision_start_token_id,
+            vision_end_token_id=self.config.vision_end_token_id,
+            video_token_id=self.config.video_token_id,
+            select_token_id=self.is_multimodal_pruning_enabled,
+        )
+
+        repl_token_ids = torch.tensor(video_repl.full, device=device)
+        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
+        is_video_embed = torch.isin(repl_token_ids, embed_token_id)
+
+        text_embeddings = self.language_model.embed_input_ids(repl_token_ids)
+        merged_embeddings = _merge_multimodal_embeddings(
+            inputs_embeds=text_embeddings,
+            multimodal_embeddings=[video_embeddings],
+            is_multimodal=is_video_embed,
+        )
+
+        is_vision_start = repl_token_ids.eq(self.config.vision_start_token_id)
+        expanded_positions = self._get_expanded_positions(
+            device=merged_embeddings.device,
+            seq_len=merged_embeddings.shape[0],
+            video_grid_thw=video_grid_thw,
+            num_tokens_per_frame=num_tokens_per_frame,
+            timestamps=timestamps,
+            is_video_embed=is_video_embed,
+            is_vision_start=is_vision_start,
+            retention_mask=retention_mask,
+        )
+        return torch.cat([merged_embeddings, expanded_positions], dim=-1)
+
+    def _get_expanded_positions(
+        self,
+        device,
+        seq_len,
+        video_grid_thw,
+        num_tokens_per_frame,
+        timestamps,
+        is_video_embed,
+        is_vision_start,
+        retention_mask,
+    ):
+        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
+        expanded_positions = torch.zeros(
+            seq_len,
+            5,  # [t, h, w, is_vision_start, is_video]
+            device=device,
+            dtype=torch.long,
+        )
+        _, h, w = video_grid_thw
+        merge_size = self.visual.spatial_merge_size
+        num_frames = len(num_tokens_per_frame)
+        unpruned_token_ids = Qwen3VLMultiModalProcessor.get_video_repl(
+            tokens_per_frame=[(h // merge_size) * (w // merge_size)] * num_frames,
+            tokenizer=self._tokenizer,
+            timestamps=timestamps,
+            vision_start_token_id=self.config.vision_start_token_id,
+            vision_end_token_id=self.config.vision_end_token_id,
+            video_token_id=self.config.video_token_id,
+        ).full
+        unpruned_token_ids_tensor = torch.tensor(unpruned_token_ids, device=device)
+        mm_feature = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem(
+                {
+                    "video_grid_thw": MultiModalFieldElem(
+                        data=torch.tensor(video_grid_thw),
+                        field=None,  # HACK: matches Qwen3-VL EVS path
+                    ),
+                }
+            ),
+            modality="video",
+            identifier="DUMMY",
+            mm_position=PlaceholderRange(offset=0, length=len(unpruned_token_ids)),
+        )
+        original_mrope = (
+            self.get_mrope_input_positions(
+                input_tokens=unpruned_token_ids,
+                mm_features=[mm_feature],
+            )[0]
+            .to(device, non_blocking=True)
+            .permute(1, 0)
+        )
+        full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
+        expanded_positions[is_video_embed, :3] = original_mrope[full_is_video_embed][
+            retention_mask
+        ]
+        expanded_positions[~is_video_embed, :3] = original_mrope[~full_is_video_embed]
+        expanded_positions[..., 3] = is_vision_start
+        expanded_positions[..., 4] = is_video_embed
+        return expanded_positions
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
 
-        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+        multimodal_embeddings: list[torch.Tensor] = []
 
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 image_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings += tuple(image_embeddings)
+                image_embeddings = self._postprocess_image_embeds_evs(
+                    image_embeddings, multimodal_input
+                )
+                multimodal_embeddings.extend(image_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
-                multimodal_embeddings += tuple(video_embeddings)
+                if self.is_multimodal_pruning_enabled:
+                    video_embeddings = self._postprocess_video_embeds_evs(
+                        video_embeddings, multimodal_input
+                    )
+                multimodal_embeddings.extend(video_embeddings)
 
-        return multimodal_embeddings
+        return tuple(multimodal_embeddings)
 
     def forward(
         self,
@@ -756,3 +958,25 @@ class Cosmos3EdgeForConditionalGeneration(
             mm_features=mm_features,
             config=self.config,
         )
+
+    def recompute_mrope_positions(
+        self,
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
+        mrope_positions: torch.LongTensor,
+        num_computed_tokens: int,
+    ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
+        return Qwen3VLForConditionalGeneration._recompute_mrope_positions(
+            input_ids=input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            mrope_positions=mrope_positions,
+            num_computed_tokens=num_computed_tokens,
+            image_token_id=self.config.image_token_id,
+            video_token_id=self.config.video_token_id,
+            vision_start_token_id=self.config.vision_start_token_id,
+        )
+
+
+@lru_cache
+def _cached_tensor(x, device) -> torch.Tensor:
+    return torch.tensor(x, device=device)
