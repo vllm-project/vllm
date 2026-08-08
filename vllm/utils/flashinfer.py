@@ -213,6 +213,27 @@ def has_flashinfer_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_moe_ep(transport: str = "nccl_ep") -> bool:
+    """Return `True` if FlashInfer MoE expert-parallel is available.
+
+    Requires both the `flashinfer.moe_ep` package AND a built transport
+    backend: `nccl_ep` (from the nccl4py wheel, `BUILD_NCCL_EP=1`) or
+    `nixl_ep` (in-tree meson build, `BUILD_NIXL_EP=1`). Without the
+    corresponding build, `available_backends()` will not list `transport`.
+    """
+    if not has_flashinfer():
+        return False
+    if importlib.util.find_spec("flashinfer.moe_ep") is None:
+        return False
+    try:
+        from flashinfer.moe_ep import available_backends
+
+        return transport in available_backends()
+    except Exception:
+        return False
+
+
+@functools.cache
 def has_flashinfer_sparse_mla_sm120() -> bool:
     """Return ``True`` if FlashInfer sparse MLA decode support is available."""
     if not has_flashinfer():
@@ -1038,6 +1059,7 @@ __all__ = [
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "autotune",
     "has_flashinfer_moe",
+    "has_flashinfer_moe_ep",
     "has_flashinfer_comm",
     "has_flashinfer_nvlink_two_sided",
     "has_flashinfer_nvlink_one_sided",
