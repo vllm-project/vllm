@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Callable, Iterable, Sequence
+from copy import copy
+from hashlib import sha256
 from typing import Any
 
 from tqdm import tqdm
@@ -36,7 +39,6 @@ from vllm.v1.engine.llm_engine import LLMEngine
 
 logger = init_logger(__name__)
 
-
 _P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _O = TypeVar(
     "_O",
@@ -44,6 +46,59 @@ _O = TypeVar(
     default=RequestOutput | PoolingRequestOutput,
 )
 _R = TypeVar("_R", default=Any)
+
+
+_SEED_SPACE = 2**63
+
+
+def _prompt_fingerprint(prompt: object) -> bytes:
+    """Deterministic, process-independent fingerprint of a prompt.
+
+    Non-serializable values (e.g. multi-modal data) are reduced to their
+    type name.
+    """
+    if isinstance(prompt, str):
+        return prompt.encode("utf-8")
+    try:
+        return json.dumps(
+            prompt, sort_keys=True, default=lambda o: type(o).__name__
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return b""
+
+
+def _mix_prompt_seeds(
+    seq_params: Sequence[_P],
+    seq_prompts: Sequence[object],
+) -> Sequence[_P]:
+    """Mix each seeded request's seed with its prompt content.
+
+    Sharing one seed across a batch would make every request draw an
+    identical sampling noise vector, correlating tokens across the batch
+    and biasing the marginal token distribution.
+
+    Mixing applies uniformly after params are expanded to one per prompt,
+    so `generate([a], SamplingParams(seed=42))` and
+    `generate([a], [SamplingParams(seed=42)])` give identical results.
+    Deriving from the prompt content rather than the batch index keeps a
+    prompt's result independent of batch composition and order: the same
+    (seed, prompt) pair always produces the same result, so repeated
+    identical prompts share their noise by construction. Use `n>1` to draw
+    multiple distinct samples of one prompt; its per-child seeds derived in
+    `ParentRequest` stay distinct within each request.
+    """
+    mixed = []
+    for request_params, prompt in zip(seq_params, seq_prompts, strict=True):
+        if (
+            isinstance(request_params, SamplingParams)
+            and (seed := request_params.seed) is not None
+        ):
+            fingerprint = _prompt_fingerprint(prompt)
+            digest = int.from_bytes(sha256(fingerprint).digest()[:8], "little")
+            request_params = copy(request_params)
+            request_params.seed = (seed + digest) % _SEED_SPACE
+        mixed.append(request_params)
+    return mixed
 
 
 class OfflineInferenceMixin:
@@ -301,7 +356,9 @@ class OfflineInferenceMixin:
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
-        seq_params = self._params_to_seq(params, len(seq_prompts))
+        seq_params = _mix_prompt_seeds(
+            self._params_to_seq(params, len(seq_prompts)), seq_prompts
+        )
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
         seq_priority = self._priority_to_seq(priority, len(seq_prompts))
 
@@ -405,7 +462,9 @@ class OfflineInferenceMixin:
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         seq_convs = conversation_to_seq(messages)
-        seq_params = self._params_to_seq(params, len(seq_convs))
+        seq_params = _mix_prompt_seeds(
+            self._params_to_seq(params, len(seq_convs)), seq_convs
+        )
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
         seq_priority = self._priority_to_seq(priority, len(seq_convs))
 
