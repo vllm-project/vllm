@@ -210,6 +210,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_MORIIO_DEFERRED_TIMEOUT_S: str | None = None
     VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
@@ -2035,6 +2036,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
+    ),
+    # MoRI-IO connector deferred-send reap timeout (seconds). Operator override
+    # for kv_connector_extra_config["defer_timeout"]. Registered here so it is
+    # centrally discoverable/typed and does not trip validate_environ(), but the
+    # value is returned RAW (str | None): the resolver
+    # (moriio_common.resolve_defer_timeout) owns float parsing, the >0
+    # validation, warn-and-fallback on bad values, and the
+    # env > extra_config > default precedence. Returning None when unset keeps
+    # "unset" distinguishable from "set to a default" for that precedence chain.
+    "VLLM_MORIIO_DEFERRED_TIMEOUT_S": lambda: os.environ.get(
+        "VLLM_MORIIO_DEFERRED_TIMEOUT_S"
     ),
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
