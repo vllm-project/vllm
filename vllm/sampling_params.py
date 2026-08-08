@@ -62,6 +62,14 @@ ThinkingTokenBudget = Annotated[
 
 
 class SamplingType(IntEnum):
+    """Sampling strategy for token generation.
+
+    Attributes:
+        GREEDY: Always pick the token with the highest probability.
+        RANDOM: Sample randomly from the probability distribution at each step.
+        RANDOM_SEED: Sample randomly but accept a fixed seed for reproducibility.
+    """
+
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
@@ -180,11 +188,16 @@ class RepetitionDetectionParams:
 
 
 class RequestOutputKind(Enum):
-    # Return entire output so far in every RequestOutput
+    """Controls how intermediate outputs are returned during generation.
+
+    Attributes:
+        CUMULATIVE: Return the entire output so far in every RequestOutput.
+        DELTA: Return only the new tokens since the last RequestOutput.
+        FINAL_ONLY: Only return a single RequestOutput at the end of generation.
+    """
+
     CUMULATIVE = 0
-    # Return only deltas in each RequestOutput
     DELTA = 1
-    # Do not return intermediate RequestOutput
     FINAL_ONLY = 2
 
 
