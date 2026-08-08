@@ -166,9 +166,13 @@ def _delegating(mock_tokenizer, tools=None):
 
 def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
     """Stream ``text`` through ``DelegatingParser.parse_delta``, ``chunk_size``
-    tokens per delta; return ``(content, reasoning, ordered tool names)``."""
+    tokens per delta; return ``(content, reasoning, ordered tool names,
+    ordered tool arguments)``. Arguments arrive in fragments, so they are
+    concatenated per tool index."""
     tokens = _tokenize(text)
-    content, reasoning, tools = "", "", {}
+    content, reasoning = "", ""
+    tools: dict[int, str] = {}
+    args: dict[int, str] = {}
     for start in range(0, len(tokens), chunk_size):
         batch = tokens[start : start + chunk_size]
         delta = parser.parse_delta(
@@ -186,7 +190,14 @@ def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
             for tc in delta.tool_calls:
                 if tc.function and tc.function.name:
                     tools[tc.index] = tc.function.name
-    return content, reasoning, [tools[k] for k in sorted(tools)]
+                if tc.function and tc.function.arguments:
+                    args[tc.index] = args.get(tc.index, "") + tc.function.arguments
+    return (
+        content,
+        reasoning,
+        [tools[k] for k in sorted(tools)],
+        [args.get(k, "") for k in sorted(tools)],
+    )
 
 
 class TestArgConverter:
@@ -615,7 +626,7 @@ class TestDelegatingTwoPass:
     def test_plain_text_streaming(self, mock_tokenizer, mock_request, chunk_size):
         tools = [_function_tool()]
         mock_request.tools = tools
-        content, _, calls = _stream_delegating(
+        content, _, calls, _ = _stream_delegating(
             _delegating(mock_tokenizer, tools),
             mock_request,
             f"{TEXT_START}The answer is 42.{END_MESSAGE}",
@@ -734,7 +745,7 @@ class TestDelegatingTwoPass:
     def test_reasoning_then_tool_streaming(
         self, mock_tokenizer, mock_request, chunk_size
     ):
-        content, _, tools = _stream_delegating(
+        content, _, tools, _ = _stream_delegating(
             _delegating(mock_tokenizer),
             mock_request,
             f"{THINK_START}plan{END_MESSAGE}{MSG_MODEL}"
@@ -743,5 +754,35 @@ class TestDelegatingTwoPass:
             self.GEN_PROMPT,
         )
         assert tools == ["get_weather"]
+        assert TOOL_JSON not in content
+        assert END_MESSAGE not in content
+
+    @pytest.mark.parametrize("opener", [TEXT_START, TOOL_TEXT, TOOL_ERROR])
+    @pytest.mark.parametrize("chunk_size", [1, 3, 64])
+    def test_visible_text_then_tool_streaming(
+        self, mock_tokenizer, mock_request, chunk_size, opener
+    ):
+        """Visible content before a tool call, with no thinking block.
+
+        The reasoning pass leaves its reasoning phase only on an explicit
+        reasoning-end event. A response that opens with visible content never
+        emitted one, so the tool pass never ran: the entire tool block came
+        back as assistant content and no tool call was parsed. Every opener
+        that starts a visible block has to confirm the boundary, which is why
+        ``TOOL_TEXT`` and ``TOOL_ERROR`` are covered alongside ``TEXT_START``.
+        """
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        content, _, names, args = _stream_delegating(
+            _delegating(mock_tokenizer, tools),
+            mock_request,
+            f"{opener}let me check{END_MESSAGE}{MSG_MODEL}"
+            + _tool_block("get_weather", '{"city":"SF"}'),
+            chunk_size,
+            self.GEN_PROMPT,
+        )
+        assert content == "let me check"
+        assert names == ["get_weather"]
+        assert json.loads(args[0]) == {"city": "SF"}
         assert TOOL_JSON not in content
         assert END_MESSAGE not in content
