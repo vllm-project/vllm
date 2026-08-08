@@ -224,6 +224,30 @@ class TestBaseThinkingReasoningParserExtraction:
         assert reasoning == "This is reasoning"
         assert content == "This is content"
 
+    def test_extract_reasoning_with_prefix_before_start_token(self, test_tokenizer):
+        """Test extraction when text appears before start token."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test-model")
+
+        model_output = (
+            "Prefix text <test:think>This is reasoning</test:think>This is content"
+        )
+        reasoning, content = parser.extract_reasoning(model_output, request)
+
+        assert reasoning == "This is reasoning"
+        assert content == "Prefix text This is content"
+
+    def test_extract_reasoning_with_prefix_no_end_token(self, test_tokenizer):
+        """Test extraction when text appears before start token and no end token."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        request = ChatCompletionRequest(messages=[], model="test-model")
+
+        model_output = "Prefix text <test:think>This is reasoning"
+        reasoning, content = parser.extract_reasoning(model_output, request)
+
+        assert reasoning == "This is reasoning"
+        assert content == "Prefix text "
+
     def test_extract_reasoning_only_end_token(self, test_tokenizer):
         """Test extraction when only end token is present."""
         parser = TestThinkingReasoningParser(test_tokenizer)
