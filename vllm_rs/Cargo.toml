@@ -1,0 +1,16 @@
+[package]
+name = "vllm_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "vllm_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+rustc-hash = "2.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
