@@ -30,6 +30,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
@@ -38,6 +39,27 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+def _warn_if_incomplete_full_cudagraph_coverage(
+    pure_decode_shapes: list[tuple[int, int]],
+    covered_batch_sizes: set[int],
+) -> None:
+    """Warn when schedulable pure-decode batches lack full CUDA graphs."""
+    uncovered_shapes = [
+        shape for shape in pure_decode_shapes if shape[0] not in covered_batch_sizes
+    ]
+    if not uncovered_shapes:
+        return
+
+    largest_num_tokens = max(num_tokens for _, num_tokens in pure_decode_shapes)
+    logger.warning_once(
+        "%d/%d schedulable decode batch sizes are not covered by FULL CUDA "
+        "graphs. Consider increasing max_cudagraph_capture_size to %d.",
+        len(uncovered_shapes),
+        len(pure_decode_shapes),
+        largest_num_tokens,
+    )
 
 
 class AttentionState(NamedTuple):
@@ -116,7 +138,10 @@ class CudaGraphManager:
     ):
         self.vllm_config = vllm_config
         self.device = device
-        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        scheduler_config = vllm_config.scheduler_config
+        self.max_num_reqs = scheduler_config.max_num_seqs
+        self.max_num_scheduled_tokens = scheduler_config.max_num_scheduled_tokens
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
@@ -271,6 +296,7 @@ class CudaGraphManager:
                 descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
 
         if not descs_by_token_lora:
+            self._warn_if_incomplete_full_decode_coverage()
             return
 
         all_token_counts = sorted({k[0] for k in descs_by_token_lora})
@@ -288,6 +314,61 @@ class CudaGraphManager:
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
             self._capture_descs[mode] = descs
+
+        self._warn_if_incomplete_full_decode_coverage()
+
+    def _warn_if_incomplete_full_decode_coverage(self) -> None:
+        if self.cudagraph_mode.decode_mode() != CUDAGraphMode.FULL:
+            return
+
+        max_num_reqs = self.max_num_reqs
+        if self.max_num_scheduled_tokens is not None:
+            max_num_reqs = min(max_num_reqs, self.max_num_scheduled_tokens)
+        decode_query_lens = [self.decode_query_len] * (max_num_reqs + 1)
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            speculative_config
+            and speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            max_speculative_tokens = self.vllm_config.num_speculative_tokens
+            dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
+                speculative_config.num_speculative_tokens_per_batch_size,
+                vllm_max_batch_size=max_num_reqs,
+                vllm_num_speculative_tokens=max_speculative_tokens,
+            )
+            num_new_sampled_tokens_per_step = (
+                self.decode_query_len - max_speculative_tokens
+            )
+            decode_query_lens = [
+                num_speculative_tokens + num_new_sampled_tokens_per_step
+                for num_speculative_tokens in dynamic_sd_lookup
+            ]
+
+        pure_decode_shapes = [
+            (num_reqs, num_reqs * decode_query_lens[num_reqs])
+            for num_reqs in range(1, max_num_reqs + 1)
+            if num_reqs * decode_query_lens[num_reqs] <= self.max_num_tokens
+        ]
+        lora_case = self.lora_capture_cases[0]
+        covered_batch_sizes = {
+            num_reqs
+            for num_reqs, num_tokens in pure_decode_shapes
+            if any(
+                desc.cg_mode == CUDAGraphMode.FULL
+                and _is_compatible(
+                    desc,
+                    num_reqs,
+                    num_tokens,
+                    decode_query_lens[num_reqs],
+                    lora_case,
+                )
+                for desc in self._candidates.get((num_tokens, lora_case), [])
+            )
+        }
+        _warn_if_incomplete_full_cudagraph_coverage(
+            pure_decode_shapes,
+            covered_batch_sizes,
+        )
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
