@@ -880,6 +880,14 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
+def reinterpret_u64_as_i64(addr: int) -> int:
+    """Wrap an address >= 2**63 into signed 64-bit range (same bit pattern),
+    since torch's tensor item assignment rejects Python ints that overflow
+    a signed `long long`, regardless of the tensor's actual dtype.
+    """
+    return addr - (1 << 64) if addr >= (1 << 63) else addr
+
+
 def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
     Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).

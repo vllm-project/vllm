@@ -27,6 +27,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import reinterpret_u64_as_i64
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -109,8 +110,8 @@ class ECCPUWorker:
 
         for i, block_idx in enumerate(block_ids):
             start = i * block_size
-            src_ptrs[idx] = src_base + start
-            dst_ptrs[idx] = dst_base + block_idx * block_size
+            src_ptrs[idx] = reinterpret_u64_as_i64(src_base + start)
+            dst_ptrs[idx] = reinterpret_u64_as_i64(dst_base + block_idx * block_size)
             sizes[idx] = min(block_size, total_bytes - start)
             idx += 1
 
@@ -173,8 +174,12 @@ class ECCPUWorker:
             op_idx = 0
             for block_ids in load_items.values():
                 for block_idx in block_ids:
-                    src_ptrs[op_idx] = src_base + block_idx * block_size
-                    dst_ptrs[op_idx] = dst_buf_base + op_idx * block_size
+                    src_ptrs[op_idx] = reinterpret_u64_as_i64(
+                        src_base + block_idx * block_size
+                    )
+                    dst_ptrs[op_idx] = reinterpret_u64_as_i64(
+                        dst_buf_base + op_idx * block_size
+                    )
                     op_idx += 1
 
             swap_blocks_batch(src_ptrs, dst_ptrs, sizes, is_src_access_order_any=True)
