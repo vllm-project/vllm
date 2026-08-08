@@ -234,6 +234,7 @@ __global__ void hisparse_swap_in_kernel(
     int32_t* __restrict__ miss_mask,  // [num_rows, top_k] or nullptr
     int32_t* __restrict__ device_global_indices,  // [max_rows, region_stride]
     int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
+    unsigned long long* __restrict__ stats,       // [2] hits,misses or nullptr
     const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
     const int64_t host_rows, const int32_t host_block_size,
     const int64_t host_block_stride, const int64_t row_bytes,
@@ -566,6 +567,13 @@ __global__ void hisparse_swap_in_kernel(
   if (compact_miss_counts != nullptr && tid == 0) {
     compact_miss_counts[batch_row] = total_misses;
   }
+  // Aggregate hit/miss counters (hit rate + PCIe gather volume telemetry).
+  if (stats != nullptr && threadIdx.x == 0) {
+    atomicAdd(&stats[0],
+              static_cast<unsigned long long>(total_hits + s_counters[3]));
+    atomicAdd(&stats[1], static_cast<unsigned long long>(total_misses));
+  }
+
   // Phase 4: write back the LRU order: stale evictables at the front,
   // freshly loaded misses next, then hits at MRU.
   const int total_evictable = hot_size - total_hits;
@@ -887,6 +895,7 @@ void hisparse_swap_in(
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
+    std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride,
     std::optional<torch::stable::Tensor> const& request_ids,
@@ -1106,6 +1115,17 @@ void hisparse_swap_in(
     miss_mask_ptr = mm.mutable_data_ptr<int32_t>();
   }
 
+  unsigned long long* stats_ptr = nullptr;
+  if (stats.has_value()) {
+    auto const& st = stats.value();
+    STD_TORCH_CHECK(
+        st.is_cuda() &&
+            st.scalar_type() == torch::headeronly::ScalarType::UInt64 &&
+            st.numel() >= 2,
+        "stats must be a uint64 CUDA tensor with >= 2 elements");
+    stats_ptr = static_cast<unsigned long long*>(st.mutable_data_ptr());
+  }
+
   int32_t* attention_indices_ptr = nullptr;
   if (attention_indices.has_value()) {
     auto const& indices = attention_indices.value();
@@ -1154,8 +1174,8 @@ void hisparse_swap_in(
       compact_miss_hots_ptr, compact_miss_counts_ptr,
       hot_indices.mutable_data_ptr<int32_t>(), attention_indices_ptr,
       miss_mask_ptr, device_global_indices.mutable_data_ptr<int32_t>(),
-      lru_slots.mutable_data_ptr<int16_t>(), request_state_ptr, host_rows,
-      host_layout.block_size, host_layout.block_stride, row_bytes,
+      lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
+      host_rows, host_layout.block_size, host_layout.block_stride, row_bytes,
       row_value_bytes, hot_block_stride, hot_block_table.stride(0),
       hot_block_size, top_k, hot_size, hash_size, region_stride,
       attention_block_stride, source_bt_stride, source_num_reqs,

@@ -601,6 +601,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prefix_cache_hits, per_engine_labelvalues
         )
 
+        self.hisparse_counters: dict[str, dict[int, Counter]] = {}
+        if vllm_config.attention_config.hisparse_config is not None:
+            for name, documentation in (
+                ("cache_hits", "Number of HiSparse device hot-buffer hits."),
+                ("cache_misses", "Number of HiSparse device hot-buffer misses."),
+                (
+                    "host_to_device_bytes",
+                    "Bytes transferred from host KV storage to HiSparse hot buffers.",
+                ),
+            ):
+                counter = self._counter_cls(
+                    name=f"vllm:hisparse_{name}",
+                    documentation=documentation,
+                    labelnames=labelnames,
+                )
+                self.hisparse_counters[name] = create_metric_per_engine(
+                    counter, per_engine_labelvalues
+                )
+
         #
         # External - KV connector prefix cache
         #
@@ -1140,6 +1159,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats, engine_idx
+                )
+
+            if self.hisparse_counters and (
+                hisparse_stats := scheduler_stats.hisparse_stats
+            ):
+                self.hisparse_counters["cache_hits"][engine_idx].inc(
+                    hisparse_stats.cache_hits
+                )
+                self.hisparse_counters["cache_misses"][engine_idx].inc(
+                    hisparse_stats.cache_misses
+                )
+                self.hisparse_counters["host_to_device_bytes"][engine_idx].inc(
+                    hisparse_stats.host_to_device_bytes
                 )
 
             if scheduler_stats.kv_connector_stats is not None:
