@@ -120,8 +120,21 @@ def compute_sub_block_ptrs(
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
 
+# A single cudaHostRegister of 512 GiB or more fails with
+# cudaErrorMemoryAllocation no matter how much host memory is free (measured on
+# H200: 511.96 GiB registers, 512.15 GiB does not), and lower ceilings have been
+# reported for other setups. Registration time scales with the size registered,
+# so splitting one call into several costs nothing.
+MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
+
+
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    """Register the mmap as CUDA pinned memory, one chunk at a time.
+
+    Chunks end on block-row boundaries, which are page aligned, so neither the
+    driver's page rounding nor any single block transfer straddles two
+    registrations.
+    """
     if not current_platform.is_cuda_alike():
         logger.info(
             "Skipping mmap host registration on %s; cudaHostRegister is only "
@@ -131,23 +144,39 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
         return
 
     rank = region.rank
-
     base_ptr = region._base.data_ptr()
-    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
-    if result.value != 0:
-        logger.warning(
-            "cudaHostRegister failed for rank=%d (code=%d) — "
-            "transfers will still work but may be slower (unpinned DMA)",
-            rank,
-            result,
-        )
-    else:
-        logger.debug(
-            "cudaHostRegister rank=%d %.2f GB",
-            rank,
-            region.total_size_bytes / 1e9,
-        )
+    total_size = region.total_size_bytes
+    rows_per_chunk = max(MAX_HOST_REGISTER_CHUNK_BYTES // region._row_stride, 1)
+    chunk_size = rows_per_chunk * region._row_stride
+
+    cudart = torch.cuda.cudart()
+    pinned = 0
+    while pinned < total_size:
+        size = min(chunk_size, total_size - pinned)
+        result = cudart.cudaHostRegister(base_ptr + pinned, size, 0)
+        if result.value != 0:
+            logger.warning(
+                "cudaHostRegister failed for rank=%d at offset %.2f GB "
+                "(code=%d) — %.2f of %.2f GB pinned, transfers through the "
+                "rest will still work but may be slower (unpinned DMA)",
+                rank,
+                pinned / 1e9,
+                result,
+                pinned / 1e9,
+                total_size / 1e9,
+            )
+            break
+        region.pinned_chunks.append((pinned, size))
+        pinned += size
+
+    if region.pinned_chunks:
         region.is_pinned = True
+        logger.debug(
+            "cudaHostRegister rank=%d %.2f GB in %d chunk(s)",
+            rank,
+            pinned / 1e9,
+            len(region.pinned_chunks),
+        )
 
 
 def _new_descriptor_buffers(
