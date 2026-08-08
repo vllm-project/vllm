@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -7,7 +8,11 @@ import pytest
 
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams
-from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
+from vllm.renderers.kimi_k3 import (
+    KimiK3Renderer,
+    _merge_k3_media_io_kwargs,
+    _preserve_malformed_tool_arguments,
+)
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.registry import TokenizerRegistry
 
@@ -351,3 +356,251 @@ async def test_render_messages_async_returns_token_prompt():
 
     assert prompt == {"prompt_token_ids": [4, 5]}
     assert conversation[0]["role"] == "user"
+
+
+def test_apply_chat_template_strips_null_tool_fields():
+    # The serving layer's model_dump() serializes unset tool fields as null;
+    # the platform tokenism omits them, so K3 drops them for prompt parity.
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "foo",
+                "description": None,
+                "strict": None,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    params = ChatParams(chat_template_kwargs={"tools": tools})
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert tokenizer.calls[-1]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "foo",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+
+def test_apply_chat_template_keeps_user_schema_content():
+    # None values inside user-supplied `parameters` are schema content
+    # (e.g. "default": null) and must survive the null stripping.
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "foo",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": {"type": "string", "default": None}},
+                },
+            },
+        }
+    ]
+    params = ChatParams(chat_template_kwargs={"tools": tools})
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert tokenizer.calls[-1]["tools"] == tools
+
+
+def test_preserve_malformed_tool_arguments_helper():
+    # Malformed strings are wrapped as JSON string literals; valid strings,
+    # dicts and non-list tool_calls pass through untouched.
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "a",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": '{"x": 1'},
+                },
+                {
+                    "id": "b",
+                    "type": "function",
+                    "function": {"name": "g", "arguments": '{"x": 1}'},
+                },
+                {
+                    "id": "c",
+                    "type": "function",
+                    "function": {"name": "h", "arguments": {"x": 1}},
+                },
+            ],
+        },
+    ]
+
+    (out,) = _preserve_malformed_tool_arguments(messages)[1:2]
+    calls = out["tool_calls"]
+    assert json.loads(calls[0]["function"]["arguments"]) == '{"x": 1'
+    assert calls[1]["function"]["arguments"] == '{"x": 1}'
+    assert calls[2]["function"]["arguments"] == {"x": 1}
+
+
+def test_preserve_malformed_tool_arguments_whitespace_only():
+    # Whitespace-only arguments are normalized to empty arguments instead of
+    # failing json.loads downstream (K3 treats them as empty).
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "a",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "  \n "},
+                },
+            ],
+        },
+    ]
+
+    (out,) = _preserve_malformed_tool_arguments(messages)
+    assert out["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
+def test_render_messages_preserves_malformed_tool_arguments():
+    """Malformed tool-call arguments round-trip to K3's encoding byte-exact.
+
+    parse_chat_messages json.loads string arguments, so the renderer wraps
+    unparsable ones as JSON string literals; the loads round-trips them to
+    the original string, which K3's encoding renders via its raw-text
+    fallback exactly like the platform tokenism.
+    """
+    tokenizer = StubTokenizer([1, 2])
+    renderer = _make_renderer(tokenizer)
+    malformed = '{"location":"北京"'
+
+    conversation, prompt = renderer.render_messages(
+        [
+            {"role": "user", "content": "北京天气怎么样？"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": malformed},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "晴"},
+            {"role": "user", "content": "继续"},
+        ],
+        ChatParams(),
+    )
+
+    assert prompt == {"prompt_token_ids": [1, 2]}
+    sent = tokenizer.conversations[-1]
+    assert sent[1]["tool_calls"][0]["function"]["arguments"] == malformed
+
+
+@pytest.mark.asyncio
+async def test_render_messages_async_preserves_malformed_tool_arguments():
+    tokenizer = StubTokenizer([3])
+    renderer = _make_renderer(tokenizer)
+    malformed = '{"location":"北京"'
+
+    await renderer.render_messages_async(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": malformed},
+                    }
+                ],
+            },
+        ],
+        ChatParams(),
+    )
+
+    sent = tokenizer.conversations[-1]
+    assert sent[0]["tool_calls"][0]["function"]["arguments"] == malformed
+
+
+def test_render_messages_converts_developer_to_system():
+    """developer messages must reach K3's encoding as system messages.
+
+    K3's encoding_k3 only recognizes system/user/assistant/tool and silently
+    drops other roles; developer (OpenAI's newer system-role name) is
+    converted with tools preserved so it renders as a dynamic tool declare.
+    """
+    tokenizer = StubTokenizer([1, 2])
+    renderer = _make_renderer(tokenizer)
+    tools = [{"type": "function", "function": {"name": "search"}}]
+
+    conversation, prompt = renderer.render_messages(
+        [
+            {"role": "developer", "content": "be terse", "tools": tools},
+            {"role": "user", "content": "hi"},
+        ],
+        ChatParams(),
+    )
+
+    assert prompt == {"prompt_token_ids": [1, 2]}
+    sent = tokenizer.conversations[-1]
+    # A developer message with BOTH content and tools is split in two
+    # (declare first, content second): the encoding renders a system
+    # message with tools as a tool-declare and would drop the content.
+    assert sent[0] == {"role": "system", "tools": tools}
+    assert sent[1] == {"role": "system", "content": "be terse"}
+
+
+def test_render_messages_converts_developer_without_tools_to_single_system():
+    tokenizer = StubTokenizer([1, 2])
+    renderer = _make_renderer(tokenizer)
+
+    conversation, prompt = renderer.render_messages(
+        [{"role": "developer", "content": "be terse"}],
+        ChatParams(),
+    )
+
+    assert prompt == {"prompt_token_ids": [1, 2]}
+    sent = tokenizer.conversations[-1]
+    assert sent[0] == {"role": "system", "content": "be terse", "tools": None}
+    assert len(sent) == 1
+
+
+def test_render_messages_converts_developer_tools_without_content_to_single():
+    tokenizer = StubTokenizer([1, 2])
+    renderer = _make_renderer(tokenizer)
+    tools = [{"type": "function", "function": {"name": "search"}}]
+
+    conversation, prompt = renderer.render_messages(
+        [{"role": "developer", "tools": tools}],
+        ChatParams(),
+    )
+
+    assert prompt == {"prompt_token_ids": [1, 2]}
+    sent = tokenizer.conversations[-1]
+    assert sent[0] == {"role": "system", "content": "", "tools": tools}
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_render_messages_async_converts_developer_to_system():
+    tokenizer = StubTokenizer([3])
+    renderer = _make_renderer(tokenizer)
+
+    await renderer.render_messages_async(
+        [{"role": "developer", "content": "be terse"}], ChatParams()
+    )
+
+    sent = tokenizer.conversations[-1]
+    assert sent[0]["role"] == "system"
+    assert sent[0]["content"] == "be terse"

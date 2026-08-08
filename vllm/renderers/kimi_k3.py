@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from typing import Any, cast
 
 from vllm.config import VllmConfig
@@ -30,6 +31,113 @@ def _merge_k3_media_io_kwargs(
     media_io_kwargs: dict[str, dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]] | None:
     return merge_media_io_kwargs(_K3_MEDIA_IO_DEFAULTS, media_io_kwargs)
+
+
+def _convert_developer_to_system(
+    conversation: list[ConversationMessage],
+) -> list[ConversationMessage]:
+    """Map ``developer`` messages to ``system`` for K3's chat encoding.
+
+    K3's ``encoding_k3`` only recognizes ``system`` and silently drops other
+    roles. A system message carrying ``tools`` is rendered as a dynamic tool
+    declare with its content ignored, so a developer message with BOTH
+    content and tools is split in two (declare first, content second),
+    matching the Rust frontend.
+    """
+    converted: list[ConversationMessage] = []
+    for msg in conversation:
+        if msg["role"] != "developer":
+            converted.append(msg)
+            continue
+        content = msg.get("content")
+        has_content = bool(
+            content
+            if isinstance(content, str)
+            else (content is not None and content != [])
+        )
+        if has_content and msg.get("tools"):
+            converted.append(
+                {"role": "system", "tools": msg["tools"]}  # type: ignore[misc]
+            )
+            converted.append(
+                {
+                    **{k: v for k, v in msg.items() if k != "tools"},
+                    "role": "system",
+                }  # type: ignore[misc]
+            )
+        else:
+            converted.append({**msg, "role": "system"})  # type: ignore[misc]
+    return converted
+
+
+def _drop_null_tool_fields(tools: Any) -> Any:
+    """Drop keys with ``None`` values at the tool and function level.
+
+    The serving layer's ``model_dump()`` keeps unset optional fields as
+    explicit ``null``, which the platform tokenism omits -- the nulls would
+    diverge the rendered prompt. Only the two pydantic-model levels are
+    touched; schema content under ``parameters`` is left alone.
+    """
+    if not isinstance(tools, list):
+        return tools
+    cleaned = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            cleaned.append(tool)
+            continue
+        tool = {k: v for k, v in tool.items() if v is not None}
+        function = tool.get("function")
+        if isinstance(function, dict):
+            tool["function"] = {k: v for k, v in function.items() if v is not None}
+        cleaned.append(tool)
+    return cleaned
+
+
+def _preserve_malformed_tool_arguments(
+    messages: list[ChatCompletionMessageParam],
+) -> list[ChatCompletionMessageParam]:
+    """Wrap unparsable tool-call ``arguments`` as JSON string literals.
+
+    ``parse_chat_messages`` rejects malformed JSON arguments with a 400,
+    while K3's encoding tolerates them via a raw-text fallback. Wrapping the
+    string as a JSON string literal survives that ``loads`` (round-tripping
+    to the original string), so the text reaches K3's encoding byte-exact.
+    """
+    preserved: list[ChatCompletionMessageParam] = []
+    for message in messages:
+        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not isinstance(tool_calls, list):
+            preserved.append(message)
+            continue
+        new_calls = []
+        for tool_call in tool_calls:
+            if isinstance(tool_call, dict):
+                function = tool_call.get("function")
+                if isinstance(function, dict):
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        if not arguments.strip():
+                            # Whitespace-only arguments read as a non-empty
+                            # string downstream and fail json.loads; K3 treats
+                            # them as empty arguments.
+                            tool_call = {
+                                **tool_call,
+                                "function": {**function, "arguments": "{}"},
+                            }
+                        else:
+                            try:
+                                json.loads(arguments)
+                            except json.JSONDecodeError:
+                                tool_call = {
+                                    **tool_call,
+                                    "function": {
+                                        **function,
+                                        "arguments": json.dumps(arguments),
+                                    },
+                                }
+            new_calls.append(tool_call)
+        preserved.append({**message, "tool_calls": new_calls})  # type: ignore[typeddict-item]
+    return preserved
 
 
 def _dump_k3_template_value(value: Any) -> Any:
@@ -169,6 +277,8 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             kwargs["tool_choice"] = _dump_k3_template_value(params.tool_choice)
         if params.response_format is not None:
             kwargs["response_format"] = _dump_k3_template_value(params.response_format)
+        if (tools := kwargs.get("tools")) is not None:
+            kwargs["tools"] = _drop_null_tool_fields(tools)
         kwargs["tokenize"] = True
         return self.get_tokenizer().apply_chat_template(conversation, **kwargs)
 
@@ -178,14 +288,16 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         conversation, mm_data, mm_uuids = parse_chat_messages(
-            messages,
+            _preserve_malformed_tool_arguments(messages),
             self.model_config,
             content_format="string",
             media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        rendered_conversation = _normalize_k3_tool_messages(conversation)
+        rendered_conversation = _normalize_k3_tool_messages(
+            _convert_developer_to_system(conversation)
+        )
         prompt = parse_dec_only_prompt(
             self._apply_chat_template(rendered_conversation, params)
         )
@@ -202,14 +314,16 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
-            messages,
+            _preserve_malformed_tool_arguments(messages),
             self.model_config,
             content_format="string",
             media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        rendered_conversation = _normalize_k3_tool_messages(conversation)
+        rendered_conversation = _normalize_k3_tool_messages(
+            _convert_developer_to_system(conversation)
+        )
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)
         if mm_data is not None:
