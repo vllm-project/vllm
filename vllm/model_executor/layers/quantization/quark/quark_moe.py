@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import Any
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
@@ -55,6 +57,10 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.mxfp4 import (
+    _use_k3_situ_aiter,
+    setup_k3_situ_aiter_weights,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -89,6 +95,17 @@ __all__ = [
     "QuarkOCP_MX_MoEMethod",
     "QuarkNvfp4MoEMethod",
 ]
+
+
+def _use_k3_situ_aiter_a8w4(
+    moe: FusedMoEConfig, ocp_mx_scheme: OCP_MX_Scheme | str
+) -> bool:
+    """Whether Quark K3 should override A4 activations with native A8."""
+    return (
+        ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+        and envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        and _use_k3_situ_aiter(moe)
+    )
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -1091,8 +1108,19 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         else:
             self.static_input_scales = False
 
+        self.is_k3_situ_aiter_a8w4 = _use_k3_situ_aiter_a8w4(moe, self.ocp_mx_scheme)
+
         # Select backend based on OCP MX scheme
-        if self.ocp_mx_scheme == "w_mxfp4":
+        if self.is_k3_situ_aiter_a8w4:
+            # The checkpoint declares dynamic MXFP4 activations. This explicit
+            # opt-in keeps its packed MXFP4 weights/scales but quantizes SiTU
+            # activations to FP8 in AITER's native SiTUv2 A8W4 kernels.
+            self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+            # Keep all token buckets on A8W4 so layout and compute semantics
+            # cannot silently switch back to A16W4 at low token counts.
+            os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
+        elif self.ocp_mx_scheme == "w_mxfp4":
             # W4A16: weight-only MXFP4
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
@@ -1137,6 +1165,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         logger.info_once(
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
         )
+        if self.is_k3_situ_aiter_a8w4:
+            logger.warning_once(
+                "Kimi-K3 Quark checkpoint declares dynamic MXFP4 activations; "
+                "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 explicitly overrides "
+                "routed-MoE activations to FP8 and uses native AITER SiTUv2 "
+                "A8W4 with MXFP4 weights."
+            )
 
     def maybe_roundup_sizes(
         self,
@@ -1153,6 +1188,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
         # Round per-partition sizes up to each backend's requirement. Emulation is
         # handled inside the helper too (OCP MX block alignment), so no special-case.
+        if self.is_k3_situ_aiter_a8w4:
+            # K3's TP8 intermediate size is 384. AITER SiTUv2 handles it
+            # natively; generic MXFP4 rounding to 512 wastes memory and can OOM.
+            return hidden_size, intermediate_size_per_partition
         if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
@@ -1278,7 +1317,25 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer):
+        if self.is_k3_situ_aiter_a8w4:
+            self._setup_kernel_k3_situ(layer)
+            return
         self._setup_kernel(layer)
+
+    def _setup_kernel_k3_situ(self, layer: RoutedExperts) -> None:
+        setup_k3_situ_aiter_weights(layer)
+        torch.accelerator.empty_cache()
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config is not None and self.experts_cls is not None:
+            self.moe_kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                mxfp4_backend=self.mxfp4_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._expert_routing_tables(),
+                layer=layer,
+            )
 
     def _setup_kernel(self, layer: RoutedExperts):
         """Setup kernel using oracle functions for MXFP4 schemes (W4A16, W4A8)."""
