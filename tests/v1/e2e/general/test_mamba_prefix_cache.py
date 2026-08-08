@@ -744,17 +744,18 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
             ],
         ),
+        # Successor-aware hashing makes the final aligned prompt boundary
+        # reusable, so these prompts no longer stop one Mamba page early.
         "prompt_2_block_size": TestConfig(
             num_prompt_tokens=560 * 2,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 560, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     560 * 2,
                     4,
-                    [1, 1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1, 1],
+                    [0, 1, 1, 1, 1, 1],
                     (1, 2),
                     (-1, -1),
                 ),
@@ -765,12 +766,12 @@ def get_mamba_prefix_cache_step_configs(
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560, 570, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
+                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(560 * 2, 10, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
                 StepAction(
                     560 * 2 + 10,
                     4,
-                    [1, 0, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
+                    [0, 1, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -781,12 +782,11 @@ def get_mamba_prefix_cache_step_configs(
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
+                StepAction(0, 560 * 3, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     560 * 3,
                     4,
-                    [0, 1, 1, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1, 1],
+                    [0, 0, 1, 1, 1, 1, 1],
                     (2, 3),
                     (-1, -1),
                 ),
@@ -797,12 +797,18 @@ def get_mamba_prefix_cache_step_configs(
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(560 * 2, 570, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
+                StepAction(0, 560 * 3, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    560 * 3,
+                    10,
+                    [0, 0, 1, 1, 1, 1, 1],
+                    (2, 3),
+                    (-1, -1),
+                ),
                 StepAction(
                     560 * 3 + 10,
                     4,
-                    [0, 1, 0, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
+                    [0, 0, 1, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -816,24 +822,15 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     560 * 5,
-                    560 * 4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
-                    (4, 8),
-                    (-1, -1),
-                ),
-                StepAction(
-                    560 * 9,
-                    560,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1]
-                    if a
-                    else [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
-                    (8, 9),
+                    560 * 5,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1],
+                    (4, 9),
                     (-1, -1),
                 ),
                 StepAction(
                     560 * 10,
                     4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1]
                     if a
                     else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
                     (9, 10),
@@ -849,18 +846,18 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     560 * 5,
-                    560 * 4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
-                    (4, 8),
+                    560 * 5,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1],
+                    (4, 9),
                     (-1, -1),
                 ),
                 StepAction(
-                    560 * 9,
-                    560 + 10,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1]
+                    560 * 10,
+                    10,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1]
                     if a
-                    else [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
-                    (8, 10),
+                    else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (9, 10),
                     (-1, -1),
                 ),
             ],
@@ -930,12 +927,12 @@ def _run_mamba_prefix_cache_mrv1(
     cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
 
@@ -1199,11 +1196,11 @@ def _run_mamba_prefix_cache_mrv2(
         cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=False)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_mamba_prefix_cache_mrv2_async(monkeypatch: pytest.MonkeyPatch):
     _run_mamba_prefix_cache_mrv2(monkeypatch, async_scheduling=True)

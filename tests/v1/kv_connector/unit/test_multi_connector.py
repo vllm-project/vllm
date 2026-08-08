@@ -315,11 +315,9 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
-    # First event is bind_gpu_block_pool from initialization, then
-    # set_xfer_handshake_metadata_pp_aware, then on_new_request when the request is
-    # enqueued, then get_num_new_matched_tokens and update_state_after_alloc from
-    # generate().
-    assert storage1_scheduler_events[:6] == [
+    # Prefix-hash mode is propagated before the connector is initialized.
+    assert storage1_scheduler_events[:7] == [
+        "set_eagle_prefix_cache_hashing False",
         "bind_gpu_block_pool",
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
@@ -327,9 +325,8 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization (register_kv_caches,
-    # set_host_xfer_buffer_ops, get_handshake_metadata), then generate() events.
-    assert events["storage1-WORKER"][:8] == [
+    assert events["storage1-WORKER"][:9] == [
+        "set_eagle_prefix_cache_hashing False",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
@@ -339,7 +336,8 @@ def test_multi_example_connector_consistency():
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert storage2_scheduler_events[:6] == [
+    assert storage2_scheduler_events[:7] == [
+        "set_eagle_prefix_cache_hashing False",
         "bind_gpu_block_pool",
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
@@ -347,7 +345,8 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-WORKER"][:8] == [
+    assert events["storage2-WORKER"][:9] == [
+        "set_eagle_prefix_cache_hashing False",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
