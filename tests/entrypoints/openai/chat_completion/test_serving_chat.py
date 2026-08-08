@@ -21,7 +21,11 @@ from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
+from vllm.entrypoints.openai.chat_completion.batch_serving import (
+    OpenAIServingChatBatch,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
@@ -63,6 +67,69 @@ _PER_REQUEST_STATS = RequestStateStats(
     last_token_ts=3.0,
     num_generation_tokens=2,
 )
+
+
+@pytest.mark.asyncio
+async def test_batch_parsers_receive_per_conversation_request():
+    serving = object.__new__(OpenAIServingChatBatch)
+    serving.response_role = "assistant"
+    serving.system_fingerprint = None
+    serving._raise_if_error = MagicMock()
+
+    request = BatchChatCompletionRequest(
+        messages=[
+            [{"role": "user", "content": "first"}],
+            [{"role": "user", "content": "second"}],
+        ],
+    )
+    single_requests = [
+        request.to_chat_completion_request(messages) for messages in request.messages
+    ]
+    parsers = [MagicMock(), MagicMock()]
+    for parser in parsers:
+        parser.parse.return_value = (None, "parsed", None)
+
+    async def result_generator(prompt_idx: int):
+        yield RequestOutput(
+            request_id=f"test-{prompt_idx}",
+            prompt="test",
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="output",
+                    token_ids=[2],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
+        )
+
+    generators = [result_generator(0), result_generator(1)]
+    metadata = RequestResponseMetadata(request_id="test")
+
+    response = await serving.chat_completion_full_generator_batch(
+        request,
+        single_requests,
+        generators,
+        "test",
+        "model",
+        [list(messages) for messages in request.messages],
+        MagicMock(),
+        metadata,
+        parsers,
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    for parser, single_request in zip(parsers, single_requests):
+        parser.parse.assert_called_once_with(
+            "output",
+            request=single_request,
+            model_output_token_ids=[2],
+        )
 
 
 @pytest.fixture(scope="module")
