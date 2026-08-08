@@ -628,12 +628,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # Prefix caching: D allocated only uncached blocks, so on a partial hit it
         # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
         # the uncomputed tail into D's slots. Runs on kernel ids, post-expansion.
-        remote_block_ids, local_block_ids = self._apply_prefix_caching(
-            decode_block_ids=remote_block_ids,
-            prefill_block_ids=local_block_ids,
-            decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
-            prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
-        )
+        try:
+            remote_block_ids, local_block_ids = self._apply_prefix_caching(
+                decode_block_ids=remote_block_ids,
+                prefill_block_ids=local_block_ids,
+                decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+                prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+            )
+        except ValueError as e:
+            self._log_failure(
+                failure_type="block_validation_failed",
+                req_id=request_id,
+                msg="Remote/local block count mismatch",
+                error=e,
+                dst_engine_id=dst_engine_id,
+            )
+            self.xfer_stats.record_failed_transfer()
+            return None
 
         local_block_ids = list(local_block_ids)
         remote_block_ids = list(remote_block_ids)

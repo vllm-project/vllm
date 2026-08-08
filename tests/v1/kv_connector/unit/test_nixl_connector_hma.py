@@ -446,10 +446,27 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
     worker._group_spec_types = (FullAttentionSpec, MambaSpec)
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
-    with pytest.raises(AssertionError, match="unpairable SSM state slots"):
+    with pytest.raises(ValueError, match="unpairable SSM state slots"):
         worker._apply_prefix_caching(
             [list(range(10)), [4, 5, 6, 7]], [list(range(10)), [8, 9]], 10, 10
         )
+
+
+@pytest.mark.cpu_test
+def test_apply_prefix_caching_non_mamba_block_mismatch():
+    """When decode has more blocks than prefill in a non-Mamba model,
+    _apply_prefix_caching must raise ValueError (not AssertionError)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = False
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.kv_cache_config = make_kv_cache_config(block_size=16)
+
+    with pytest.raises(ValueError, match="decode has .* blocks but prefill"):
+        worker._apply_prefix_caching([list(range(10))], [list(range(5))], 1, 1)
 
 
 @pytest.mark.cpu_test
