@@ -134,6 +134,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     # Provided by the platform subclass.
     backend_cls: ClassVar[type[AttentionBackend]]
+    # Backend for the SWA cache layer; None uses the default SWA backend.
+    swa_backend_cls: ClassVar[type[AttentionBackend] | None] = None
     # KV-cache per-token block format (both layouts are paged). True (default)
     # = fp8_ds_mla (UE8M0 block-scaled fp8 packed as uint8); False = plain
     # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
@@ -322,6 +324,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             dtype=self.kv_cache_torch_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
+            backend_cls=self.swa_backend_cls,
         )
 
         # Register with compilation context for metadata lookup.
