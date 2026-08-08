@@ -542,9 +542,8 @@ class InternS1ForConditionalGeneration(
         image_size = config.vision_config.image_size[0]
         patch_size = config.vision_config.patch_size[0]
         self.patch_size = patch_size
-        self.num_image_token = int(
-            (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
-        )
+        self.patch_tokens = (image_size // patch_size) ** 2
+        self.num_image_token = int(self.patch_tokens * (config.downsample_ratio**2))
         self.downsample_ratio = config.downsample_ratio
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
@@ -818,3 +817,17 @@ class InternS1ForConditionalGeneration(
             connector="multi_modal_projector",
             tower_model="vision_tower",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        if num_image_tokens <= 0 or self.num_image_token <= 0:
+            return 0
+
+        num_patches = num_image_tokens // self.num_image_token
+        return num_patches * (self.patch_tokens + 1)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        if num_vision_tokens <= 0 or self.num_image_token <= 0:
+            return 0
+
+        num_patches = num_vision_tokens // (self.patch_tokens + 1)
+        return num_patches * self.num_image_token
