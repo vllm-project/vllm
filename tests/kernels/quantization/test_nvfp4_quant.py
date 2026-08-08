@@ -306,3 +306,29 @@ def test_quantize_to_fp4_padded_no_sf_swizzled(pad_shape: tuple[int, int]) -> No
     out_ans = cast_from_fp4(out, m, n)
     torch.testing.assert_close(out_ans, out_ref)
     torch.testing.assert_close(scale_ans, scale_ref)
+
+
+@pytest.mark.parametrize("shape", [(2, 512), (16, 1024), (128, 4096)])
+@torch.inference_mode()
+def test_quantize_to_fp4_noncontiguous_input(shape: tuple[int, int]) -> None:
+    """A strided (non-contiguous) view must quantize the same as its
+    contiguous copy; previously the kernel read the view's buffer linearly
+    and silently quantized the wrong memory for every row past the first."""
+    dtype = torch.float16
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+
+    m, n = shape
+
+    wide = torch.randn((m, 2 * n), dtype=dtype)
+    x_strided = wide[:, :n]
+    assert not x_strided.is_contiguous()
+
+    tensor_amax = torch.abs(x_strided).max().to(torch.float32)
+    global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
+
+    out_ref, scale_ref = ops.scaled_fp4_quant(x_strided.contiguous(), global_scale)
+    out, out_scale = ops.scaled_fp4_quant(x_strided, global_scale)
+
+    torch.testing.assert_close(out, out_ref)
+    torch.testing.assert_close(out_scale, scale_ref)
