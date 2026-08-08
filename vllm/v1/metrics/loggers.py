@@ -2,10 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+import queue
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import Any
 
+import msgspec
+import zmq
 from prometheus_client import Counter, Gauge, Histogram
 
 import vllm.envs as envs
@@ -26,6 +31,7 @@ from vllm.v1.metrics.stats import (
     MultiModalCacheStats,
     PromptTokenStats,
     SchedulerStats,
+    ZmqMetricsStats,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
@@ -68,6 +74,9 @@ class StatLoggerBase(ABC):
         pass
 
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
+        pass
+
+    def shutdown(self):  # noqa
         pass
 
 
@@ -1308,6 +1317,124 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
     return build_buckets([1, 2, 5], max_value)
 
 
+class ZmqStatLogger(AggregateStatLoggerBase):
+    SHUTDOWN_TIMEOUT: float = 1.0
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_indexes: list[int],
+    ):
+        self.vllm_config = vllm_config
+        self.engine_indexes = engine_indexes
+        self.cache_config_info: dict[str, Any] | None = None
+        if vllm_config.cache_config is not None:
+            self.cache_config_info = vllm_config.cache_config.metrics_info()
+
+        self.queue: queue.Queue[ZmqMetricsStats | None] = queue.Queue()
+        self.running = True
+
+        # ZMQ setup
+        self._ctx = zmq.Context.instance()
+        self._pub = self._ctx.socket(zmq.PUB)
+
+        endpoint = vllm_config.observability_config.zmq_metrics_endpoint
+        if endpoint and (
+            "*" in endpoint
+            or "::" in endpoint
+            or endpoint.startswith("ipc://")
+            or endpoint.startswith("inproc://")
+        ):
+            logger.info("Binding ZMQ metrics publisher to %s", endpoint)
+            self._pub.bind(endpoint)
+        elif endpoint:
+            logger.info("Connecting ZMQ metrics publisher to %s", endpoint)
+            self._pub.connect(endpoint)
+
+        self._thread = threading.Thread(
+            target=self._publisher_thread,
+            daemon=True,
+            name="zmq-metrics-publisher",
+        )
+        self._thread.start()
+
+    def record(
+        self,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_idx: int = 0,
+    ):
+        if not self.running or scheduler_stats is None:
+            return
+
+        msg = ZmqMetricsStats(
+            num_requests_running=scheduler_stats.num_running_reqs,
+            num_requests_waiting=scheduler_stats.num_waiting_reqs,
+            kv_cache_usage_perc=scheduler_stats.kv_cache_usage,
+            cache_config_info=self.cache_config_info,
+            engine_id=str(engine_idx),
+        )
+        self.queue.put(msg)
+
+    def log_engine_initialized(self):
+        pass
+
+    def _publisher_thread(self) -> None:
+        encoder = msgspec.msgpack.Encoder()
+
+        while self.running:
+            try:
+                msg = self.queue.get()
+                if msg is None:
+                    break
+
+                # Drain the queue to get the latest message
+                latest_msg = msg
+                try:
+                    while True:
+                        next_item = self.queue.get_nowait()
+                        if next_item is None:
+                            return
+                        latest_msg = next_item
+                except queue.Empty:
+                    pass
+
+                payload = encoder.encode(latest_msg)
+                self._pub.send(payload)
+
+            except Exception as e:
+                logger.exception("Error in ZMQ metrics publisher thread: %s", e)
+
+    def shutdown(self):
+        """Stop the publisher thread and clean up resources."""
+        self.running = False
+        self.queue.put_nowait(None)
+
+        start = time.time()
+        pending_items = True
+        while pending_items and (time.time() - start < self.SHUTDOWN_TIMEOUT):
+            pending_items = not self.queue.empty()
+            if pending_items:
+                time.sleep(0.1)
+
+        if pending_items:
+            logger.warning(
+                "Warning: Queue still has %s items after %s seconds timeout",
+                self.queue.qsize(),
+                self.SHUTDOWN_TIMEOUT,
+            )
+
+        if self._thread.is_alive():
+            self._thread.join(timeout=self.SHUTDOWN_TIMEOUT)
+
+        try:
+            if self._pub is not None:
+                self._pub.close(linger=0)
+        except Exception as e:
+            logger.error("Error closing ZMQ socket: %s", e)
+
+
 class StatLoggerManager:
     """
     StatLoggerManager:
@@ -1371,6 +1498,17 @@ class StatLoggerManager:
             self.stat_loggers.append(
                 PrometheusStatLogger(vllm_config, self.engine_indexes)
             )
+        if vllm_config.observability_config.enable_zmq_metrics:
+            if client_count > 1 or len(self.engine_indexes) > 1:
+                logger.warning(
+                    "ZmqStatLogger created with api_server_count or engine count "
+                    "more than 1; disabling it as ZMQ metrics logger only supports "
+                    "a single engine."
+                )
+            else:
+                self.stat_loggers.append(
+                    ZmqStatLogger(vllm_config, self.engine_indexes)
+                )
 
     def record(
         self,
@@ -1400,3 +1538,7 @@ class StatLoggerManager:
     def log_engine_initialized(self):
         for agg_logger in self.stat_loggers:
             agg_logger.log_engine_initialized()
+
+    def shutdown(self):
+        for logger in self.stat_loggers:
+            logger.shutdown()
