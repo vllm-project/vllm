@@ -2133,9 +2133,30 @@ def is_set(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+# Env vars vLLM used to read that were removed in favor of a CLI flag or a
+# different env var. Setting one now has no effect; the generic "unknown
+# variable" message below doesn't say why, so call these out by name.
+REMOVED_ENVIRONMENT_VARIABLES: dict[str, str] = {
+    "VLLM_ATTENTION_BACKEND": (
+        "the --attention-backend CLI flag or the attention_backend argument to "
+        "LLM()/EngineArgs"
+    ),
+}
+
+
 def validate_environ(hard_fail: bool) -> None:
     for env in os.environ:
-        if env.startswith("VLLM_") and env not in environment_variables:
+        if env in REMOVED_ENVIRONMENT_VARIABLES:
+            # These already raise under hard_fail as unknown VLLM_ variables;
+            # only the message changes, not the strict-mode control flow.
+            message = (
+                f"Environment variable {env} is no longer read by vLLM and has "
+                f"no effect; use {REMOVED_ENVIRONMENT_VARIABLES[env]} instead."
+            )
+            if hard_fail:
+                raise ValueError(message)
+            logger.warning(message)
+        elif env.startswith("VLLM_") and env not in environment_variables:
             if hard_fail:
                 raise ValueError(f"Unknown vLLM environment variable detected: {env}")
             else:
