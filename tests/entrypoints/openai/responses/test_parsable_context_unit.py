@@ -7,7 +7,7 @@ Parser (via parse) and properly builds response output items.
 """
 
 from collections.abc import Sequence
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -361,3 +361,41 @@ def test_num_init_messages_offset():
     items = ctx.make_response_output_items()
     assert len(items) == 1
     assert items[0].type == "message"
+
+
+# ---------------------------------------------------------------------------
+# Tests: builtin tool dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["code_interpreter", "python"])
+async def test_call_tool_dispatches_python(tool_name):
+    """A function call named ``code_interpreter`` or ``python`` is dispatched
+    to ``call_python_tool``.
+
+    ``need_builtin_tool_call`` accepts both names, so ``call_tool`` must
+    dispatch both; otherwise a ``python`` call is silently dropped.
+    """
+    ctx = _make_context(_NoOpParser)
+    ctx._tool_sessions = {"python": MagicMock()}
+    ctx.call_python_tool = AsyncMock(return_value=[])
+    ctx.response_messages = [MagicMock(type="function_call")]
+    # ``name`` is reserved by MagicMock's constructor, so set it explicitly.
+    ctx.response_messages[-1].name = tool_name
+
+    await ctx.call_tool()
+
+    ctx.call_python_tool.assert_awaited_once()
+    assert ctx.call_python_tool.await_args.args[0] is ctx._tool_sessions["python"]
+
+
+@pytest.mark.parametrize("tool_name", ["code_interpreter", "python"])
+def test_need_builtin_and_call_tool_agree_on_python(tool_name):
+    """``need_builtin_tool_call`` and ``call_tool`` must recognize the same
+    set of builtin names, so a call the loop waits on is actually executed."""
+    ctx = _make_context(_NoOpParser, available_tools={"python"})
+    ctx.response_messages = [MagicMock(type="function_call")]
+    ctx.response_messages[-1].name = tool_name
+
+    assert ctx.need_builtin_tool_call() is True

@@ -523,7 +523,7 @@ class ParsableContext(ConversationContext):
         # change this to a mcp_ function call
         last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
         self.response_messages[-1] = last_msg
-        if last_msg.name == "code_interpreter":
+        if last_msg.name in ("code_interpreter", "python"):
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)
         elif last_msg.name == "web_search_preview":
             return await self.call_search_tool(self._tool_sessions["browser"], last_msg)
