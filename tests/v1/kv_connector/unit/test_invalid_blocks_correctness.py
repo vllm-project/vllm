@@ -105,6 +105,9 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
 
     # store original num_computed_tokens for comparison
     original_num_computed_tokens = request.num_computed_tokens
+    # A KV load failure can arrive after async scheduling has reserved an
+    # output placeholder. Recompute must restart from prefill state.
+    request.num_output_placeholders = 1
 
     model_runner_output = create_model_runner_output(
         [request],
@@ -132,6 +135,8 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
     assert request.num_computed_tokens < original_num_computed_tokens, (
         "num_computed_tokens should be reduced after invalid block detection"
     )
+    assert request.num_output_placeholders == 0
+    assert request.async_tokens_to_discard == 0
 
     # 3. no output should be generated (request is still running)
     # the request should be skipped in the output loop
