@@ -676,3 +676,74 @@ def test_aiter_fusion_rmsnorm_gated_quant_no_gdn_layers(
         model_fused(x, z)
 
         assert fusion_pass.matched_count == 0
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="V1 attention only on CUDA")
+def test_fusion_rmsnorm_group_quant_skips_ue8m0():
+    """scale_ue8m0=True group quant must stay unfused.
+
+    The fused op ``rms_norm_per_block_quant`` has no ue8m0 parameter and
+    always emits raw float32 group scales. Replacing a ``scale_ue8m0=True``
+    ``per_token_group_fp8_quant`` with it silently drops the power-of-two
+    scale contract of the DeepGEMM path, so the pass must not match those
+    graphs. Regression test for the pattern-registration fix; before it,
+    the pass matched and the compiled model produced non-power-of-two
+    scales (contract break measured as 128/128 groups on SM120).
+    """
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(torch.bfloat16)
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["none", "+rms_norm", "+quant_fp8"],
+            backend="eager",
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config):
+
+        class Model(torch.nn.Module):
+            def __init__(self, hidden: int):
+                super().__init__()
+                self.norm = RMSNorm(hidden, eps=1e-6)
+                self.quant = QuantFP8(
+                    static=False,
+                    group_shape=GroupShape(1, 128),
+                    column_major_scales=False,
+                    use_ue8m0=True,
+                    compile_native=False,
+                )
+
+            def forward(self, x, residual):
+                y, res = self.norm(x, residual)
+                q, s = self.quant(y)
+                deq = q.to(torch.float32) * s.repeat_interleave(128, dim=1).to(
+                    torch.float32
+                )
+                return deq, s, res
+
+        model = Model(512)
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config), fusion_pass, PostCleanupPass(vllm_config)
+        )
+
+        x = torch.randn(32, 512)
+        residual = torch.randn(32, 512)
+        result = model(x.clone(), residual.clone())
+        result2 = torch.compile(model, backend=backend)(x.clone(), residual.clone())
+
+        # The ue8m0 graph must not be rewritten...
+        assert fusion_pass.matched_count == 0
+        # ...and the compiled model must keep emitting power-of-two scales.
+        for scales in (result[1], result2[1]):
+            log2_scales = torch.log2(scales.float())
+            assert torch.equal(log2_scales, log2_scales.round()), (
+                "expected power-of-two group scales on the scale_ue8m0=True path"
+            )
+        torch.testing.assert_close(result[0], result2[0], atol=1e-6, rtol=0)
