@@ -92,9 +92,12 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
             content = delta_text[think_end_index + len(self.end_token) :]
             content = content.lstrip("\n")
             response_start_idx = content.find(self.response_start_token)
-            response_end_idx = content.rfind(self.response_end_token)
             if response_start_idx != -1:
                 content = content[response_start_idx + len(self.response_start_token) :]
+            # Recompute the end index *after* the prefix slice above, otherwise
+            # it is stale (offset by len("<response>")) and truncates the
+            # content — mirrors the sibling elif branch below.
+            response_end_idx = content.rfind(self.response_end_token)
             if response_end_idx != -1:
                 content = content[:response_end_idx]
             return DeltaMessage(
