@@ -231,3 +231,55 @@ def test_mistral_tokenizer_compile_grammar(
     grammar = backend.compile_grammar(request_type, grammar_spec)
     assert grammar is not None
     assert not grammar.is_terminated()
+
+
+def test_grammar_bitmask_pads_missing_drafts():
+    # Speculative methods can schedule fewer drafts than
+    # num_speculative_tokens for a step (e.g. dspark on its first decode).
+    # The bitmask must still emit exactly 1 + num_speculative_tokens rows per
+    # grammar request, or the runner's logit mapping goes out of sync and the
+    # engine dies (vllm#50924).
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    prompt = tokenizer.encode('{"a": "b"}')
+    num_spec = 3
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(tokenizer=TOKENIZER),
+        structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+        speculative_config=SpeculativeConfig(
+            model="[ngram]", num_speculative_tokens=num_spec
+        ),
+    )
+    manager = StructuredOutputManager(vllm_config)
+
+    def make_req(req_id: str) -> Request:
+        sampling_params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
+        )
+        sampling_params.structured_outputs._backend = "guidance"
+        sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
+        req = Request(
+            req_id,
+            prompt_token_ids=prompt,
+            sampling_params=sampling_params,
+            pooling_params=None,
+        )
+        manager.grammar_init(req)
+        return req
+
+    req_full = make_req("req_full")
+    req_empty = make_req("req_empty")
+    for req in (req_full, req_empty):
+        while not req.structured_output_request._check_grammar_completion():
+            pass
+
+    bitmask = manager.grammar_bitmask(
+        requests={req_full.request_id: req_full, req_empty.request_id: req_empty},
+        structured_output_request_ids=[req_full.request_id, req_empty.request_id],
+        scheduled_spec_decode_tokens={
+            req_full.request_id: list(prompt[:num_spec]),
+            # req_empty scheduled zero drafts this step
+        },
+    )
+
+    assert bitmask is not None
+    assert bitmask.shape[0] == 2 * (1 + num_spec)
