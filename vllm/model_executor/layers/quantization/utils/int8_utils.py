@@ -12,7 +12,10 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import get_device_name_as_file_name
+from vllm.utils.platform_utils import (
+    get_device_name_as_file_name,
+    resolve_rocm_device_config_file_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +339,7 @@ def get_w8a8_block_int8_configs(
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
     )
+    config_file_path = resolve_rocm_device_config_file_path(config_file_path)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info(
