@@ -623,3 +623,29 @@ class OffloadingSpec(ABC):
             An OffloadingWorker instance for this medium.
         """
         pass
+
+    ## Asynchronous initialization
+    # Servers whose host buffers take minutes to allocate can prepare them off the
+    # main thread, letting the engine serve without offloading until they land.
+
+    @property
+    def supports_async_init(self) -> bool:
+        """Whether this spec can prepare its host buffers off the main thread."""
+        return False
+
+    def start_async_init(self, kv_caches: CanonicalKVCaches) -> None:
+        """Begin preparing the worker's host buffers off the main thread."""
+        raise NotImplementedError
+
+    def poll_async_init(self) -> OffloadingWorker | None:
+        """The worker once its buffers are ready, else None while preparing."""
+        raise NotImplementedError
+
+    @property
+    def async_init_failed(self) -> bool:
+        """Whether preparation failed. Terminal: offloading stays disabled."""
+        return False
+
+    def close_async_init(self) -> None:
+        """Release buffers prepared but never handed to a worker."""
+        raise NotImplementedError

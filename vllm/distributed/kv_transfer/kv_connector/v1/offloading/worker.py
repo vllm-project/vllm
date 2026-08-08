@@ -6,6 +6,7 @@ from dataclasses import replace
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import ConnectorInitState
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
 )
@@ -46,11 +47,13 @@ class OffloadingConnectorWorker:
         spec: OffloadingSpec,
         vllm_config: "VllmConfig",
         kv_cache_config: KVCacheConfig,
+        async_init: bool = False,
     ):
         self.spec = spec
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.worker: OffloadingWorker | None = None
+        self._async_init = async_init
         # Non-writers still ack: pending_count waits for world_size per job.
         self._is_store_writer = (
             not self.spec.replicated_layout or self.spec.config.parallel.rank == 0
@@ -64,7 +67,10 @@ class OffloadingConnectorWorker:
         self._connector_worker_meta = OffloadingWorkerMetadata()
 
     def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
-        self.worker = self.spec.get_worker(kv_caches)
+        if self._async_init:
+            self.spec.start_async_init(kv_caches)
+        else:
+            self.worker = self.spec.get_worker(kv_caches)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
@@ -380,6 +386,18 @@ class OffloadingConnectorWorker:
 
         return set(), finished_recving
 
+    def get_init_state(self) -> ConnectorInitState | None:
+        """Drive asynchronous initialization and report where it stands."""
+        if not self._async_init:
+            return None
+        if self.worker is None:
+            self.worker = self.spec.poll_async_init()
+            if self.worker is None:
+                if self.spec.async_init_failed:
+                    raise RuntimeError("Asynchronous KV offload initialization failed")
+                return ConnectorInitState.INITIALIZING
+        return ConnectorInitState.READY
+
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
         if not self._connector_worker_meta.completed_jobs:
@@ -392,5 +410,8 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
+        if self._async_init:
+            # No-op once a worker adopted the buffers; it owns them from then on.
+            self.spec.close_async_init()
         if self.worker is not None:
             self.worker.shutdown()

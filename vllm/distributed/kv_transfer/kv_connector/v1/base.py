@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -147,6 +148,48 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     pass
 
 
+class NoOpKVConnectorMetadata(KVConnectorMetadata):
+    """Placeholder emitted while a connector is not ready to accept work.
+
+    Callers must detect it by type: a real connector may legitimately produce
+    empty metadata for a step, and that still has to be bound.
+    """
+
+    pass
+
+
+class ConnectorInitState(enum.Enum):
+    """Local state of a connector's asynchronous initialization.
+
+    There is no FAILED state: a worker that fails to initialize raises
+    instead, which brings down the whole engine rather than degrading.
+    """
+
+    INITIALIZING = enum.auto()
+    READY = enum.auto()
+
+
+class KVConnectorInitStatus(ABC):
+    """Worker-to-scheduler status for asynchronous connector initialization."""
+
+    @abstractmethod
+    def aggregate(self, other: "KVConnectorInitStatus") -> "KVConnectorInitStatus":
+        """Combine statuses reported by different workers."""
+
+
+@dataclass
+class KVConnectorRankInitStatus(KVConnectorInitStatus):
+    """Initialization status reported by one or more connector ranks."""
+
+    ready_ranks: set[int] = field(default_factory=set)
+
+    def aggregate(self, other: KVConnectorInitStatus) -> KVConnectorInitStatus:
+        assert isinstance(other, KVConnectorRankInitStatus)
+        return KVConnectorRankInitStatus(
+            ready_ranks=self.ready_ranks | other.ready_ranks,
+        )
+
+
 class KVConnectorWorkerMetadata(ABC):
     """
     Abstract Metadata used to communicate back
@@ -211,6 +254,36 @@ class KVConnectorBase_V1(ABC):
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
         self._role = role
+        self._async_init_enabled = False
+        self._connector_ready = True
+        self._connector_init_report_acknowledged = False
+        self._ready_connector_ranks: set[int] = set()
+
+    def enable_async_init(self) -> None:
+        """Enable the generic asynchronous-initialization readiness handshake."""
+        self._async_init_enabled = True
+        self._connector_ready = False
+
+    def get_connector_init_state(self) -> ConnectorInitState | None:
+        """Return this worker's initialization state, or None when synchronous."""
+        return None
+
+    def is_connector_ready(self) -> bool:
+        """Whether this connector can accept new requests.
+
+        While this returns False the scheduler skips `on_new_request`,
+        `get_num_new_matched_tokens`, `update_state_after_alloc` and
+        `request_finished` for newly admitted requests, and hands the worker a
+        `NoOpKVConnectorMetadata` instead of calling `build_connector_meta`.
+        Those requests stay connector-ineligible for their whole lifetime, so a
+        connector never sees a later chunk of a request whose earlier chunks it
+        missed.
+        """
+        if not self._async_init_enabled:
+            return True
+        if self._role == KVConnectorRole.WORKER:
+            return self.get_connector_init_state() == ConnectorInitState.READY
+        return self._connector_ready
 
     @property
     def role(self) -> KVConnectorRole:
@@ -231,6 +304,10 @@ class KVConnectorBase_V1(ABC):
             connector_metadata (dict): the connector metadata.
         """
         self._connector_metadata = connector_metadata
+        if self._async_init_enabled and self._role == KVConnectorRole.WORKER:
+            # Real metadata is the scheduler's acknowledgement that it observed
+            # readiness, so this worker can stop sending status reports.
+            self._connector_init_report_acknowledged = True
 
     def clear_connector_metadata(self) -> None:
         """Clear the connector metadata.
@@ -447,6 +524,43 @@ class KVConnectorBase_V1(ABC):
             None if no worker metadata is available.
         """
         return None
+
+    def build_connector_init_status(self) -> KVConnectorInitStatus | None:
+        """Build this worker's asynchronous-initialization status report."""
+        if (
+            not self._async_init_enabled
+            or self._connector_init_report_acknowledged
+            or self._role != KVConnectorRole.WORKER
+        ):
+            return None
+        state = self.get_connector_init_state()
+        if state is None:
+            return None
+        rank = self._vllm_config.parallel_config.rank
+        return KVConnectorRankInitStatus(
+            ready_ranks={rank} if state == ConnectorInitState.READY else set(),
+        )
+
+    def update_connector_init_status(
+        self, status: KVConnectorInitStatus | None
+    ) -> None:
+        """Apply aggregated worker initialization status on the scheduler."""
+        if not self._async_init_enabled or self._role != KVConnectorRole.SCHEDULER:
+            return
+        if status is None:
+            return
+        assert isinstance(status, KVConnectorRankInitStatus)
+        if self._connector_ready:
+            return
+        self._ready_connector_ranks |= status.ready_ranks
+        if (
+            len(self._ready_connector_ranks)
+            == self._vllm_config.parallel_config.world_size
+        ):
+            logger.info(
+                "Asynchronous connector initialization completed on all workers"
+            )
+            self._connector_ready = True
 
     # ==============================
     # Scheduler-side methods

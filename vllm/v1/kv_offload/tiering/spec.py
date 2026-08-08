@@ -280,6 +280,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # CUDA-alike check.
         return True
 
+    @property
+    @override
+    def supports_async_init(self) -> bool:
+        # create_worker below builds its own region and ignores any prepared
+        # one, so an async region would be a second, unaccounted-for opener.
+        return False
+
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         world_size = self.config.parallel.world_size
