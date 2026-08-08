@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from vllm.multimodal.cache import (
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheItem,
     MultiModalProcessorCacheItemMetadata,
+    MultiModalProcessorOnlyCache,
     MultiModalProcessorSenderCache,
     MultiModalReceiverCache,
     ShmObjectStoreReceiverCache,
@@ -100,6 +102,164 @@ def test_cache_item_size(item, expected_size):
 
     cache[""] = item.get_data()
     assert cache.currsize == expected_size
+
+
+def _fake_model_config(
+    *,
+    mm_processor_cache_gb: float = 1,
+    mm_shm_cache_max_object_size_mb: int = 1,
+):
+    mm_config = SimpleNamespace(
+        mm_processor_cache_gb=mm_processor_cache_gb,
+        mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+    )
+    return SimpleNamespace(get_multimodal_config=lambda: mm_config)
+
+
+def _fake_shm_vllm_config():
+    return SimpleNamespace(
+        model_config=_fake_model_config(
+            mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes,
+            mm_shm_cache_max_object_size_mb=1,
+        ),
+        parallel_config=SimpleNamespace(world_size=1),
+    )
+
+
+@pytest.mark.parametrize(
+    "cache_cls",
+    [MultiModalProcessorOnlyCache, MultiModalProcessorSenderCache],
+)
+def test_processor_cache_transaction_rollback_keeps_existing_lru(cache_cls):
+    cache = cache_cls(_fake_model_config())
+
+    existing_hash = "existing_image"
+    new_hash = "new_image"
+    existing_item = MultiModalKwargsItem.dummy(16)
+    new_item = MultiModalKwargsItem.dummy(16)
+
+    cache.get_and_update_item((existing_item, []), existing_hash)
+
+    with cache.begin_transaction() as txn:
+        cache.get_and_update_item(None, existing_hash)
+        cache.get_and_update_item((new_item, []), new_hash)
+
+    txn.rollback()
+
+    assert cache.is_cached([existing_hash, new_hash]) == [True, False]
+
+
+@pytest.mark.parametrize(
+    "cache_cls",
+    [MultiModalProcessorOnlyCache, MultiModalProcessorSenderCache],
+)
+def test_processor_cache_transaction_rollback_keeps_replaced_lru(cache_cls):
+    cache = cache_cls(_fake_model_config())
+
+    new_hash = "new_image"
+    original_item = MultiModalKwargsItem.dummy(16)
+    replacement_item = MultiModalKwargsItem.dummy(32)
+
+    with cache.begin_transaction() as txn:
+        cache.get_and_update_item((original_item, []), new_hash)
+        inserted_cache_item = cache._cache[new_hash]
+
+    replacement_cache_item = type(inserted_cache_item)(replacement_item, [])
+    cache._cache[new_hash] = replacement_cache_item
+
+    txn.rollback()
+
+    assert cache.is_cached([new_hash]) == [True]
+    assert cache._cache[new_hash] is replacement_cache_item
+
+
+@pytest.mark.parametrize(
+    "cache_cls",
+    [MultiModalProcessorOnlyCache, MultiModalProcessorSenderCache],
+)
+def test_processor_cache_transaction_commit_keeps_new_lru(cache_cls):
+    cache = cache_cls(_fake_model_config())
+
+    new_hash = "new_image"
+    new_item = MultiModalKwargsItem.dummy(16)
+
+    with cache.begin_transaction() as txn:
+        cache.get_and_update_item((new_item, []), new_hash)
+
+    txn.commit()
+
+    assert cache.is_cached([new_hash]) == [True]
+
+
+def test_processor_cache_transaction_exception_rolls_back_lru():
+    cache = MultiModalProcessorSenderCache(_fake_model_config())
+
+    new_hash = "new_image"
+    new_item = MultiModalKwargsItem.dummy(16)
+
+    with pytest.raises(ValueError, match="processor failed"), cache.begin_transaction():
+        cache.get_and_update_item((new_item, []), new_hash)
+        raise ValueError("processor failed")
+
+    assert cache.is_cached([new_hash]) == [False]
+
+
+def test_shm_processor_cache_transaction_rollback_removes_key_visibility():
+    cache = ShmObjectStoreSenderCache(_fake_shm_vllm_config())
+
+    new_hash = "new_image"
+    new_item = MultiModalKwargsItem.dummy(16)
+
+    try:
+        with cache.begin_transaction() as txn:
+            cache.get_and_update_item((new_item, []), new_hash)
+
+        _, monotonic_id = cache._shm_cache.key_index[new_hash]
+        assert cache.is_cached([new_hash]) == [True]
+        assert new_hash in cache._p0_cache
+        assert cache._shm_cache.id_index[monotonic_id] == new_hash
+        assert cache._shm_cache.writer_flag[monotonic_id] == 1
+
+        txn.rollback()
+
+        assert cache.is_cached([new_hash]) == [False]
+        assert new_hash not in cache._p0_cache
+        assert monotonic_id not in cache._shm_cache.id_index
+        assert monotonic_id not in cache._shm_cache.writer_flag
+
+        cache.get_and_update_item((new_item, []), new_hash)
+        assert cache.is_cached([new_hash]) == [True]
+        cache._shm_cache.free_unused()
+        assert cache.is_cached([new_hash]) == [True]
+    finally:
+        cache.close()
+
+
+def test_shm_processor_cache_transaction_rollback_keeps_touched_entry():
+    cache = ShmObjectStoreSenderCache(_fake_shm_vllm_config())
+
+    new_hash = "new_image"
+    new_item = MultiModalKwargsItem.dummy(16)
+
+    try:
+        with cache.begin_transaction() as txn:
+            cache.get_and_update_item((new_item, []), new_hash)
+
+        address, monotonic_id = cache._shm_cache.key_index[new_hash]
+        assert cache._shm_cache.writer_flag[monotonic_id] == 1
+
+        cache.get_and_update_item(None, new_hash)
+        assert cache._shm_cache.writer_flag[monotonic_id] == 2
+
+        txn.rollback()
+
+        assert cache.is_cached([new_hash]) == [True]
+        assert cache._shm_cache.key_index[new_hash] == (address, monotonic_id)
+        assert cache._shm_cache.id_index[monotonic_id] == new_hash
+        assert cache._shm_cache.writer_flag[monotonic_id] == 1
+        assert new_hash in cache._p0_cache
+    finally:
+        cache.close()
 
 
 def _create_vllm_config(
