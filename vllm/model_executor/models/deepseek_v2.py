@@ -1300,7 +1300,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         input_is_sequence_parallel = (
             self.use_sequence_parallel_moe
             and residual is not None
-            and hidden_states.shape[0] != full_num_tokens
+            and (
+                hidden_states.shape[0] != full_num_tokens
+                or full_num_tokens < get_tensor_model_parallel_world_size()
+            )
         )
 
         # Self Attention
