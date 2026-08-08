@@ -370,3 +370,18 @@ steps:
   - tests/evals/mrcr/
   commands:
     - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
+  mirror:
+    amd:
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/evals/mrcr/
