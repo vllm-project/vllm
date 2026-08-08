@@ -27,6 +27,8 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
+    #[error("invalid `mm_processor_kwargs`: {message}")]
+    InvalidMmProcessorKwargs { message: String },
     #[error("{kind} parsing is not available for model `{model_id}`")]
     ParserUnavailableForModel {
         kind: &'static str,
@@ -90,7 +92,8 @@ impl Error {
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedModality { .. }
-            | Self::MmLimitExceeded { .. } => true,
+            | Self::MmLimitExceeded { .. }
+            | Self::InvalidMmProcessorKwargs { .. } => true,
 
             _ => false,
         }
