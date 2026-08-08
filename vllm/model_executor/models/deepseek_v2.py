@@ -719,6 +719,10 @@ class Indexer(nn.Module):
         self.n_head_scale = self.n_head**-0.5
         self.use_fused_indexer_q = (
             current_platform.is_cuda()
+            # The fused Triton kernel stores fp8e4nv, which Triton only
+            # supports on SM89+; older archs (e.g. SM80) take the unfused
+            # rope + per_token_group_quant_fp8 path below.
+            and current_platform.has_device_capability(89)
             and self.quant_block_size == self.head_dim
             and self.head_dim == 128
             and self.rope_dim == 64
