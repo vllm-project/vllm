@@ -525,6 +525,8 @@ class Gemma3ForConditionalGeneration(
             )
             self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
+        # https://huggingface.co/blog/gemma3, (image tokens attend to each other)
+        config.text_config.is_mm_prefix_lm = True # explicit mention here as text side in gemma3 standalone does not need prefix_lm but multimodal does
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
