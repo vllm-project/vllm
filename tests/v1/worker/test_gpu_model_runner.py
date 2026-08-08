@@ -43,7 +43,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.block_table import (
@@ -54,7 +54,7 @@ from vllm.v1.worker.block_table import (
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -1754,3 +1754,80 @@ class TestInitFp8KvScalesHybridModels:
         assert (t1 == 0).all()
         assert (t2 == 0).all()
         assert all((t == 0).all() for t in list_entry)
+
+
+class TestGetPromptLogprobsDict:
+    def _make_runner(self) -> GPUModelRunner:
+        runner = GPUModelRunner.__new__(GPUModelRunner)
+        runner.device = torch.device("cpu")
+        # _sync_device requires an accelerator; this path is device-agnostic.
+        runner._sync_device = lambda: None  # type: ignore[method-assign]
+        return runner
+
+    @staticmethod
+    def _make_request(
+        prompt_token_ids: list[int],
+        num_computed_tokens: int,
+        in_progress_prompt_logprobs_cpu: LogprobsTensors | None = None,
+    ) -> CachedRequestState:
+        return CachedRequestState(
+            req_id="req-1",
+            prompt_token_ids=prompt_token_ids,
+            mm_features=[],
+            sampling_params=None,
+            generator=None,
+            block_ids=([],),
+            num_computed_tokens=num_computed_tokens,
+            output_token_ids=[],
+            in_progress_prompt_logprobs_cpu=in_progress_prompt_logprobs_cpu,
+        )
+
+    def test_skips_remote_prefilled_request(self):
+        """A remote-prefilled request must not ship uninitialized tensors.
+
+        When an external KV connector pre-computes the whole prompt,
+        num_computed_tokens equals prompt_len, so there are no remaining prompt
+        tokens to produce logprobs for and no tensors were ever filled. The
+        freshly-created empty tensors must not be shipped to the decoder.
+        """
+        runner = self._make_runner()
+        runner.num_prompt_logprobs = {"req-1": 1}
+        runner.requests = {
+            "req-1": self._make_request([1, 2, 3, 4], num_computed_tokens=4)
+        }
+
+        prompt_logprobs_dict = runner._get_prompt_logprobs_dict(
+            torch.empty(1, 8), {"req-1": 1}
+        )
+
+        assert "req-1" not in prompt_logprobs_dict
+        assert runner.num_prompt_logprobs == {}
+
+    def test_ships_preexisting_tensors_on_final_chunk(self):
+        """The final chunk (num_remaining_tokens == 0) still ships logprobs.
+
+        When the tensors were populated in prior chunked-prefill steps, the
+        final step that returns them has nothing new to fill but must still
+        ship the completed tensors.
+        """
+        runner = self._make_runner()
+        runner.num_prompt_logprobs = {"req-1": 1}
+        filled = LogprobsTensors(
+            logprob_token_ids=torch.zeros(3, 2, dtype=torch.int32),
+            logprobs=torch.zeros(3, 2),
+            selected_token_ranks=torch.zeros(3, dtype=torch.int32),
+        )
+        runner.requests = {
+            "req-1": self._make_request(
+                [1, 2, 3, 4],
+                num_computed_tokens=3,
+                in_progress_prompt_logprobs_cpu=filled,
+            )
+        }
+
+        prompt_logprobs_dict = runner._get_prompt_logprobs_dict(
+            torch.empty(1, 8), {"req-1": 1}
+        )
+
+        assert prompt_logprobs_dict["req-1"] is filled
+        assert runner.num_prompt_logprobs == {}

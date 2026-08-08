@@ -759,6 +759,10 @@ class CompilationConfig:
     """The names of all the MOE layers in the model
     """
 
+    static_all_kv_layers: list[str] = field(default_factory=list, init=False)
+    """The names of all the KV cache layers in the model
+    """
+
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [

@@ -5731,6 +5731,7 @@ class GPUModelRunner(
 
             # Set up target LogprobsTensors object.
             logprobs_tensors = request.in_progress_prompt_logprobs_cpu
+            logprobs_preexisting = logprobs_tensors is not None
             if logprobs_tensors is None:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
@@ -5753,7 +5754,12 @@ class GPUModelRunner(
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
-                prompt_logprobs_dict[req_id] = logprobs_tensors
+                if num_logits > 0 or logprobs_preexisting:
+                    # Only ship tensors that actually hold data. A request
+                    # whose whole prompt arrived pre-computed (e.g. via an
+                    # external KV connector) never produced any prompt logprobs,
+                    # so the just-created tensors are uninitialized.
+                    prompt_logprobs_dict[req_id] = logprobs_tensors
 
             if num_logits <= 0:
                 # This can happen for the final chunk if we prefilled exactly
