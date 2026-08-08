@@ -373,9 +373,13 @@ class SingleDirectionOffloadingHandler:
             else torch.Event(enable_timing=True)
         )
 
-        if self.gpu_to_cpu:
-            # wait for model computation to finish before offloading
-            stream.wait_stream(current_platform.current_stream())
+        # Stores must wait for the model to finish writing the KV they read.
+        # Loads must wait for pending zeroing of their destination blocks:
+        # the scheduler's _skip_zero_block_ids only edits the step being
+        # scheduled and cannot retract zeroing shipped in an earlier step for
+        # a since-reallocated block; with async scheduling nothing else orders
+        # that zeroing against this copy.
+        stream.wait_stream(current_platform.current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event

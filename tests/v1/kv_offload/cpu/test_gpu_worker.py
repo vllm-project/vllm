@@ -441,3 +441,72 @@ def test_transfer_multi_group(
                 )
 
     worker.shutdown()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="stream ordering test requires CUDA"
+)
+@torch.inference_mode()
+def test_load_is_ordered_after_compute_stream(default_vllm_config) -> None:
+    """A load must not land before the compute stream zeroes its destination.
+
+    Destination blocks are freshly allocated and zeroed on the compute stream
+    in the same step; unordered, the copy can land first and be wiped. Trials
+    repeat because the first pays one-time init that drains the stream.
+    """
+    device = DEVICES[0]
+    # Above THRESHOLD_BYTES, so the copy engine is used rather than Triton.
+    page_size = 128 * 1024
+    num_blocks, sentinel = 64, 0x5A
+    load_blocks = list(range(32))
+
+    gpu_tensor = torch.zeros((num_blocks, page_size), dtype=torch.int8, device=device)
+    # Built up front: building it later would sync and drain the backlog.
+    zero_idx = torch.tensor(load_blocks, device=device, dtype=torch.long)
+    scratch = torch.randn((4096, 4096), dtype=torch.float16, device=device)
+
+    worker = CPUOffloadingWorker(
+        kv_caches=CanonicalKVCaches(
+            tensors=[
+                CanonicalKVCacheTensor(tensor=gpu_tensor, page_size_bytes=page_size)
+            ],
+            group_data_refs=[
+                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size)]
+            ],
+        ),
+        block_size_factor=1,
+        num_cpu_blocks=num_blocks,
+        mmap_region=None,
+    )
+    for cpu_tensor in worker._load_handler.src_tensors:
+        cpu_tensor.fill_(sentinel)
+    expected = torch.full((page_size,), sentinel, dtype=torch.int8)
+
+    for trial in range(5):
+        gpu_tensor.fill_(0x11)
+        torch.accelerator.synchronize()
+
+        busy = scratch
+        for _ in range(300):
+            busy = torch.mm(busy, busy)
+        gpu_tensor.index_fill_(0, zero_idx, 0)
+
+        assert worker.submit_load(
+            trial + 1,
+            CPULoadStoreSpec(load_blocks),
+            GPULoadStoreSpec(
+                load_blocks, group_sizes=(len(load_blocks),), block_indices=(0,)
+            ),
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline and not worker.get_finished():
+            time.sleep(0.02)
+        torch.accelerator.synchronize()
+
+        for block_id in load_blocks:
+            torch.testing.assert_close(
+                gpu_tensor[block_id].cpu(),
+                expected,
+                msg=f"trial {trial}: loaded KV overwritten by compute stream",
+            )
+    worker.shutdown()
