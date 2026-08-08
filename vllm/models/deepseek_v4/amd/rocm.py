@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import CUDAGraphMode
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -441,6 +443,11 @@ class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLABackend):
         return DeepseekV4ROCMAiterMLASparseMetadataBuilder
 
 
+# Only M<=4 has tuned tgemm entries for both DSV4 compressor projections. The
+# base GEMM is faster at larger M and avoids AITER's M=128 ASM graph issue.
+_GFX950_TGEMM_MAX_NUM_TOKENS = 4
+
+
 class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4."""
 
@@ -451,6 +458,54 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        self._tgemm_static_eligible = (
+            self.compressor is not None
+            and rocm_aiter_ops.is_tgemm_enabled()
+            and self.compressor.fused_wkv_wgate.weight.dtype == torch.bfloat16
+            and (
+                self.indexer is None
+                or self.indexer.compressor.fused_wkv_wgate.weight.dtype
+                == torch.bfloat16
+            )
+        )
+
+    def attn_gemm_parallel_execute(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[Any, ...]:
+        if (
+            not self._tgemm_static_eligible
+            or hidden_states.dtype != torch.bfloat16
+            or hidden_states.shape[0] > _GFX950_TGEMM_MAX_NUM_TOKENS
+            or get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
+        ):
+            return super().attn_gemm_parallel_execute(hidden_states)
+
+        return self._attn_gemm_parallel_execute_aiter_tgemm(hidden_states)
+
+    def _attn_gemm_parallel_execute_aiter_tgemm(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[Any, ...]:
+        from aiter.tuned_gemm import tgemm
+
+        assert self.compressor is not None
+
+        qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+        kv_score = tgemm.mm(
+            hidden_states,
+            self.compressor.fused_wkv_wgate.weight,
+            otype=torch.bfloat16,
+        )
+        indexer_kv_score = None
+        indexer_weights = None
+        if self.indexer is not None:
+            indexer_kv_score = tgemm.mm(
+                hidden_states,
+                self.indexer.compressor.fused_wkv_wgate.weight,
+                otype=torch.bfloat16,
+            )
+            indexer_weights, _ = self.indexer.weights_proj(hidden_states)
+
+        return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:

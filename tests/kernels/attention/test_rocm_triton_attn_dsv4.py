@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -34,6 +35,105 @@ requires_split_decode_arch = pytest.mark.skipif(
 NOPE_HEAD_DIM = 448
 ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
+
+
+@pytest.mark.parametrize(
+    ("eligible", "runtime_mode", "dtype", "num_tokens", "expected_optimized"),
+    [
+        (True, CUDAGraphMode.FULL, torch.bfloat16, 4, True),
+        (True, CUDAGraphMode.FULL, torch.bfloat16, 5, False),
+        (True, CUDAGraphMode.FULL, torch.bfloat16, 128, False),
+        (True, CUDAGraphMode.NONE, torch.bfloat16, 1, False),
+        (True, CUDAGraphMode.PIECEWISE, torch.bfloat16, 1, False),
+        (False, CUDAGraphMode.FULL, torch.bfloat16, 1, False),
+        (True, CUDAGraphMode.FULL, torch.float32, 1, False),
+    ],
+)
+def test_dsv4_aiter_tgemm_is_limited_to_tuned_full_graph_shapes(
+    monkeypatch,
+    eligible: bool,
+    runtime_mode: CUDAGraphMode,
+    dtype: torch.dtype,
+    num_tokens: int,
+    expected_optimized: bool,
+) -> None:
+    from vllm.models.deepseek_v4.amd import rocm
+
+    attention = object.__new__(rocm.DeepseekV4ROCMAiterMLAAttention)
+    torch.nn.Module.__init__(attention)
+    attention._tgemm_static_eligible = eligible
+    base_result = object()
+    optimized_result = object()
+    context_calls = 0
+
+    def get_context():
+        nonlocal context_calls
+        context_calls += 1
+        return SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
+
+    monkeypatch.setattr(rocm, "get_forward_context", get_context)
+    monkeypatch.setattr(
+        rocm.DeepseekV4Attention,
+        "attn_gemm_parallel_execute",
+        lambda *_args, **_kwargs: base_result,
+    )
+    attention._attn_gemm_parallel_execute_aiter_tgemm = (
+        lambda *_args, **_kwargs: optimized_result
+    )
+
+    result = attention.attn_gemm_parallel_execute(
+        torch.empty((num_tokens, 1), dtype=dtype)
+    )
+
+    assert result is (optimized_result if expected_optimized else base_result)
+    assert context_calls == int(
+        eligible
+        and dtype == torch.bfloat16
+        and num_tokens <= rocm._GFX950_TGEMM_MAX_NUM_TOKENS
+    )
+
+
+def test_dsv4_aiter_tgemm_uses_both_compressor_weights(monkeypatch) -> None:
+    tgemm = pytest.importorskip("aiter.tuned_gemm").tgemm
+
+    from vllm.models.deepseek_v4.amd import rocm
+
+    hidden_states = torch.empty((2, 4), dtype=torch.bfloat16)
+    main_weight = torch.empty((3, 4), dtype=torch.bfloat16)
+    indexer_weight = torch.empty((5, 4), dtype=torch.bfloat16)
+    indexer_weights = torch.empty((2, 1), dtype=torch.bfloat16)
+    qr_kv = torch.empty((2, 2), dtype=torch.bfloat16)
+    attention = object.__new__(rocm.DeepseekV4ROCMAiterMLAAttention)
+    torch.nn.Module.__init__(attention)
+    attention.compressor = SimpleNamespace(
+        fused_wkv_wgate=SimpleNamespace(weight=main_weight)
+    )
+    attention.indexer = SimpleNamespace(
+        compressor=SimpleNamespace(
+            fused_wkv_wgate=SimpleNamespace(weight=indexer_weight)
+        ),
+        weights_proj=lambda _hidden_states: (indexer_weights, None),
+    )
+
+    calls = []
+
+    def fake_mm(inp, weight, *, otype):
+        calls.append((inp, weight, otype))
+        return weight
+
+    monkeypatch.setattr(tgemm, "mm", fake_mm)
+    attention._fused_wqa_wkv_gemm = lambda _hidden_states: qr_kv
+
+    result = attention._attn_gemm_parallel_execute_aiter_tgemm(hidden_states)
+
+    assert calls == [
+        (hidden_states, main_weight, torch.bfloat16),
+        (hidden_states, indexer_weight, torch.bfloat16),
+    ]
+    assert result[0] is qr_kv
+    assert result[1] is main_weight
+    assert result[2] is indexer_weight
+    assert result[3] is indexer_weights
 
 
 def _ref_global_topk_ragged(
