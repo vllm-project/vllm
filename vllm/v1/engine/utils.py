@@ -455,6 +455,7 @@ class CoreEngineActorManager:
         assert len(placement_groups) == dp_size, (
             "Number of placement groups must match data parallel size"
         )
+        
         self.placement_group_is_local = []
         refs = []
         for index, local_index, pg in zip(
