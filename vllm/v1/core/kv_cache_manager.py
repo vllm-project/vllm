@@ -716,7 +716,12 @@ class KVCacheManager:
         """Get block ids covering the request's computed tokens."""
         block_ids = self.get_block_ids(request_id)
         clipped_block_ids: list[list[int]] = []
-        for group, ids in zip(self.kv_cache_config.kv_cache_groups, block_ids):
+        for group, manager, ids in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.coordinator.single_type_managers,
+            block_ids,
+            strict=True,
+        ):
             spec = group.kv_cache_spec
             if not isinstance(spec, AttentionSpec) or isinstance(
                 spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)
@@ -724,7 +729,7 @@ class KVCacheManager:
                 clipped_block_ids.append(ids)
                 continue
 
-            num_valid_blocks = cdiv(num_computed_tokens, spec.block_size)
+            num_valid_blocks = cdiv(num_computed_tokens, manager.block_size)
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
 

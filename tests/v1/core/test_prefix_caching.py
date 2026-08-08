@@ -2581,6 +2581,38 @@ def test_emit_cached_block_events_zero_cached():
     assert pool.take_events() == []
 
 
+def test_computed_block_ids_use_dcp_effective_block_size():
+    block_size = 16
+    dcp_world_size = 2
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=8),
+        max_model_len=8192,
+        scheduler_block_size=block_size * dcp_world_size,
+        hash_block_size=block_size * dcp_world_size,
+        enable_caching=False,
+        dcp_world_size=dcp_world_size,
+    )
+    req = make_request(
+        "dcp_lookahead",
+        prompt_token_ids=list(range(2 * block_size)),
+        block_size=block_size * dcp_world_size,
+        hash_fn=sha256,
+    )
+    blocks = manager.allocate_slots(
+        req,
+        num_new_tokens=block_size * dcp_world_size,
+        num_lookahead_tokens=block_size * dcp_world_size,
+    )
+    assert blocks is not None
+    assert len(blocks.blocks[0]) == 2
+
+    computed = manager.get_block_ids_for_computed_tokens(
+        req.request_id, block_size * dcp_world_size
+    )
+
+    assert computed == ([blocks.blocks[0][0].block_id],)
+
+
 def test_eagle_enabled_removes_last_block():
     """Verify Eagle does NOT remove blocks when request
     length is divisible by block size."""
