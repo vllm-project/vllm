@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import shutil
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -1098,6 +1100,76 @@ class ModelConfig:
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"],
             )
             self.tokenizer = object_storage_tokenizer.dir
+
+    def maybe_pull_model_files_for_runai_worker(self) -> None:
+        """Pull non-tensor model files from Object Storage onto the local node.
+
+        Weights are streamed separately. Safe to call on every rank.
+        """
+        # Only set once the driver has pulled the model from Object Storage.
+        model_uri = self.model_weights
+        if not model_uri or not is_runai_obj_uri(model_uri):
+            return
+
+        # avoid circular import
+        from vllm.model_executor.model_loader.weight_utils import get_lock
+
+        # A general solution for concurrent Object Storage downloads is
+        # https://github.com/vllm-project/vllm/pull/36696.
+        # The canonical path, so two spellings of one directory share one lock.
+        with get_lock(os.path.realpath(self.model)):
+            # Content, not existence: an empty pre-created directory is the
+            # broken state this repairs; a populated one means another rank
+            # already completed the pull. Unsafe to read outside the lock —
+            # a non-empty directory may be a pull still in progress.
+            if os.path.isdir(self.model) and os.listdir(self.model):
+                return
+
+            # Workers must not install process-global signal handlers.
+            object_storage_model = ObjectStorageModel(
+                url=model_uri, install_signal_handlers=False
+            )
+            if os.path.realpath(object_storage_model.dir) != os.path.realpath(
+                self.model
+            ):
+                raise RuntimeError(
+                    "Run:ai model streamer cache directory mismatch on this "
+                    "node: the config resolved on the driver points at "
+                    f"{self.model!r}, but this node derives "
+                    f"{object_storage_model.dir!r} from the model URI. This "
+                    "usually means VLLM_ASSETS_CACHE (or XDG_CACHE_HOME / "
+                    "HOME) differs between the driver and this node; make it "
+                    "consistent across all nodes."
+                )
+            logger.info(
+                "Pulling non-tensor model files to %s on this node.", self.model
+            )
+            pull_succeeded = False
+            try:
+                object_storage_model.pull_files(
+                    model_uri, allow_pattern=["*.model", "*.py", "*.json"]
+                )
+                # Shared tokenizer: the driver rewrote both `model` and
+                # `tokenizer` to this directory, so pull the rest of the
+                # non-weight files it will need. A separate tokenizer is
+                # read from its own path and needs nothing more here.
+                if self.tokenizer == self.model:
+                    object_storage_model.pull_files(
+                        model_uri,
+                        ignore_pattern=[
+                            "*.pt",
+                            "*.safetensors",
+                            "*.bin",
+                            "*.tensors",
+                            "*.pth",
+                        ],
+                    )
+                pull_succeeded = True
+            finally:
+                if not pull_succeeded:
+                    # A partial pull must not survive: the in-lock check
+                    # would otherwise trust it on the next attempt.
+                    shutil.rmtree(object_storage_model.dir, ignore_errors=True)
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
