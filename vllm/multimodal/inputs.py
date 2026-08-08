@@ -395,6 +395,11 @@ class MultiModalFieldElem:
     in order to batch multi-modal items together for model inference.
     """
 
+    uuid: str | None = None
+    """
+    uuid for tensor data in paged shared memory storage.
+    """
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False

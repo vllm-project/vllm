@@ -54,6 +54,7 @@ from .inputs import (
     TokPrompt,
 )
 from .inputs.preprocess import extract_target_prompt
+from .paged_shm.mm_inputs import PagedShmMMInputs
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -99,6 +100,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self._async_tokenizer_decode = make_async(self._decode, executor=self._executor)
 
         self.mm_processor: BaseMultiModalProcessor | None = None
+        self._pshm_mm_inputs = PagedShmMMInputs(self.config.model_config)
         self._readonly_mm_processor: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
         self._clear_mm_cache_async = make_async(
@@ -281,6 +283,8 @@ class BaseRenderer(ABC, Generic[_T]):
                     logger.warning("Readonly multi-modal warmup failed")
                 finally:
                     self._clear_processor_cache(self._readonly_mm_processor)
+
+        self._pshm_mm_inputs.connect()
 
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the multimodal executor to avoid
@@ -762,6 +766,7 @@ class BaseRenderer(ABC, Generic[_T]):
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
 
+        self._pshm_mm_inputs.write(mm_inputs)
         self.update_mm_cache_stats()
 
         return mm_inputs
