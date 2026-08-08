@@ -86,7 +86,9 @@ class TieringMetricsTracker:
         lookup_duration: float,
     ) -> None:
         state = self._request_states.get(req_context.req_id)
-        assert state is not None
+        if state is None:
+            state = _RequestMetricsState()
+            self._request_states[req_context.req_id] = state
 
         if state.observed_lookups is not None and result in (
             LookupResult.HIT,

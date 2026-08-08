@@ -230,6 +230,10 @@ class TieringOffloadingManager(OffloadingManager):
             for tier_idx, tier in enumerate(self.secondary_tiers)
         }
 
+    @property
+    def _transfer_jobs(self) -> dict[JobId, JobMetadata]:
+        return self._jobs
+
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
         job_id = self._job_id_counter
@@ -363,7 +367,6 @@ class TieringOffloadingManager(OffloadingManager):
         # in time for a promotion this lookup may initiate.
         self._maybe_process_finished_jobs()
 
-        assert req_context.req_id in self._req_state
         start_time = time.monotonic()
         primary_hit = self.primary_tier.lookup(key, req_context)
         lookup_duration = time.monotonic() - start_time
@@ -672,7 +675,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-        tier_idx: int,
+        tier_idx: int = 0,
     ) -> TransferJob:
         """Pin blocks in the primary tier and create a tracked store job.
 
