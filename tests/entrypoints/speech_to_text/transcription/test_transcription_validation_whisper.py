@@ -253,6 +253,7 @@ async def test_sampling_params(mary_had_lamb, whisper_client):
             top_k=12,
             top_p=0.4,
             min_p=0.5,
+            p_less=True,
             frequency_penalty=1.8,
             presence_penalty=2.0,
         ),

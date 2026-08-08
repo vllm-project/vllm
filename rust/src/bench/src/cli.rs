@@ -458,6 +458,10 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub min_p: Option<f64>,
 
+    /// p-less sampling parameter. Only affects openai-compatible backends.
+    #[arg(long)]
+    pub p_less: Option<bool>,
+
     /// Temperature sampling parameter. Only affects openai-compatible backends.
     #[arg(long)]
     pub temperature: Option<f64>,

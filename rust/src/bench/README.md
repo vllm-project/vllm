@@ -554,6 +554,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--temperature` | Temperature (server default if omitted) |
 | `--top-p` | Top-p (nucleus) sampling |
 | `--top-k` | Top-k sampling |
+| `--p-less` | p-less sampling |
 | `--min-p` | Min-p sampling |
 | `--frequency-penalty` | Frequency penalty |
 | `--presence-penalty` | Presence penalty |

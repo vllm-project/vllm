@@ -58,6 +58,7 @@ message RandomSampling {
   float top_p = 3;  // 0 means default
   float min_p = 4;  // 0 means default
   optional int64 seed = 5;
+  bool p_less = 6;  // 0 means default
 }
 
 message DecodingParameters {

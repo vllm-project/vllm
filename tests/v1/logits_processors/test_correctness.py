@@ -30,6 +30,7 @@ from vllm.v1.sample.logits_processor import (
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
     MoveDirectionality,
+    PLessLogitsProcessor,
     build_logitsprocs,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -190,7 +191,7 @@ def _generate_test_fakes(batch_size: int, device: str) -> LogitsprocsTestFakes:
 def _sampling_params_from_logitproc(logitproc_type: LogitprocType) -> SamplingParams:
     """Customize request SamplingParams for a specified logitproc"""
     # SamplingParams for req with no logitproc
-    kwargs = {"min_p": 0.0, "logit_bias": None, "min_tokens": 0}
+    kwargs = {"p_less": False, "min_p": 0.0, "logit_bias": None, "min_tokens": 0}
     if fxn := logitsprocs_test_mapping[logitproc_type].gen_request_fxn:
         fxn(kwargs)
     return SamplingParams(**kwargs)
@@ -294,6 +295,142 @@ def _logit_bias_validate(
                     request_params=request_params,
                     step_idx=step_idx,
                 )
+
+
+def _p_less_params(kwargs: dict) -> None:
+    """
+    The p-less logits processor configuration.
+    """
+    kwargs["p_less"] = True
+
+
+def _p_less_validate(
+    test_fakes: LogitsprocsTestFakes,
+    persistent_batch: list[LogitsProcsRequestParams],
+    logits_new: torch.Tensor,
+    batch_index: int,
+    request_params: LogitsProcsRequestParams,
+    step_idx: int,
+) -> None:
+    """
+    Validate that the p-less logits processor is applied correctly.
+    """
+    logits_old_for_batch_id = test_fakes.logits[
+        persistent_batch[batch_index].workload_index
+    ].cpu()
+    logits_new_for_batch_id = logits_new[batch_index].cpu()
+    if request_params.params.p_less:
+        # p-less decoding is used when p_less is set to True
+        # Calculate threshold logits
+        max_logits = logits_old_for_batch_id.amax(dim=-1, keepdim=True)
+        exps = (logits_old_for_batch_id - max_logits).exp()
+        sum_exps = exps.sum(dim=-1, keepdim=True)
+        sum_squared_exps = exps.square().sum(dim=-1, keepdim=True)
+        threshold_logits = sum_squared_exps.log() - sum_exps.log() + max_logits
+        # Create boolean mask for invalid tokens
+        invalid_token_mask = logits_old_for_batch_id < threshold_logits
+        # Apply mask to convert logits of invalid tokens to negative infinity
+        logits_new_exp = logits_old_for_batch_id.masked_fill(
+            invalid_token_mask, -float("inf")
+        )
+        for token_id in range(VOCAB_SIZE):
+            logit_new = logits_new_for_batch_id[token_id]
+            logit_new_exp = logits_new_exp[token_id]
+            if logit_new_exp != pytest.approx(logit_new):
+                _raise_error_invalid(
+                    msg_suffix=(
+                        f"Token {token_id} logit value {logit_new} "
+                        f"does not match expected value {logit_new_exp}"
+                    ),
+                    batch_index=batch_index,
+                    request_params=request_params,
+                    step_idx=step_idx,
+                )
+    else:
+        # p-less decoding is not used when p_less is set to False
+        for token_id in range(VOCAB_SIZE):
+            logit_old = logits_old_for_batch_id[token_id]
+            logit_new = logits_new_for_batch_id[token_id]
+            if logit_new != pytest.approx(logit_old):
+                _raise_error_invalid(
+                    msg_suffix=(
+                        f"Token {token_id} logit value {logit_old} "
+                        f"does not match expected value {logit_new}"
+                    ),
+                    batch_index=batch_index,
+                    request_params=request_params,
+                    step_idx=step_idx,
+                )
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize(
+    "logits, expected_logits",
+    [
+        (
+            torch.tensor([[1.1, -0.3, 0.5, -0.1, 0.9]]),
+            torch.tensor([[1.1, float("-inf"), float("-inf"), float("-inf"), 0.9]]),
+        ),
+        (
+            torch.tensor([[-0.25, 0.18, 0.1, -0.12]]),
+            torch.tensor([[float("-inf"), 0.18, 0.1, float("-inf")]]),
+        ),
+    ],
+)
+def test_p_less_fixed_logits(
+    device: str, logits: torch.tensor, expected_logits: torch.tensor
+):
+    """
+    Test a fixed input logit distribution for a fixed output logit distribution.
+    """
+    p_less_logits_processor = PLessLogitsProcessor(
+        VllmConfig(), device, PIN_MEMORY_AVAILABLE
+    )
+    p_less_logits_processor.p_less = torch.tensor([[True]], device=logits.device)
+    p_less_logits_processor.p_less_count = 1
+    p_less_logits_processor.apply(logits)
+    torch.testing.assert_close(logits, expected_logits)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("size", [3456, 6789, 12345, 234876, 1234987])
+@pytest.mark.parametrize("logit", [-16.4, -1.1, 0.567, 19.1, 24.2])
+def test_p_less_deterministic_logits(device: str, size: int, logit: float):
+    """
+    Test a deterministic input logit distribution for a deterministic output logit
+    distribution.
+    """
+    logits = torch.full((1, size), float("-inf"))
+    logits[0, 123] = logit
+    expected_logits = torch.full((1, size), float("-inf"))
+    expected_logits[0, 123] = logit
+    p_less_logits_processor = PLessLogitsProcessor(
+        VllmConfig(), device, PIN_MEMORY_AVAILABLE
+    )
+    p_less_logits_processor.p_less = torch.tensor([[True]], device=logits.device)
+    p_less_logits_processor.p_less_count = 1
+    p_less_logits_processor.apply(logits)
+    torch.testing.assert_close(logits, expected_logits)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("size", [3456, 6789, 12345, 234876, 1234987])
+@pytest.mark.parametrize("logit", [-16.4, -1.1, 0.567, 19.1, 24.2])
+def test_p_less_uniform_logits(device: str, size: int, logit: float):
+    """
+    Test a uniform input logit distribution for a uniform output logit distribution.
+    """
+    logits = torch.full((1, size), logit)
+    p_less_logits_processor = PLessLogitsProcessor(
+        VllmConfig(), device, PIN_MEMORY_AVAILABLE
+    )
+    p_less_logits_processor.p_less = torch.tensor([[True]], device=logits.device)
+    p_less_logits_processor.p_less_count = 1
+    p_less_logits_processor.apply(logits)
+    torch.testing.assert_close(logits, torch.full((1, size), logit))
 
 
 def _min_p_params(kwargs: dict) -> None:
@@ -581,6 +718,9 @@ logitsprocs_test_mapping = {
     STR_NO_LOGITPROC: LogitsprocTestHelpers(eval_fxn=_none_validate),
     LogitBiasLogitsProcessor: LogitsprocTestHelpers(
         gen_request_fxn=_logit_bias_params, eval_fxn=_logit_bias_validate
+    ),
+    PLessLogitsProcessor: LogitsprocTestHelpers(
+        gen_request_fxn=_p_less_params, eval_fxn=_p_less_validate
     ),
     MinPLogitsProcessor: LogitsprocTestHelpers(
         gen_request_fxn=_min_p_params, eval_fxn=_min_p_validate

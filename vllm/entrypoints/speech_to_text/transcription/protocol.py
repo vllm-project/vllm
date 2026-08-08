@@ -167,6 +167,12 @@ class TranscriptionRequest(OpenAIBaseModel):
     minimum likelihood threshold during sampling.
     """
 
+    p_less: bool | None = None
+    """Filters tokens according to the entire token probability distribution,
+    via the p-less' hyperparameter-free information-theoretic and dynamic 
+    threshold probability.
+    """
+
     seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     """The seed to use for sampling."""
 
@@ -190,6 +196,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "p_less": False,
     }
 
     def build_stt_params(
@@ -258,6 +265,10 @@ class TranscriptionRequest(OpenAIBaseModel):
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
+        if (p_less := self.p_less) is None:
+            p_less = default_sampling_params.get(
+                "p_less", self._DEFAULT_SAMPLING_PARAMS["p_less"]
+            )
 
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get(
@@ -272,6 +283,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
+            p_less=p_less,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
             presence_penalty=self.presence_penalty,
