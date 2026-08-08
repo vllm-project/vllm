@@ -54,6 +54,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
@@ -2160,6 +2161,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         nvfp4_config: ModelOptNvFp4Config,
         w4a16_nvfp4_config: ModelOptNvFp4Config,
         mxfp8_config: ModelOptMxFp8Config,
+        fp8_pb_config: Fp8Config | None = None,
     ) -> None:
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
@@ -2168,6 +2170,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
         self.mxfp8_config = mxfp8_config
+        self.fp8_pb_config = fp8_pb_config
+
+    def has_blocked_weights(self) -> bool:
+        # Gates "+quant_fp8" in VllmConfig. Without it QuantFP8 uses
+        # forward_native, whose fp32 unpacked group scales are wrong for the
+        # SM100 DeepGEMM path (which needs int32 UE8M0-packed) -> NaN.
+        return self.fp8_pb_config is not None
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
@@ -2233,6 +2242,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if group_size is None:
             group_size = 16
 
+        # FP8_PB carries its own block size; None when the checkpoint has none
+        fp8_pb_block: int | None = None
+        for layer_info in quantized_layers.values():
+            if str(layer_info.get("quant_algo") or "").upper() == "FP8_PB":
+                fp8_pb_block = layer_info.get("group_size", 128)
+                break
+
         fp8_config = ModelOptFp8Config(
             quant_method="FP8",
             is_checkpoint_fp8_serialized=True,
@@ -2264,6 +2280,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             exclude_modules=[],
         )
 
+        # FP8_PB scales are DeepSeek-style `weight_scale_inv`, not ModelOpt's
+        # 4D `weight_scale`, so these route to vLLM's native block-FP8 path.
+        # Left None when absent so has_blocked_weights() stays False for
+        # checkpoints that declare no FP8_PB layer.
+        fp8_pb_config: Fp8Config | None = None
+        if fp8_pb_block is not None:
+            fp8_pb_config = Fp8Config(
+                is_checkpoint_fp8_serialized=True,
+                activation_scheme="dynamic",
+                weight_block_size=[fp8_pb_block, fp8_pb_block],
+            )
+
         return cls(
             kv_cache_quant_method=kv_cache_quant_method,
             exclude_modules=exclude_modules,
@@ -2272,6 +2300,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             nvfp4_config=nvfp4_config,
             w4a16_nvfp4_config=w4a16_nvfp4_config,
             mxfp8_config=mxfp8_config,
+            fp8_pb_config=fp8_pb_config,
         )
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
@@ -2370,6 +2399,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         return tuple(dict.fromkeys(candidates))
 
+    @staticmethod
+    def _warn_unsupported_algo(quant_algo: str | None, prefix: str) -> None:
+        if quant_algo is not None:
+            logger.warning_once(
+                "MIXED_PRECISION checkpoint declares quant_algo %s, which is "
+                "not handled by the MIXED_PRECISION dispatch (first seen at "
+                "%s). Affected layers are left unquantized, so weight loading "
+                "will fail if the checkpoint stores scales for them.",
+                quant_algo,
+                prefix,
+            )
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -2397,7 +2438,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             if quant_algo == "MXFP8":
                 return ModelOptMxFp8LinearMethod(self.mxfp8_config)
-            # Layer not in quantized_layers — leave unquantized
+            if quant_algo == "FP8_PB":
+                assert self.fp8_pb_config is not None
+                return Fp8LinearMethod(self.fp8_pb_config)
+            # Not in quantized_layers, or an algo vLLM cannot serve
+            self._warn_unsupported_algo(quant_algo, prefix)
             return UnquantizedLinearMethod()
 
         if isinstance(layer, RoutedExperts):
@@ -2421,6 +2466,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     quant_config=self.mxfp8_config,
                     moe_config=layer.moe_config,
                 )
+            self._warn_unsupported_algo(quant_algo, prefix)
             return None
 
         return None

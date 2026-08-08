@@ -20,6 +20,7 @@ from vllm.model_executor.kernels.linear import (
     MarlinNvFp4LinearKernel,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptFp8LinearMethod,
@@ -91,6 +92,11 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
             is_checkpoint_nvfp4_serialized=True,
             kv_cache_quant_algo=None,
             exclude_modules=[],
+        ),
+        fp8_pb_config=Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+            weight_block_size=[128, 128],
         ),
         mxfp8_config=ModelOptMxFp8Config(
             is_checkpoint_mxfp8_serialized=True,
@@ -679,3 +685,78 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     assert config.nvfp4_config.LinearMethodCls is m.ModelOptNvFp4LinearMethod
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
     assert config.w4a16_nvfp4_config.LinearMethodCls is m.ModelOptNvFp4W4A16LinearMethod
+
+
+def _fp8_pb_hf_config(group_size: int = 128) -> dict[str, Any]:
+    """A MIXED_PRECISION config with a single FP8_PB layer."""
+    return {
+        "quantization": {
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": None,
+            "exclude_modules": [],
+            "quantized_layers": {
+                "model.layers.0.mlp.down_proj": {
+                    "quant_algo": "FP8_PB",
+                    "group_size": group_size,
+                }
+            },
+        }
+    }
+
+
+@pytest.mark.parametrize("group_size", [128, 64])
+def test_modelopt_mixed_precision_dispatches_fp8_pb_layer(group_size):
+    """FP8_PB must route to the native block-FP8 method, with the block size
+    read from the checkpoint. ``ModelOptFp8PbWoLinearMethod`` expects a 4D
+    ``weight_scale`` and cannot load these 2D ``weight_scale_inv`` checkpoints.
+    """
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization import modelopt as m
+    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+    config = m.ModelOptMixedPrecisionConfig.from_config(_fp8_pb_hf_config(group_size))
+
+    with patch(
+        "vllm.model_executor.layers.quantization.fp8.get_current_vllm_config"
+    ) as mock_vllm_config:
+        mock_vllm_config.return_value.model_config.dtype = torch.bfloat16
+        method = config.get_quant_method(
+            MagicMock(spec=LinearBase), "model.layers.0.mlp.down_proj"
+        )
+
+    assert isinstance(method, Fp8LinearMethod), type(method).__name__
+    assert method.block_quant
+    assert method.weight_block_size == [group_size, group_size]
+
+
+@pytest.mark.parametrize(
+    "quantized_layers, expect_blocked",
+    [
+        ({"model.layers.0.a": {"quant_algo": "FP8_PB", "group_size": 128}}, True),
+        ({"model.layers.0.a": {"quant_algo": "FP8"}}, False),
+        ({"model.layers.0.a": {"quant_algo": "NVFP4", "group_size": 16}}, False),
+        ({"model.layers.0.a": {"quant_algo": "MXFP8"}}, False),
+    ],
+)
+def test_modelopt_mixed_precision_has_blocked_weights(quantized_layers, expect_blocked):
+    """``VllmConfig`` gates "+quant_fp8" on this; without it ``QuantFP8`` emits
+    unpacked fp32 group scales where the SM100 DeepGEMM path expects
+    UE8M0-packed ones, and generation returns NaN. Must be True only for
+    FP8_PB, and ``weight_block_size`` must stay absent since it is checked
+    first.
+    """
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    hf_quant_config: dict[str, Any] = {
+        "quantization": {
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": None,
+            "exclude_modules": [],
+            "group_size": 16,
+            "quantized_layers": quantized_layers,
+        }
+    }
+    config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
+
+    assert not hasattr(config, "weight_block_size")
+    assert config.has_blocked_weights() is expect_blocked
