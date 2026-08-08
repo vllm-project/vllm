@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -184,6 +186,67 @@ def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
 
     # the adaptive plan keeps all 5 in one chunk
     assert chunk_plan == [(0, 5, 36, 103)]
+
+
+@pytest.mark.parametrize(
+    ("num_decodes", "num_decode_tokens", "num_prefill_tokens", "expected_calls"),
+    [
+        (0, 0, 0, []),
+        (1, 1, 0, [("decode", [0])]),
+        (1, 1, 2, [("prefill", [1, 2]), ("decode", [0])]),
+    ],
+)
+def test_flashinfer_sm120_dispatches_nonempty_token_slices(
+    monkeypatch,
+    num_decodes: int,
+    num_decode_tokens: int,
+    num_prefill_tokens: int,
+    expected_calls: list[tuple[str, list[int]]],
+):
+    from vllm.models.deepseek_v4.nvidia import flashinfer_sparse as flashinfer_mod
+
+    calls = []
+
+    def fake_prefill(self, *, q, output, **kwargs):
+        calls.append(("prefill", q[:, 0].tolist()))
+        assert output[:, 0].tolist() == q[:, 0].tolist()
+
+    def fake_decode(self, *, q, output, **kwargs):
+        calls.append(("decode", q[:, 0].tolist()))
+        assert output[:, 0].tolist() == q[:, 0].tolist()
+
+    monkeypatch.setattr(
+        flashinfer_mod.DeepseekV4FlashInferSM120Attention,
+        "_forward_prefill",
+        fake_prefill,
+    )
+    monkeypatch.setattr(
+        flashinfer_mod.DeepseekV4FlashInferSM120Attention,
+        "_forward_decode",
+        fake_decode,
+    )
+
+    attn = object.__new__(flashinfer_mod.DeepseekV4FlashInferSM120Attention)
+    num_tokens = num_decode_tokens + num_prefill_tokens
+    q = torch.arange(num_tokens, dtype=torch.float32).unsqueeze(1)
+    swa_metadata = SimpleNamespace(
+        num_decodes=num_decodes,
+        num_prefills=1,
+        num_decode_tokens=num_decode_tokens,
+        num_prefill_tokens=num_prefill_tokens,
+    )
+
+    attn._forward_sparse_impl(
+        q=q,
+        output=q.clone(),
+        flashmla_metadata=None,
+        swa_metadata=swa_metadata,
+        self_kv_cache=None,
+        swa_kv_cache=torch.empty(0),
+        swa_only=True,
+    )
+
+    assert calls == expected_calls
 
 
 def test_flashinfer_sparse_indices_cache(monkeypatch):

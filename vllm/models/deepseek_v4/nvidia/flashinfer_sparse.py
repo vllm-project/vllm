@@ -621,7 +621,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         swa_only: bool,
     ) -> None:
         num_decode_tokens = swa_metadata.num_decode_tokens
-        if swa_metadata.num_prefills > 0:
+        if swa_metadata.num_prefill_tokens > 0:
             self._forward_prefill(
                 q=q[num_decode_tokens:],
                 compressed_k_cache=self_kv_cache,
@@ -630,7 +630,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                 attn_metadata=flashmla_metadata,
                 swa_metadata=swa_metadata,
             )
-        if swa_metadata.num_decodes > 0:
+        if num_decode_tokens > 0:
             self._forward_decode(
                 q=q[:num_decode_tokens],
                 kv_cache=self_kv_cache,
