@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Literal
+
 import torch
 
 import vllm.envs as envs
@@ -52,6 +54,8 @@ def create_scheduler(
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
+    scheduling_policy: Literal["fcfs", "priority", "residual_sjf"] = "fcfs",
+    residual_sjf_max_wait_ms: int = 10_000,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
     use_kv_connector: None | bool | str | MockKVConfig = None,
@@ -102,6 +106,8 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        policy=scheduling_policy,
+        residual_sjf_max_wait_ms=residual_sjf_max_wait_ms,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
     )
