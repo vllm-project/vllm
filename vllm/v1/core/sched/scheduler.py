@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -64,6 +65,9 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+KV_TRANSFER_PRIORITY_POLL = bool(
+    int(os.environ.get("VLLM_KV_TRANSFER_PRIORITY_POLL", "0"))
+)
 
 
 class Scheduler(SchedulerInterface):
@@ -189,6 +193,8 @@ class Scheduler(SchedulerInterface):
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
+
+        self._kv_transfer_priority_poll_logged = False
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -437,6 +443,29 @@ class Scheduler(SchedulerInterface):
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)
 
+    def _should_prioritize_kv_transfer_poll(self) -> bool:
+        if (
+            not KV_TRANSFER_PRIORITY_POLL
+            or self.connector is None
+            or not self.running
+            or self._pause_state != PauseState.UNPAUSED
+        ):
+            return False
+
+        waiting_for_kv_transfer = itertools.chain(self.waiting, self.skipped_waiting)
+        return any(
+            self._is_kv_transfer_poll_candidate(request)
+            for request in waiting_for_kv_transfer
+        )
+
+    @staticmethod
+    def _is_kv_transfer_poll_candidate(request: Request) -> bool:
+        return request.kv_transfer_params is not None and request.status in (
+            RequestStatus.WAITING,
+            RequestStatus.PREEMPTED,
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+        )
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -481,9 +510,21 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        prioritize_kv_transfer_poll = self._should_prioritize_kv_transfer_poll()
+        if prioritize_kv_transfer_poll and not self._kv_transfer_priority_poll_logged:
+            logger.info(
+                "VLLM_KV_TRANSFER_PRIORITY_POLL=1: prioritizing remote KV "
+                "admission before running decode steps."
+            )
+            self._kv_transfer_priority_poll_logged = True
+
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while (
+            not prioritize_kv_transfer_poll
+            and req_index < len(self.running)
+            and token_budget > 0
+        ):
             request = self.running[req_index]
 
             if (
@@ -705,6 +746,13 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if prioritize_kv_transfer_poll and not (
+                    self._is_kv_transfer_poll_candidate(request)
+                ):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -1059,6 +1107,8 @@ class Scheduler(SchedulerInterface):
                                 num_computed_tokens,
                             )
                         )
+                    if prioritize_kv_transfer_poll:
+                        break
                     continue
 
                 self.running.append(request)
