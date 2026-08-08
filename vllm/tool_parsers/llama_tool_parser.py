@@ -12,7 +12,23 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.engine.registered_adapters import LlamaJsonParserToolAdapter
 
-_EMPTY_OBJECT_SCHEMA = {"type": "object", "properties": {}}
+
+def _empty_object_schema() -> dict[str, Any]:
+    """Schema for a tool that declares no parameters.
+
+    ``additionalProperties: False`` is load-bearing, not decoration.  Without
+    it the schema forbids nothing, so the decoding grammar accepts the
+    ``{"name": ..., "parameters": ...}`` envelope the chat template asks for
+    as readily as the bare ``{}`` -- and the parser cannot tell which it was
+    handed.  Forbidding extra keys makes ``{}`` the only valid output on
+    every backend, which is also exactly what "no parameters" means.
+
+    Built fresh per call: a shared literal is mutated in place downstream
+    (``_get_tool_schema_defs`` pops ``$defs``, the guidance backend writes
+    ``additionalProperties``), so one request's edits would otherwise reach
+    every parameterless tool served afterwards.
+    """
+    return {"type": "object", "properties": {}, "additionalProperties": False}
 
 
 def _named_choice_tool_name(
@@ -66,5 +82,5 @@ class Llama3JsonToolParser(LlamaJsonParserToolAdapter):  # type: ignore[valid-ty
                     getattr(function, "name", None) == name
                     and getattr(function, "parameters", None) is None
                 ):
-                    function.parameters = dict(_EMPTY_OBJECT_SCHEMA)
+                    function.parameters = _empty_object_schema()
         return super().adjust_request(request)
