@@ -244,10 +244,12 @@ class HunYuanVisionAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
-        out = self.attn(q, k, v)
+        out = self.attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
         output, _ = self.o_proj(out)
         return output
 
@@ -287,8 +289,12 @@ class HunYuanVisionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = x + self.self_attn(self.input_layernorm(x))
+        x = x + self.self_attn(
+            self.input_layernorm(x), cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+        )
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 
@@ -491,41 +497,87 @@ class HunYuanVisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.embeddings.patch_embedding.weight.device
 
+    def prepare_encoder_metadata(
+        self,
+        grid_thw: list[list[int]],
+        *,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if device is None:
+            device = self.device
+
+        # NOTE: matches the legacy per-image split lengths, which use h * w
+        # only (video, i.e. t > 1, is not yet supported by this model).
+        lengths = [int(h) * int(w) for (_, h, w) in grid_thw]
+        cu_seqlens = torch.tensor([0, *lengths], dtype=torch.int32)
+        cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
+
+        # Keep cu_seqlens shape stable across CUDA graph capture/replay.
+        if max_batch_size is not None:
+            num_seqs = len(cu_seqlens) - 1
+            if num_seqs < max_batch_size:
+                cu_seqlens = torch.cat(
+                    (
+                        cu_seqlens,
+                        torch.full(
+                            (max_batch_size - num_seqs,),
+                            cu_seqlens[-1],
+                            dtype=cu_seqlens.dtype,
+                        ),
+                    )
+                )
+
+        if max_seqlen_override is None:
+            max_seqlen = (
+                (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+                if len(cu_seqlens) > 1
+                else torch.tensor(0, dtype=torch.int32)
+            )
+        else:
+            max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
+
+        return {
+            "cu_seqlens": cu_seqlens.to(device=device, non_blocking=True),
+            "max_seqlen": max_seqlen,
+        }
+
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: list[list[int]],
+        grid_thw: list[list[int]] | None,
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # patchify
         seq_len = x.size(0)
-        cu_seqlens: list = [0]
 
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         # embeddings = patch_embeds + patch_pos_embed
+        assert grid_thw is not None, (
+            "grid_thw is required to compute patch position embeddings"
+        )
         hidden_states = self.embeddings(hidden_states, grid_thw)
 
-        for t, h, w in grid_thw:
-            t, h, w = int(t), int(h), int(w)
-            cu_seqlens.append(h * w)
-
-        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32)
-        cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
-
-        cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
+        if encoder_metadata is None:
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw)
+        cu_seqlens = encoder_metadata["cu_seqlens"]
+        max_seqlen = encoder_metadata["max_seqlen"]
 
         hidden_states = hidden_states.reshape(seq_len, -1)
         hidden_states = hidden_states.unsqueeze(0)
 
-        # build per-image lengths once
-        split_lengths = [int(h) * int(w) for (_, h, w) in grid_thw]
+        # hidden_states: (1, T_total, D), packed across all images in the
+        # batch. cu_seqlens keeps attention scoped to each image.
         for layer in self.layers:
-            # hidden_states: (1, T_total, D)
-            parts = hidden_states.split(split_lengths, dim=1)  # list of (1, L_i, D)
-            parts = [layer(p) for p in parts]
-            hidden_states = torch.cat(parts, dim=1)
+            hidden_states = layer(
+                hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+            )
 
-        # adapter
-        split_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        # adapter: the conv-based merger still operates per-image, since it
+        # needs each image's (h, w) spatial layout to insert newline tokens.
+        split_lengths = [int(h) * int(w) for (_, h, w) in grid_thw]
         split_items = hidden_states.split(split_lengths, dim=1)
         image_embeds_list = []
         for grid, split_item in zip(grid_thw, split_items):
