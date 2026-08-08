@@ -88,6 +88,8 @@ class TileGemm224<c10::BFloat16, kv_cache_t> {
   // BF16 path: scratch_elems=1 so the scratch array is eliminated by the
   // compiler.
   static constexpr int64_t scratch_elems = fp8_kv ? tile_elems : 1;
+  // No separate AMX tile reconfiguration needed between QK and PV phases.
+  static constexpr bool pv_uses_separate_tile_config = false;
 
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -237,6 +239,8 @@ class TileGemm122<c10::BFloat16, kv_cache_t> {
                     std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
                     std::is_same_v<kv_cache_t, c10::Float8_e5m2>,
                 "kv_cache_t must be BFloat16, Float8_e4m3fn, or Float8_e5m2");
+
+  static constexpr bool pv_uses_separate_tile_config = false;
 
   static constexpr bool fp8_kv =
       std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||

@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16, NEON, VXE, RVV, VSX };
+enum class ISA { AMX, AMX_FP8, VEC, VEC16, NEON, VXE, RVV, VSX };
 
 // Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
 enum class Fp8KVCacheDataType {
@@ -151,6 +151,9 @@ struct AttentionMetadata {
     switch (isa) {
       case ISA::AMX:
         ss << "AMX, ";
+        break;
+      case ISA::AMX_FP8:
+        ss << "AMX_FP8, ";
         break;
       case ISA::VEC:
         ss << "VEC, ";
@@ -885,6 +888,8 @@ struct AttentionInput {
   // FP8 KV cache scales (used by FP8 attention implementations)
   float k_scale_fp8 = 1.0f;
   float v_scale_fp8 = 1.0f;
+  // FP8 query scale (used by AMX_FP8 which quantizes query inside the kernel)
+  float q_scale_fp8 = 1.0f;
 };
 
 #define DEFINE_CPU_ATTENTION_PARAMS                                         \
@@ -1128,14 +1133,12 @@ class AttentionMainLoop {
                       kv_tile_token_num, q_head_num, kv_tile_token_num,
                       is_first_iter, use_sink);
 
-        // if (debug_info){
-        //     print_logits("softmax logits",
-        //     reinterpret_cast<prob_buffer_t*>(logits_buffer), q_head_num,
-        //     kv_tile_token_num, kv_tile_token_num * sizeof(logits_buffer_t) /
-        //     sizeof(prob_buffer_t));
-        //     print_logits("new_max", max_buffer, 1, q_head_num, q_head_num);
-        //     print_logits("new_sum", sum_buffer, 1, q_head_num, q_head_num);
-        // }
+        // AMX_FP8 E4M3 native PV: reconfigure AMX tiles for narrow FP8
+        // (colsb=32).  This must happen after QK (which uses colsb=64) and
+        // before the P@V loop.  The BF16 and E5M2 paths are no-ops here.
+        if constexpr (requires { tile_gemm_t::setup_for_pv(q_head_num); }) {
+          tile_gemm_t::setup_for_pv(q_head_num);
+        }
       }
 
       // compute P@V
@@ -1189,10 +1192,12 @@ class AttentionMainLoop {
           accum_c = true;
         }
       }
-      //   if (debug_info) {
-      //     print_logits("output", partial_q_buffer, q_head_num, head_dim,
-      //     head_dim);
-      //   }
+
+      // AMX_FP8 E4M3 native PV: restore wide tile config (colsb=64) so the
+      // next execute_attention() call's QK phase sees correct tile widths.
+      if constexpr (requires { tile_gemm_t::teardown_pv(q_head_num); }) {
+        tile_gemm_t::teardown_pv(q_head_num);
+      }
     }
 
     void apply_mask(logits_buffer_t* __restrict__ logits_buffer,
