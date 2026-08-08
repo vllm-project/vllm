@@ -433,6 +433,7 @@ class Attention(nn.Module, AttentionLayerBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+        compilation_config.static_all_kv_layers.append(prefix)
         self.attn_type = attn_type
 
         if kv_sharing_target_layer_name is not None:
@@ -536,9 +537,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 and key is not None
                 and value is not None
             ):
-                kv_cache_dummy_dep = unified_kv_cache_update(
-                    key, value, self.layer_name
-                )
+                kv_cache_dummy_dep = unified_kv_cache_update(key, value)
             unified_attention_with_output(
                 query,
                 key,
@@ -556,9 +555,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 and key is not None
                 and value is not None
             ):
-                kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                    key, value, encoded
-                )
+                kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(key, value)
             torch.ops.vllm.unified_attention_with_output(
                 query,
                 key,
@@ -671,7 +668,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
 
 def get_attention_context(
-    layer_name: str,
+    layer_name: str | None = None,
 ) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor]:
     """Extract attention context for a given layer.
 
@@ -679,7 +676,8 @@ def get_attention_context(
     instance, KV cache tensor, and slot mapping for a specific layer.
 
     Args:
-        layer_name: The name/identifier of the attention layer.
+        layer_name: Optional name/identifier of the attention layer.
+            If None, retrieved dynamically from forward_context.
 
     Returns:
         A tuple containing:
@@ -693,6 +691,21 @@ def get_attention_context(
         extracted from the forward context.
     """
     forward_context: ForwardContext = get_forward_context()
+    if layer_name is None:
+        if forward_context.all_kv_layers is not None:
+            layer_name = forward_context.all_kv_layers[
+                forward_context.kv_layer_index % len(forward_context.all_kv_layers)
+            ]
+            forward_context.kv_layer_index += 1
+        else:
+            kv_layers = [
+                k
+                for k, v in forward_context.no_compile_layers.items()
+                if hasattr(v, "kv_cache")
+            ]
+            layer_name = kv_layers[forward_context.kv_layer_index % len(kv_layers)]
+            forward_context.kv_layer_index += 1
+
     attn_metadata_raw = forward_context.attn_metadata
     attn_metadata: AttentionMetadata
     if isinstance(attn_metadata_raw, dict):
@@ -716,14 +729,12 @@ def get_attention_context(
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,
-    layer_name: LayerNameType,
 ) -> torch.Tensor:
     """
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
-    layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context()
     if layer_slot_mapping is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
@@ -742,7 +753,6 @@ def unified_kv_cache_update(
 def unified_kv_cache_update_fake(
     key: torch.Tensor,
     value: torch.Tensor,
-    layer_name: LayerNameType,
 ) -> torch.Tensor:
     return torch.empty(0, device=key.device, dtype=key.dtype)
 

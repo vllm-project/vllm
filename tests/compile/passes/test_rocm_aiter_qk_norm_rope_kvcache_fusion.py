@@ -218,9 +218,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         q = q.view(-1, self.num_heads, self.head_size)
         k = k.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size)
-        kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-            k, v, self.layer_name
-        )
+        kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(k, v)
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
