@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import random
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,33 @@ else:
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
+
+
+def test_offline_multiprocess_frontend_heap_freeze_lifecycle(monkeypatch):
+    """Offline multiprocess freezes the front-end heap and thaws on teardown.
+
+    Regression guard for gh #48229. In multiprocess mode the EngineCore child
+    and the online server both freeze their heaps, but the offline front-end
+    process (the one running step()) was never frozen, so its oldest-generation
+    GC pauses could grow over long runs. Building a multiprocess ``LLM`` must
+    leave the driver process with a frozen heap; explicit teardown (via the
+    context manager here) must unfreeze it, so repeatedly creating and
+    destroying offline ``LLM`` instances in one process does not strand each
+    frozen heap.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    gc.collect()
+    before = gc.get_freeze_count()
+    with LLM(
+        MODEL,
+        dtype=DTYPE,
+        max_model_len=128,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+    ):
+        frozen = gc.get_freeze_count()
+        assert frozen > before
+    assert gc.get_freeze_count() < frozen
 
 
 def _vllm_model(
