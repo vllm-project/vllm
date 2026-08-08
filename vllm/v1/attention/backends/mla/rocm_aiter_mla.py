@@ -908,6 +908,53 @@ class AiterMLAHelper:
         return m % num_heads == 0 and gluon_supported
 
 
+def _expand_dspark_mqa_metadata(
+    decode: AiterMLADecodeMetadata,
+    num_rows: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Expand request KV metadata into causal DSpark verification rows."""
+    cached = getattr(decode, "_dspark_mqa_cache", None)
+    if cached is not None and cached[0] == num_rows:
+        return cached[1], cached[2], cached[3]
+
+    old_indptr = decode.paged_kv_indptr
+    per_req_len = old_indptr[1:] - old_indptr[:-1]
+    num_reqs = per_req_len.shape[0]
+    qo_indptr = decode.qo_indptr
+    assert qo_indptr is not None
+    qo_len = (qo_indptr[1 : num_reqs + 1] - qo_indptr[:num_reqs]).to(torch.int64)
+
+    device = old_indptr.device
+    row_req = torch.repeat_interleave(torch.arange(num_reqs, device=device), qo_len)
+    if row_req.shape[0] != num_rows:
+        raise AssertionError(
+            "DSpark MQA row map disagrees with the query batch: "
+            f"qo_indptr implies {row_req.shape[0]} rows, q has {num_rows}"
+        )
+
+    row_pos = torch.arange(num_rows, device=device, dtype=torch.int64)
+    row_pos -= torch.repeat_interleave(qo_indptr[:num_reqs].to(torch.int64), qo_len)
+    row_len = (per_req_len[row_req] - qo_len[row_req] + row_pos + 1).clamp_(min=0)
+    new_indptr = torch.cat([old_indptr.new_zeros(1), row_len.cumsum(0)]).to(
+        torch.int32
+    )
+    total = int(new_indptr[-1].item())
+    within = torch.arange(total, device=device, dtype=torch.int64)
+    within -= new_indptr[:-1].to(torch.int64).repeat_interleave(row_len)
+    src = old_indptr[row_req].to(torch.int64).repeat_interleave(row_len) + within
+    new_indices = decode.paged_kv_indices[src]
+
+    # Split-K in the small-head Gluon verification regime triggers illegal
+    # memory accesses. Match ordinary decode's single-split path.
+    min_kv_seq_len = 1
+    result = (new_indices, new_indptr, min_kv_seq_len)
+    try:
+        setattr(decode, "_dspark_mqa_cache", (num_rows, *result))
+    except (AttributeError, TypeError):
+        pass
+    return result
+
+
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     def __init__(
         self,
@@ -1201,7 +1248,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and _aiter_mla_small_head_mode() != "asm"
             and _gluon_mla_decode_supported()
         ):
-            qlen = int(decode.max_qo_len)
             if type(q) is tuple:
                 q_nope, q_pe = q
             else:
@@ -1217,42 +1263,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 device=q_nope.device,
             )
             kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
-            # Expand per-request paged-KV to per-verify-token. Row r*qlen+t is
-            # request r's verify token t, and seq_lens counts the tokens
-            # scheduled in this step, so a request's KV range already spans its
-            # whole verify block and context_r = seq_len_r - qlen. Token t may
-            # attend to [0, context_r + t], i.e. seq_len_r - (qlen - 1) + t
-            # entries. paged_kv_indices lists a request's pages in ascending
-            # position order, so each row's causal window is a prefix of that
-            # request's slice and only the row length changes. Rows clamp to
-            # zero for cudagraph padding requests, whose seq_len is 0. Fully
-            # vectorized (no host loop).
-            old_indptr = decode.paged_kv_indptr
-            per_req_len = old_indptr[1:] - old_indptr[:-1]
-            dev = q_nope.device
-            row_req = torch.arange(per_req_len.shape[0], device=dev).repeat_interleave(
-                qlen
+            new_indices, new_indptr, min_kv_seq_len = (
+                _expand_dspark_mqa_metadata(decode, B)
             )
-            row_len = (
-                (
-                    per_req_len.unsqueeze(1)
-                    - (qlen - 1)
-                    + torch.arange(qlen, device=dev, dtype=per_req_len.dtype)
-                )
-                .clamp_(min=0)
-                .flatten()
-            )
-            new_indptr = torch.cat([old_indptr.new_zeros(1), row_len.cumsum(0)]).to(
-                torch.int32
-            )
-            total = int(new_indptr[-1].item())
-            within = torch.arange(total, device=dev, dtype=torch.int64) - new_indptr[
-                :-1
-            ].to(torch.int64).repeat_interleave(row_len)
-            src = (
-                old_indptr[row_req].to(torch.int64).repeat_interleave(row_len) + within
-            )
-            new_indices = decode.paged_kv_indices[src]
             mla_gluon = _get_mla_gluon()
             mla_gluon(
                 q_nope=q_nope,
@@ -1266,7 +1279,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 kv_pe_offset=self.kv_lora_rank,
                 use_2d_view=False,
                 kv_scale=1.0,
-                min_kv_seq_len=int(row_len.min()),
+                min_kv_seq_len=min_kv_seq_len,
             )
             return o, None
 
