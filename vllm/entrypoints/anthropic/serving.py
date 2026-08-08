@@ -610,18 +610,21 @@ class AnthropicServingMessages(OpenAIServingChat):
             return generator
 
         elif isinstance(generator, ChatCompletionResponse):
-            return self.messages_full_converter(generator)
+            # Preserve the requested model alias in non-streaming response
+            return self.messages_full_converter(generator, request.model)
 
-        return self.message_stream_converter(generator)
+        # Preserve the requested model alias in streaming response
+        return self.message_stream_converter(generator, request.model)
 
     def messages_full_converter(
         self,
         generator: ChatCompletionResponse,
+        requested_model: str | None = None,
     ) -> AnthropicMessagesResponse:
         result = AnthropicMessagesResponse(
             id=generator.id,
             content=[],
-            model=generator.model,
+            model=requested_model or generator.model,  # Preserve requested alias
             usage=_build_anthropic_usage(generator.usage),
             kv_transfer_params=generator.kv_transfer_params,
             ec_transfer_params=generator.ec_transfer_params,
@@ -673,6 +676,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     async def message_stream_converter(
         self,
         generator: AsyncGenerator[str, None],
+        requested_model: str | None = None,
     ) -> AsyncGenerator[str, None]:
         try:
 
@@ -806,7 +810,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     type="message",
                                     role="assistant",
                                     content=[],
-                                    model=origin_chunk.model,
+                                    model=requested_model or origin_chunk.model,  # Preserve requested alias
                                     stop_reason=None,
                                     stop_sequence=None,
                                     usage=_build_anthropic_usage(origin_chunk.usage),
