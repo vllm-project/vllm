@@ -9,6 +9,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    TopKTopPSampler,
     apply_top_k_top_p_pytorch,
     random_sample,
 )
@@ -1047,3 +1048,22 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+def test_forward_cpu_honors_seeds_in_partially_seeded_batch():
+    """A seeded row must be reproducible when other rows are unseeded.
+
+    `forward_cpu` early-returns into `compiled_random_sample`, which draws
+    from the global RNG and takes no generators, whenever the batch is not
+    *fully* seeded. Vary only the global seed: a row with its own generator
+    must sample identically across both calls.
+    """
+    sampler = TopKTopPSampler()
+    logits = torch.randn(4, 512)
+
+    def sample(global_seed: int) -> torch.Tensor:
+        set_random_seed(global_seed)
+        generators = {0: torch.Generator().manual_seed(1234)}
+        return sampler.forward_cpu(logits.clone(), generators, None, None)[0]
+
+    assert sample(0)[0] == sample(99)[0]
