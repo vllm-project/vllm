@@ -194,6 +194,13 @@ class GuidanceGrammar(StructuredOutputGrammar):
         if self.ll_matcher.is_stopped():
             return []
 
+        for i, token in enumerate(tokens):
+            if token < 0:
+                tokens = tokens[:i]
+                break
+        if len(tokens) == 0:
+            return []
+
         num_tokens = self.ll_matcher.validate_tokens(tokens)
 
         self.check_error()

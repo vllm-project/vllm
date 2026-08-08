@@ -36,7 +36,8 @@ class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
 
     def __init__(self, vllm_config: VllmConfig):
-        self.backend: StructuredOutputBackend | None = None
+        self.backends: dict[str, StructuredOutputBackend] = {}
+        self._grammar_bitmask_spec: tuple[tuple[int, ...], torch.dtype] | None = None
         # We only store the class of the reasoner in the manager.
         # The parser instance is request-scoped because some reasoning parsers
         # depend on per-request chat-template kwargs.
@@ -121,60 +122,88 @@ class StructuredOutputManager:
                 and request.sampling_params.structured_outputs is not None
             )
 
-        # Initialize the backend the first time it is needed.
-        #
-        # NOTE: We only support a single backend. We do NOT support different
-        # backends on a per-request basis in V1 (for now, anyway...).
-        # _backend is set in Processor._validate_structured_output
-        if self.backend is None:
-            assert request.sampling_params is not None
-            backend = request.sampling_params.structured_outputs._backend
-            vocab_size = self.vllm_config.model_config.get_vocab_size()
-            if backend == "xgrammar":
-                self.backend = XgrammarBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif backend == "guidance":
-                self.backend = GuidanceBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif backend == "outlines":
-                from vllm.v1.structured_output.backend_outlines import OutlinesBackend
-
-                self.backend = OutlinesBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif backend == "lm-format-enforcer":
-                from vllm.v1.structured_output.backend_lm_format_enforcer import (  # noqa: E501
-                    LMFormatEnforcerBackend,
-                )
-
-                self.backend = LMFormatEnforcerBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            else:
-                raise ValueError(f"Unsupported structured output backend: {backend}")
+        backend = self._get_or_create_backend(request.structured_output_request.backend)
 
         grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar
         if self._use_async_grammar_compilation:
-            grammar = self.executor.submit(self._create_grammar, request)
+            grammar = self.executor.submit(self._create_grammar, request, backend)
         else:
             try:
-                grammar = self._create_grammar(request)
+                grammar = self._create_grammar(request, backend)
             except Exception as e:
                 grammar = Future()
                 grammar.set_exception(e)
         request.structured_output_request.grammar = grammar
 
-    def _create_grammar(self, request: "Request") -> StructuredOutputGrammar:
+    def _get_or_create_backend(self, backend_name: str) -> StructuredOutputBackend:
+        if backend_name in self.backends:
+            return self.backends[backend_name]
+
+        vocab_size = self.vllm_config.model_config.get_vocab_size()
+        backend: StructuredOutputBackend
+        if backend_name == "xgrammar":
+            backend = XgrammarBackend(
+                self.vllm_config,
+                tokenizer=self.tokenizer,
+                vocab_size=vocab_size,
+            )
+        elif backend_name == "guidance":
+            backend = GuidanceBackend(
+                self.vllm_config,
+                tokenizer=self.tokenizer,
+                vocab_size=vocab_size,
+            )
+        elif backend_name == "outlines":
+            from vllm.v1.structured_output.backend_outlines import OutlinesBackend
+
+            backend = OutlinesBackend(
+                self.vllm_config,
+                tokenizer=self.tokenizer,
+                vocab_size=vocab_size,
+            )
+        elif backend_name == "lm-format-enforcer":
+            from vllm.v1.structured_output.backend_lm_format_enforcer import (
+                LMFormatEnforcerBackend,
+            )
+
+            backend = LMFormatEnforcerBackend(
+                self.vllm_config,
+                tokenizer=self.tokenizer,
+                vocab_size=vocab_size,
+            )
+        else:
+            raise ValueError(f"Unsupported structured output backend: {backend_name}")
+
+        try:
+            self._register_backend_bitmask_spec(backend_name, backend)
+        except Exception:
+            backend.destroy()
+            raise
+        self.backends[backend_name] = backend
+        return backend
+
+    def _register_backend_bitmask_spec(
+        self,
+        backend_name: str,
+        backend: StructuredOutputBackend,
+    ) -> None:
+        sample_bitmask = backend.allocate_token_bitmask(1)
+        spec = (tuple(sample_bitmask.shape[1:]), sample_bitmask.dtype)
+        if self._grammar_bitmask_spec is None:
+            self._grammar_bitmask_spec = spec
+        elif spec != self._grammar_bitmask_spec:
+            raise ValueError(
+                "Structured output backends in the same engine must use "
+                "compatible bitmask layouts. "
+                f"Backend '{backend_name}' produced {spec}, expected "
+                f"{self._grammar_bitmask_spec}."
+            )
+
+    def _create_grammar(
+        self,
+        request: "Request",
+        backend: StructuredOutputBackend,
+    ) -> StructuredOutputGrammar:
         struct_request = request.structured_output_request
         assert struct_request is not None
         # Note that the request was validated in the engine core client,
@@ -183,8 +212,7 @@ class StructuredOutputManager:
         # scheduler so it can fail only this request.
         try:
             request_type, grammar_spec = struct_request.structured_output_key
-            assert self.backend is not None
-            return self.backend.compile_grammar(request_type, grammar_spec)
+            return backend.compile_grammar(request_type, grammar_spec)
         except Exception:
             logger.exception(
                 "Failed to compile grammar for request %s", request.request_id
@@ -223,13 +251,17 @@ class StructuredOutputManager:
         max_num_spec_tokens = self.vllm_config.num_speculative_tokens
 
         if self._grammar_bitmask is None:
-            assert self.backend is not None
             max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
+            first_request = requests[structured_output_request_ids[0]]
+            assert first_request.structured_output_request is not None
+            backend = self._get_or_create_backend(
+                first_request.structured_output_request.backend
+            )
 
             # Allocate a bitmask for each token needing to be checked:
             # one for each speculative position, and one more for the
             # bonus token / non-speculative token.
-            self._grammar_bitmask = self.backend.allocate_token_bitmask(
+            self._grammar_bitmask = backend.allocate_token_bitmask(
                 max_batch_size * (1 + max_num_spec_tokens)
             )
 
@@ -486,5 +518,8 @@ class StructuredOutputManager:
         return new_token_ids[num_reasoning:]
 
     def clear_backend(self) -> None:
-        if self.backend is not None:
-            self.backend.destroy()
+        for backend in self.backends.values():
+            backend.destroy()
+        self.backends.clear()
+        self._grammar_bitmask = None
+        self._grammar_bitmask_spec = None

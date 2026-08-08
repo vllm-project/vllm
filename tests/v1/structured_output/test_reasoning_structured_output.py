@@ -3,14 +3,19 @@
 
 """Unit tests for reasoning-aware structured output functionality (PR #25515)."""
 
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 class MockReasoner:
@@ -189,6 +194,134 @@ class TestReasoningStructuredOutput:
 
         # Should return False since reasoning hasn't ended
         assert result is False
+
+    @pytest.mark.parametrize("async_grammar", [True, False])
+    def test_grammar_init_uses_request_scoped_backend(
+        self, mock_vllm_config, async_grammar
+    ):
+        manager = StructuredOutputManager(mock_vllm_config)
+        manager._use_async_grammar_compilation = async_grammar
+        executor = None
+        if async_grammar:
+            executor = ThreadPoolExecutor(max_workers=1)
+            manager.executor = executor
+
+        xgrammar_grammar = object()
+        guidance_grammar = object()
+        xgrammar_backend = Mock()
+        guidance_backend = Mock()
+        xgrammar_backend.compile_grammar.return_value = xgrammar_grammar
+        guidance_backend.compile_grammar.return_value = guidance_grammar
+        manager.backends = {
+            "xgrammar": xgrammar_backend,
+            "guidance": guidance_backend,
+        }
+
+        def make_request(backend: str) -> Request:
+            sampling_params = SamplingParams(
+                structured_outputs=StructuredOutputsParams(json='{"type":"object"}')
+            )
+            assert sampling_params.structured_outputs is not None
+            sampling_params.structured_outputs._backend = backend
+            return Request(
+                f"request-{backend}",
+                prompt_token_ids=[1],
+                sampling_params=sampling_params,
+                pooling_params=None,
+            )
+
+        try:
+            xgrammar_request = make_request("xgrammar")
+            assert xgrammar_request.sampling_params is not None
+            assert xgrammar_request.sampling_params.structured_outputs is not None
+            xgrammar_request.sampling_params.structured_outputs._backend = "guidance"
+            guidance_request = make_request("guidance")
+
+            manager.grammar_init(xgrammar_request)
+            manager.grammar_init(guidance_request)
+
+            while not (
+                xgrammar_request.structured_output_request._check_grammar_completion()
+            ):
+                continue
+            while not (
+                guidance_request.structured_output_request._check_grammar_completion()
+            ):
+                continue
+
+            assert xgrammar_request.structured_output_request.backend == "xgrammar"
+            assert guidance_request.structured_output_request.backend == "guidance"
+            assert (
+                xgrammar_request.structured_output_request.grammar is xgrammar_grammar
+            )
+            assert (
+                guidance_request.structured_output_request.grammar is guidance_grammar
+            )
+            xgrammar_backend.compile_grammar.assert_called_once_with(
+                StructuredOutputOptions.JSON, '{"type":"object"}'
+            )
+            guidance_backend.compile_grammar.assert_called_once_with(
+                StructuredOutputOptions.JSON, '{"type":"object"}'
+            )
+        finally:
+            if executor is not None:
+                executor.shutdown()
+
+    def test_grammar_bitmask_supports_mixed_compatible_backends(self, mock_vllm_config):
+        mock_vllm_config.num_speculative_tokens = 0
+        mock_vllm_config.model_config.is_diffusion = False
+        manager = StructuredOutputManager(mock_vllm_config)
+
+        def make_backend():
+            backend = Mock()
+            backend.allocate_token_bitmask.side_effect = lambda size: torch.full(
+                (size, 2), -1, dtype=torch.int32
+            )
+            return backend
+
+        manager.backends = {
+            "xgrammar": make_backend(),
+            "guidance": make_backend(),
+        }
+        manager._grammar_bitmask_spec = ((2,), torch.int32)
+
+        def make_request(backend: str, fill_value: int) -> Request:
+            sampling_params = SamplingParams(
+                structured_outputs=StructuredOutputsParams(json='{"type":"object"}')
+            )
+            assert sampling_params.structured_outputs is not None
+            sampling_params.structured_outputs._backend = backend
+            request = Request(
+                f"request-{backend}",
+                prompt_token_ids=[1],
+                sampling_params=sampling_params,
+                pooling_params=None,
+            )
+            grammar = Mock()
+            grammar.is_terminated.return_value = False
+            grammar.fill_bitmask.side_effect = lambda bitmask, idx: bitmask[idx].fill_(
+                fill_value
+            )
+            assert request.structured_output_request is not None
+            request.structured_output_request.grammar = grammar
+            return request
+
+        xgrammar_request = make_request("xgrammar", 1)
+        guidance_request = make_request("guidance", 2)
+        bitmask = manager.grammar_bitmask(
+            requests={
+                xgrammar_request.request_id: xgrammar_request,
+                guidance_request.request_id: guidance_request,
+            },
+            structured_output_request_ids=[
+                xgrammar_request.request_id,
+                guidance_request.request_id,
+            ],
+            scheduled_spec_decode_tokens={},
+        )
+
+        assert bitmask is not None
+        assert bitmask.tolist() == [[1, 1], [2, 2]]
 
     def test_should_advance_reasoning_just_ended(
         self,

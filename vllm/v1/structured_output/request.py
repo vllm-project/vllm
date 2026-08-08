@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 @dataclasses.dataclass
 class StructuredOutputRequest:
     params: StructuredOutputsParams
+    backend: str
     _grammar: (
         Future[StructuredOutputGrammar] | StructuredOutputGrammar | Exception | None
     ) = None
@@ -45,7 +46,9 @@ class StructuredOutputRequest:
         params = sampling_params.structured_outputs
         if not params or params.all_constraints_none():
             return None
-        return StructuredOutputRequest(params=params)
+        if params._backend is None:
+            raise ValueError("Structured output backend was not resolved.")
+        return StructuredOutputRequest(params=params, backend=params._backend)
 
     def _check_grammar_completion(self) -> bool:
         if isinstance(self._grammar, Future):
