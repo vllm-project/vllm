@@ -16,6 +16,7 @@ endif()
 set(ENABLE_X86_ISA $ENV{VLLM_CPU_X86})
 set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
 set(ENABLE_ARM_I8MM $ENV{VLLM_CPU_ARM_I8MM})
+set(ENABLE_RVV_FP16 $ENV{VLLM_CPU_RVV_FP16})
 set(ENABLE_RVV_BF16 $ENV{VLLM_CPU_RVV_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
@@ -57,15 +58,22 @@ else()
     endif()
 endif()
 
-if (NOT MACOSX_FOUND)
+set(VLLM_RISCV_CROSSCOMPILING OFF)
+if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    set(VLLM_RISCV_CROSSCOMPILING ON)
+endif()
+
+if (NOT MACOSX_FOUND AND NOT VLLM_RISCV_CROSSCOMPILING)
     execute_process(COMMAND cat /proc/cpuinfo
                     RESULT_VARIABLE CPUINFO_RET
                     OUTPUT_VARIABLE CPUINFO)
     if (NOT CPUINFO_RET EQUAL 0)
         message(FATAL_ERROR "Failed to check CPU features via /proc/cpuinfo")
     endif()
+elseif(VLLM_RISCV_CROSSCOMPILING)
+    message(STATUS
+        "Cross-compiling for RISC-V: skipping CPU feature detection from /proc/cpuinfo")
 endif()
-
 
 function (find_isa CPUINFO TARGET OUT)
     string(FIND ${CPUINFO} ${TARGET} ISA_FOUND)
@@ -99,15 +107,20 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
     check_sysctl(hw.optional.arm.FEAT_I8MM ARM_I8MM_FOUND)
 else()
-    find_isa(${CPUINFO} "Power11" POWER11_FOUND)
-    find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
-    find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
-    find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
-    find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
-    find_isa(${CPUINFO} "i8mm" ARM_I8MM_FOUND) # Check for ARM I8MM support
-    find_isa(${CPUINFO} "S390" S390_FOUND)
-    find_isa(${CPUINFO} "zvfhmin" RVV_FP16_FOUND) # Check for RISC-V Vector FP16 support
-    find_isa(${CPUINFO} "zvfbfmin" RVV_BF16_FOUND) # Check for RISC-V Vector BF16 support
+    if(VLLM_RISCV_CROSSCOMPILING)
+        set(RVV_FP16_FOUND OFF)
+        set(RVV_BF16_FOUND OFF)
+    else()
+        find_isa(${CPUINFO} "Power11" POWER11_FOUND)
+        find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
+        find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
+        find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
+        find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
+        find_isa(${CPUINFO} "i8mm" ARM_I8MM_FOUND) # Check for ARM I8MM support
+        find_isa(${CPUINFO} "S390" S390_FOUND)
+        find_isa(${CPUINFO} "zvfhmin" RVV_FP16_FOUND) # Check for RISC-V Vector FP16 support
+        find_isa(${CPUINFO} "zvfbfmin" RVV_BF16_FOUND) # Check for RISC-V Vector BF16 support
+    endif()
 
     # Support cross-compilation by allowing override via environment variables
     if (ENABLE_ARM_BF16)
@@ -118,6 +131,10 @@ else()
         set(ARM_I8MM_FOUND ON)
         message(STATUS
             "ARM I8MM support enabled via VLLM_CPU_ARM_I8MM environment variable")
+    endif()
+    if (ENABLE_RVV_FP16)
+        set(RVV_FP16_FOUND ON)
+        message(STATUS "RVV FP16 support enabled via VLLM_CPU_RVV_FP16 environment variable")
     endif()
     # Some kernels (e.g. Bianbu on Spacemit X100) do not report zvfbfmin
     # in /proc/cpuinfo despite hardware support. VLLM_CPU_RVV_BF16=1
@@ -194,6 +211,13 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
         message(FATAL_ERROR
             "VLLM_RVV_VLEN must be zero or a positive integer; got '${VLLM_RVV_VLEN}'")
     endif()
+    if(VLLM_RISCV_CROSSCOMPILING AND DEFINED VLLM_RVV_VLEN AND
+            VLLM_RVV_VLEN EQUAL 0 AND
+            (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+        message(FATAL_ERROR
+            "VLLM_RVV_VLEN=0 requests a scalar RISC-V build and cannot be "
+            "combined with VLLM_CPU_RVV_FP16=1 or VLLM_CPU_RVV_BF16=1.")
+    endif()
     # VLLM_RVV_VLEN selects the target VLEN. Auto-detected from /proc/cpuinfo
     # by default; set -DVLLM_RVV_VLEN=0 to force scalar RISC-V build.
     # Override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256 for RVV.
@@ -230,6 +254,14 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
                 "  CMAKE_ARGS='-DVLLM_RVV_VLEN=128'   (for VLEN=128 hardware)\n"
                 "  CMAKE_ARGS='-DVLLM_RVV_VLEN=256'   (for VLEN=256 hardware, e.g. Spacemit X100)")
         endif()
+    endif()
+    if(VLLM_RISCV_CROSSCOMPILING AND VLLM_RVV_VLEN AND
+            VLLM_RVV_VLEN GREATER 0 AND
+            NOT (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+        message(FATAL_ERROR
+            "RISC-V cross-compilation with VLLM_RVV_VLEN>0 requires "
+            "explicit target capability information. Set "
+            "VLLM_CPU_RVV_FP16=1 or VLLM_CPU_RVV_BF16=1.")
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
         message(STATUS "RISC-V RVV VLEN=${VLLM_RVV_VLEN}")

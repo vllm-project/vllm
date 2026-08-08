@@ -959,10 +959,12 @@ inline void storeFP32<c10::Half>(float v, c10::Half* ptr) {
 }
 
 inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
-  reg = RVVI(__riscv_vfncvt_f_f_w_f16, LMUL_256)(v.reg, VEC_ELEM_NUM);
+  reg = RVVI3(__riscv_vfncvt_f_f_w_f16, LMUL_256, _rm)(v.reg, __RISCV_FRM_RNE,
+                                                       VEC_ELEM_NUM);
 }
 inline FP16Vec8::FP16Vec8(const FP32Vec8& v) {
-  reg = RVVI(__riscv_vfncvt_f_f_w_f16, LMUL_128)(v.reg, VEC_ELEM_NUM);
+  reg = RVVI3(__riscv_vfncvt_f_f_w_f16, LMUL_128, _rm)(v.reg, __RISCV_FRM_RNE,
+                                                       VEC_ELEM_NUM);
 }
 inline FP32Vec16::FP32Vec16(const FP16Vec16& v) {
   reg = RVVI(__riscv_vfwcvt_f_f_v_f32, LMUL_512)(v.reg, VEC_ELEM_NUM);
