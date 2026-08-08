@@ -15,7 +15,6 @@ use vllm_llm::TokenUsage;
 
 /// Default model identifier used when no model is specified.
 pub const UNKNOWN_MODEL_ID: &str = "unknown";
-const MAX_STOP_STRINGS: usize = 4;
 
 // ============================================================================
 // Default value helpers
@@ -55,13 +54,21 @@ impl StringOrArray {
     }
 }
 
-/// Validates stop sequences (at most four non-empty strings).
+fn max_stop_strings() -> usize {
+    std::env::var("VLLM_MAX_STOP_STRINGS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4)
+}
+
+/// Validates stop sequences (at most the configured number of non-empty strings).
 pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationError> {
     let stop = stop.as_slice();
-    if stop.len() > MAX_STOP_STRINGS {
-        return Err(validator::ValidationError::new(
-            "stop strings must contain at most 4 items",
-        ));
+    let max_stop_strings = max_stop_strings();
+    if stop.len() > max_stop_strings {
+        let mut error = validator::ValidationError::new("too_many_stop_strings");
+        error.code = format!("stop strings must contain at most {max_stop_strings} items").into();
+        return Err(error);
     }
     if stop.iter().any(|s| s.is_empty()) {
         return Err(validator::ValidationError::new(

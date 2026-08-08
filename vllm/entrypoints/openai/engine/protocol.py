@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
 from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.exceptions import VLLMServerError, VLLMValidationError
@@ -27,9 +28,8 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
-MAX_STOP_STRINGS = 4
 StopParam: TypeAlias = (
-    str | Annotated[list[str], Field(max_length=MAX_STOP_STRINGS)] | None
+    str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
 )
 
 

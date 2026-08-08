@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from typing import Protocol
 
@@ -68,3 +71,25 @@ def test_public_requests_reject_more_than_four_stop_strings(
 ):
     with pytest.raises(ValidationError, match="at most 4"):
         build_request(["one", "two", "three", "four", "five"])
+
+
+def test_stop_string_limit_can_be_overridden():
+    env = os.environ.copy()
+    env["VLLM_MAX_STOP_STRINGS"] = "1"
+    code = """
+from pydantic import ValidationError
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+
+try:
+    CompletionRequest(
+        model="test-model",
+        prompt="hello",
+        stop=["one", "two"],
+    )
+except ValidationError as error:
+    assert "at most 1" in str(error)
+else:
+    raise AssertionError("configured stop-string limit was not enforced")
+"""
+
+    subprocess.run([sys.executable, "-c", code], check=True, env=env)

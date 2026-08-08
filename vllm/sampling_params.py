@@ -31,9 +31,6 @@ MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
-MAX_NUM_BAD_WORDS = 128
-"""Upper bound on tokenized bad-word entries per request."""
-
 
 def _verify_num_sequences(value: int, parameter_name: str) -> None:
     if not isinstance(value, int):
@@ -688,6 +685,7 @@ class SamplingParams(
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
@@ -707,11 +705,11 @@ class SamplingParams(
                     and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
-                    if len(self._bad_words_token_ids) > MAX_NUM_BAD_WORDS:
+                    if len(self._bad_words_token_ids) > max_num_bad_words:
                         raise VLLMValidationError(
                             f"Too many bad words after tokenization: "
                             f"{len(self._bad_words_token_ids)}. "
-                            f"The max number is {MAX_NUM_BAD_WORDS}.",
+                            f"The max number is {max_num_bad_words}.",
                             parameter="bad_words",
                             value=self.bad_words,
                         )

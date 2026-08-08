@@ -34,3 +34,14 @@ def test_bad_word_tokenization_stops_at_worker_limit():
         params.update_from_tokenizer(tokenizer)
 
     assert tokenizer.calls == 129
+
+
+def test_bad_word_tokenization_limit_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("VLLM_MAX_NUM_BAD_WORDS", "2")
+    params = SamplingParams(bad_words=["bad", "worse"])
+    tokenizer = MockTokenizer()
+
+    with pytest.raises(VLLMValidationError, match="The max number is 2"):
+        params.update_from_tokenizer(tokenizer)
+
+    assert tokenizer.calls == 3
