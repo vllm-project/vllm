@@ -339,3 +339,105 @@ def test_step3p5_streaming_drops_leading_newline(step3p5_tokenizer):
 
     _, content = run_reasoning_extraction(parser, output_tokens, streaming=True)
     assert content == "Answer"
+
+
+def test_is_reasoning_end_streaming_and_nonstreaming_isolated(step3p5_tokenizer):
+    """Verify that is_reasoning_end (non-streaming) is stateless and does not
+    clobber the _end_token_pending accumulator used by is_reasoning_end_streaming.
+
+    Before the fix, both paths shared _is_reasoning_end_from_ids which mutated
+    _end_token_pending, causing cross-contamination when both paths were called
+    on the same parser instance.
+    """
+    parser_cls = ReasoningParserManager.get_reasoning_parser("step3p5")
+
+    start_id = parser_cls(step3p5_tokenizer).start_token_id
+    end_id = parser_cls(step3p5_tokenizer).end_token_id
+
+    # Pick a normal token id that is neither start nor end special token.
+    normal_id = 1 if (start_id != 1 and end_id != 1) else start_id + 7
+
+    # ------------------------------------------------------------------
+    # Scenario A: non-streaming call must not clobber streaming pending state
+    # ------------------------------------------------------------------
+    parser = parser_cls(step3p5_tokenizer)
+
+    # Feed a streaming delta ending exactly on </think> — streaming sets
+    # _end_token_pending=True and returns False (still waiting for next token).
+    full_ids_at_end: list[int] = [normal_id, end_id]
+    result = parser.is_reasoning_end_streaming(full_ids_at_end, [end_id])
+    assert result is False, (
+        "Streaming: </think> at tail of delta should return False (pending)"
+    )
+    assert parser._end_token_pending is True, (
+        "Streaming: _end_token_pending should be True after seeing </think> tail"
+    )
+
+    # Now call the non-streaming path with the full sequence ending at </think>.
+    # Post-fix: should return False (no token follows </think>).
+    # Post-fix: must NOT change _end_token_pending.
+    ns_result = parser.is_reasoning_end(full_ids_at_end)
+    assert ns_result is False, (
+        "Non-streaming: sequence ending at </think> with no following token should "
+        "return False"
+    )
+    assert parser._end_token_pending is True, (
+        "Non-streaming is_reasoning_end must not mutate _end_token_pending "
+        "(cross-contamination bug)"
+    )
+
+    # Now feed the confirming streaming delta (a single normal token).
+    # Because _end_token_pending was preserved, streaming should return True.
+    full_ids_after: list[int] = [normal_id, end_id, normal_id]
+    streaming_confirm = parser.is_reasoning_end_streaming(full_ids_after, [normal_id])
+    assert streaming_confirm is True, (
+        "Streaming: normal token after pending </think> should confirm end (True). "
+        "Pre-fix this returns False because _end_token_pending was clobbered."
+    )
+
+    # ------------------------------------------------------------------
+    # Scenario B: is_reasoning_end correctness on various full sequences
+    # ------------------------------------------------------------------
+    fresh = parser_cls(step3p5_tokenizer)
+
+    # Only </think>, nothing after — reasoning not yet ended.
+    assert fresh.is_reasoning_end([end_id]) is False, (
+        "Sequence [</think>] with nothing after should be False"
+    )
+
+    # </think> followed by a normal token — reasoning ended.
+    assert fresh.is_reasoning_end([end_id, normal_id]) is True, (
+        "Sequence [</think>, normal] should be True"
+    )
+
+    # <think> somewhere — still inside reasoning.
+    assert fresh.is_reasoning_end([start_id, normal_id]) is False, (
+        "Sequence ending after <think> should be False (still in reasoning)"
+    )
+
+    # No special tokens at all — not ended.
+    assert fresh.is_reasoning_end([normal_id]) is False, (
+        "Sequence with no special tokens should be False"
+    )
+
+    # </think> then start_id — start_id seen last, so still inside reasoning.
+    assert fresh.is_reasoning_end([end_id, normal_id, start_id]) is False, (
+        "Sequence whose last special token is <think> should be False"
+    )
+
+    # ------------------------------------------------------------------
+    # Scenario C: is_reasoning_end must NOT mutate _end_token_pending at all
+    # ------------------------------------------------------------------
+    stateless = parser_cls(step3p5_tokenizer)
+    assert stateless._end_token_pending is False
+
+    # Call with a sequence that would trigger the old code to set pending.
+    stateless.is_reasoning_end([end_id])
+    assert stateless._end_token_pending is False, (
+        "is_reasoning_end must not set _end_token_pending=True (stateless contract)"
+    )
+
+    stateless.is_reasoning_end([end_id, normal_id])
+    assert stateless._end_token_pending is False, (
+        "is_reasoning_end must not clear _end_token_pending (stateless contract)"
+    )
