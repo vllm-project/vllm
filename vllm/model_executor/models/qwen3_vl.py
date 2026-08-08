@@ -173,7 +173,7 @@ DUMMY_VIDEO_NUM_FRAMES = 2048
 
 if HAS_TRITON:
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["H", "W"])
     def _bilinear_pos_embed_kernel(
         embed_ptr,
         output_ptr,
