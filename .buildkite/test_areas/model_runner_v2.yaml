@@ -116,7 +116,7 @@ steps:
   commands:
     - set -x
     - export VLLM_USE_V2_MODEL_RUNNER=1
-    - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+    - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray"
     - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
     - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
@@ -130,6 +130,7 @@ steps:
   - vllm/v1/worker/gpu_worker.py
   - tests/v1/spec_decode/test_max_len.py
   - tests/v1/spec_decode/test_rejection_sampler_utils.py
+  - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   - tests/v1/e2e/spec_decode/
   commands:
   - set -x
@@ -139,6 +140,9 @@ steps:
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   - pytest -v -s v1/e2e/spec_decode/eagle/
   - pytest -v -s v1/e2e/spec_decode/speculators/
+  - >-
+    pytest -v -s
+    'v1/e2e/spec_decode/mtp/test_mtp.py::test_mtp_correctness[qwen3_5-hybrid]'
   mirror:
     amd:
       dind: false
