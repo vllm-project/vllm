@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -1044,7 +1045,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1)
+        Field(..., min_length=1, max_length=envs.VLLM_MAX_BATCH_CONVERSATIONS)
     )
     model: str | None = None
 
