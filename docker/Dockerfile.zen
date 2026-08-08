@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# This Dockerfile builds AMD Zen CPU images for vLLM with zentorch.
+# It layers on top of the CPU image produced by docker/Dockerfile.cpu.
+#
+# Supported platforms:
+#   - linux/amd64 (Zen2 and newer; Zen5 is the canonical CI target)
+#
+# Build targets:
+#   vllm-openai-zen (default): vLLM + zentorch for serving
+#   vllm-zen-test            : vllm-openai-zen + test deps for CI
+#
+# Build workflow (see .buildkite/image_build/image_build_zen_cpu.sh):
+#   1. docker build -f docker/Dockerfile.cpu --target vllm-openai -t <base>:<tag> .
+#   2. docker build -f docker/Dockerfile.zen --build-arg BASE_IMAGE=<base>:<tag> \
+#                    --target vllm-zen-test -t <out>:<tag> .
+
+ARG BASE_IMAGE
+ARG PYTHON_VERSION=3.12
+ARG ZENTORCH_VERSION
+
+######################### ZEN OPENAI IMAGE #########################
+FROM ${BASE_IMAGE} AS vllm-openai-zen
+
+ARG TARGETARCH
+ARG ZENTORCH_VERSION
+
+RUN if [ "${TARGETARCH}" != "amd64" ]; then \
+        echo "ERROR: Dockerfile.zen requires --platform=linux/amd64"; \
+        exit 1; \
+    fi
+
+WORKDIR /vllm-workspace
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -n "${ZENTORCH_VERSION}" ]; then \
+        uv pip install "zentorch==${ZENTORCH_VERSION}"; \
+    else \
+        uv pip install "vllm[zen]"; \
+    fi
+
+LABEL org.opencontainers.image.title="vLLM Zen CPU"
+LABEL org.opencontainers.image.description="vLLM with zentorch for AMD Zen CPUs"
+LABEL org.opencontainers.image.vendor="vLLM Project"
+LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm"
+LABEL ai.vllm.build.target-arch="${TARGETARCH}"
+LABEL ai.vllm.build.python-version="${PYTHON_VERSION}"
+LABEL ai.vllm.build.zentorch-version="${ZENTORCH_VERSION:-unpinned}"
+
+ENTRYPOINT ["vllm", "serve"]
+
+######################### ZEN TEST IMAGE #########################
+FROM vllm-openai-zen AS vllm-zen-test
+
+WORKDIR /vllm-workspace
+
+COPY requirements/test/cuda.in requirements/test/zen.in
+
+RUN sed -i '/mamba_ssm/d'                  requirements/test/zen.in && \
+    sed -i 's/^torch==.*/torch==2.11.0/g'  requirements/test/zen.in && \
+    sed -i 's/torchaudio.*/torchaudio/g'   requirements/test/zen.in && \
+    sed -i 's/torchvision.*/torchvision/g' requirements/test/zen.in && \
+    # zentorch parity: keep sentence-transformers pinned where vllm-test-deps did.
+    sed -i 's/^sentence-transformers.*/sentence-transformers==5.3.0/g' requirements/test/zen.in && \
+    uv pip compile requirements/test/zen.in \
+       -o requirements/test/zen.txt \
+       --index-strategy unsafe-best-match --torch-backend cpu
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/test/zen.txt
+
+# Reassert zentorch's torch in case test-deps moved it.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -n "${ZENTORCH_VERSION}" ]; then \
+        uv pip install --force-reinstall --no-deps "zentorch==${ZENTORCH_VERSION}"; \
+    else \
+        uv pip install --force-reinstall --no-deps "vllm[zen]"; \
+    fi
+
+ADD ./tests/ ./tests/
+ADD ./examples/ ./examples/
+ADD ./benchmarks/ ./benchmarks/
+ADD ./vllm/collect_env.py .
+ADD ./docker/ ./docker/
+ADD ./.buildkite/ ./.buildkite/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -e tests/vllm_test_utils
+
+ENV HF_XET_HIGH_PERFORMANCE=1
+ENV HF_HUB_DOWNLOAD_TIMEOUT=60
+
+ENTRYPOINT []
