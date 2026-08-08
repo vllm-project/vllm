@@ -430,6 +430,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             registration_data["decode_host"],
             registration_data["decode_port"],
             registration_data["decode_tp_size"],
+            push_target=True,
         )
         if fut is not None:
 

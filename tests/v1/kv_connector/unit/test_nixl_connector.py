@@ -43,6 +43,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    RemoteMeta,
+    ReqMeta,
     compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -2159,7 +2161,8 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.shutdown()
         worker.shutdown()
 
-        mock_exec.shutdown.assert_called_with(wait=False)
+        # cancel_futures: a queued release must not run after teardown.
+        mock_exec.shutdown.assert_called_with(wait=False, cancel_futures=True)
 
         # Same sequence on scheduler.shutdown()
         scheduler.shutdown()
@@ -2225,6 +2228,7 @@ def test_engine_ttl_eviction(default_vllm_config, dist_init):
         worker._engine_last_active[engine_id] = time.perf_counter() - 20.0
 
         worker._evict_stale_engines()
+        _wait_for_released_engines(worker)
 
         assert engine_id not in worker._remote_agents
         assert engine_id not in worker.dst_xfer_side_handles
@@ -2259,6 +2263,220 @@ def test_engine_ttl_disabled(default_vllm_config, dist_init):
     # Nothing should be evicted.
     assert engine_id in worker._remote_agents
     assert engine_id in worker.dst_xfer_side_handles
+
+
+def _make_recv_meta(engine_id: str) -> ReqMeta:
+    return ReqMeta(
+        local_block_ids=[[1, 2]],
+        local_physical_block_ids=[[1, 2]],
+        tp_size=1,
+        remote=RemoteMeta(
+            block_ids=[[1, 2]],
+            host="localhost",
+            port=1234,
+            engine_id=engine_id,
+            request_id="remote-req",
+        ),
+    )
+
+
+def _fail_transfers(worker) -> None:
+    """Make every in-flight transfer report failure to get_finished()."""
+    worker.nixl_wrapper.check_xfer_state = lambda handle: "ERR"
+
+
+def _start_recv(worker, req_id: str, engine_id: str) -> None:
+    worker._recving_metadata[req_id] = _make_recv_meta(engine_id)
+    worker._recving_transfers[req_id] = [1234]
+
+
+def _wait_for_released_engines(worker) -> None:
+    """Block until releases queued on the handshake executor have run."""
+    worker._handshake_initiation_executor.submit(lambda: None).result(timeout=5)
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_failed_transfer_releases_remote_engine(default_vllm_config, dist_init):
+    """A step whose transfer fails drops that peer's agents.
+
+    A crashed peer is only observable through failing transfers, so holding
+    its agents until the (1h default) TTL leaves dead endpoints registered
+    in NIXL.
+    """
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=3600.0)
+    _fail_transfers(worker)
+
+    with patch.object(worker.nixl_wrapper, "remove_remote_agent") as mock_rem:
+        _start_recv(worker, "req1", engine_id)
+
+        worker.get_finished()
+        _wait_for_released_engines(worker)
+
+        assert engine_id not in worker._remote_agents
+        assert engine_id not in worker.dst_xfer_side_handles
+        assert engine_id not in worker._engine_last_active
+        assert {call.args[0] for call in mock_rem.call_args_list} == {
+            "agent_0",
+            "agent_1",
+        }
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_failed_transfer_keeps_healthy_engines(default_vllm_config, dist_init):
+    """Only the peer whose transfer failed is released.
+
+    A decode instance usually pulls from several prefill instances.
+    """
+    worker, failing_engine = _setup_worker_with_remote_engine(engine_ttl=3600.0)
+    healthy_engine = "remote-engine-2"
+    worker._remote_agents[healthy_engine] = {(0, 0): "healthy_agent"}
+    worker._engine_last_active[healthy_engine] = time.perf_counter()
+    _fail_transfers(worker)
+
+    _start_recv(worker, "req1", failing_engine)
+
+    worker.get_finished()
+    _wait_for_released_engines(worker)
+
+    assert failing_engine not in worker._remote_agents
+    assert worker._remote_agents[healthy_engine] == {(0, 0): "healthy_agent"}
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_failed_transfer_keeps_engine_serving_other_requests(
+    default_vllm_config, dist_init
+):
+    """Releasing agents under a live transfer would break it, so it waits."""
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=3600.0)
+    _fail_transfers(worker)
+
+    _start_recv(worker, "req1", engine_id)
+    # req2 is still waiting for its KV; get_finished() leaves it untouched.
+    worker._recving_metadata["req2"] = _make_recv_meta(engine_id)
+
+    worker.get_finished()
+    _wait_for_released_engines(worker)
+
+    assert engine_id in worker._remote_agents
+
+    del worker._recving_metadata["req2"]
+    _start_recv(worker, "req3", engine_id)
+
+    worker.get_finished()
+    _wait_for_released_engines(worker)
+
+    assert engine_id not in worker._remote_agents
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_peer_restart_releases_previous_engine_at_same_address(
+    default_vllm_config, dist_init
+):
+    """A peer that restarts comes back under a new engine id at its address.
+
+    Nothing fails a transfer in that sequence, so the dead engine's endpoints
+    would otherwise stay registered in NIXL until the TTL expires.
+    """
+    worker, restarted_engine = _setup_worker_with_remote_engine(engine_ttl=3600.0)
+    worker._engine_address[restarted_engine] = ("localhost", 1234)
+    agents_removed_before_handshake = []
+
+    def record_handshake(*args, **kwargs):
+        agents_removed_before_handshake.append(mock_rem.call_count)
+        return {}
+
+    with (
+        patch.object(worker.nixl_wrapper, "remove_remote_agent") as mock_rem,
+        patch.object(worker, "_nixl_handshake", side_effect=record_handshake),
+    ):
+        expected_agents = len(worker._remote_agents[restarted_engine])
+
+        worker._ensure_handshake("new-engine-after-restart", "localhost", 1234, 1)
+        _wait_for_released_engines(worker)
+
+        assert restarted_engine not in worker._remote_agents
+        assert restarted_engine not in worker._engine_address
+        # NIXL is not thread-safe: release must precede the replacement's load.
+        assert agents_removed_before_handshake == [expected_agents]
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_engine_being_handshaked_is_not_released(default_vllm_config, dist_init):
+    """A pending handshake is about to repopulate the state a release drops."""
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=3600.0)
+    worker._handshake_futures[engine_id] = MagicMock()
+    _fail_transfers(worker)
+
+    _start_recv(worker, "req1", engine_id)
+
+    worker.get_finished()
+    _wait_for_released_engines(worker)
+
+    assert engine_id in worker._remote_agents
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_push_target_engine_is_not_released(default_vllm_config, dist_init):
+    """Pushes are tracked per request, so nothing here sees one in flight.
+
+    Releasing a push target's handles could pull them out from under the
+    writer thread mid-send.
+    """
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=3600.0)
+    worker._push_target_engines.add(engine_id)
+    _fail_transfers(worker)
+
+    _start_recv(worker, "req1", engine_id)
+
+    worker.get_finished()
+    _wait_for_released_engines(worker)
+
+    assert engine_id in worker._remote_agents
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_shutdown_releases_engines_dropped_before_teardown(
+    default_vllm_config, dist_init
+):
+    """Shutdown cancels queued releases, so it must free them itself.
+
+    The engine is already out of _remote_agents by then, so shutdown's own
+    sweep would not otherwise see its agents.
+    """
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=3600.0)
+
+    with patch.object(worker.nixl_wrapper, "remove_remote_agent") as mock_rem:
+        # Drop the engine without letting the executor drain the release.
+        worker._pop_remote_engine_state(engine_id)
+        assert mock_rem.call_count == 0
+
+        worker.shutdown()
+
+        assert {call.args[0] for call in mock_rem.call_args_list} == {
+            "agent_0",
+            "agent_1",
+        }
 
 
 def test_transfer_topology_unregister():

@@ -217,7 +217,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # ..but we still need to notify the other remote ranks that we
             # have the blocks we need so they can update the request state.
             notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
-            remote_agents = self._remote_agents[meta.remote.engine_id]
+            remote_agents = self._remote_agents.get(meta.remote.engine_id, {})
             for rank_to_notify, agent in remote_agents.items():
                 if rank_to_notify != (0, read_specs[0].remote_rank):
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
