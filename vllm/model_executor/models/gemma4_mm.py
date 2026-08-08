@@ -118,6 +118,28 @@ def _get_max_soft_tokens(
     return None, False
 
 
+def _get_video_max_soft_tokens(merged_kwargs: Mapping[str, object]) -> object | None:
+    """Return the per-frame video token budget, if it was configured."""
+    videos_kwargs = merged_kwargs.get("videos_kwargs")
+    if isinstance(videos_kwargs, Mapping):
+        return videos_kwargs.get("max_soft_tokens")
+
+    return None
+
+
+def _resolve_video_max_soft_tokens(merged_kwargs: Mapping[str, object]) -> int:
+    """Return the validated per-frame video token budget."""
+    val = _get_video_max_soft_tokens(merged_kwargs)
+    if val is None:
+        return _VIDEO_MAX_SOFT_TOKENS
+    if val not in _SUPPORTED_SOFT_TOKENS:
+        raise ValueError(
+            f"Unsupported video max_soft_tokens value: {val}. "
+            f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
+        )
+    return val
+
+
 # ---------------------------------------------------------------------------
 # Input schema
 # ---------------------------------------------------------------------------
@@ -265,7 +287,9 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             # Audio max tokens from the processor's audio_seq_length.
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
-        # Video: each frame ≤ 70 soft tokens + boi + eoi + ~6 ts tokens.
+        # Video: each frame uses its configured budget + boi + eoi + ~6 ts
+        # tokens.
+        video_max_soft_tokens = _resolve_video_max_soft_tokens(merged_kwargs)
         num_frames = _VIDEO_MAX_FRAMES
         mm_config = self.ctx.model_config.get_multimodal_config()
         video_opts = mm_config.limit_per_prompt.get("video")
@@ -274,7 +298,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             and video_opts.num_frames is not None
         ):
             num_frames = min(num_frames, video_opts.num_frames)
-        tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
+        tokens["video"] = num_frames * (video_max_soft_tokens + 2 + 6)
         return tokens
 
     def get_data_parser(self) -> MultiModalDataParser:
@@ -591,13 +615,14 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 f"Unsupported max_soft_tokens value: {val}. "
                 f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
             )
+        video_max_soft_tokens = _resolve_video_max_soft_tokens(merged_kwargs)
 
         mm_data = dict(mm_data)
 
         # ---- VIDEO HANDLING ----
         # Gemma4 decomposes video into timestamped image frames.
-        # Each frame is processed with max_soft_tokens=70 through the
-        # same vision tower, matching transformers processing_gemma4.py.
+        # Each frame is processed through the image vision tower with the
+        # independently configurable video-frame token budget.
         video_outputs: dict[str, Any] = {}
         if videos := mm_data.pop("videos", []):
             processor = self.info.get_hf_processor()
@@ -627,9 +652,13 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 frame_indices = metadata.get("frames_indices", list(range(len(frames))))
                 timestamps = [idx / fps for idx in frame_indices]
 
-                # Process frames as images with max_soft_tokens=70
+                # Process frames as images with the video-specific budget.
                 video_mm_kwargs = dict(mm_kwargs)
-                video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
+                # The frame call uses the image processor, so suppress the
+                # video kwargs that would otherwise be re-merged from the
+                # model config and conflict with this top-level override.
+                video_mm_kwargs["videos_kwargs"] = {}
+                video_mm_kwargs["max_soft_tokens"] = video_max_soft_tokens
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
 
@@ -654,7 +683,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 for img in frames:
                     w, h = img.size
                     n = self.info._compute_num_soft_tokens(
-                        w, h, max_soft_tokens=_VIDEO_MAX_SOFT_TOKENS
+                        w, h, max_soft_tokens=video_max_soft_tokens
                     )
                     num_soft_per_frame.append(n)
 

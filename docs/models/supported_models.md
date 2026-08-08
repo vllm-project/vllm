@@ -632,6 +632,10 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     For `Gemma4ForConditionalGeneration`:
     - audio input is only supported by the `gemma-4-E2B` and `gemma-4-E4B` variants.
     - The model does not ingest videos directly. However, vLLM’s Gemma 4 implementation supports video inputs by handling video processing internally. Users can send videos directly in the message structure to vLLM, where they are converted into text and image frames before being passed to the model.
+    - To increase the visual-token budget for each video frame independently of
+      images, set `--mm-processor-kwargs '{"videos_kwargs":
+      {"max_soft_tokens": 140}}'`. Supported values are 70, 140, 280, 560,
+      and 1120.
     - Gemma 4 assistant checkpoints for speculative decoding use vLLM’s Gemma
       4 MTP path, not generic draft-model speculative decoding. See the
       [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
@@ -640,6 +644,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     For `Gemma4UnifiedForConditionalGeneration`:
     - This is the encoder-free Gemma 4 variant (e.g. `gemma-4-12B-it`). Unlike the tower-based `Gemma4ForConditionalGeneration`, it has **no SigLIP vision encoder** and **no audio encoder**. Raw pixel patches are projected directly into LM space via a Dense+LayerNorm pipeline with factorized positional embeddings, and raw audio waveform frames are projected directly through a multimodal embedder.
     - All modalities (image, video, audio) are supported.
+    - Video frame token budgets can be configured with
+      `--mm-processor-kwargs '{"videos_kwargs": {"max_soft_tokens": 140}}'`.
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
