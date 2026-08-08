@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.models import interfaces
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -149,6 +150,16 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
     assert runner.eplb_state is not None
     assert runner.eplb_state.add_model_calls == []
     assert runner.eplb_state.async_started is False
+
+
+def test_moe_detection_handles_multimodal_without_language_model(monkeypatch):
+    class NoLMMultiModal:
+        def get_language_model(self):
+            raise NotImplementedError
+
+    monkeypatch.setattr(interfaces, "SupportsMultiModal", NoLMMultiModal)
+
+    assert interfaces.get_mixture_of_experts_model(NoLMMultiModal()) is None
 
 
 def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
