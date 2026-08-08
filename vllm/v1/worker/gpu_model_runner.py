@@ -5570,6 +5570,13 @@ class GPUModelRunner(
             )
         else:
             aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+            logger.warning_once(
+                "Eagle3 aux layers not set in the draft model config; falling "
+                "back to the default %s. Acceptance will be low if the draft "
+                "was trained on other layers; set "
+                "`eagle_aux_hidden_state_layer_ids` in the draft config.",
+                aux_layers,
+            )
 
         self.model.set_aux_hidden_state_layers(aux_layers)
 
