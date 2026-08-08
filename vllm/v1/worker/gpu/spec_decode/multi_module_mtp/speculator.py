@@ -61,6 +61,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             device=self.device,
         )
         self.cached_draft_input_embeds: torch.Tensor | None = None
+        # Whether embeddings were cached alongside the ids for a request.
+        self.cached_with_input_embeds: torch.Tensor | None = None
         self.cached_target_hidden_states = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps - 1,
@@ -95,6 +97,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.hidden_size,
             dtype=self.dtype,
             device=self.device,
+        )
+        self.cached_with_input_embeds = torch.zeros(
+            self.max_num_reqs, dtype=torch.bool, device=self.device
         )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -176,6 +181,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             input_batch.query_start_loc[: num_reqs + 1]
         )
 
+        # Only embed input ids if any MM embeddings are present
+        # in the input.
+        mm_embeds, is_mm_embed = mm_inputs or (None, None)
+        use_input_embeds = self.inputs_embeds is not None and bool(mm_embeds)
         self._prepare_inputs(
             last_hidden_states,
             input_batch,
@@ -185,7 +194,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             num_rejected,
             last_sampled,
             next_prefill_tokens,
-            mm_inputs,
+            use_input_embeds,
+            mm_embeds,
+            is_mm_embed,
         )
 
         # When all requests are decoding (no true prefills), each has
@@ -202,7 +213,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             uniform_token_count,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
-            need_eager=is_profile,
+            need_eager=is_profile or use_input_embeds,
         )
 
         # Rebuild the slot mappings and attention metadata.
@@ -250,6 +261,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 slot_mappings,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
+                use_input_embeds=use_input_embeds,
             )
         return self.draft_tokens[:num_reqs]
 
@@ -262,6 +274,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         spec_module_idx: int,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        use_input_embeds: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -273,15 +286,15 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
         ):
+            inputs_embeds = None
+            if use_input_embeds:
+                assert self.inputs_embeds is not None
+                inputs_embeds = self.inputs_embeds[:num_tokens]
             model_inputs = dict(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
-                inputs_embeds=(
-                    self.inputs_embeds[:num_tokens]
-                    if self.inputs_embeds is not None
-                    else None
-                ),
+                inputs_embeds=inputs_embeds,
                 spec_step_idx=spec_module_idx,
             )
             if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
@@ -317,7 +330,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         last_sampled: torch.Tensor,
         # [num_prefill_lookahead, max_num_reqs]
         next_prefill_tokens: torch.Tensor,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        use_input_embeds: bool,
+        mm_embeds: list[torch.Tensor] | None,
+        is_mm_embed: torch.Tensor | None,
     ) -> None:
         num_reqs = input_batch.num_reqs
         prepare_input_buffers(
@@ -335,20 +350,13 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.num_speculative_steps,
         )
 
-        # Compute the input embeddings with the MM embeddings merged in.
-        # TODO(TheEpicDolphin): When the batch has no MM content (is_mm_embed
-        # all False), skip this embed/copy and run the model with
-        # inputs_embeds=None. Requirements:
-        # 1. Eager steps can switch freely, but FULL cudagraphs bake the
-        # embeds/no-embeds path at capture, so extending to decode steps
-        # needs a uses_input_embeds property in the graph descriptors,
-        # resulting in 2x captures.
-        # 2. The skip condition must also verify the request's cached
-        # re-prefill window (cached_draft_input_embeds) holds no MM
-        # embeddings, or the rejection re-prefill gap would be re-embedded
-        # from token ids incorrectly.
-        if self.inputs_embeds is not None:
-            mm_embeds, is_mm_embed = mm_inputs or (None, None)
+        if use_input_embeds:
+            # Compute the embeddings for the token ids, with the MM embeddings
+            # merged in.
+            # NOTE: input_ids already contains the cached draft token ids to
+            # re-prefill from the previous step.
+            assert mm_embeds is not None and is_mm_embed is not None
+            assert self.inputs_embeds is not None
             self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
                 self.input_buffers.input_ids[:num_tokens],
                 multimodal_embeddings=mm_embeds,
@@ -363,10 +371,12 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.cached_target_hidden_states,
             self.inputs_embeds,
             self.cached_draft_input_embeds,
+            self.cached_with_input_embeds,
             input_batch,
             self.input_buffers,
             num_rejected,
             self.num_speculative_steps,
+            use_input_embeds,
         )
 
     def _generate_drafts(
@@ -377,6 +387,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        use_input_embeds: bool = False,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         sample_positions = self.input_buffers.positions[last_token_indices]
@@ -391,12 +402,13 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             self.hidden_states,
             self.cached_draft_input_ids,
             self.cached_draft_input_embeds,
+            self.cached_with_input_embeds,
             self.cached_target_hidden_states,
             last_token_indices,
             idx_mapping,
             num_reqs,
             self.num_speculative_steps,
-            use_input_embeds=self.inputs_embeds is not None,
+            use_input_embeds,
         )
 
         for step in range(self.num_speculative_steps):
@@ -411,6 +423,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 spec_module_idx=step,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                use_input_embeds=use_input_embeds,
             )
 
             # Sample draft tokens for the current step.
@@ -432,16 +445,14 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 # instead of the sampled draft.
                 overrides = self.draft_input_id_overrides[:num_reqs, step]
                 next_input_tokens = torch.where(overrides >= 0, overrides, draft_tokens)
-                # Shift the draft inputs left by one and append the next
-                # input token id/embeddings.
-                draft_embeds = (
+                next_input_embeds = (
                     self.model.embed_input_ids(next_input_tokens)
-                    if self.inputs_embeds is not None
+                    if use_input_embeds
                     else None
                 )
                 update_draft_inputs(
                     next_input_tokens,
-                    draft_embeds,
+                    next_input_embeds,
                     self.input_buffers,
                     self.inputs_embeds,
                     last_token_indices,
@@ -648,6 +659,7 @@ def _prepare_input_hidden_states_and_embeddings_kernel(
     cached_draft_input_embeds_ptr,
     cached_draft_input_embeds_stride0,
     cached_draft_input_embeds_stride1,
+    cached_with_input_embeds_ptr,
     idx_mapping_ptr,
     num_rejected_ptr,
     query_start_loc_ptr,
@@ -721,7 +733,14 @@ def _prepare_input_hidden_states_and_embeddings_kernel(
                 cached_hidden_state,
                 mask=dim_mask,
             )
-            if USE_INPUT_EMBEDS:
+
+            if USE_INPUT_EMBEDS and tl.load(
+                cached_with_input_embeds_ptr + req_state_idx
+            ):
+                # Only overwrite input embeddings for requests that cached them
+                # during the previous step with `use_input_embeds=True`. Those
+                # requests may hold multi-modal embeddings that must be inserted
+                # into the re-prefill gap.
                 cached_embed = tl.load(
                     cached_draft_input_embeds_ptr
                     + req_state_idx * cached_draft_input_embeds_stride0
@@ -752,13 +771,15 @@ def prepare_input_hidden_states_and_embeddings(
     input_embeds: torch.Tensor | None,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
     cached_draft_input_embeds: torch.Tensor | None,
+    # [max_num_reqs]
+    cached_with_input_embeds: torch.Tensor | None,
     input_batch: InputBatch,
     input_buffers: InputBuffers,
     # [num_reqs]
     num_rejected: torch.Tensor,
     num_speculative_steps: int,
+    use_input_embeds: bool,
 ) -> None:
-    use_input_embeds = input_embeds is not None
     hidden_size = target_hidden_states.shape[-1]
     query_block_size = 16
     hidden_block_size = 256
@@ -788,6 +809,7 @@ def prepare_input_hidden_states_and_embeddings(
         cached_draft_input_embeds.stride(1)
         if cached_draft_input_embeds is not None
         else 0,
+        cached_with_input_embeds,
         input_batch.idx_mapping,
         num_rejected,
         input_buffers.query_start_loc,
@@ -854,6 +876,7 @@ def _cache_inputs_kernel(
     cached_draft_input_embeds_ptr,
     cached_draft_input_embeds_stride0,
     cached_draft_input_embeds_stride1,
+    cached_with_input_embeds_ptr,
     cached_target_hidden_states_ptr,
     cached_target_hidden_states_stride0,
     cached_target_hidden_states_stride1,
@@ -864,6 +887,7 @@ def _cache_inputs_kernel(
     hidden_size,
     BLOCK_SIZE: tl.constexpr,
     USE_INPUT_EMBEDS: tl.constexpr,
+    HAS_EMBEDS_CACHE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -874,6 +898,9 @@ def _cache_inputs_kernel(
     if req_state_idx < 0:
         # Skip cudagraph padded requests.
         return
+
+    if HAS_EMBEDS_CACHE and block_idx == 0:
+        tl.store(cached_with_input_embeds_ptr + req_state_idx, USE_INPUT_EMBEDS)
 
     query_start = tl.load(query_start_loc_ptr + req_idx)
     last_token_index = tl.load(last_token_indices_ptr + req_idx)
@@ -932,6 +959,8 @@ def cache_inputs(
     cached_draft_input_ids: torch.Tensor,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
     cached_draft_input_embeds: torch.Tensor | None,
+    # [max_num_reqs]
+    cached_with_input_embeds: torch.Tensor | None,
     # [max_num_reqs, num_speculative_steps - 1, hidden_size]
     cached_target_hidden_states: torch.Tensor,
     # [num_reqs]
@@ -959,6 +988,7 @@ def cache_inputs(
         cached_draft_input_embeds.stride(1)
         if cached_draft_input_embeds is not None
         else 0,
+        cached_with_input_embeds,
         cached_target_hidden_states,
         cached_target_hidden_states.stride(0),
         cached_target_hidden_states.stride(1),
@@ -969,6 +999,7 @@ def cache_inputs(
         hidden_size,
         BLOCK_SIZE=hidden_block_size,
         USE_INPUT_EMBEDS=use_input_embeds,
+        HAS_EMBEDS_CACHE=cached_with_input_embeds is not None,
     )
 
 
@@ -1078,8 +1109,8 @@ def update_draft_inputs(
         draft_tokens,
         BLOCK_SIZE=1024,
     )
-    if input_embeds is not None:
-        assert draft_embeds is not None
+    if draft_embeds is not None:
+        assert input_embeds is not None
         hidden_size = input_embeds.shape[-1]
         hidden_block_size = 256
         _shift_input_embeds_kernel[
