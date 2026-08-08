@@ -655,6 +655,38 @@ _ALL_JSON_TYPES = frozenset(
 )
 
 
+_CONSTRAINING_KEYS = (
+    "properties",
+    "additionalProperties",
+    "patternProperties",
+    "required",
+    "anyOf",
+    "oneOf",
+    "allOf",
+    "$ref",
+    "enum",
+    "const",
+)
+
+
+def _constrains_object(schema: dict) -> bool:
+    """Whether *schema* restricts which objects are valid.
+
+    ``{}``, ``{"type": "object"}`` and a ``properties`` that names no keys
+    accept anything an unconstrained model writes -- including the
+    ``{"name", "parameters"}`` envelope.  Everything else narrows the shape,
+    so the model emits bare parameters.
+    """
+    for key in _CONSTRAINING_KEYS:
+        value = schema.get(key)
+        if key == "properties":
+            if isinstance(value, dict) and value:
+                return True
+        elif value is not None:
+            return True
+    return False
+
+
 def _json_type_name(value: object) -> str:
     if value is None:
         return "null"
@@ -799,13 +831,31 @@ def _splice_types(raw: str, start: int, end: int, schema: dict) -> str:
 
 
 @functools.cache
-def llama_json_config() -> ParserEngineConfig:
+def llama_json_config(
+    markers: tuple[str, ...] = (PYTHON_TAG, PYTHON_START, PYTHON_END),
+) -> ParserEngineConfig:
+    """Config for the Llama JSON format.
+
+    *markers* is the subset of the tool markers present in the tokenizer's
+    vocabulary.  Only those become **text** terminals: a marker the model
+    cannot emit as a token is one it can only have written as ordinary
+    prose, and consuming it there deletes the client's text.  Llama 3
+    tokenizers carry ``<|python_tag|>`` but not the Llama 4 wrappers, so
+    declaring all three unconditionally silently ate
+    ``<|python_start|>`` typed as text.
+    """
     return ParserEngineConfig(
         name="llama_json",
         terminals={
-            "PYTHON_TAG": PYTHON_TAG,
-            "PYTHON_START": PYTHON_START,
-            "PYTHON_END": PYTHON_END,
+            **{
+                name: text
+                for name, text in (
+                    ("PYTHON_TAG", PYTHON_TAG),
+                    ("PYTHON_START", PYTHON_START),
+                    ("PYTHON_END", PYTHON_END),
+                )
+                if text in markers
+            },
             "OPEN_BRACE": "{",
         },
         # Llama 3 tokenizers lack the Llama 4 markers and vice versa;
@@ -824,6 +874,8 @@ def llama_json_config() -> ParserEngineConfig:
             # non-streaming path.
             (ParserState.CONTENT, "PYTHON_START"): Transition(ParserState.CONTENT, ()),
             (ParserState.CONTENT, "PYTHON_END"): Transition(ParserState.CONTENT, ()),
+            # Transitions for markers absent from the vocab are harmless:
+            # the terminal is never produced, so the key is never matched.
             (ParserState.CONTENT, "OPEN_BRACE"): Transition(
                 ParserState.TOOL_ARGS,
                 # ARG_VALUE_CHUNK re-injects the consumed "{" into the
@@ -895,7 +947,17 @@ class LlamaJsonParser(ParserEngine):
         self._arg_scans: dict[int, _ArgScan] = {}
         self._properties_cache: dict[str, dict] = {}
         self._properties_tools: list[Tool] | None = None
-        kwargs.setdefault("parser_engine_config", llama_json_config())
+        if "parser_engine_config" not in kwargs:
+            vocab = kwargs.get("vocab")
+            if vocab is None:
+                try:
+                    vocab = tokenizer.get_vocab()
+                except (AttributeError, NotImplementedError):
+                    vocab = {}
+            present = tuple(
+                m for m in (PYTHON_TAG, PYTHON_START, PYTHON_END) if m in vocab
+            )
+            kwargs["parser_engine_config"] = llama_json_config(present)
         super().__init__(tokenizer, tools, **kwargs)
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
@@ -973,13 +1035,20 @@ class LlamaJsonParser(ParserEngine):
             schema = getattr(text_format, "schema_", None)
         if schema is None:
             return None
-        # A schema that declares no properties does not forbid the
-        # {"name": ..., "parameters": ...} envelope, and an effectively
-        # unconstrained model writes the envelope the chat template asks
-        # for.  Only a schema that names its keys makes bare parameters the
-        # shape actually generated, so only then is it safe to read the
-        # whole object as the arguments.
-        if not isinstance(schema, dict) or "properties" not in schema:
+        # An *effectively unconstrained* schema does not forbid the
+        # {"name": ..., "parameters": ...} envelope, and a model free to
+        # write either writes the envelope the chat template asks for -- so
+        # reading the whole object as the arguments would hand the executor
+        # the envelope.  Any schema that constrains the object at all makes
+        # bare parameters the shape actually generated.
+        #
+        # Testing for a literal "properties" key gets both ends wrong: it
+        # arms for {"type": "object", "properties": {}} (which constrains
+        # nothing, and is what adjust_request installs for a parameterless
+        # tool), and it refuses to arm for anyOf / oneOf / allOf / $ref /
+        # additionalProperties / enum, which do constrain -- leaving those
+        # with no tool call at all.
+        if not isinstance(schema, dict) or not _constrains_object(schema):
             return None
         return name or None
 
@@ -1077,11 +1146,28 @@ class LlamaJsonParser(ParserEngine):
                     # append-only, so nothing held is ever retracted.
                     self._held_ws.clear()
                     self._held_forced.append(event.value)
-                elif not self._content_has_nonws and not event.value.strip():
+                elif not event.value.strip():
+                    # Every whitespace run is held, not just the leading one.
+                    # Non-streaming strips the whitespace around a tool call,
+                    # so forwarding the run between prose and an envelope
+                    # ("Sure. {call}") made the two routes disagree on the
+                    # most ordinary shape there is.  Held whitespace is
+                    # flushed before the next real content and discarded once
+                    # a call completes, which is what the other route does.
                     self._held_ws.append(event.value)
                 else:
                     self._flush_held_ws(out)
-                    out.append(event)
+                    # A delta can carry text and its trailing whitespace in
+                    # one chunk, so splitting is what makes the hold above
+                    # chunk-size independent rather than only correct at one
+                    # token per delta.
+                    body = event.value.rstrip()
+                    if body != event.value:
+                        if body:
+                            out.append(SemanticEvent(EventType.TEXT_CHUNK, body))
+                        self._held_ws.append(event.value[len(body) :])
+                    else:
+                        out.append(event)
                 continue
             if event.tool_index < 0:
                 out.append(event)
