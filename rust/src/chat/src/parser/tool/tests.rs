@@ -177,10 +177,17 @@ fn factory_new_resolves_default_patterns() {
         Some(names::MINIMAX_M2)
     );
     assert_eq!(
+        factory.resolve_name_for_model("ai-sage/GigaChat3-10B-A1.8B"),
+        Some(names::GIGACHAT3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ai-sage/GigaChat3.1-10B-A1.8B"),
+        Some(names::GIGACHAT3)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("ByteDance-Seed/Seed-OSS-36B-Instruct"),
         Some(names::SEED_OSS)
     );
-
     // InternLM2 positive: both dashed and underscored versioned names route.
     assert_eq!(
         factory.resolve_name_for_model("internlm/internlm2-chat-7b"),
