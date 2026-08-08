@@ -21,6 +21,7 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 logger = init_logger(__name__)
 
@@ -253,6 +254,9 @@ def warmup_kernels(
     # new_block_ids_to_zero, so none of the steps below reach it.
     if model_runner.kv_block_zeroer is not None:
         model_runner.kv_block_zeroer.warmup(model_runner.kv_cache_config.num_blocks)
+
+    if isinstance(model_runner.sampler, Sampler):
+        model_runner.sampler.warmup_compact_output_expansion()
 
     # Step 1: Prefill all requests with 1 + decode_query_len prompt tokens each.
     new_reqs = [
