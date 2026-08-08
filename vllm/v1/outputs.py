@@ -290,6 +290,10 @@ class ModelRunnerOutput:
 
     ec_connector_output: ECConnectorOutput | None = None
 
+    # Requests whose EAGLE-family drafter forward completed in this step.
+    # The scheduler uses this acknowledgement to publish draft KV cache blocks.
+    draft_kv_materialized_req_ids: set[str] | None = None
+
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 

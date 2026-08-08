@@ -89,6 +89,10 @@ def test_scheduler_role_initializes_store_scheduler_only():
     assert connector.connector_scheduler is mock_scheduler.return_value
     assert connector.connector_worker is None
 
+    connector.set_eagle_prefix_cache_hashing(True)
+    assert connector.use_eagle_prefix_cache_hashing
+    assert connector.connector_scheduler.use_eagle_prefix_cache_hashing
+
 
 def test_worker_methods_delegate_to_store_worker():
     vllm_config = _make_vllm_config()
@@ -111,6 +115,7 @@ def test_worker_methods_delegate_to_store_worker():
     worker = mock_worker_cls.return_value
     worker.get_finished.return_value = ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.return_value = {3, 4}
+    connector.set_eagle_prefix_cache_hashing(True)
     connector.bind_connector_metadata(metadata)
 
     connector.register_kv_caches(kv_caches)
@@ -118,6 +123,8 @@ def test_worker_methods_delegate_to_store_worker():
     invalid_block_ids = connector.get_block_ids_with_load_errors()
 
     worker.register_kv_caches.assert_called_once_with(kv_caches)
+    assert connector.use_eagle_prefix_cache_hashing
+    assert worker.use_eagle_prefix_cache_hashing
     worker.get_finished.assert_called_once_with(finished_req_ids, metadata)
     assert result == ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.assert_called_once_with()
@@ -410,9 +417,17 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
 
     # Blocking lookup (non_block defaults to False) runs on the executor and
     # returns the resolved hit length.
-    assert client.lookup("req0", num_tokens=128, block_hashes=[]) == 5
+    assert (
+        client.lookup(
+            "req0",
+            num_tokens=128,
+            block_hashes=[],
+        )
+        == 5
+    )
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
+    assert len(sent_frames) == 4
     assert sent_frames[0] == protocol.LOOKUP_MSG
     assert int.from_bytes(sent_frames[1], "big") == 128
 

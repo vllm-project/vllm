@@ -27,6 +27,9 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+    is_eagle_prefix_cache_hashing_enabled,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -48,6 +51,7 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
     get_request_block_hasher,
+    get_request_eagle_block_hasher,
     init_none_hash,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
@@ -218,15 +222,24 @@ class EngineCore:
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
+        use_eagle_prefix_cache_hashing = is_eagle_prefix_cache_hashing_enabled(
+            vllm_config,
+            kv_connector,
+        )
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
             )
             init_none_hash(caching_hash_fn)
 
-            self.request_block_hasher = get_request_block_hasher(
-                hash_block_size, caching_hash_fn
-            )
+            if use_eagle_prefix_cache_hashing:
+                self.request_block_hasher = get_request_eagle_block_hasher(
+                    hash_block_size, caching_hash_fn
+                )
+            else:
+                self.request_block_hasher = get_request_block_hasher(
+                    hash_block_size, caching_hash_fn
+                )
 
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
@@ -976,7 +989,10 @@ class EngineCore:
                 request.mm_features
             )
 
-        req = Request.from_engine_core_request(request, self.request_block_hasher)
+        req = Request.from_engine_core_request(
+            request,
+            self.request_block_hasher,
+        )
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For

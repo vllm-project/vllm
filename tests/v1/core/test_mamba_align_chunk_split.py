@@ -77,12 +77,14 @@ def _split(
     request: Request,
     num_new_tokens: int,
     use_eagle: bool = True,
+    use_eagle_prefix_cache_hashing: bool = False,
     partial_hit: bool = False,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     stub = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
         use_eagle=use_eagle,
+        use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
         max_num_scheduled_tokens=16384,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
@@ -90,6 +92,17 @@ def _split(
         hash_block_size=ATTN_BLOCK_SIZE,
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
+
+
+def test_successor_hashing_preserves_last_mamba_cache_boundary() -> None:
+    prompt_len = 2 * MAMBA_BLOCK_SIZE + 1
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+
+    assert _split(request, prompt_len) == MAMBA_BLOCK_SIZE
+    assert (
+        _split(request, prompt_len, use_eagle_prefix_cache_hashing=True)
+        == 2 * MAMBA_BLOCK_SIZE
+    )
 
 
 def _run_chunked_prefill(

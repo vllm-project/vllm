@@ -18,9 +18,10 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    generate_block_hash_extra_keys,
+    generate_request_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
+    get_request_block_hash_event_data,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
@@ -166,11 +167,13 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        use_eagle_prefix_cache_hashing: bool = False,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
+        self.use_eagle_prefix_cache_hashing = use_eagle_prefix_cache_hashing
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -268,6 +271,9 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+        event_block_indices: list[int] | None = (
+            [] if self.enable_kv_cache_events else None
+        )
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -297,8 +303,21 @@ class BlockPool:
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+                assert event_block_indices is not None
+                event_block_indices.append(num_cached_blocks + i)
 
         if self.enable_kv_cache_events:
+            assert event_block_indices is not None
+            if self._emit_individual_block_stored_events(
+                request,
+                event_block_indices,
+                block_size,
+                kv_cache_group_id,
+            ):
+                return
+            if not new_hashes:
+                return
+
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
@@ -323,8 +342,12 @@ class BlockPool:
                     continue
                 block_start = i * block_size
                 block_end = block_start + block_size
-                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                    request, block_start, block_end, curr_mm_idx
+                extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
+                    request,
+                    block_start,
+                    block_end,
+                    curr_mm_idx,
+                    self.use_eagle_prefix_cache_hashing,
                 )
                 extra_keys_list.append(extra_keys)
 
@@ -341,6 +364,46 @@ class BlockPool:
                 )
             )
 
+    def _emit_individual_block_stored_events(
+        self,
+        request: Request,
+        block_indices: Iterable[int],
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> bool:
+        if (
+            not self.use_eagle_prefix_cache_hashing
+            or block_size == self.hash_block_size
+        ):
+            return False
+
+        for block_idx in block_indices:
+            event_data = get_request_block_hash_event_data(
+                request,
+                block_idx,
+                block_size,
+                self.hash_block_size,
+            )
+            block_hash, parent_hash, block_start, block_end, extra_keys = event_data
+            self.kv_event_queue.append(
+                self._build_block_stored_event(
+                    request,
+                    block_hashes=[maybe_convert_block_hash(block_hash)],
+                    parent_block_hash=(
+                        maybe_convert_block_hash(parent_hash)
+                        if parent_hash is not None
+                        else None
+                    ),
+                    start_token_idx=block_start,
+                    end_token_idx=block_end,
+                    block_size=block_size,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=extra_keys,
+                    hash_block_size=self.hash_block_size,
+                )
+            )
+        return True
+
     def _build_block_stored_event(
         self,
         request: Request,
@@ -351,6 +414,7 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         extra_keys_list: list[tuple[Any, ...] | None],
+        hash_block_size: int | None = None,
     ) -> BlockStored:
         """Build a ``BlockStored`` KV event for ``request``.
 
@@ -368,6 +432,7 @@ class BlockPool:
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
+            hash_block_size=hash_block_size,
         )
 
     def emit_cached_block_events(
@@ -396,6 +461,14 @@ class BlockPool:
             request.block_hashes, self.hash_block_size, block_size
         )
 
+        if self._emit_individual_block_stored_events(
+            request,
+            range(num_cached_blocks),
+            block_size,
+            kv_cache_group_id,
+        ):
+            return
+
         # Collect external hashes and extra_keys for cached blocks.
         cached_hashes: list[ExternalBlockHash] = []
         extra_keys_list: list[tuple[Any, ...] | None] = []
@@ -404,8 +477,12 @@ class BlockPool:
             block_start = i * block_size
             block_end = block_start + block_size
             cached_hashes.append(maybe_convert_block_hash(block_hashes[i]))
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
+            extra_keys, curr_mm_idx = generate_request_block_hash_extra_keys(
+                request,
+                block_start,
+                block_end,
+                curr_mm_idx,
+                self.use_eagle_prefix_cache_hashing,
             )
             extra_keys_list.append(extra_keys)
 
@@ -521,8 +598,12 @@ class BlockPool:
             )
             block_end = num_tokens
             curr_mm_idx = -1 if block_start > 0 else 0
-            extra_keys, _ = generate_block_hash_extra_keys(
-                request, block_start, block_end, curr_mm_idx
+            extra_keys, _ = generate_request_block_hash_extra_keys(
+                request,
+                block_start,
+                block_end,
+                curr_mm_idx,
+                self.use_eagle_prefix_cache_hashing,
             )
             self.kv_event_queue.append(
                 BlockStored(

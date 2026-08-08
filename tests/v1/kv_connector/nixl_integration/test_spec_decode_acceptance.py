@@ -11,16 +11,19 @@ Supports EAGLE3 (default) and MTP, selected via SD_METHOD env var.
 
 Environment variables (set by spec_decode_acceptance_test.sh):
     TEST_MODEL   - target model name
+    PREFILL_PORT - port of the prefill vLLM server (for /metrics)
     DECODE_PORT  - port of the decode vLLM server (for /metrics)
     SD_METHOD    - "eagle3" (default) or "mtp"
 """
 
 import os
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from urllib.request import urlopen
 
 import openai
+import pytest
 import regex as re
 from transformers import AutoTokenizer
 
@@ -28,6 +31,7 @@ from vllm.benchmarks.datasets import get_samples
 
 SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")
 PROXY_BASE_URL = f"http://{SERVER_HOST}:8192/v1"
+PREFILL_PORT = os.environ.get("PREFILL_PORT", "8100")
 DECODE_PORT = os.environ.get("DECODE_PORT", "8200")
 MODEL_NAME = os.environ.get("TEST_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
 SD_METHOD = os.environ.get("SD_METHOD", "eagle3").lower()
@@ -109,14 +113,85 @@ def _get_mt_bench_prompts() -> list[str]:
     return [sample.prompt for sample in samples]
 
 
-def _fetch_metric(metric_name: str) -> float:
-    """Fetch a single counter metric from the decode server's /metrics."""
-    url = f"http://{SERVER_HOST}:{DECODE_PORT}/metrics"
+def _fetch_metric(metric_name: str, port: str = DECODE_PORT) -> float:
+    """Fetch a counter, treating an unmaterialized zero series as zero."""
+    url = f"http://{SERVER_HOST}:{port}/metrics"
     body = urlopen(url).read().decode()
+    names = (
+        (metric_name,)
+        if metric_name.endswith("_total")
+        else (
+            metric_name,
+            metric_name + "_total",
+        )
+    )
     for line in body.split("\n"):
-        if line.startswith(metric_name + "{") or line.startswith(metric_name + " "):
+        if any(
+            line.startswith(name + "{") or line.startswith(name + " ") for name in names
+        ):
             return float(line.rsplit(" ", 1)[-1])
-    raise ValueError(f"Metric {metric_name} not found in decode /metrics")
+    return 0.0
+
+
+def _wait_for_metric_delta(
+    metric_name: str,
+    port: str,
+    baseline: float,
+    expected: float,
+    timeout: float = 10,
+) -> float:
+    deadline = time.monotonic() + timeout
+    while True:
+        delta = _fetch_metric(metric_name, port) - baseline
+        if delta >= expected or time.monotonic() >= deadline:
+            return delta
+        time.sleep(0.1)
+
+
+def test_mtp_pd_reuses_last_safe_prefix_block():
+    """Repeated MTP requests hit the successor-proven boundary on both nodes."""
+    if SD_METHOD != "mtp":
+        pytest.skip("successor-aware MTP prefix caching test")
+
+    aligned_page_size = 544
+    prompt_len = 2 * aligned_page_size + 1
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    source = (
+        "The following context is intentionally repeated to exercise prefix "
+        "caching across disaggregated prefill and decode nodes. "
+    ) * 300
+    prompt_token_ids = tokenizer.encode(source, add_special_tokens=False)[-prompt_len:]
+    assert len(prompt_token_ids) == prompt_len
+
+    client = openai.OpenAI(api_key="EMPTY", base_url=PROXY_BASE_URL)
+
+    def complete():
+        return client.completions.create(
+            model=MODEL_NAME,
+            prompt=prompt_token_ids,
+            max_tokens=32,
+            temperature=0.0,
+            seed=42,
+            extra_body={"add_special_tokens": False},
+        )
+
+    cold = complete()
+    prefill_hits = _fetch_metric("vllm:prefix_cache_hits", PREFILL_PORT)
+    decode_hits = _fetch_metric("vllm:prefix_cache_hits", DECODE_PORT)
+
+    warm = complete()
+    max_safe_hit = 2 * aligned_page_size
+    prefill_warm_hits = _wait_for_metric_delta(
+        "vllm:prefix_cache_hits", PREFILL_PORT, prefill_hits, max_safe_hit
+    )
+    decode_warm_hits = _wait_for_metric_delta(
+        "vllm:prefix_cache_hits", DECODE_PORT, decode_hits, max_safe_hit
+    )
+
+    # Legacy EAGLE dropping would leave only one 544-token page reusable.
+    assert prefill_warm_hits == max_safe_hit
+    assert decode_warm_hits == max_safe_hit
+    assert cold.choices[0].text == warm.choices[0].text
 
 
 def _fetch_per_position_acceptance() -> dict[int, float]:
@@ -150,6 +225,10 @@ def test_spec_decode_acceptance_length():
         f"Expected {DEFAULT_NUM_PROMPTS} prompts, got {len(prompts)}"
     )
 
+    drafts_before = _fetch_metric("vllm:spec_decode_num_drafts_total")
+    accepted_before = _fetch_metric("vllm:spec_decode_num_accepted_tokens_total")
+    per_position_before = _fetch_per_position_acceptance()
+
     client = openai.OpenAI(api_key="EMPTY", base_url=PROXY_BASE_URL)
     for i, prompt in enumerate(prompts):
         resp = client.completions.create(
@@ -168,8 +247,10 @@ def test_spec_decode_acceptance_length():
             print(f"  [{i}] {prompt[:60]}... -> {text}...")
 
     # ── Extract metrics from decode server ────────────────────────────
-    n_drafts = _fetch_metric("vllm:spec_decode_num_drafts_total")
-    n_accepted = _fetch_metric("vllm:spec_decode_num_accepted_tokens_total")
+    n_drafts = _fetch_metric("vllm:spec_decode_num_drafts_total") - drafts_before
+    n_accepted = (
+        _fetch_metric("vllm:spec_decode_num_accepted_tokens_total") - accepted_before
+    )
 
     assert n_drafts > 0, "No spec-decode drafts were generated"
 
@@ -193,7 +274,11 @@ def test_spec_decode_acceptance_length():
 
     # ── Assert per-position acceptance (EAGLE3) ───────────────────────
     if config.expected_acceptance_lengths_per_pos:
-        per_pos_counts = _fetch_per_position_acceptance()
+        per_position_after = _fetch_per_position_acceptance()
+        per_pos_counts = {
+            pos: count - per_position_before.get(pos, 0)
+            for pos, count in per_position_after.items()
+        }
         per_pos_rates = [
             per_pos_counts.get(i, 0) / n_drafts
             for i in range(len(config.expected_acceptance_lengths_per_pos))

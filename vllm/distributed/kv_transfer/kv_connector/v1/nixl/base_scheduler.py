@@ -61,6 +61,7 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
+        self.use_eagle_prefix_cache_hashing = False
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -376,11 +377,15 @@ class NixlBaseConnectorScheduler:
         h(N-1) instead of h(N). The decoder recomputes the last token to
         derive h(N) correctly.
 
+        Successor-aware prefix hashes retain h(N-1) at a proven cache boundary,
+        so the prefiller can keep the full prompt and transfer only through N-1.
+
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         params = request.kv_transfer_params
         if (
             params is not None
+            and not self.use_eagle_prefix_cache_hashing
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
