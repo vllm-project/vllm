@@ -16,7 +16,6 @@ MODEL_CONFIGS = [
     {
         "model": "facebook/opt-125m",
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.20,
         "max_model_len": 64,
         "max_num_batched_tokens": 64,
         "max_num_seqs": 64,
@@ -25,7 +24,6 @@ MODEL_CONFIGS = [
     {
         "model": "Qwen/Qwen3-0.6B",
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.50,
         "max_model_len": 64,
         "max_num_batched_tokens": 64,
         "max_num_seqs": 64,
@@ -35,7 +33,6 @@ MODEL_CONFIGS = [
     {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.95,
         "max_model_len": 64,
         "max_num_batched_tokens": 64,
         "max_num_seqs": 64,

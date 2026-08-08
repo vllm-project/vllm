@@ -134,7 +134,6 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
         vllm_runner(
             "facebook/opt-125m",
             compilation_config=compilation_config,
-            gpu_memory_utilization=0.4,
         ) as _,
     ):
         pass
@@ -172,7 +171,6 @@ def test_use_cudagraphs(
         vllm_runner(
             "facebook/opt-125m",
             compilation_config=compilation_config,
-            gpu_memory_utilization=0.4,
         ) as _,
     ):
         pass
@@ -190,7 +188,6 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
         vllm_runner(
             "facebook/opt-125m",
             compilation_config={"mode": CompilationMode.STOCK_TORCH_COMPILE},
-            gpu_memory_utilization=0.4,
         ) as _,
     ):
         pass
@@ -207,7 +204,6 @@ def test_no_compilation(vllm_runner, monkeypatch):
         vllm_runner(
             "facebook/opt-125m",
             compilation_config={"mode": CompilationMode.NONE},
-            gpu_memory_utilization=0.4,
         ) as _,
     ):
         pass
@@ -222,9 +218,7 @@ def test_enforce_eager(vllm_runner, monkeypatch):
     with (
         compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
         # loading the model causes compilation (if enabled) to happen
-        vllm_runner(
-            "facebook/opt-125m", enforce_eager=True, gpu_memory_utilization=0.4
-        ) as _,
+        vllm_runner("facebook/opt-125m", enforce_eager=True) as _,
     ):
         pass
 
@@ -239,7 +233,6 @@ def test_torch_compile_disable(vllm_runner, monkeypatch):
         compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
         vllm_runner(
             "facebook/opt-125m",
-            gpu_memory_utilization=0.4,
         ) as _,
     ):
         pass

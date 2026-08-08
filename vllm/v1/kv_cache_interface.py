@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
@@ -257,6 +258,56 @@ def compute_layer_kv_cache_shape_bytes(
     bs = block_size if block_size is not None else spec.block_size
     ns = num_states_for(bs, spec.tokens_per_state)
     return (num_blocks, spec.num_heads, ns, spec.state_content_size_bytes)
+
+
+def num_outer_segments(
+    spec: KVCacheSpec,
+    num_layer_slots: int,
+    layout: KVCacheLayout,
+) -> int:
+    """Number of equal contiguous segments of a KV cache tensor's physical
+    layout that each hold a contiguous run of blocks: the product of the
+    physical dims outer to the block dim. Within each segment, block ``b``
+    occupies bytes ``[b * S, (b + 1) * S)`` where
+    ``S = bytes_per_block / num_segments``, so a grow-only backing (the
+    extensible KV cache) can commit a per-segment prefix of blocks.
+
+    ``layout.stride_order`` is authoritative for every spec: layouts that
+    hoist dims outside the block dim (e.g. LHBNC for separate K/V head
+    groups) are declared by the backend, and ``spec.num_heads`` already
+    reflects the physical H dim (2 for separate K/V groups).
+    """
+    segments = 1
+    for dim in layout.stride_order:
+        if dim == _DIM_B:
+            return segments
+        if dim == _DIM_L:
+            segments *= num_layer_slots
+        else:
+            assert dim == _DIM_H
+            segments *= spec.num_heads
+    raise AssertionError(f"No block dim in stride order {layout.stride_order}")
+
+
+def tensor_num_outer_segments(
+    kv_cache_tensor: KVCacheTensor,
+    layer_specs: Mapping[str, KVCacheSpec],
+    layout: KVCacheLayout,
+) -> int:
+    """`num_outer_segments` for a whole KV cache tensor, checking that the
+    layers sharing it agree on the segmentation."""
+    num_layer_slots = len(kv_cache_tensor.shared_by)
+    segment_counts = {
+        num_outer_segments(spec, num_layer_slots, layout)
+        for slot_layers in kv_cache_tensor.shared_by
+        for layer_name in slot_layers
+        if (spec := layer_specs.get(layer_name)) is not None
+    }
+    assert len(segment_counts) == 1, (
+        "Layers sharing one KV cache tensor disagree on the buffer "
+        f"segmentation ({segment_counts}): {kv_cache_tensor.shared_by}"
+    )
+    return segment_counts.pop()
 
 
 def reshape_kv_cache(

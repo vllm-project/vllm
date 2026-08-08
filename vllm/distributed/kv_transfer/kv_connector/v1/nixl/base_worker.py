@@ -990,6 +990,8 @@ class NixlBaseConnectorWorker:
         )
 
         caches_data = []
+        # storage base -> (storage nbytes, [(region base, committed span)])
+        storage_extents: dict[int, tuple[int, list[tuple[int, int]]]] = {}
         seen_storage_addresses: set[int] = set()
         seen_base_addresses: list[int] = []
 
@@ -1038,10 +1040,15 @@ class NixlBaseConnectorWorker:
             # Memory registration follows allocations, while transfer regions
             # follow logical layers (or contiguous head segments). This keeps
             # strided cross-layer views inside their registered allocation.
+            # Registration extents are collected per region and clamped to the
+            # views' committed spans after the loop: with the extensible KV
+            # cache, the storage spans the reserved virtual-address capacity,
+            # of which only each view's per-segment block prefix is physically
+            # backed (and safe to register).
             if storage_addr not in seen_storage_addresses:
                 seen_storage_addresses.add(storage_addr)
                 self.device_id = max(cache.get_device(), 0)
-                caches_data.append((storage_addr, storage.nbytes(), self.device_id, ""))
+                storage_extents[storage_addr] = (storage.nbytes(), [])
 
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
@@ -1066,17 +1073,17 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
-                storage_is_block_major = num_blocks * block_stride == storage.nbytes()
+                # Block-major packing interleaves other layers within the
+                # block stride. Derived from the view, not storage.nbytes():
+                # extensible-KV storages span the reserved capacity.
+                storage_is_block_major = block_stride > physical_page_size
                 hnc_contiguous = (
                     cache.ndim == 4
                     and cache.stride(2) == cache.shape[3]
                     and cache.stride(1) == cache.shape[2] * cache.shape[3]
                 )
                 if storage_is_block_major and not hnc_contiguous:
-                    storage_block_len = storage.nbytes() // num_blocks
-                    region_specs = [
-                        (storage_addr, storage_block_len, storage_block_len)
-                    ]
+                    region_specs = [(storage_addr, block_stride, block_stride)]
                 elif storage_is_block_major:
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)
@@ -1111,6 +1118,9 @@ class NixlBaseConnectorWorker:
                 self.block_len_per_layer.append(block_len)
                 self.block_stride_per_layer.append(block_stride)
                 self._region_is_mla.append(is_mla_region)
+                storage_extents[storage_addr][1].append(
+                    (base_addr, num_blocks * block_stride)
+                )
 
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
@@ -1155,6 +1165,17 @@ class NixlBaseConnectorWorker:
 
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
+
+        for storage_addr, (storage_nbytes, region_spans) in storage_extents.items():
+            covered = sum(span for _, span in region_spans)
+            if covered >= storage_nbytes:
+                # Fully backed storage: one registration per allocation.
+                caches_data.append((storage_addr, storage_nbytes, self.device_id, ""))
+            else:
+                # Committed-extent views (extensible KV cache): register only
+                # the physically backed per-segment block prefixes.
+                for base_addr, span in region_spans:
+                    caches_data.append((base_addr, span, self.device_id, ""))
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)

@@ -20,7 +20,6 @@ def llm():
         model=MODEL,
         max_model_len=2048,
         enforce_eager=True,
-        gpu_memory_utilization=0.8,
         enable_mm_embeds=True,
         limit_mm_per_prompt={"image": 0},
     ) as llm:

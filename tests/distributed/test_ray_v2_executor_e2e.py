@@ -59,7 +59,6 @@ class _AsyncLLMActor:
             distributed_executor_backend="ray",
             enforce_eager=True,
             max_model_len=256,
-            gpu_memory_utilization=0.8,
         )
         vllm_config = engine_args.create_engine_config()
         vllm_config.parallel_config.placement_group = pg

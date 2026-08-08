@@ -65,6 +65,18 @@ class EncoderRunner:
         budget: MultiModalBudget,
     ) -> None:
         """Profile multimodal encoder and temporary encoder cache memory."""
+        if budget.encoder_cache_size > 0:
+            # Hold the encoder cache's full steady-state budget for the rest
+            # of profiling: at runtime the cache can grow to
+            # `encoder_cache_size` tokens of embeddings (including in
+            # embedding-only mode), well beyond one batch of encoder outputs.
+            # Cleared with the tmp_* entries by reset_encoder_cache().
+            self.encoder_cache.encoder_outputs["tmp_profile_reservation"] = torch.empty(
+                (budget.encoder_cache_size, self.hidden_size),
+                dtype=self.dtype,
+                device=self.device,
+            )
+
         if (encoder_budget := budget.get_encoder_budget()) <= 0:
             return
 

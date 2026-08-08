@@ -50,7 +50,6 @@ def _run_test(
         dtype=dtype,
         enforce_eager=True,
         max_model_len=64,
-        gpu_memory_utilization=0.7,
         attention_config=attention_config,
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(
@@ -164,7 +163,6 @@ def test_models_text_image_no_crash(
         dtype=dtype,
         enforce_eager=True,
         max_model_len=64,
-        gpu_memory_utilization=0.7,
         attention_config=siglip_attention_config,
     ) as vllm_model:
         with pytest.raises(ValueError, match="not both"):

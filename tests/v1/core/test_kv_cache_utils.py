@@ -11,7 +11,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -2858,3 +2858,180 @@ def test_resolve_block_hashes_rejects_mismatched_view():
     mismatched = BlockHashListWithBlockSize(raw, 2, 8)
     with pytest.raises(AssertionError):
         resolve_block_hashes(mismatched, 2, 4)
+
+
+# ---------------------------------------------------------------------------
+# Extensible KV cache: defaults, fallbacks and the post-warmup buffer.
+#
+# These encode decisions whose regressions are silent -- a less safe memory
+# budget rather than a crash -- so they are asserted rather than commented.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected_extensible,expected_util",
+    [
+        # Default: on, and sizing from measured memory needs no unused fraction.
+        ({}, True, 1.0),
+        ({"enable_extensible_kv_cache": True}, True, 1.0),
+        # Off by request: the profiling path needs its fraction back.
+        (
+            {"enable_extensible_kv_cache": False},
+            False,
+            CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
+        ),
+        # An explicit utilization always wins over either default.
+        ({"gpu_memory_utilization": 0.8}, True, 0.8),
+        (
+            {"enable_extensible_kv_cache": False, "gpu_memory_utilization": 0.8},
+            False,
+            0.8,
+        ),
+    ],
+)
+def test_extensible_kv_cache_defaults(kwargs, expected_extensible, expected_util):
+    """The utilization default follows whether measured sizing is in use."""
+    cache_config = CacheConfig(**kwargs)
+    assert cache_config.enable_extensible_kv_cache is expected_extensible
+    assert cache_config.gpu_memory_utilization == expected_util
+    assert cache_config.user_specified_enable_extensible_kv_cache == (
+        "enable_extensible_kv_cache" in kwargs
+    )
+
+
+@pytest.mark.parametrize("util", [None, 0.8])
+def test_disable_extensible_kv_cache_restores_utilization(util):
+    """Falling back to profiling-based sizing must restore its safety fraction,
+    without overriding a utilization the user chose."""
+    kwargs = {} if util is None else {"gpu_memory_utilization": util}
+    cache_config = CacheConfig(**kwargs)
+    cache_config.disable_extensible_kv_cache()
+
+    assert cache_config.enable_extensible_kv_cache is False
+    assert cache_config.gpu_memory_utilization == (
+        util if util is not None else CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+    )
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("sleep_mode", [False, True])
+def test_validate_extensible_kv_cache_with_connector(explicit, sleep_mode):
+    """A KV connector on the V1 runner, or alongside sleep mode, cannot use the
+    extensible KV cache. Explicit requests fail; a default quietly steps down,
+    so enabling by default does not break existing deployments."""
+    cache_config = CacheConfig(enable_extensible_kv_cache=True if explicit else None)
+    config = SimpleNamespace(
+        cache_config=cache_config,
+        kv_transfer_config=object(),
+        # Sleep mode is incompatible even on V2, since waking remaps pages.
+        use_v2_model_runner=sleep_mode,
+        model_config=SimpleNamespace(enable_sleep_mode=sleep_mode),
+    )
+
+    if explicit:
+        with pytest.raises(ValueError, match="cannot be honored"):
+            VllmConfig._validate_extensible_kv_cache(config)
+        return
+
+    VllmConfig._validate_extensible_kv_cache(config)
+    assert cache_config.enable_extensible_kv_cache is False
+    assert (
+        cache_config.gpu_memory_utilization
+        == CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+    )
+
+
+def test_validate_extensible_kv_cache_leaves_supported_config_alone():
+    cache_config = CacheConfig()
+    config = SimpleNamespace(
+        cache_config=cache_config,
+        kv_transfer_config=None,
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(enable_sleep_mode=False),
+    )
+    VllmConfig._validate_extensible_kv_cache(config)
+    assert cache_config.enable_extensible_kv_cache is True
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_use_extensible_kv_cache_unsupported_driver(explicit, monkeypatch):
+    """An explicit request is mandatory; a default steps down and hands the
+    utilization fraction back to the profiling path."""
+    cache_config = CacheConfig(enable_extensible_kv_cache=True if explicit else None)
+    vllm_config = SimpleNamespace(cache_config=cache_config)
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "_extensible_kv_cache_unsupported_reason",
+        lambda collective_rpc: "no VMM support",
+    )
+
+    if explicit:
+        with pytest.raises(ValueError, match="cannot be honored"):
+            kv_cache_utils.use_extensible_kv_cache(vllm_config, lambda *a, **k: [])
+        return
+
+    assert not kv_cache_utils.use_extensible_kv_cache(vllm_config, lambda *a, **k: [])
+    assert cache_config.enable_extensible_kv_cache is False
+    assert (
+        cache_config.gpu_memory_utilization
+        == CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+    )
+
+
+def test_unsupported_reason_skips_rpc_off_cuda(monkeypatch):
+    """A platform without VMM cannot be saved by asking the workers, so it must
+    not pay for a collective RPC to find out."""
+    monkeypatch.setattr(
+        type(kv_cache_utils.current_platform), "is_cuda_alike", lambda self: False
+    )
+
+    def unreachable(*args, **kwargs):
+        raise AssertionError("collective_rpc must not be called")
+
+    reason = kv_cache_utils._extensible_kv_cache_unsupported_reason(unreachable)
+    assert reason is not None and "CUDA or ROCm" in reason
+
+
+def test_warmup_memory_buffer_scales_with_activation_peak():
+    """The buffer tracks the workload, not the device: a fraction of the
+    profiled activation peak, with an absolute floor for small configs."""
+    floor = kv_cache_utils._WARMUP_MEMORY_BUFFER_FLOOR_BYTES
+    fraction = kv_cache_utils._WARMUP_MEMORY_BUFFER_PEAK_FRACTION
+    min_fraction = kv_cache_utils._WARMUP_MEMORY_BUFFER_MIN_BUDGET_FRACTION
+    # A budget where neither budget-proportional bound binds.
+    ample = int(floor / min_fraction)
+
+    assert kv_cache_utils._warmup_memory_buffer(0, ample) == floor
+    # Below the crossover the floor dominates; above it the peak does.
+    small = int(floor / fraction) // 2
+    assert kv_cache_utils._warmup_memory_buffer(small, ample) == floor
+    large = int(floor / fraction) * 4
+    assert kv_cache_utils._warmup_memory_buffer(large, ample) == int(fraction * large)
+
+
+def test_warmup_memory_buffer_scales_with_large_budget():
+    """Post-warmup first-time allocations scale with the deployment, so a
+    large KV budget carries a proportionally larger margin than the floor."""
+    floor = kv_cache_utils._WARMUP_MEMORY_BUFFER_FLOOR_BYTES
+    min_fraction = kv_cache_utils._WARMUP_MEMORY_BUFFER_MIN_BUDGET_FRACTION
+
+    big = int(floor / min_fraction) * 8
+    assert kv_cache_utils._warmup_memory_buffer(0, big) == int(min_fraction * big)
+
+
+def test_warmup_memory_buffer_capped_by_budget_share():
+    """A small budget must not lose the floor's worth of memory to the margin:
+    the buffer never exceeds its configured share of the budget it comes from.
+    """
+    floor = kv_cache_utils._WARMUP_MEMORY_BUFFER_FLOOR_BYTES
+    budget_fraction = kv_cache_utils._WARMUP_MEMORY_BUFFER_MAX_BUDGET_FRACTION
+
+    # A budget only twice the floor would otherwise surrender half of itself.
+    tight = floor * 2
+    assert kv_cache_utils._warmup_memory_buffer(0, tight) == int(
+        budget_fraction * tight
+    )
+    # The cap binds against the peak-scaled value too, not just the floor.
+    assert kv_cache_utils._warmup_memory_buffer(floor * 100, tight) == int(
+        budget_fraction * tight
+    )

@@ -258,7 +258,6 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
         model_path,
         enforce_eager=True,
         tensor_parallel_size=tp,
-        gpu_memory_utilization=0.1,
     ) as llm:
 
         def check_model(model):
@@ -295,7 +294,6 @@ def test_quark_w4a8_fp8_moe(vllm_runner, monkeypatch, tp):
         model_path,
         enforce_eager=True,
         tensor_parallel_size=tp,
-        gpu_memory_utilization=0.1,
     ) as llm:
 
         def check_model(model):
@@ -317,7 +315,6 @@ def test_quark_fp8_parity(vllm_runner):
     llm_kwargs = {
         "tensor_parallel_size": 1,
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.1,
     }
     with (
         vllm_runner(quark_model_id, **llm_kwargs) as quark_handle,
@@ -355,7 +352,6 @@ class AccuracyTestConfig:
             "dtype": "auto",
             "add_bos_token": True,
             "tensor_parallel_size": tp_size,
-            "gpu_memory_utilization": 0.7,
             **kwargs,
         }
         if model_max_len is not None:

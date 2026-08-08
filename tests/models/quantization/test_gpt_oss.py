@@ -97,7 +97,6 @@ class EvaluationConfig:
             "think_end_token": "200008",
             "tensor_parallel_size": tp_size,
             "dtype": "auto",
-            "gpu_memory_utilization": 0.95,
             "trust_remote_code": False,
             "enable_prefix_caching": False,
             "enforce_eager": False,

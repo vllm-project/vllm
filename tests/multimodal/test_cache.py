@@ -583,7 +583,6 @@ def test_sleep_wake_preserves_mm_cache_consistency():
         model="Qwen/Qwen2-VL-2B-Instruct",
         enable_sleep_mode=True,
         enforce_eager=True,
-        gpu_memory_utilization=0.5,
         max_model_len=2048,
     )
 

@@ -58,6 +58,7 @@ from vllm.multimodal.encoder_budget import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -106,6 +107,7 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.kv_connector import (
     NO_OP_KV_CONNECTOR,
     KVConnector,
+    get_deferred_kv_connector,
     get_kv_connector,
 )
 from vllm.v1.worker.gpu.lora_utils import (
@@ -289,6 +291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        self.extensible_kv_buffers: ExtensibleKVCacheBuffers | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -458,7 +461,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return {}
         return get_kv_cache_spec(self.vllm_config)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, extensible: bool = False
+    ) -> None:
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.free()
+        self.extensible_kv_buffers = None
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -555,7 +563,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
+        kv_caches_dict, self.extensible_kv_buffers = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
@@ -563,8 +571,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.kernel_block_sizes,
             vllm_config=self.vllm_config,
+            extensible=extensible,
         )
+        self._kv_caches_dict = kv_caches_dict
+        # With the extensible flow, KV transfer init is deferred until the
+        # final KV cache size is committed, so this yields a no-op connector
+        # that init_deferred_kv_connector later replaces.
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+    def init_deferred_kv_connector(self) -> None:
+        """Create and register the KV connector after `extend_kv_cache`."""
+        assert self.extensible_kv_buffers is not None
+        self.kv_connector = get_deferred_kv_connector(
+            self.vllm_config,
+            self._kv_caches_dict,
+            self.attn_groups,
+            self.kernel_block_sizes,
+            self.kv_cache_config.num_blocks,
+        )
+
+    def ensure_kv_cache_blocks(self, num_blocks: int) -> None:
+        """Commit at least `num_blocks` KV blocks (no-op without extensible
+        KV). Called from warmup before writing to real block IDs."""
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.ensure_blocks(num_blocks)
+
+    def extend_kv_cache(self, num_blocks: int, defragment: bool = False) -> None:
+        """Grow the KV cache to `num_blocks` blocks after warmup."""
+        if self.extensible_kv_buffers is None:
+            raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
+        self.extensible_kv_buffers.extend(num_blocks, defragment=defragment)
+        self.kv_cache_config.num_blocks = num_blocks
+
+    @property
+    def kv_cache_committed_bytes(self) -> int:
+        """Physically committed KV cache bytes (0 without extensible KV)."""
+        buffers = self.extensible_kv_buffers
+        return buffers.physical_bytes if buffers is not None else 0
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1723,6 +1766,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.free()
+            self.extensible_kv_buffers = None
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state

@@ -50,7 +50,6 @@ def run_maverick_serving(model: str):
             tensor_parallel_size=8,
             enable_expert_parallel=True,
             trust_remote_code=True,
-            gpu_memory_utilization=0.4,
             kv_cache_dtype="fp8",
         )
 
@@ -634,7 +633,6 @@ def test_dummy_maverick(
         model=model_path,
         trust_remote_code=True,
         max_model_len=512,  # Small context for testing
-        gpu_memory_utilization=0.3,  # Conservative memory usage
         enforce_eager=enforce_eager,
         tensor_parallel_size=tp,
         enable_expert_parallel=ep,

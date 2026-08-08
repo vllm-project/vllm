@@ -224,7 +224,6 @@ def test_fp32_head_e2e_no_nan():
         hf_overrides={"head_dtype": "float32"},
         logprobs_mode="processed_logprobs",
         enforce_eager=True,
-        gpu_memory_utilization=0.5,
         max_model_len=256,
     )
     sampling_params = SamplingParams(

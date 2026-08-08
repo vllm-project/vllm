@@ -99,7 +99,6 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         tensor_parallel_size=model_case.tp,
         load_format="dummy",
         compilation_config={"cudagraph_capture_sizes": [16]},
-        gpu_memory_utilization=0.8,  # mxfp6 models use more scratch space
     ) as llm:
         # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
         # def check_model(model):

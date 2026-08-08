@@ -77,7 +77,6 @@ def test_quant_model_lora(tinyllama_lora_files, model):
         max_num_seqs=16,
         max_loras=4,
         max_model_len=400,
-        gpu_memory_utilization=0.2,  # avoid OOM
         quantization=model.quantization,
         trust_remote_code=True,
         enable_chunked_prefill=True,
@@ -139,7 +138,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available, model
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
-        gpu_memory_utilization=0.2,  # avoid OOM
         quantization=model.quantization,
         trust_remote_code=True,
         enable_chunked_prefill=True,
@@ -155,7 +153,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available, model
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=2,
-        gpu_memory_utilization=0.2,  # avoid OOM
         quantization=model.quantization,
         enable_chunked_prefill=True,
     )

@@ -252,8 +252,12 @@ def test_engine_core_concurrent_batches():
         return request
 
     class DummyExecutor(UniProcExecutor):
-        def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-            super().initialize_from_config(kv_cache_configs)
+        def initialize_from_config(
+            self,
+            kv_cache_configs: list[KVCacheConfig],
+            extensible: bool = False,
+        ) -> None:
+            super().initialize_from_config(kv_cache_configs, extensible=extensible)
 
             # Create a thread pool with a single worker
             self.thread_pool = ThreadPoolExecutor(max_workers=1)
@@ -478,14 +482,17 @@ def test_engine_core_invalid_request_id_type():
     [
         ("ec_producer", 0.01, False),
         # NOTE: ec_producer never allows prefix caching
-        ("ec_consumer", 0.7, True),
-        ("ec_consumer", 0.7, False),
+        # None leaves gpu_memory_utilization at its default: capping it left
+        # the consumer's KV cache only a few percent above the minimum needed
+        # for max_model_len, too tight for the post-warmup memory buffer.
+        ("ec_consumer", None, True),
+        ("ec_consumer", None, False),
     ],
 )
 @pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_encoder_instance_zero_kv_cache(
     ec_role: str,
-    gpu_memory_utilization: float,
+    gpu_memory_utilization: float | None,
     enable_prefix_caching: bool,
     use_kv_connector: bool,
 ):

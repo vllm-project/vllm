@@ -111,7 +111,6 @@ def _run_and_compare(
     max_model_len: int,
     max_num_seqs: int,
     mm_limit: int,
-    gpu_memory_utilization: float,
 ):
     """Load each runner once, run all inputs, then compare."""
     # NOTE: run vLLM first, then HF.  vLLM needs a fresh process without
@@ -122,7 +121,6 @@ def _run_and_compare(
         runner="generate",
         max_model_len=max_model_len,
         max_num_seqs=max_num_seqs,
-        gpu_memory_utilization=gpu_memory_utilization,
         dtype=DTYPE,
         limit_mm_per_prompt={"image": mm_limit},
         tensor_parallel_size=2,
@@ -178,7 +176,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
         max_model_len=8192,
         max_num_seqs=2,
         mm_limit=1,
-        gpu_memory_utilization=0.80,
     )
 
 
@@ -194,5 +191,4 @@ def test_multi_images_models(hf_runner, vllm_runner, image_assets, model) -> Non
         max_model_len=8192,
         max_num_seqs=2,
         mm_limit=2,
-        gpu_memory_utilization=0.80,
     )
