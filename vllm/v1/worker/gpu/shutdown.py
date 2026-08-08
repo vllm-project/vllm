@@ -8,6 +8,7 @@ logger = init_logger(__name__)
 
 def free_before_shutdown(vllm_config: VllmConfig) -> None:
     from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+    from vllm.v1.attention.backends.turboquant_attn import reset_tq_decode_scratch
     from vllm.v1.worker.workspace import reset_workspace_manager
 
     cache_config = vllm_config.cache_config
@@ -18,3 +19,4 @@ def free_before_shutdown(vllm_config: VllmConfig) -> None:
 
     _ROPE_DICT.clear()
     reset_workspace_manager()
+    reset_tq_decode_scratch()
