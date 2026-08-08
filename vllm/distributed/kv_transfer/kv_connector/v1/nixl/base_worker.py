@@ -556,10 +556,24 @@ class NixlBaseConnectorWorker:
         )
 
     def _sync_block_size_with_kernel(self) -> None:
+        # Packed caches already encode each cache group's page geometry in a
+        # single per-block slab. The global cache_config.block_size is the
+        # scheduler's allocation granularity (often the minimum across hybrid
+        # groups), not a kernel block size shared by every attention backend.
+        # NIXL transfers the whole slab, so virtually splitting it here would
+        # corrupt its descriptor geometry and can fail when the scheduler
+        # granularity is smaller than a backend's required block size.
+        self._logical_num_blocks = self.num_blocks
+        if any(t.block_stride > 0 for t in self.kv_cache_config.kv_cache_tensors):
+            logger.info_once(
+                "Packed KV cache detected; keeping scheduler block size %s "
+                "for NIXL whole-slab transfers.",
+                self.block_size,
+            )
+            return
+
         backends = get_current_attn_backends(self.vllm_config)
         kernel_block_size = select_common_block_size(self.block_size, backends)
-        # Number of blocks not accounting for kernel block mismatches
-        self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
             logger.info_once(
                 "User-specified logical block size (%s) does not match"
