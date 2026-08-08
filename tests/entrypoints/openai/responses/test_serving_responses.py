@@ -680,6 +680,104 @@ class TestHarmonyPreambleStreaming:
             assert "response.output_item.done" in type_names
 
 
+class TestHarmonyNamespaceToolStreaming:
+    """Tests for namespace tool name resolution in Harmony streaming events."""
+
+    @staticmethod
+    def _make_segment(*, channel, recipient, delta="{}"):
+        return Segment(channel=channel, recipient=recipient, delta=delta)
+
+    @staticmethod
+    def _make_previous_item(*, channel, recipient, text='{"cmd": "echo hi"}'):
+        content_part = MagicMock()
+        content_part.text = text
+        item = MagicMock()
+        item.channel = channel
+        item.recipient = recipient
+        item.content = [content_part]
+        return item
+
+    def test_delta_events_resolve_namespace(self) -> None:
+        """Streaming delta should emit resolved name + namespace fields."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+        from vllm.tool_parsers.utils import ResponsesToolCallName
+
+        name_map = {
+            "codex__shell": ResponsesToolCallName(name="shell", namespace="codex"),
+        }
+        fn_names = frozenset({"codex__shell"})
+        segment = self._make_segment(
+            channel="commentary",
+            recipient="functions.codex__shell",
+            delta='{"cmd":',
+        )
+        state = StreamingState()
+
+        events = emit_content_delta_events(
+            segment, state, fn_names, tool_call_name_map=name_map
+        )
+
+        added_events = [e for e in events if e.type == "response.output_item.added"]
+        assert len(added_events) == 1
+        item = added_events[0].item
+        assert item.name == "shell"
+        assert item.namespace == "codex"
+
+    def test_done_events_resolve_namespace(self) -> None:
+        """Streaming done should emit resolved name + namespace fields."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+        from vllm.tool_parsers.utils import ResponsesToolCallName
+
+        name_map = {
+            "codex__shell": ResponsesToolCallName(name="shell", namespace="codex"),
+        }
+        fn_names = frozenset({"codex__shell"})
+        previous = self._make_previous_item(
+            channel="commentary", recipient="functions.codex__shell"
+        )
+        state = StreamingState()
+        state.is_first_function_call_delta = True
+        state.current_item_id = "fc_test"
+        state.current_call_id = "call_test"
+        state.current_output_index = 0
+
+        events = emit_previous_item_done_events(
+            previous, state, fn_names, tool_call_name_map=name_map
+        )
+
+        done_events = [e for e in events if e.type == "response.output_item.done"]
+        assert len(done_events) == 1
+        item = done_events[0].item
+        assert item.name == "shell"
+        assert item.namespace == "codex"
+
+    def test_delta_events_no_namespace_passthrough(self) -> None:
+        """Without name_map, function name passes through unchanged."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        fn_names = frozenset({"get_weather"})
+        segment = self._make_segment(
+            channel="commentary",
+            recipient="functions.get_weather",
+            delta='{"lat":',
+        )
+        state = StreamingState()
+
+        events = emit_content_delta_events(segment, state, fn_names)
+
+        added_events = [e for e in events if e.type == "response.output_item.added"]
+        assert len(added_events) == 1
+        item = added_events[0].item
+        assert item.name == "get_weather"
+        assert item.namespace is None
+
+
 def _make_simple_context_with_output(text, token_ids, response_parser=None):
     """Create a SimpleContext with a RequestOutput containing the given text."""
     ctx = SimpleContext(response_parser=response_parser)
