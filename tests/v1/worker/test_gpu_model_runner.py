@@ -351,9 +351,13 @@ def test_select_common_block_size_no_valid_option():
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
-    model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
+    model.get_mm_lora_token_counts.side_effect = (
+        lambda *, modality, mm_kwargs, num_mm_embeds: (
+            num_mm_embeds + 1,
+            num_mm_embeds + 11,
+        )
+    )
     model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
-    model.get_num_mm_connector_tokens.side_effect = lambda num_tokens: num_tokens + 10
 
     lora_manager = Mock()
     lora_manager.supports_tower_connector_lora.return_value = True
