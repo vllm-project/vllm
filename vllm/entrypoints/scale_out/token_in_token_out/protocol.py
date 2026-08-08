@@ -20,7 +20,11 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import (
+    StreamOptions,
+    UsageInfo,
+    validate_cache_salt,
+)
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -164,6 +168,13 @@ class GenerateRequest(BaseModel):
         instance = handler(data)
         instance._sampling_params_provided_keys = provided
         return instance
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_cache_salt(cls, data: Any):
+        if isinstance(data, dict):
+            validate_cache_salt(data.get("cache_salt"))
+        return data
 
     def is_sampling_param_provided(self, name: str) -> bool:
         """Whether the caller explicitly set ``sampling_params.<name>``.
