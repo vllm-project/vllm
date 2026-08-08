@@ -43,6 +43,10 @@ class INCWNA16LinearScheme(INCLinearScheme):
         )
 
     def _build_gptq_method(self):
+        assert isinstance(self.layer_config.group_size, int), (
+            "WNA16 only supports integer group_size."
+        )
+
         gptq_type_map = {
             (4, True): scalar_types.uint4b8,
             (8, True): scalar_types.uint8b128,
@@ -82,6 +86,10 @@ class INCWNA16LinearScheme(INCLinearScheme):
         )
 
     def _build_awq_method(self):
+        assert isinstance(self.layer_config.group_size, int), (
+            "WNA16 only supports integer group_size."
+        )
+
         awq_type_map = {
             4: scalar_types.uint4,
             8: scalar_types.uint8,
@@ -165,6 +173,9 @@ class INCXPULinearBase(INCLinearScheme):
 
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         self.weight_bits = layer_config.bits
+        assert isinstance(layer_config.group_size, int), (
+            "INCXPULinearBase requires integer group_size."
+        )
         self.group_size = layer_config.group_size
 
         self.sym = layer_config.sym

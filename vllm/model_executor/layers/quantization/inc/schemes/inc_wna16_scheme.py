@@ -122,6 +122,10 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         check_moe_marlin_supports_layer,
     )
 
+    assert isinstance(layer_config.group_size, int), (
+        "WNA16 only supports integer group_size."
+    )
+
     # AutoGPTQMoEMethod selects its fused-MoE backend through the WNA16 oracle
     # (Marlin on CUDA, XPUExpertsWNA16 on XPU). Gate only on the layer-shape
     # check like compressed-tensors does; the capability-based
@@ -165,6 +169,10 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
     )
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
         check_moe_marlin_supports_layer,
+    )
+
+    assert isinstance(layer_config.group_size, int), (
+        "WNA16 only supports integer group_size."
     )
 
     use_marlin = layer_config.bits in (4, 8) and check_moe_marlin_supports_layer(
