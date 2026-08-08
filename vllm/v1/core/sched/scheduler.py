@@ -1201,8 +1201,29 @@ class Scheduler(SchedulerInterface):
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
+            # Count only requests that will sample this step (decode or
+            # final-prefill-chunk that reaches sampling).  Including mid-prefill
+            # requests in the count causes K to thrash at batch boundaries.
+            # See #49548.
+            decode_request_count = 0
+            for req_id, num_tokens in num_scheduled_tokens.items():
+                req = self.requests[req_id]
+                if (req.num_computed_tokens + num_tokens
+                        >= req.num_tokens
+                        + req.num_output_placeholders):
+                    decode_request_count += 1
+            # Fall back to total count if no requests reach sampling
+            # (e.g. all-prefill step).
+            lookup_count = (
+                decode_request_count
+                if decode_request_count > 0
+                else len(num_scheduled_tokens)
+            )
+            # Clamp to lookup table bounds (should not exceed, but guard
+            # against edge cases with async output placeholders).
+            lookup_count = min(lookup_count, len(self.dynamic_sd_lookup) - 1)
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
-                len(num_scheduled_tokens)
+                lookup_count
             ]
 
         scheduled_encoder_input_stats = None
