@@ -1050,6 +1050,11 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
+    def get_fused_moe_routing_backend_cls(cls) -> str | None:
+        """Return the class that resolves platform-specific fused MoE routers."""
+        return None
+
+    @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:
         """
         Returns whether the GPU is an integrated (UMA) device that shares
