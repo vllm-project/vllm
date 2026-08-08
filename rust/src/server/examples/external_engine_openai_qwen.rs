@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
             local_input_address: None,
             local_output_address: None,
         },
+        configured_data_parallel_size: args.engine_count,
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
         served_model_name: vec![],

@@ -457,6 +457,7 @@ impl SharedRuntimeArgs {
         coordinator_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
+        configured_data_parallel_size: usize,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
@@ -474,6 +475,7 @@ impl SharedRuntimeArgs {
                 engine_count,
                 ready_timeout,
             },
+            configured_data_parallel_size,
             coordinator_mode: match coordinator_address {
                 Some(address) => CoordinatorMode::External { address },
                 None => CoordinatorMode::None,
@@ -530,6 +532,7 @@ impl SharedRuntimeArgs {
                 local_input_address,
                 local_output_address,
             },
+            configured_data_parallel_size: engine_count,
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
             served_model_name: self.served_model_name,
@@ -661,6 +664,9 @@ pub struct FrontendArgs {
     /// Total number of data-parallel engines expected for this frontend.
     #[arg(long, default_value_t = 1)]
     pub engine_count: usize,
+    /// Deployment-wide configured data-parallel size. Defaults to engine count.
+    #[arg(long)]
+    pub data_parallel_size: Option<usize>,
 
     /// Shared frontend arguments as one JSON object.
     #[arg(long = "args-json", value_parser = parse_runtime_args_json, value_name = "JSON")]
@@ -670,6 +676,7 @@ pub struct FrontendArgs {
 impl FrontendArgs {
     /// Convert the CLI arguments into the OpenAI server's runtime config.
     pub fn into_config(self) -> Config {
+        let configured_data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
             self.input_address,
@@ -677,6 +684,7 @@ impl FrontendArgs {
             self.coordinator_address,
             self.engine_start_index,
             self.engine_count,
+            configured_data_parallel_size,
         )
     }
 }
