@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 
-VALID_KV_OFFLOAD_BACKENDS = ("cpu", "disk")
+VALID_KV_OFFLOAD_BACKENDS = ("cpu", "disk", "legomem")
 # Keys that only apply to the disk backend, warned about under "cpu".
 _DISK_ONLY_KEYS = (
     "disk_path",
@@ -115,8 +115,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
             if ignored:
                 logger.warning(
-                    'kv_offload_backend is "cpu", ignoring disk-only config: %s. '
+                    'kv_offload_backend is "%s", ignoring disk-only config: %s. '
                     'Set kv_offload_backend="disk" to enable the disk backend.',
+                    kv_offload_backend,
                     ", ".join(ignored),
                 )
             disk_path = None
@@ -168,6 +169,18 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_capacity_bytes=disk_capacity_bytes,
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
+                legomem_library_path=str(
+                    extra_config.get(
+                        "legomem_library_path",
+                        "/home/ubuntu/legomem/lib/liblegomem_kv.so",
+                    )
+                ),
+                legomem_host=str(extra_config.get("legomem_host", "127.0.0.1")),
+                legomem_port=int(extra_config.get("legomem_port", 9999)),
+                legomem_num_nodes=int(extra_config.get("legomem_num_nodes", 16)),
+                legomem_node_capacity_bytes=int(
+                    extra_config.get("legomem_node_capacity_bytes", 256 * 1024**2)
+                ),
             )
 
     # --- Worker-side methods ---

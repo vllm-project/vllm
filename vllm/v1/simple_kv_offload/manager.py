@@ -180,7 +180,16 @@ class SimpleCPUOffloadScheduler:
 
         # For TP/PP: track partial store completions across steps.
         # Events must be reported by all world_size workers before considered complete.
-        self._expected_worker_count = vllm_config.parallel_config.world_size
+        # With external_launcher every MPI rank owns an engine/scheduler and
+        # reports only its colocated worker's completion.  Waiting for the
+        # global TP world size in each scheduler leaves every store forever
+        # unpublished.  mp/ray use one scheduler for all workers instead.
+        self._expected_worker_count = (
+            1
+            if vllm_config.parallel_config.distributed_executor_backend
+            == "external_launcher"
+            else vllm_config.parallel_config.world_size
+        )
         self._store_event_pending_counts: dict[int, int] = {}
 
     @staticmethod
