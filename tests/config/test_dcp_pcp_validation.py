@@ -13,6 +13,7 @@ GPU or downloading a real model.
 """
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -21,7 +22,7 @@ from vllm.config import ModelConfig
 
 def _make_model_config(
     *, total_num_attention_heads: int, total_num_kv_heads: int
-) -> ModelConfig:
+) -> Any:
     """Build a minimal stand-in exposing only what
     `verify_with_parallel_config` reads before the DCP/PCP branch returns.
     """
@@ -111,6 +112,24 @@ def test_dcp_without_pcp_tp_duplication_still_enforces_max():
         ModelConfig.verify_with_parallel_config(
             model_config, parallel_config_too_large
         )
+
+
+def test_dcp_with_non_divisible_tp_kv_ratio_is_not_falsely_rejected():
+    # pcp=1, tp=12, kv_heads=8: tp > kv_heads so there IS a duplication
+    # source, even though floor(tp / kv_heads) == 1. dcp=2 must be rejected
+    # for exceeding the (low) max_dcp_size, not misreported as having no
+    # duplication source at all.
+    model_config = _make_model_config(
+        total_num_attention_heads=24, total_num_kv_heads=8
+    )
+    parallel_config = _make_parallel_config(
+        tensor_parallel_size=12,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=2,
+    )
+
+    with pytest.raises(ValueError, match="exceeds the maximum"):
+        ModelConfig.verify_with_parallel_config(model_config, parallel_config)
 
 
 def test_dcp_exceeding_combined_tp_pcp_capacity_is_rejected():
