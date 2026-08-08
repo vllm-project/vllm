@@ -12,6 +12,7 @@ ARG FA_BRANCH="jpvillam/gfx1250_wip"
 ARG FA_REPO="https://github.com/jpvillam-amd/flash-attention.git"
 ARG AITER_BRANCH="main"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ARG AITER_COMMIT="dca178b4b858146ff71b21c7897c54e234a1ffd3"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
@@ -252,9 +253,11 @@ RUN mkdir -p /app/install; \
 FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
+ARG AITER_COMMIT
 ARG USE_SCCACHE
 RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
 RUN cd aiter \
+    && git checkout ${AITER_COMMIT} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
 RUN pip install pyyaml && cd aiter \
@@ -309,6 +312,7 @@ ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
+ARG AITER_COMMIT
 ARG MORI_BRANCH
 ARG MORI_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
@@ -321,5 +325,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
+    && echo "AITER_COMMIT: ${AITER_COMMIT}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
