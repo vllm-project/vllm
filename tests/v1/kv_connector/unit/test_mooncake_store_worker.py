@@ -3184,25 +3184,54 @@ def test_store_worker_close_releases_store():
     assert worker.store is None
 
 
+def test_store_worker_close_releases_lookup_server():
+    worker = _make_bare_worker()
+    lookup_server = MagicMock()
+    worker.lookup_server = lookup_server
+
+    worker.close()
+
+    lookup_server.close.assert_called_once_with()
+    assert worker.lookup_server is None
+
+
 def test_store_worker_close_is_idempotent():
     worker = _make_bare_worker()
     store = worker.store
+    lookup_server = MagicMock()
+    worker.lookup_server = lookup_server
 
     worker.close()
     worker.close()
 
-    # Second call short-circuits because store was already released.
+    # Second call short-circuits because both resources were already released.
     store.close.assert_called_once_with()
+    lookup_server.close.assert_called_once_with()
 
 
 def test_store_worker_close_swallows_store_errors():
     worker = _make_bare_worker()
     worker.store.close.side_effect = RuntimeError("boom")
+    lookup_server = MagicMock()
+    worker.lookup_server = lookup_server
 
-    # A failure tearing down the store must not propagate out of close().
+    # A failure tearing down the store must not propagate out of close(),
+    # and must not strand the lookup server.
     worker.close()
 
     assert worker.store is None
+    lookup_server.close.assert_called_once_with()
+    assert worker.lookup_server is None
+
+
+def test_store_worker_close_swallows_lookup_server_errors():
+    worker = _make_bare_worker()
+    worker.lookup_server = MagicMock()
+    worker.lookup_server.close.side_effect = RuntimeError("boom")
+
+    worker.close()
+
+    assert worker.lookup_server is None
 
 
 def test_blob_block_hashes_wire_roundtrip():
