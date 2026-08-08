@@ -287,7 +287,6 @@ def test_ray_dp_actors_start_after_frontend_bind(
             executor_class=_DummyExecutor,
             log_stats=False,
             addresses=addresses,
-            defer_ray_actor_start=True,
         ) as engine_launch:
             assert engine_launch.engine_manager is None
 

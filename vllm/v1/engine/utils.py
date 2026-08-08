@@ -1066,7 +1066,6 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     addresses: EngineZmqAddresses,
-    defer_ray_actor_start: bool = False,
 ) -> Iterator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
 
@@ -1117,15 +1116,10 @@ def launch_core_engines(
         logger.info("Starting ray-based data parallel backend")
 
         engine_launch = CoreEngineLaunch(None, coordinator, addresses, tensor_queue)
-        if not defer_ray_actor_start:
-            engine_launch.engine_manager = CoreEngineActorManager(
-                vllm_config, addresses, executor_class, log_stats
-            )
         yield engine_launch
-        if defer_ray_actor_start:
-            engine_launch.engine_manager = CoreEngineActorManager(
-                vllm_config, addresses, executor_class, log_stats
-            )
+        engine_launch.engine_manager = CoreEngineActorManager(
+            vllm_config, addresses, executor_class, log_stats
+        )
         return
 
     if offline_mode:

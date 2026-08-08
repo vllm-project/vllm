@@ -315,15 +315,10 @@ def run_multi_api_server(args: argparse.Namespace):
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
     # Port allocation is deferred to the front-end's bind() to avoid TOCTOU.
-    is_ray_dp = parallel_config.data_parallel_backend == "ray"
     addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
 
     with launch_core_engines(
-        vllm_config,
-        executor_class,
-        log_stats,
-        addresses,
-        defer_ray_actor_start=is_ray_dp,
+        vllm_config, executor_class, log_stats, addresses
     ) as engine_launch:
         coordinator = engine_launch.coordinator
         addresses = engine_launch.addresses
