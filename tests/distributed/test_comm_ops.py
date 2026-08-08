@@ -208,9 +208,14 @@ def send_recv_tensor_dict_test_worker(
 class _DummyWork:
     def __init__(self) -> None:
         self.wait_calls = 0
+        self.completed = False
 
     def wait(self) -> None:
         self.wait_calls += 1
+        self.completed = True
+
+    def is_completed(self) -> bool:
+        return self.completed
 
 
 class _DummyAllGatherGroup:
@@ -316,6 +321,133 @@ def test_cuda_communicator_checkpoints_flashinfer_workspaces(
     for workspace in unique_workspaces:
         workspace.checkpoint_prepare.assert_called_once_with()
         workspace.checkpoint_restore.assert_called_once_with(group)
+
+
+def test_isend_object_posts_size_then_object_and_releases_on_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[tuple[torch.Tensor, _DummyWork]] = []
+
+    def fake_isend(t: torch.Tensor, *args: Any, **kwargs: Any) -> _DummyWork:
+        w = _DummyWork()
+        posted.append((t, w))
+        return w
+
+    monkeypatch.setattr(torch.distributed, "isend", fake_isend)
+
+    g = _make_group_for_unit_test(rank_in_group=0, world_size=2)
+    handle = g.isend_object({"k": [1, 2, 3]}, dst=1)
+
+    # two sends, in size-then-object order (preserves gloo FIFO).
+    assert len(posted) == 2
+    assert posted[0][0].dtype == torch.long
+    assert posted[0][0].shape == torch.Size([1])
+    assert posted[0][0].item() == posted[1][0].numel()
+    assert posted[1][0].dtype == torch.uint8
+
+    # retain holds both source tensors until wait.
+    assert handle._retained == [posted[0][0], posted[1][0]]
+
+    handle.wait()
+
+    # both underlying works drained, retain dropped.
+    assert all(w.wait_calls == 1 for _, w in posted)
+    assert handle._retained == []
+
+    # wait is idempotent: gloo Work.wait() is single-shot for p2p sends (a
+    # second wait blocks forever), and both the worker's _pp_send_work drain
+    # and _reap_completed_isends may wait the same metadata handle.
+    handle.wait()
+    assert all(w.wait_calls == 1 for _, w in posted)
+    assert handle._retained == []
+
+
+def test_isend_tensor_dict_includes_metadata_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[torch.Tensor] = []
+
+    def fake_isend(t: torch.Tensor, *args: Any, **kwargs: Any) -> _DummyWork:
+        posted.append(t)
+        return _DummyWork()
+
+    monkeypatch.setattr(torch.distributed, "isend", fake_isend)
+
+    g = _make_group_for_unit_test(rank_in_group=0, world_size=2)
+    td = {"a": torch.arange(4, dtype=torch.float32, device="cpu")}
+    handles = g.isend_tensor_dict(td, dst=1)
+
+    # size + object (metadata) + one tensor send.
+    assert len(posted) == 3
+    assert posted[0].dtype == torch.long
+    assert posted[1].dtype == torch.uint8
+    assert posted[2].dtype == torch.float32
+
+    # composite metadata handle + one tensor handle.
+    assert len(handles) == 2
+
+    for handle in handles:
+        handle.wait()
+    assert handles[0]._retained == []
+
+
+def test_isend_tensor_dict_self_retains_for_fire_and_forget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    works: list[_DummyWork] = []
+
+    def fake_isend(t: torch.Tensor, *args: Any, **kwargs: Any) -> _DummyWork:
+        w = _DummyWork()
+        works.append(w)
+        return w
+
+    monkeypatch.setattr(torch.distributed, "isend", fake_isend)
+
+    g = _make_group_for_unit_test(rank_in_group=0, world_size=2)
+    td = {"a": torch.arange(4, dtype=torch.float32, device="cpu")}
+
+    # fire-and-forget: the returned handles are dropped by the caller, so the
+    # group must self-retain the handles and the source tensor.
+    g.isend_tensor_dict(td, dst=1)
+    assert len(g._pending_isends) == 1
+    handles0, tensors0 = g._pending_isends[0]
+    assert len(handles0) == 2  # metadata composite + one tensor send
+    assert tensors0 == [td["a"]]
+
+    # the first send is still in flight, so the next call's reap keeps it.
+    g.isend_tensor_dict(td, dst=1)
+    assert len(g._pending_isends) == 2
+
+    # metadata-only send (no tensors) is dropped best-effort on the next
+    # reap, since it has no reliable completion signal.
+    g.isend_tensor_dict({"meta": "no-tensors"}, dst=1)
+    assert len(g._pending_isends) == 3
+
+    # complete every posted work; the next call reaps all three old entries
+    # (the metadata-only one unconditionally) and keeps only its own.
+    for w in works:
+        w.completed = True
+    g.isend_tensor_dict(td, dst=1)
+    assert len(g._pending_isends) == 1
+    # reaped entries had their metadata handles waited as a backstop.
+    assert handles0[0]._retained == []
+
+
+def test_send_tensor_dict_sync_path_does_not_self_retain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_isend(t: torch.Tensor, *args: Any, **kwargs: Any) -> _DummyWork:
+        return _DummyWork()
+
+    monkeypatch.setattr(torch.distributed, "isend", fake_isend)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+
+    g = _make_group_for_unit_test(rank_in_group=0, world_size=2)
+    td = {"a": torch.arange(4, dtype=torch.float32, device="cpu")}
+    g.send_tensor_dict(td, dst=1)
+
+    # the sync path waited every handle, so no retention entry may leak.
+    assert len(g._pending_isends) == 0
 
 
 def test_async_intermediate_tensors_lazy_wait() -> None:
