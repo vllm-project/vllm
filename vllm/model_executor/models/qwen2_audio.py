@@ -31,7 +31,6 @@ import torch.nn as nn
 from transformers import BatchFeature
 from transformers.models.qwen2_audio import (
     Qwen2AudioConfig,
-    Qwen2AudioEncoder,
     Qwen2AudioProcessor,
 )
 from transformers.models.whisper import WhisperFeatureExtractor
@@ -39,6 +38,8 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     AudioItem,
@@ -62,8 +63,15 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from .module_mapping import MultiModelKeys
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .whisper import WhisperEncoderLayer
 
 
 # # === Audio Inputs === #
@@ -109,12 +117,26 @@ Qwen2AudioInputs: TypeAlias = Qwen2AudioFeatureInputs | Qwen2AudioEmbeddingInput
 
 
 class Qwen2AudioMultiModalProjector(nn.Module):
-    def __init__(self, audio_hidden_size: int, text_hidden_size: int):
+    def __init__(
+        self,
+        audio_hidden_size: int,
+        text_hidden_size: int,
+        quant_config=None,
+        prefix: str = "",
+    ):
         super().__init__()
-        self.linear = nn.Linear(audio_hidden_size, text_hidden_size, bias=True)
+        # ReplicatedLinear (a vLLM-native linear) so the connector can be
+        # wrapped for LoRA; a plain nn.Linear is left unwrapped by from_layer.
+        self.linear = ReplicatedLinear(
+            audio_hidden_size,
+            text_hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear",
+        )
 
     def forward(self, audio_features):
-        hidden_states = self.linear(audio_features)
+        hidden_states, _ = self.linear(audio_features)
         return hidden_states
 
 
@@ -123,6 +145,102 @@ def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     feat_lengths = (input_lengths - 1) // 2 + 1
     output_lengths = (feat_lengths - 2) // 2 + 1
     return feat_lengths, output_lengths
+
+
+class Qwen2AudioWhisperEncoder(nn.Module):
+    """vLLM-native Qwen2-Audio audio tower.
+
+    The HuggingFace ``Qwen2AudioEncoder`` is a Whisper encoder followed by an
+    average pooler. This re-implementation reuses vLLM's ``WhisperEncoderLayer``
+    (whose ``qkv_proj``/``out_proj``/``fc1``/``fc2`` are vLLM-native linears) so
+    the tower can be wrapped for LoRA, while the surrounding ``forward`` mirrors
+    the HuggingFace encoder numerically. The mel input is padded to 30s, so the
+    attention mask the HuggingFace encoder ignores is unnecessary here.
+    """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        embed_dim = config.d_model
+        self.num_mel_bins = config.num_mel_bins
+        self.max_source_positions = config.max_source_positions
+
+        self.conv1 = nn.Conv1d(self.num_mel_bins, embed_dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
+        self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
+        self.layers = nn.ModuleList(
+            [
+                WhisperEncoderLayer(
+                    vllm_config=vllm_config, prefix=f"{prefix}.layers.{idx}"
+                )
+                for idx in range(config.encoder_layers)
+            ]
+        )
+        self.avg_pooler = nn.AvgPool1d(2, stride=2)
+        self.layer_norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, input_features: torch.Tensor) -> torch.Tensor:
+        input_features = input_features.to(self.conv1.weight.dtype)
+        inputs_embeds = nn.functional.gelu(self.conv1(input_features))
+        inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
+
+        inputs_embeds = inputs_embeds.permute(0, 2, 1)
+        hidden_states = inputs_embeds + self.embed_positions.weight
+
+        for encoder_layer in self.layers:
+            hidden_states = encoder_layer(hidden_states)
+
+        hidden_states = hidden_states.permute(0, 2, 1)
+        hidden_states = self.avg_pooler(hidden_states)
+        hidden_states = hidden_states.permute(0, 2, 1)
+
+        hidden_states = self.layer_norm(hidden_states)
+        return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        def _with_k_proj_bias(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            # The HuggingFace encoder's k_proj has no bias, but vLLM fuses
+            # q/k/v into a single qkv_proj with bias. Emit a zero k-bias so the
+            # fused bias' k-slice is initialized instead of left as uninitialized
+            # memory (mirrors WhisperModel.load_weights).
+            for name, weight in weights:
+                yield name, weight
+                if name.endswith(".self_attn.k_proj.weight"):
+                    yield name.replace(".weight", ".bias"), torch.zeros(weight.size(0))
+
+        for name, loaded_weight in _with_k_proj_bias(weights):
+            # transformers stores the feed-forward directly on the layer; vLLM's
+            # WhisperEncoderLayer nests it under ``.mlp``.
+            name = name.replace(".fc1", ".mlp.fc1").replace(".fc2", ".mlp.fc2")
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # k_proj has no bias in the HuggingFace encoder.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                param.weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 def _qwen2audio_field_config(hf_inputs: Mapping[str, torch.Tensor]):
@@ -328,7 +446,14 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
     info=Qwen2AudioProcessingInfo,
     dummy_inputs=Qwen2AudioDummyInputsBuilder,
 )
-class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Qwen2AudioForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
+):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -346,9 +471,15 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         self.quant_config = quant_config
 
         with self._mark_tower_model(vllm_config, "audio"):
-            self.audio_tower = Qwen2AudioEncoder(config.audio_config)
+            self.audio_tower = Qwen2AudioWhisperEncoder(
+                vllm_config=vllm_config.with_hf_config(config.audio_config),
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
             self.multi_modal_projector = Qwen2AudioMultiModalProjector(
-                config.audio_config.d_model, config.text_config.hidden_size
+                config.audio_config.d_model,
+                config.text_config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
         with self._mark_language_model(vllm_config):
@@ -397,44 +528,14 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         input_features = audio_input["input_features"]
         feature_attention_mask = audio_input["feature_attention_mask"]
 
-        audio_feat_lengths, audio_output_lengths = (
-            self.audio_tower._get_feat_extract_output_lengths(
-                feature_attention_mask.sum(-1)
-            )
+        _, audio_output_lengths = _get_feat_extract_output_lengths(
+            feature_attention_mask.sum(-1)
         )
 
-        batch_size, _, max_mel_seq_len = input_features.shape
-        max_seq_len = (max_mel_seq_len - 2) // 2 + 1
-        # Create a sequence tensor of shape (batch_size, max_seq_len)
-        seq_range = (
-            torch.arange(
-                0,
-                max_seq_len,
-                dtype=audio_feat_lengths.dtype,
-                device=audio_feat_lengths.device,
-            )
-            .unsqueeze(0)
-            .expand(batch_size, max_seq_len)
-        )
-        lengths_expand = audio_feat_lengths.unsqueeze(-1).expand(
-            batch_size, max_seq_len
-        )
-        # Create mask
-        padding_mask = seq_range >= lengths_expand
-
-        audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
-            batch_size, 1, max_seq_len, max_seq_len
-        )
-        audio_attention_mask = audio_attention_mask_.to(
-            dtype=self.audio_tower.conv1.weight.dtype,
-            device=self.audio_tower.conv1.weight.device,
-        )
-        audio_attention_mask[audio_attention_mask_] = float("-inf")
-
-        audio_outputs = self.audio_tower(
-            input_features, attention_mask=audio_attention_mask
-        )
-        selected_audio_feature = audio_outputs.last_hidden_state
+        # The mel input is padded to 30s, so the audio tower runs on the full
+        # padded sequence (the HuggingFace encoder ignores the attention mask)
+        # and the padded outputs are trimmed to ``audio_output_lengths`` below.
+        selected_audio_feature = self.audio_tower(input_features)
         audio_features = self.multi_modal_projector(selected_audio_feature)
         num_audios, max_audio_tokens, embed_dim = audio_features.shape
         audio_output_lengths = audio_output_lengths.unsqueeze(1)
@@ -483,3 +584,24 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefix in multimodal models."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="audio_tower",
+        )
+
+    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+        # The Whisper-style tower requires a fixed 30s mel input, so its
+        # transformer layers (the LoRA-wrapped linears) always run on
+        # ``max_source_positions`` conv-downsampled tokens, independent of the
+        # valid placeholder count. The avg_pooler then halves this length.
+        return self.config.audio_config.max_source_positions
+
+    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
+        # The connector runs on the avg-pooled tower output (avg_pooler with
+        # stride 2), i.e. half the encoder length, before it is trimmed to the
+        # valid placeholder count.
+        return num_encoder_tokens // 2
