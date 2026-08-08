@@ -12,6 +12,10 @@ use super::progress::RowDownloadReporter;
 use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
 
+const DEFAULT_DATASETS_SERVER_ENDPOINT: &str = "https://datasets-server.huggingface.co";
+const DATASETS_SERVER_ENDPOINT_ENV: &str = "HF_DATASETS_SERVER_ENDPOINT";
+const DATASETS_SERVER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Cache directory for downloaded HF datasets.
 fn cache_dir() -> std::path::PathBuf {
     dirs::cache_dir()
@@ -31,6 +35,23 @@ fn sanitize_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+fn dataset_server_url(endpoint: &str, route: &str) -> Result<url::Url> {
+    let mut url = url::Url::parse(endpoint).map_err(|e| {
+        BenchError::Config(format!(
+            "Invalid HF datasets server endpoint '{endpoint}': {e}"
+        ))
+    })?;
+    let path = format!(
+        "{}/{}",
+        url.path().trim_end_matches('/'),
+        route.trim_start_matches('/')
+    );
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
 }
 
 /// Detected column format for extracting prompts from HF dataset rows.
@@ -114,11 +135,12 @@ pub async fn download_hf_dataset(
     split: Option<&str>,
     num_rows_needed: usize,
 ) -> Result<(String, String, String)> {
-    let encoded_dataset: String =
-        url::form_urlencoded::byte_serialize(dataset.as_bytes()).collect();
+    let datasets_server_endpoint = std::env::var(DATASETS_SERVER_ENDPOINT_ENV)
+        .unwrap_or_else(|_| DEFAULT_DATASETS_SERVER_ENDPOINT.to_string());
 
-    let mut client_builder =
-        reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
+    let mut client_builder = reqwest::Client::builder()
+        .connect_timeout(DATASETS_SERVER_CONNECT_TIMEOUT)
+        .timeout(std::time::Duration::from_secs(120));
 
     // Add HF_TOKEN auth header if available
     if let Ok(token) = std::env::var("HF_TOKEN") {
@@ -139,9 +161,9 @@ pub async fn download_hf_dataset(
         (cfg.to_string(), spl.to_string())
     } else {
         // Call /info to discover available configs and splits
-        let info_url =
-            format!("https://datasets-server.huggingface.co/info?dataset={encoded_dataset}");
-        let info = get_with_retry(&client, &info_url, "HF dataset /info").await?;
+        let mut info_url = dataset_server_url(&datasets_server_endpoint, "info")?;
+        info_url.query_pairs_mut().append_pair("dataset", dataset);
+        let info = get_with_retry(&client, info_url.as_str(), "HF dataset /info").await?;
 
         let dataset_info =
             info.get("dataset_info").and_then(|d| d.as_object()).ok_or_else(|| {
@@ -234,27 +256,21 @@ pub async fn download_hf_dataset(
         "downloading Hugging Face dataset"
     );
 
-    let encoded_config: String =
-        url::form_urlencoded::byte_serialize(resolved_config.as_bytes()).collect();
-    let encoded_split: String =
-        url::form_urlencoded::byte_serialize(resolved_split.as_bytes()).collect();
-
     let mut all_rows: Vec<serde_json::Value> = Vec::new();
     let mut offset = 0usize;
     let page_size = 100usize;
     let mut progress = RowDownloadReporter::new();
 
     loop {
-        let url = format!(
-            "https://datasets-server.huggingface.co/rows\
-             ?dataset={encoded_dataset}\
-             &config={encoded_config}\
-             &split={encoded_split}\
-             &offset={offset}\
-             &length={page_size}"
-        );
+        let mut url = dataset_server_url(&datasets_server_endpoint, "rows")?;
+        url.query_pairs_mut()
+            .append_pair("dataset", dataset)
+            .append_pair("config", &resolved_config)
+            .append_pair("split", &resolved_split)
+            .append_pair("offset", &offset.to_string())
+            .append_pair("length", &page_size.to_string());
 
-        let data = get_with_retry(&client, &url, "HF dataset /rows").await?;
+        let data = get_with_retry(&client, url.as_str(), "HF dataset /rows").await?;
 
         let rows = data["rows"]
             .as_array()
@@ -973,6 +989,20 @@ mod tests {
         );
         assert_eq!(sanitize_name("simple-name"), "simple-name");
         assert_eq!(sanitize_name("org/sub/deep"), "org_sub_deep");
+    }
+
+    #[test]
+    fn test_dataset_server_url_uses_configured_endpoint() {
+        let url = dataset_server_url("https://datasets.example/api/", "rows").unwrap();
+
+        assert_eq!(url.as_str(), "https://datasets.example/api/rows");
+    }
+
+    #[test]
+    fn test_dataset_server_url_rejects_invalid_endpoint() {
+        let err = dataset_server_url("not a URL", "info").unwrap_err();
+
+        assert!(err.to_string().contains("Invalid HF datasets server endpoint"));
     }
 
     // --- extract_chat_prompt edge cases ---
