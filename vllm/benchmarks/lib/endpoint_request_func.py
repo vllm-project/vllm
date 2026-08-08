@@ -155,6 +155,52 @@ def _get_headers(content_type: str | None = None) -> dict[str, str]:
     return headers
 
 
+def _record_token_timings(
+    output: RequestFuncOutput,
+    timestamp: float,
+    start_time: float,
+    most_recent_token_timestamp: float | None,
+    new_tokens: int,
+) -> float:
+    """Record timings for tokens represented by the current stream chunk.
+
+    When a parser buffers several generated tokens before emitting one SSE
+    chunk, the client only observes the aggregate arrival time. Spread that
+    interval across the reported token delta so ITL counts generated tokens
+    instead of visible chunks.
+    """
+    if new_tokens <= 0:
+        return timestamp
+
+    previous_timestamp = (
+        start_time
+        if most_recent_token_timestamp is None
+        else most_recent_token_timestamp
+    )
+
+    if most_recent_token_timestamp is None:
+        # TTFT is the full user-perceived wait, not a per-token average.
+        output.ttft = timestamp - start_time
+        itl_count = new_tokens - 1
+    else:
+        itl_count = new_tokens
+
+    if itl_count > 0:
+        per_token_latency = (timestamp - previous_timestamp) / new_tokens
+        output.itl.extend([per_token_latency] * itl_count)
+    return timestamp
+
+
+def _chat_choice_has_streamed_output(choice: dict[str, Any]) -> bool:
+    delta = choice.get("delta") or {}
+    return (
+        delta.get("content") is not None
+        or delta.get("reasoning") is not None
+        or bool(delta.get("tool_calls"))
+        or delta.get("function_call") is not None
+    )
+
+
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -362,6 +408,7 @@ async def async_request_openai_chat_completions(
         "stream": True,
         "stream_options": {
             "include_usage": True,
+            "continuous_usage_stats": True,
         },
     }
     _update_payload_common(payload, request_func_input)
@@ -373,10 +420,15 @@ async def async_request_openai_chat_completions(
     output.prompt_len = request_func_input.prompt_len
 
     generated_text = ""
-    ttft = 0.0
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
+    # most_recent_token_timestamp tracks when we last recorded token
+    # timings (for ITL intervals); most_recent_timestamp (above) tracks
+    # every chunk arrival (for output.latency).
+    most_recent_token_timestamp: float | None = None
+    last_completion_tokens = 0
+    used_visible_chunk_timing = False
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
@@ -400,22 +452,53 @@ async def async_request_openai_chat_completions(
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
 
-                            if choices := data.get("choices"):
-                                content = choices[0]["delta"].get("content")
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
-
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
-
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get("completion_tokens")
+                            usage_completion_tokens = None
+                            if usage := data.get("usage"):
+                                usage_completion_tokens = usage.get(
+                                    "completion_tokens"
+                                )
+                                if usage_completion_tokens is not None:
+                                    output.output_tokens = usage_completion_tokens
+                                    if not used_visible_chunk_timing:
+                                        new_tokens = (
+                                            usage_completion_tokens
+                                            - last_completion_tokens
+                                        )
+                                        if new_tokens > 0:
+                                            most_recent_token_timestamp = (
+                                                _record_token_timings(
+                                                    output,
+                                                    timestamp,
+                                                    st,
+                                                    most_recent_token_timestamp,
+                                                    new_tokens,
+                                                )
+                                            )
+                                            last_completion_tokens = (
+                                                usage_completion_tokens
+                                            )
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
+
+                            if choices := data.get("choices"):
+                                choice = choices[0]
+                                content = choice["delta"].get("content")
+                                if (
+                                    usage_completion_tokens is None
+                                    and _chat_choice_has_streamed_output(choice)
+                                ):
+                                    most_recent_token_timestamp = (
+                                        _record_token_timings(
+                                            output,
+                                            timestamp,
+                                            st,
+                                            most_recent_token_timestamp,
+                                            1,
+                                        )
+                                    )
+                                    used_visible_chunk_timing = True
+
+                                generated_text += content or ""
 
                             most_recent_timestamp = timestamp
 
