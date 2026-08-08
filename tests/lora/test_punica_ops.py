@@ -636,3 +636,56 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+@pytest.mark.parametrize("rank", [8, 16, 32])
+def test_lora_shrink_is_deterministic(rank: int) -> None:
+    """Regression for vllm-project/vllm#50059 (split_k atomic_add)."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    device = DEVICE_TYPE
+    batches, seq_length, hidden_size = 4, 8, 4096
+    dtype = torch.float16
+    nslices = 1
+    num_loras = 1
+
+    def run_once() -> torch.Tensor:
+        data = generate_data_for_nslices(
+            batches,
+            hidden_size,
+            num_loras,
+            rank,
+            seq_length,
+            nslices,
+            dtype,
+            "shrink",
+            device,
+        )
+        _, token_nums = data.meta()
+        lora_meta = LoRAKernelMeta.make(
+            max_loras=num_loras,
+            max_num_tokens=token_nums,
+            device=device,
+        )
+        lora_meta.prepare_tensors(data.token_lora_mapping)
+        out = data.our_out_tensor.clone()
+        with _dict_lock:
+            _LORA_A_PTR_DICT.clear()
+            triton_ops.lora_shrink(
+                data.inputs_tensor,
+                data.lora_weights,
+                out,
+                *lora_meta.meta_args(
+                    token_nums=token_nums, specialize_active_lora=False
+                ),
+                1.0,
+            )
+        return out.detach().cpu()
+
+    set_random_seed(0)
+    baseline = run_once()
+    for _ in range(20):
+        set_random_seed(0)
+        out = run_once()
+        assert torch.equal(out, baseline)

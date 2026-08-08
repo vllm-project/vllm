@@ -316,7 +316,7 @@ def _lora_shrink_fp8(
     BLOCK_M = kernel_config["block_m"]
     BLOCK_N = kernel_config["block_n"]
     BLOCK_K = kernel_config["block_k"]
-    SPLIT_K = kernel_config["split_k"]
+    SPLIT_K = 1
     NUM_WARPS = kernel_config["num_warps"]
     NUM_STAGES = kernel_config["num_stages"]
     NUM_CTAS = kernel_config["num_ctas"]
