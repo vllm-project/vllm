@@ -10,6 +10,7 @@ classes used by the model registry and quantization config lookup.
 from vllm.platforms import current_platform
 
 from .quant_config import DeepseekV4FP8Config
+from .turing.is_sm75 import is_turing_target
 
 # Pick the per-platform implementation. The NVIDIA branch is the static
 # default that mypy sees; the ROCm/XPU branches override at runtime and are
@@ -24,6 +25,10 @@ elif current_platform.is_xpu():
     from .xpu.dspark import DSparkDeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
+elif is_turing_target(current_platform.get_device_capability()):
+    from .turing.dspark import DSparkDeepseekV4ForCausalLM  # type: ignore[assignment]
+    from .turing.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
+    from .turing.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 else:
     from .nvidia.dspark import (  # type: ignore[assignment]
         DSparkDeepseekV4ForCausalLM,

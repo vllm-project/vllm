@@ -113,9 +113,11 @@ def _resolve_dsv4_kv_cache_dtype(
             logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
         return kv_cache_dtype, torch.uint8
 
-    # Plain bf16 / per-tensor fp8 KV row (FlashInfer).
+    # Plain bf16 / fp16 / per-tensor fp8 KV row (FlashInfer / Turing).
     if kv_cache_dtype.startswith("fp8"):
         return kv_cache_dtype, torch.float8_e4m3fn
+    if kv_cache_dtype == "float16":
+        return kv_cache_dtype, torch.float16
     # auto / bfloat16 -> plain bf16 KV row.
     return kv_cache_dtype, torch.bfloat16
 
