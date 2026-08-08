@@ -380,20 +380,23 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                     with open(data_or_file, "rb") as file:
                         async with session.put(output_url, data=file) as response:
                             if response.status != 200:
+                                error_text = await response.text()
                                 raise Exception(
                                     f"Failed to upload file.\n"
                                     f"Status: {response.status}\n"
-                                    f"Response: {response.text()}"
+                                    f"Response: {error_text}"
                                 )
                 else:
                     async with session.put(output_url, data=data_or_file) as response:
                         if response.status != 200:
+                            error_text = await response.text()
                             raise Exception(
                                 f"Failed to upload data.\n"
                                 f"Status: {response.status}\n"
-                                f"Response: {response.text()}"
+                                f"Response: {error_text}"
                             )
-
+            # Upload succeeded; do not retry.
+            return
         except Exception as e:
             if attempt < max_retries:
                 logger.error(
