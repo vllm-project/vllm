@@ -183,6 +183,10 @@ class WorkerBase:
         """Clean up resources held by the worker."""
         return
 
+    def shutdown_for_process_exit(self) -> None:
+        """Clean up resources when the hosting process will exit."""
+        self.shutdown()
+
 
 class WorkerWrapperBase:
     """
@@ -218,6 +222,10 @@ class WorkerWrapperBase:
     def shutdown(self) -> None:
         if self.worker is not None:
             self.worker.shutdown()
+
+    def shutdown_for_process_exit(self) -> None:
+        if self.worker is not None:
+            self.worker.shutdown_for_process_exit()
 
     def update_environment_variables(
         self,

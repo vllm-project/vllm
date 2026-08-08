@@ -142,6 +142,10 @@ class UniProcExecutor(Executor):
         if worker := self.driver_worker:
             worker.shutdown()
 
+    def shutdown_for_process_exit(self) -> None:
+        if worker := self.driver_worker:
+            worker.shutdown_for_process_exit()
+
     @classmethod
     def supports_async_scheduling(cls) -> bool:
         return True
