@@ -1131,6 +1131,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # if CUDA endif
   endif()
 
+  # HIP counterpart of the FUSED_KDA_DECODE block above: same `fused_kda_decode`
+  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Only
+  # measured on gfx950, so it is only built when gfx950 is in the arch list.
+  # A multi-arch build that includes gfx950 still emits this source for every
+  # arch in that list. The runtime gate in kda_decode.py keeps the kernel off
+  # non-gfx950 devices.
+  if(VLLM_GPU_LANG STREQUAL "HIP")
+    set(FUSED_KDA_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
+    list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx950")
+    if(FUSED_KDA_DECODE_HIP_ARCHS)
+      set(FUSED_KDA_DECODE_HIP_SRC
+        "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_DECODE_HIP_SRC}")
+      message(STATUS
+        "Building fused KDA decode for HIP archs: ${FUSED_KDA_DECODE_HIP_ARCHS}")
+    endif()
+  endif()
+
   message(STATUS "Enabling C_stable extension.")
   list(REMOVE_DUPLICATES VLLM_STABLE_EXT_SRC)
   define_extension_target(
@@ -1171,6 +1189,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
+    if(FUSED_KDA_DECODE_HIP_SRC)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
   endif()
 
   # On ROCm, _C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in
