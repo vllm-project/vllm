@@ -39,6 +39,88 @@ SEEDS = [42]
 CUDA_DEVICES = ["cuda:0"]
 
 
+def _round_up(x: int, multiple: int) -> int:
+    return (x + multiple - 1) // multiple * multiple
+
+
+def _linearize_8x4_scale(scale: torch.Tensor, m: int, n: int) -> torch.Tensor:
+    block_size = 16
+    scale_n = n // block_size
+    rounded_m = _round_up(m, 8)
+    rounded_n = _round_up(scale_n, 4)
+    return (
+        scale.view(torch.uint8)
+        .reshape(rounded_m // 8, rounded_n // 4, 8, 4)
+        .permute(0, 2, 1, 3)
+        .reshape(rounded_m, rounded_n)
+    )
+
+
+@pytest.mark.parametrize(
+    "shape", [(1, 64), (7, 80), (8, 64), (9, 80), (31, 96), (32, 80)]
+)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_trtllm_8x4_scale_padding_zeroed(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: tuple[int, int],
+    device: str,
+) -> None:
+    m, n = shape
+    scale_n = n // 16
+    rounded_m = _round_up(m, 8)
+    rounded_n = _round_up(scale_n, 4)
+    poisoned_scale = torch.full(
+        (rounded_m * rounded_n,), 0x7F, dtype=torch.uint8, device=device
+    )
+
+    def fake_quant(
+        input: torch.Tensor, input_global_scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        output = torch.empty(
+            (input.shape[0], input.shape[1] // 2),
+            dtype=torch.uint8,
+            device=input.device,
+        )
+        return output, poisoned_scale.clone()
+
+    monkeypatch.setattr(ops, "flashinfer_quant_nvfp4_8x4_sf_layout", fake_quant)
+
+    x = torch.ones((m, n), dtype=torch.bfloat16, device=device)
+    global_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+    _, output_scale = ops.scaled_fp4_quant(x, global_scale, backend="trtllm")
+    linear_scale = _linearize_8x4_scale(output_scale, m, n)
+
+    torch.testing.assert_close(
+        linear_scale[:m, :scale_n],
+        torch.full((m, scale_n), 0x7F, dtype=torch.uint8, device=device),
+    )
+    assert torch.count_nonzero(linear_scale[m:, :]) == 0
+    assert torch.count_nonzero(linear_scale[:, scale_n:]) == 0
+
+
+@pytest.mark.parametrize("shape", [(1, 64), (7, 80), (9, 80), (31, 96), (32, 80)])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_trtllm_scaled_fp4_quant_8x4_padding_zeroed(
+    shape: tuple[int, int],
+    device: str,
+) -> None:
+    set_random_seed(42)
+    m, n = shape
+    scale_n = n // 16
+    x = torch.randn((m, n), dtype=torch.bfloat16, device=device)
+    global_scale = (
+        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(x.flatten(), dim=-1)
+    ).to(torch.float32)
+
+    _, output_scale = ops.scaled_fp4_quant(x, global_scale, backend="trtllm")
+    linear_scale = _linearize_8x4_scale(output_scale, m, n)
+
+    assert torch.count_nonzero(linear_scale[m:, :]) == 0
+    assert torch.count_nonzero(linear_scale[:, scale_n:]) == 0
+
+
 def get_ref_results(
     a_fp4,
     b_fp4,
