@@ -64,6 +64,8 @@ from vllm.model_executor.layers.quantization.torchao import torchao_version_at_l
 
 logger = init_logger(__name__)
 
+_AUTO_PREFETCH_FS_TYPES = frozenset({"nfs", "nfs4", "lustre", "virtiofs"})
+
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
 # lock files in the temp directory will be automatically deleted when the
@@ -857,7 +859,7 @@ def safetensors_weights_iterator(
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
 
     fs_type = _get_fs_type(sorted_files)
-    is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
+    is_auto_prefetch_fs = fs_type in _AUTO_PREFETCH_FS_TYPES
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
     avail_bytes = _get_available_ram_bytes()
     ram_threshold_pct = 90
@@ -874,11 +876,11 @@ def safetensors_weights_iterator(
 
     should_prefetch = safetensors_load_strategy == "prefetch"
     if safetensors_load_strategy is None:
-        if is_net_fs and fits_in_ram:
+        if is_auto_prefetch_fs and fits_in_ram:
             should_prefetch = True
-        elif is_net_fs and not fits_in_ram:
+        elif is_auto_prefetch_fs and not fits_in_ram:
             logger.warning_once(
-                "Network filesystem (%s) detected but checkpoint total size "
+                "Auto-prefetch filesystem (%s) detected but checkpoint total size "
                 "(%.2f GiB) exceeds %d%% of available RAM (%.2f GiB). "
                 "Skipping auto-prefetch.",
                 fs_name,
@@ -886,17 +888,18 @@ def safetensors_weights_iterator(
                 ram_threshold_pct,
                 avail_bytes / 1024**3,
             )
-        elif not is_net_fs and fits_in_ram:
+        elif not is_auto_prefetch_fs and fits_in_ram:
             logger.info_once(
                 "Auto-prefetch is disabled because the filesystem (%s) is not a "
-                "recognized network FS (NFS/Lustre). If you want to force "
+                "recognized auto-prefetch FS (NFS/Lustre/VirtioFS). To force "
                 "prefetching, start vLLM with --safetensors-load-strategy=prefetch.",
                 fs_name,
             )
-        elif not is_net_fs and not fits_in_ram:
+        elif not is_auto_prefetch_fs and not fits_in_ram:
             logger.info_once(
                 "Auto-prefetch is disabled because the filesystem (%s) is not a "
-                "recognized network FS (NFS/Lustre) and the checkpoint size "
+                "recognized auto-prefetch FS (NFS/Lustre/VirtioFS) and the "
+                "checkpoint size "
                 "(%.2f GiB) exceeds %d%% of available RAM (%.2f GiB).",
                 fs_name,
                 total_bytes / 1024**3,
