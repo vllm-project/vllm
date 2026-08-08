@@ -107,7 +107,9 @@ class Step3p5MTPProposer(EagleProposer):
             if block_table is None:
                 continue
             n_blocks = block_table.shape[1]
-            bn = (new_positions_1d // block_size).clamp(max=n_blocks - 1).to(torch.long)
+            bn = new_positions_1d // block_size
+            bn.clamp_(max=n_blocks - 1)
+            bn = bn.to(torch.long)
             block_ids = block_table[:batch_size].gather(1, bn.unsqueeze(1)).squeeze(1)
             sm = block_ids * block_size + (new_positions_1d % block_size)
             sm.masked_fill_(exceeds, PADDING_SLOT_ID)

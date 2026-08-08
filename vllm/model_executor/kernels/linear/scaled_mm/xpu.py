@@ -203,22 +203,38 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
         )
         scale = getattr(layer, scale_attr)
-        # Models with scale_fmt=ue8m0 (e.g. DeepSeek-V4) store weight scales
-        # as float8_e8m0fnu. The oneDNN fp8_gemm kernel dispatches to its
-        # "block quant" path only when NEITHER scale is e8m0:
-        #
-        #   is_block_quant = (m1_sc != e8m0) && (m2_sc != e8m0) && ...
-        #
-        # Since activation scales are always float32 (use_ue8m0=False on XPU,
-        # DeepGEMM requires Hopper/Blackwell), an e8m0 weight scale causes
-        # is_block_quant=false and falls into the wrong per-channel path,
-        # producing NaN. Converting e8m0→float32 here at load time (one-time,
-        # negligible overhead for small scale tensors) ensures the kernel sees
-        # matching dtypes and correctly enters the block-quant path with the
-        # actual group_size derived from scale tensor shapes.
-        if scale.dtype == torch.float8_e8m0fnu:
-            scale = scale.to(torch.float32)
-        replace_parameter(layer, scale_attr, scale.data.t().contiguous())
+
+        # Checkpoint scale is [n_blocks, k_blocks] (one value per 128x128 tile).
+        # oneDNN fp8_gemm requires contiguous [k_blocks, n_blocks] layout.
+        # We store the transposed contiguous buffer as a .t() view so that:
+        #   - MLA's scaled_dequantize still sees [n_blocks, k_blocks] shape
+        #   - apply_block_scaled_mm recovers the contiguous buffer via .t()
+        scale_kn = scale.data.t().contiguous()  # [k_blocks, n_blocks]
+        replace_parameter(layer, scale_attr, scale_kn.t())  # view: [n_blocks, k_blocks]
+
+        if getattr(layer, "is_bmm", False):
+            self._prepare_bmm_params(layer, scale_kn)
+
+    def _prepare_bmm_params(
+        self, layer: torch.nn.Module, scale_kn: torch.Tensor
+    ) -> None:
+        """Precompute batched weight and scale for grouped fp8_bmm (e.g. wo_a).
+
+        Splits scale [k_blocks, n_blocks] into [G, k_blocks, n_blocks_per_group]
+        and weight [N_total, K] into [G, K, N_per_group] for batch GEMM.
+        """
+        batch = layer.bmm_batch_size
+        k_blocks, n_blocks = scale_kn.shape
+        layer.bmm_scale = (
+            scale_kn.reshape(k_blocks, batch, n_blocks // batch)
+            .permute(1, 0, 2)
+            .contiguous()
+        )
+        w = layer.weight
+        N_total, K = w.shape
+        layer.bmm_weight = w.reshape(batch, N_total // batch, K).permute(
+            0, 2, 1
+        )  # [G, K, N_per_group]
 
     def apply_block_scaled_mm(
         self,
@@ -227,12 +243,14 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        # Weight is [N, K]. Use .t() to create a [K, N] view without copying.
+        # B is [N, K]; .t() gives [K, N] view (no copy).
+        # Bs is stored as [n_blocks, k_blocks] view; .t() recovers the
+        # contiguous [k_blocks, n_blocks] buffer that oneDNN expects.
         return torch.ops._xpu_C.fp8_gemm(
             A,
             B.t(),
             self.config.out_dtype,
             As,
-            Bs,
+            Bs.t(),
             torch.Tensor(),
         )

@@ -7,7 +7,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from vllm.utils import is_moe_layer
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class Cache:
@@ -105,10 +107,30 @@ class All2AllManagerBase:
         raise NotImplementedError
 
     def query_active_mask(self) -> torch.Tensor:
+        """Return the all2all liveness mask for the EP ranks.
+
+        Returns:
+            An int32 device tensor where 0 marks a live rank and 1 marks a
+            masked (dead/unreachable) rank.
+        """
         raise NotImplementedError
 
     def query_fault(self) -> torch.Tensor:
-        """Returns has_fault scalar."""
+        """Return a scalar bool tensor, True if a new fault appeared.
+
+        Compares the current mask against the baseline recorded at the last
+        recovery point.
+        """
+        raise NotImplementedError
+
+    def clean_buffers(self) -> None:
+        """Reset this rank's RDMA buffers and all2all mask state (rank-local).
+
+        Post-fault cleanup: a dispatch/combine that hit a dead peer or timed
+        out can leave partially-written or stale tokens in the RDMA receive
+        buffer, so it is zeroed to stop the next forward from reading that
+        contaminated data.
+        """
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
@@ -116,6 +138,18 @@ class All2AllManagerBase:
 
     def max_sms_used(self) -> int | None:
         return None  # None means it could use the whole GPU
+
+    def checkpoint_prepare(self) -> None:
+        logger.warning_once(
+            "%s.checkpoint_prepare is not implemented; skipping.",
+            type(self).__name__,
+        )
+
+    def checkpoint_restore(self) -> None:
+        logger.warning_once(
+            "%s.checkpoint_restore is not implemented; skipping.",
+            type(self).__name__,
+        )
 
     def combine(self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False):
         raise NotImplementedError
@@ -140,6 +174,7 @@ class DeviceCommunicatorBase:
         unique_name: str = "",
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
+        use_all2all: bool = False,
     ):
         self.device = device or torch.device("cpu")
         self.cpu_group = cpu_group
@@ -169,26 +204,33 @@ class DeviceCommunicatorBase:
             self.global_world_size = dist.get_world_size()
             self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
 
-        use_ep = False
         all2all_backend = None
         from vllm.config import get_current_vllm_config_or_none
 
         config = get_current_vllm_config_or_none()
         if config is not None:
-            # as long as we use data parallel (coupled data parallel
-            # where all data parallel ranks execute forward together),
-            # we initialize the all2all manager used in expert parallel.
-            use_ep = config.parallel_config.data_parallel_size > 1
             all2all_backend = config.parallel_config.all2all_backend
 
         self.is_ep_communicator = unique_name.split(":")[0] == "ep"
-        self.use_all2all = self.is_ep_communicator and use_ep
+        self.use_all2all = self.is_ep_communicator and use_all2all
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
         return input_
+
+    def checkpoint_prepare(self) -> None:
+        """Prepare reclaimable communicator state for checkpoint (default: no-op)."""
+
+    def checkpoint_restore(self) -> None:
+        """Restore communicator state after checkpoint (default: no-op)."""
+
+    def suspend(self) -> None:
+        """Release reclaimable communicator memory (default: no-op)."""
+
+    def resume(self) -> None:
+        """Restore memory released by ``suspend`` (default: no-op)."""
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
@@ -320,23 +362,6 @@ class DeviceCommunicatorBase:
 
     def destroy(self):
         pass
-
-    def suspend(self) -> None:
-        """Release reclaimable communicator memory (default: no-op)."""
-
-    def resume(self) -> None:
-        """Restore memory released by ``suspend`` (default: no-op)."""
-
-    def prepare_communication_buffer_for_model(self, model: torch.nn.Module) -> None:
-        """
-        Prepare the communication buffer for the model.
-        """
-        if not self.is_ep_communicator:
-            return
-
-        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
-        for module in moe_modules:
-            module.maybe_init_modular_kernel()
 
     def dispatch_router_logits(
         self,
