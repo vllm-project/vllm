@@ -19,6 +19,12 @@ Batch invariance is crucial for several use cases:
 
 Batch invariance requires NVIDIA GPUs with compute capability 8.0 or higher.
 
+!!! note
+    Current releases support Ampere and newer NVIDIA GPUs for batch invariance.
+    If you are reading older vLLM v0.20.0-v0.22.0 documentation that says
+    compute capability 9.0 or higher is required, use the 8.0+ requirement
+    shown here instead.
+
 ## Enabling Batch Invariance
 
 Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environment variable to `1`:
