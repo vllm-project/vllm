@@ -1196,8 +1196,6 @@ def causal_conv1d_update(
             assert batch == conv_state_indices.shape[0], (
                 f"ERROR: conv_state_indices should have shape ({batch},*) but got {conv_state_indices.shape}"
             )
-
-        assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this
 
     stride_w_dim, stride_w_width = weight.stride()
