@@ -243,6 +243,14 @@ class TestThinkingModeConfig:
         cfg = deepseek_v4_config(thinking=False)
         assert cfg.initial_state.name == "CONTENT"
 
+    def test_keep_thinking_tags_excludes_think_terminals(self):
+        cfg = deepseek_v4_config(keep_thinking_tags=True)
+        assert "THINK_START" not in cfg.terminals
+        assert "THINK_END" not in cfg.terminals
+        assert "THINK_START" not in cfg.token_id_terminals
+        assert "THINK_END" not in cfg.token_id_terminals
+        assert cfg.preserve_tokens == {DSML_THINK_START, DSML_THINK_END}
+
     def test_enable_thinking_kwarg(self, mock_tokenizer):
         p = DeepSeekV4Parser(
             mock_tokenizer, chat_template_kwargs={"enable_thinking": True}
