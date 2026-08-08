@@ -318,13 +318,14 @@ def _decode_index_score_kernel(
     num_kv_chunks,
     USE_PDL: tl.constexpr,
 ):
-    BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
+    valid_hq: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
+    BLOCK_SIZE_HQ: tl.constexpr = triton.next_power_of_2(valid_hq)
     pid_r = tl.program_id(0)
     pid_c = tl.program_id(1)
     hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
     h_offsets = hq_offsets // BLOCK_SIZE_Q
     q_offsets = hq_offsets % BLOCK_SIZE_Q
-    q_mask = q_offsets < decode_query_len
+    q_mask = (h_offsets < num_idx_heads) & (q_offsets < decode_query_len)
     q_ids = pid_r * decode_query_len + q_offsets
 
     if USE_PDL:
