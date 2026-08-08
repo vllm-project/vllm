@@ -89,6 +89,29 @@ def _build_hadamard_cached(d: int, device_str: str) -> torch.Tensor:
     return (H / math.sqrt(d)).to(torch.device(device_str))
 
 
+def _resolve_tq_preset(cache_dtype_str: str) -> str:
+    """Resolve the TurboQuant preset describing this backend's cache layout.
+
+    ``cache_dtype_str`` is an optional hint on ``get_kv_cache_shape``: several
+    callers do not track a per-layer dtype and leave it at ``"auto"`` (the
+    ``get_kv_cache_block_dim`` default, the KV-connector layout probes, and the
+    model runners, which downgrade to ``"auto"`` for every group whose spec
+    reports ``KVQuantMode.NONE``). A layer only reaches this backend when its
+    KV cache dtype is a TurboQuant preset (see ``supports_kv_cache_dtype``,
+    enforced by ``validate_configuration`` for auto-selected and explicitly
+    selected backends alike), so the engine-wide ``cache_dtype`` is
+    authoritative whenever the hint is not a preset itself.
+    """
+    from vllm.model_executor.layers.quantization.turboquant.config import TQ_PRESETS
+
+    if cache_dtype_str in TQ_PRESETS:
+        return cache_dtype_str
+    cache_config = get_current_vllm_config().cache_config
+    if cache_config is not None and cache_config.cache_dtype in TQ_PRESETS:
+        return cache_config.cache_dtype
+    return cache_dtype_str
+
+
 class TurboQuantAttentionBackend(AttentionBackend):
     """Attention backend using TurboQuant KV-cache compression."""
 
@@ -160,7 +183,9 @@ class TurboQuantAttentionBackend(AttentionBackend):
             TurboQuantConfig,
         )
 
-        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype_str, head_size)
+        tq_config = TurboQuantConfig.from_cache_dtype(
+            _resolve_tq_preset(cache_dtype_str), head_size
+        )
         return (num_blocks, num_kv_heads, block_size, tq_config.slot_size_aligned)
 
     @classmethod
