@@ -968,3 +968,59 @@ def test_workspace_topk_padded_stride(top_k: int, backend: str) -> None:
                 f"Row {i}: {backend} with padded stride doesn't match. "
                 f"seq_len={sl}, stride={padded_stride}"
             )
+
+
+@pytest.mark.parametrize("num_rows", NUM_ROWS)
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_prefill_torch_fallback(
+    num_rows: int,
+    top_k: int,
+) -> None:
+    """The SM12x torch fallback honors top_k_per_row_prefill's contract:
+    the top-k positions of logits[i, ks_i:ke_i) relative to ks_i, in
+    ascending position order, -1-padded when a row has fewer candidates,
+    with NaN scores never selected."""
+    from vllm.model_executor.layers.sparse_attn_indexer import (
+        _top_k_per_row_prefill_torch,
+    )
+
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+
+    vocab_size = 20000
+    row_starts, row_ends = create_row_boundaries(num_rows, vocab_size)
+    logits = create_random_logits(
+        row_starts, row_ends, torch.float32, 42, True, "random"
+    )
+    # Sprinkle NaNs inside some valid spans: the fallback must skip them
+    # (the failure mode on SM12x is NaN-dominated logits).
+    if num_rows > 2:
+        logits[2, : int(row_ends[2])] = float("nan")
+
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+    # The fallback masks logits in place; give it a scratch copy.
+    _top_k_per_row_prefill_torch(
+        logits.clone(), row_starts, row_ends, indices, top_k
+    )
+
+    for i in range(num_rows):
+        row_start = int(row_starts[i])
+        row_end = int(row_ends[i])
+        row = indices[i].cpu()
+        finite = torch.isfinite(logits[i, row_start:row_end]).sum().item()
+        num_valid = min(top_k, int(finite))
+        selected = row[:num_valid]
+        # Ascending position order, in range, no duplicates.
+        assert (selected.diff() > 0).all(), f"row {i} not ascending"
+        assert (selected >= 0).all() and (selected < row_end - row_start).all()
+        # Everything past the valid entries is -1 padding.
+        assert (row[num_valid:] == -1).all(), f"row {i} padding broken"
+        # Set-equality with the torch.topk reference over the valid span.
+        if num_valid:
+            span = logits[i, row_start:row_end].nan_to_num(float("-inf"))
+            ref = span.topk(num_valid, dim=-1)[1].cpu()
+            assert set(selected.tolist()) == set(ref.tolist()), (
+                f"row {i} selected wrong candidate set"
+            )
