@@ -80,3 +80,14 @@ def test_output_without_deliberation_is_all_content():
 
     assert reasoning is None
     assert content == output
+
+
+def test_direct_tool_call_streaming_leaves_reasoning_phase():
+    """The same case as above, but through the streaming path: the phase
+    must flip as soon as it is clear no inner block is coming."""
+    parser = make_parser(INNER_VOCAB)
+    tools_prefix_id = 99  # not in vocab, irrelevant to the reasoning parser
+
+    assert parser.is_reasoning_end_streaming(
+        input_ids=[tools_prefix_id], delta_ids=[tools_prefix_id]
+    )
