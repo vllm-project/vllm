@@ -67,6 +67,11 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    max_waiting_queue_length: int = Field(default=0, ge=0)
+    """Maximum number of requests allowed in the waiting queue. When the queue
+    reaches this length, new requests are rejected with HTTP 429. 0 disables
+    the limit (unbounded queue)."""
+
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default)."""
