@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import unittest
+from collections import deque
 from unittest.mock import MagicMock
 
 import torch
@@ -275,6 +276,26 @@ class TestStreamingScheduler(unittest.TestCase):
         _ = scheduler.schedule()
 
         assert session.status == RequestStatus.RUNNING
+
+    def test_handle_stopped_request_finalizes_streaming_session(self):
+        scheduler = create_scheduler()
+        request = DummyRequest(request_id="session", resumable=True)
+        request.status = RequestStatus.FINISHED_STOPPED
+        request.streaming_queue = deque([None])
+
+        assert scheduler._handle_stopped_request(request) is True
+        assert request.resumable is False
+        assert not request.streaming_queue
+
+    def test_handle_stopped_request_waits_for_more_streaming_input(self):
+        scheduler = create_scheduler()
+        request = DummyRequest(request_id="session", resumable=True)
+        request.status = RequestStatus.FINISHED_STOPPED
+
+        assert scheduler._handle_stopped_request(request) is False
+        assert request.resumable is True
+        assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        assert scheduler.num_waiting_for_streaming_input == 1
 
     def test_update_request_as_session_with_output_tokens(self):
         scheduler = create_scheduler()

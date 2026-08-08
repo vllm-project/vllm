@@ -2102,6 +2102,7 @@ class Scheduler(SchedulerInterface):
             update = request.streaming_queue.popleft()
             if update is None:
                 # Streaming request finished.
+                request.resumable = False
                 return True
             self._update_request_as_session(request, update)
         else:
