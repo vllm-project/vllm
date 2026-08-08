@@ -683,6 +683,15 @@ class TestFixArgTypes:
         assert parsed["active"] is True
         assert parsed["score"] == 3.14
 
+    @pytest.mark.parametrize(("raw", "expected"), [(1, True), (0, False)])
+    def test_numeric_boolean_coerced(self, raw, expected):
+        tool = _make_tool("f", {"flag": {"type": "boolean"}})
+        engine = _make_engine(tools=[tool])
+
+        result = engine._fix_arg_types(json.dumps({"flag": raw}), "f")
+
+        assert json.loads(result)["flag"] is expected
+
     def test_nested_object_coercion(self):
         tool = _make_tool(
             "f",
