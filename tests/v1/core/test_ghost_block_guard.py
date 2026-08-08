@@ -69,11 +69,39 @@ def _mla_manager(block_pool):
     )
 
 
+def test_the_shipped_default_stays_0():
+    """The default itself, not the property logic with a patched value.
+
+    It stays 0 to match upstream. tests/v1/core/test_prefix_caching.py calls
+    allocate_slots repeatedly to represent successive scheduling steps without
+    calling new_step_starts (the whole file calls it once), so with the guard on
+    those hits are treated as same-step and correctly deferred, and 11 of those
+    tests fail. Flipping the default here would fork them and break every future
+    test written the same way. Deployments turn it on instead --
+    scripts/dgx_spark_start_mp_serve.sh in the harness sets 2.
+
+    If this assertion ever fails because someone flipped the default, run
+    tests/v1/core/test_prefix_caching.py before deciding they were right.
+    """
+    import os
+
+    assert "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT" not in os.environ, (
+        "unset the env var to test the shipped default"
+    )
+    import vllm.envs as envs
+
+    assert envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT == 0
+
+
 @pytest.mark.parametrize("make", [_full_manager, _mla_manager])
-def test_guard_is_off_by_default(make, monkeypatch):
-    """Unset env => the port must be inert, whatever use_eagle says."""
+def test_guard_can_be_turned_off(make, monkeypatch):
+    """Mode 0 must make the port inert, whatever use_eagle says.
+
+    The escape hatch has to keep working: if the guard ever needs to be ruled
+    out as the cause of something, `=0` must genuinely disable it.
+    """
     monkeypatch.setattr(
-        "vllm.envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", False, raising=False
+        "vllm.envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", 0, raising=False
     )
     manager = make(_pool())
     manager.use_eagle = True

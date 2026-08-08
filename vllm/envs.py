@@ -648,11 +648,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # before the forward pass writes its KV, so another request admitted in the
     # same step can match it and read unwritten values. MambaManager has guarded
     # against this since #29387; every other manager -- including the MLA ones
-    # DeepSeek-V4 uses -- does not. When True, defer such a reader by one
-    # scheduling step. Off by default; only active when spec decode is enabled.
+    # DeepSeek-V4 uses -- does not. Defers such a reader by one scheduling step.
     # 0 = off, 1 = upstream semantics (gated on use_eagle), 2 = every group.
-    # 2 exists because on DeepSeek-V4 only the sliding-window groups carry the
-    # eagle flag, so 1 guards 2 of 5 managers and leaves the main MLA path open.
+    #
+    # SHIPPED DEFAULT IS 0, matching upstream, because 11 tests in
+    # tests/v1/core/test_prefix_caching.py call allocate_slots repeatedly to
+    # represent SUCCESSIVE scheduling steps without ever calling
+    # new_step_starts() (the whole file calls it once). With the guard on they
+    # are treated as one step and legitimately deferred, so they fail. The tests
+    # are step-agnostic rather than wrong, but flipping the default here would
+    # fork 11 upstream tests and break every future test written the same way.
+    # OUR DEPLOYMENT SETS 2 (see scripts/dgx_spark_start_mp_serve.sh).
+    #
+    # Measured on DeepSeek-V4 (2-node TP=2, DSpark, fp8 KV,
+    # prefix caching on), 4 fresh serves per arm, 3 arthur c=12 runs each:
+    #   guard off -> 3 of 4 serves lose long-context recall, 2 into single
+    #                digits; gate mean 11.5, min 3 of 24
+    #   guard on  -> 4 of 4 serves at 20-23; gate mean 22.0, min 20
+    #   Mann-Whitney U p = 0.0043
+    # It also lifts the default V1 runner from 20.7 to 23.0, so this is not a
+    # V2-only fix. Mode 1 is upstream's gate, which covers only 2 of 5 managers
+    # on this model and leaves the main MLA path unguarded -- hence 2.
     "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT": lambda: int(
         os.getenv("VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", "0")
     ),
