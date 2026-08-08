@@ -49,6 +49,7 @@ def _count_expert_num_tokens(
     topk_ids_ptr,
     expert_num_tokens_ptr,
     num_experts,
+    num_global_experts,
     topk_numel,
     expert_map,
     HAS_EXPERT_MAP: tl.constexpr,
@@ -64,8 +65,13 @@ def _count_expert_num_tokens(
         mask = offsets < (topk_numel - x * BLOCK_SIZE)
         expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
         if HAS_EXPERT_MAP:
+            # Bound the gather: expert_ids come from topk_ids, which is data and
+            # can hold stale out-of-range values on rows the router did not
+            # overwrite. Masking on `>= 0` alone reads past expert_map. Note the
+            # bound is the GLOBAL expert count (expert_map's length), not
+            # num_experts, which is this rank's local expert count.
             expert_map_ptrs = expert_map + expert_ids
-            expert_map_mask = expert_ids >= 0
+            expert_map_mask = (expert_ids >= 0) & (expert_ids < num_global_experts)
             expert_ids = tl.load(expert_map_ptrs, mask=expert_map_mask, other=-1)
 
         has_curr_expert = tl.where(expert_ids == curr_expert, 1, 0)
@@ -107,6 +113,7 @@ def count_expert_num_tokens(
         topk_ids,
         expert_num_tokens,
         num_local_experts,
+        expert_map.numel() if expert_map is not None else 0,
         topk_ids.numel(),
         expert_map,
         HAS_EXPERT_MAP=expert_map is not None,
@@ -490,6 +497,7 @@ def _swiglu_limit_pad_aware_kernel(
     input_row_stride,
     num_tokens,
     swiglu_limit,
+    num_experts,
     HAS_LIMIT: tl.constexpr,
     HAS_EXPERT_MAP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -505,12 +513,23 @@ def _swiglu_limit_pad_aware_kernel(
         expert_id = tl.load(topk_ids_ptr + row)
         should_compute = expert_id != -1
         if HAS_EXPERT_MAP:
+            # expert_id is data, not a loop bound: it is read from topk_ids,
+            # which the routers allocate with torch.empty and, on the padded
+            # rows of a CUDA-graph batch, do not always overwrite. Such a slot
+            # can hold an arbitrary positive value (in practice the bit pattern
+            # of whatever float tensor previously owned the allocation), so
+            # masking on `expert_id >= 0` alone let it gather past the end of
+            # expert_map -- a Warp MMU fault that takes down every TP rank.
+            # Bound the row offset as well; out-of-range ids fall out as
+            # not-computed, so a producer bug degrades one token slot instead
+            # of killing the engine.
+            in_range = (expert_id >= 0) & (expert_id < num_experts)
             local_expert_id = tl.load(
                 expert_map_ptr + expert_id,
-                mask=expert_id >= 0,
+                mask=in_range,
                 other=-1,
             )
-            should_compute = should_compute & (local_expert_id != -1)
+            should_compute = should_compute & in_range & (local_expert_id != -1)
 
         if should_compute:
             gate_offsets = row.to(tl.int64) * input_row_stride + column_tile
@@ -559,6 +578,7 @@ def _swiglu_limit_pad_aware(
         gate_up_size,
         num_tokens,
         swiglu_limit,
+        expert_map.numel() if expert_map is not None else 0,
         HAS_LIMIT=swiglu_limit > 0,
         HAS_EXPERT_MAP=expert_map is not None,
         BLOCK_SIZE=BLOCK_SIZE,

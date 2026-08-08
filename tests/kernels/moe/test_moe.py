@@ -1546,6 +1546,41 @@ def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.
     opcheck(torch.ops._moe_C.moe_sum, (input, actual, topk_ids, expert_map))
 
 
+@pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
+def test_moe_sum_pad_aware_bounds_expert_map_gather(topk_ids_dtype: torch.dtype):
+    """Out-of-range expert ids must be skipped, not gathered from expert_map.
+
+    topk_ids is data, not a loop bound: the routers allocate it with
+    torch.empty and do not always overwrite every slot, so a stale slot can
+    hold an arbitrary positive value (in practice the bit pattern of whatever
+    float tensor previously owned the allocation). Guarding the expert_map
+    lookup with `expert_id < 0` alone made that an illegal access that takes
+    down every rank.
+    """
+    m, topk, k = 8, 4, 128
+    dtype = torch.bfloat16
+    input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
+
+    topk_ids = torch.randint(0, 4, (m, topk), device="cuda", dtype=topk_ids_dtype)
+    # 0x3F988A43 is a float bit pattern observed in an unwritten slot in the
+    # wild; 1 << 30 is a generic far-out-of-range id.
+    topk_ids[0, 0] = 0x3F988A43
+    topk_ids[1, 1] = 1 << 30
+    topk_ids[2, 2] = -1
+
+    expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+
+    actual = torch.empty((m, k), device="cuda", dtype=dtype)
+    torch.ops._moe_C.moe_sum(input, actual, topk_ids, expert_map)
+
+    n_experts = expert_map.numel()
+    in_range = (topk_ids >= 0) & (topk_ids < n_experts)
+    routed = in_range & (expert_map[topk_ids.clamp(0, n_experts - 1).long()] >= 0)
+    expected = (input.float() * routed.unsqueeze(-1)).sum(dim=1).to(dtype)
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
+
+
 def _batched_fused_marlin_moe_cases() -> list[Any]:
     cases = [
         pytest.param(

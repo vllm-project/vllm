@@ -141,3 +141,61 @@ def test_compute_expert_num_tokens_from_numel(
         ep_size=ep_size,
         topk_ids_dtype=topk_ids_dtype,
     )
+
+
+@pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
+def test_count_expert_num_tokens_bounds_expert_map_gather(
+    topk_ids_dtype: torch.dtype,
+):
+    """Out-of-range topk_ids must not index expert_map.
+
+    topk_ids is data, not a loop bound: routers allocate it with torch.empty
+    and do not always overwrite every slot, so a stale slot can hold an
+    arbitrary positive value. Masking the expert_map gather on `>= 0` alone
+    read past the end of the map and faulted the context.
+    """
+    num_experts, num_local = 32, 16
+    expert_map = torch.full((num_experts,), -1, dtype=torch.int32, device="cuda")
+    expert_map[:num_local] = torch.arange(num_local, dtype=torch.int32, device="cuda")
+
+    topk_ids = torch.randint(0, num_local, (16, 2), dtype=topk_ids_dtype, device="cuda")
+    topk_ids[0, 0] = 0x3F988A43
+    topk_ids[1, 1] = 1 << 30
+
+    actual = count_expert_num_tokens(topk_ids, num_local, expert_map)
+
+    in_range = (topk_ids >= 0) & (topk_ids < num_experts)
+    local = expert_map[topk_ids.clamp(0, num_experts - 1).long()]
+    valid = in_range & (local >= 0)
+    expected = torch.zeros(num_local, dtype=actual.dtype, device="cuda")
+    for e in range(num_local):
+        expected[e] = ((local == e) & valid).sum()
+
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
+def test_count_expert_num_tokens_bound_is_global_expert_count(
+    topk_ids_dtype: torch.dtype,
+):
+    """The gather bound must be expert_map's length, not the local count.
+
+    On a non-zero EP shard every routed global id is >= num_local_experts, so
+    bounding against the local count would drop all of them.
+    """
+    num_experts, num_local = 32, 16
+    expert_map = torch.full((num_experts,), -1, dtype=torch.int32, device="cuda")
+    expert_map[num_local:] = torch.arange(num_local, dtype=torch.int32, device="cuda")
+
+    topk_ids = torch.randint(
+        num_local, num_experts, (16, 2), dtype=topk_ids_dtype, device="cuda"
+    )
+
+    actual = count_expert_num_tokens(topk_ids, num_local, expert_map)
+
+    local = expert_map[topk_ids.long()]
+    expected = torch.zeros(num_local, dtype=actual.dtype, device="cuda")
+    for e in range(num_local):
+        expected[e] = ((local == e) & (local >= 0)).sum()
+
+    torch.testing.assert_close(actual, expected)
