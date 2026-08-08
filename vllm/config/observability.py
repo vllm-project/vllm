@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from functools import cached_property
+from itertools import pairwise
 from typing import Any, Literal, cast
 
 from packaging.version import parse
@@ -52,6 +54,18 @@ class ObservabilityConfig:
 
     kv_cache_metrics_sample: float = Field(default=0.01, gt=0, le=1)
     """Sampling rate for KV cache metrics (0.0, 1.0]. Default 0.01 = 1% of blocks."""
+
+    custom_histogram_buckets: dict[str, list[float]] | None = None
+    """Custom Prometheus histogram bucket boundaries, as a JSON mapping from
+    bucket-family key to a list of strictly increasing, positive, finite
+    upper bounds. When a family key is present, its list replaces the default
+    buckets for every histogram in that family; families not listed keep
+    their defaults. Known families: `request_latency`, `time_to_first_token`,
+    `inter_token_latency`, `iteration_tokens`, `request_params_n`,
+    `request_tokens`, `kv_cache_residency`. Example:
+    `--custom-histogram-buckets '{"request_latency": [0.01, 0.05, 0.1, 0.5]}'`.
+    Note that every extra bucket adds one time series per metric and label
+    set."""
 
     cudagraph_metrics: bool = False
     """Enable CUDA graph metrics (number of padded/unpadded tokens, runtime cudagraph
@@ -136,6 +150,55 @@ class ObservabilityConfig:
                     "OpenTelemetry is not available. Unable to configure "
                     "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                     f"installed. Original error:\n{otel_import_error_traceback}"
+                )
+        return value
+
+    @field_validator("custom_histogram_buckets", mode="before")
+    @classmethod
+    def _reject_bool_histogram_bounds(cls, value: object) -> object:
+        """Reject booleans before pydantic silently coerces them to floats."""
+        if isinstance(value, dict):
+            for family, buckets in value.items():
+                if not isinstance(buckets, list):
+                    continue
+                for bound in buckets:
+                    if isinstance(bound, bool):
+                        raise ValueError(
+                            f"custom_histogram_buckets[{family!r}]: bound "
+                            f"{bound!r} must be a number, not a boolean"
+                        )
+        return value
+
+    @field_validator("custom_histogram_buckets")
+    @classmethod
+    def _validate_custom_histogram_buckets(
+        cls, value: dict[str, list[float]] | None
+    ) -> dict[str, list[float]] | None:
+        if value is None:
+            return value
+        from vllm.v1.metrics.buckets import BUCKET_FAMILY_KEYS
+
+        for family, buckets in value.items():
+            if family not in BUCKET_FAMILY_KEYS:
+                raise ValueError(
+                    f"custom_histogram_buckets: unknown bucket family "
+                    f"{family!r}; known families: {sorted(BUCKET_FAMILY_KEYS)}"
+                )
+            if not buckets:
+                raise ValueError(
+                    f"custom_histogram_buckets[{family!r}]: bucket list "
+                    "must not be empty"
+                )
+            for bound in buckets:
+                if not math.isfinite(bound) or bound <= 0:
+                    raise ValueError(
+                        f"custom_histogram_buckets[{family!r}]: bound "
+                        f"{bound!r} must be finite and greater than 0"
+                    )
+            if any(a >= b for a, b in pairwise(buckets)):
+                raise ValueError(
+                    f"custom_histogram_buckets[{family!r}]: bounds {buckets} "
+                    "must be strictly increasing"
                 )
         return value
 

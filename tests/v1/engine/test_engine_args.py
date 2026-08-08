@@ -128,3 +128,34 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
         vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
+
+
+def test_custom_histogram_buckets_from_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # Unset: byte-identical default behavior.
+    args = parser.parse_args([])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.observability_config.custom_histogram_buckets is None
+
+    # A JSON mapping round-trips into the config verbatim.
+    args = parser.parse_args(
+        [
+            "--custom-histogram-buckets",
+            '{"request_latency": [0.01, 0.05, 0.1, 0.5]}',
+        ]
+    )
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.observability_config.custom_histogram_buckets == {
+        "request_latency": [0.01, 0.05, 0.1, 0.5]
+    }
+
+    # Malformed JSON is rejected at argument-parsing time.
+    parser.exit_on_error = False
+    with pytest.raises(ArgumentError):
+        parser.parse_args(["--custom-histogram-buckets", "{not json"])
+
+    # An unknown family key parses as JSON but fails config validation.
+    args = parser.parse_args(["--custom-histogram-buckets", '{"bogus": [1.0, 2.0]}'])
+    with pytest.raises(ValueError, match="unknown bucket family"):
+        EngineArgs.from_cli_args(args=args).create_engine_config()
