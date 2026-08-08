@@ -63,12 +63,16 @@ class KVConnectorLogging:
         self.transfer_stats_accumulator: KVConnectorStats | None = None
 
     def observe(self, transfer_stats_data: dict[str, Any]):
+        """Accumulate connector stats received from the scheduler.
+
+        Called whenever the connector syncs with the scheduler, which
+        is not necessarily the logging interval. The incoming data is
+        rebuilt into a stats object and merged into the running
+        accumulator via :meth:`KVConnectorStats.aggregate`, so the
+        accumulator spans all observations since the last :meth:`log`.
+        """
         # Should not be called when a KVConnector is not configured.
         assert self.connector_cls is not None
-        # Called periodically when connector syncs with the scheduler.
-        # Note that this is not the same as the logging interval.
-        # We expect transfer_stats_data to be aggregated across all workers and
-        # consist of observations from a single connector or a MultiConnector.
         transfer_stats = self.connector_cls.build_kv_connector_stats(
             transfer_stats_data
         )
@@ -91,13 +95,18 @@ class KVConnectorLogging:
             )
 
     def log(self, log_fn=logger.info):
-        """Log transfer metrics periodically, similar to throughput logging"""
+        """Log the accumulated transfer metrics for the last interval.
+
+        Reduces the accumulator to a summary line (see
+        :meth:`KVConnectorStats.reduce`) and resets it for the next
+        interval. Intervals with failures but no successful transfers
+        still produce a log line (zero values) so they are not silently
+        dropped — the failures are surfaced through Prometheus.
+        """
         if (
             self.transfer_stats_accumulator
             and not self.transfer_stats_accumulator.is_empty()
         ):
-            # Produce a single cumulative stats object for the last time
-            # interval from the recorded observations.
             xfer_metrics = self.transfer_stats_accumulator.reduce()
             xfer_metrics_str = ", ".join(f"{k}={v}" for k, v in xfer_metrics.items())
             log_fn("KV Transfer metrics: %s", xfer_metrics_str)
