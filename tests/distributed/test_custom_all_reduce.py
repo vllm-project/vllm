@@ -9,6 +9,9 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
+from vllm.distributed.device_communicators.custom_all_reduce import (
+    CustomAllreduce,
+)
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 
 from ..utils import (
@@ -130,3 +133,25 @@ def test_custom_allreduce(
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+def test_custom_all_reduce_warmup_returns_reduced_value(monkeypatch):
+    ca = CustomAllreduce.__new__(CustomAllreduce)
+    ca.disabled = False
+    ca._IS_CAPTURING = True
+    ca.should_custom_ar = lambda _: True
+
+    calls: list[bool] = []
+
+    def fake_all_reduce(inp: torch.Tensor, registered: bool) -> torch.Tensor:
+        calls.append(registered)
+        return inp + 1
+
+    ca.all_reduce = fake_all_reduce
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    inp = torch.tensor([1.0])
+    out = ca.custom_all_reduce(inp)
+
+    assert calls == [False]
+    torch.testing.assert_close(out, torch.tensor([2.0]))
