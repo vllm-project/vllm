@@ -350,6 +350,11 @@ prepare_native_workspace() {
     echo "ROCm artifact commit ${recorded_commit} does not match ${BUILDKITE_COMMIT:-unset}" >&2
     return 1
   fi
+  if [[ -z "${BUILDKITE_BUILD_ID:-}" \
+    || "${recorded_base}" != *":ci_base-build-${BUILDKITE_BUILD_ID}" ]]; then
+    echo "ROCm artifact base is not scoped to Buildkite build ${BUILDKITE_BUILD_ID:-unset}: ${recorded_base}" >&2
+    return 1
+  fi
   if [[ -z "${VLLM_CI_BASE_IMAGE:-}" || "${recorded_base}" != "${VLLM_CI_BASE_IMAGE}" ]]; then
     echo "ROCm artifact base ${recorded_base} does not match ${VLLM_CI_BASE_IMAGE:-unset}" >&2
     return 1
