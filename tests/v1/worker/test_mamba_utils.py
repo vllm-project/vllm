@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -150,6 +151,168 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
         )
 
     assert mamba_state_idx == {"keep": 99}
+
+
+def _preprocess_reset_case(mamba_state_idx_map: dict[str, int]):
+    """Two requests, block_size=4, num_speculative_blocks=0.
+
+    ``no_cross`` decodes within its current block; ``cross`` advances past a
+    block boundary. Caller controls which of the two is registered in
+    ``mamba_state_idx`` -- an entry means "prior state exists", so its
+    absence forces the ``prev_state_idx == -1`` (fresh) branch.
+    """
+    req_ids = ["no_cross", "cross"]
+    scheduler_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_cached_reqs=SimpleNamespace(resumed_req_ids=set()),
+        num_scheduled_tokens={"no_cross": 1, "cross": 2},
+    )
+    input_batch = SimpleNamespace(
+        req_ids=req_ids,
+        num_accepted_tokens_cpu=np.array([3, 3], dtype=np.int32),
+    )
+    requests = {
+        # no_cross: num_computed=1, scheduled=1 => curr_state_idx = 0
+        "no_cross": SimpleNamespace(req_id="no_cross", num_computed_tokens=1),
+        # cross: num_computed=3, scheduled=2 => curr_state_idx = 1
+        "cross": SimpleNamespace(req_id="cross", num_computed_tokens=3),
+    }
+    return scheduler_output, input_batch, requests, dict(mamba_state_idx_map)
+
+
+def test_preprocess_mamba_returns_false_when_no_boundary_crossed(monkeypatch):
+    """No request crosses a block boundary => no reset, no follow-up H2D."""
+    from vllm.v1.worker import mamba_utils as worker_mamba_utils
+
+    monkeypatch.setattr(
+        worker_mamba_utils, "collect_mamba_copy_meta", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        worker_mamba_utils, "do_mamba_copy_block", lambda copy_bufs: None
+    )
+
+    mamba_spec = SimpleNamespace(block_size=4, num_speculative_blocks=0)
+    cache_config: Any = SimpleNamespace(enable_prefix_caching=True)
+    copy_bufs: Any = SimpleNamespace(
+        mamba_group_ids=[0], mamba_spec=mamba_spec, offset=0
+    )
+    # Both requests: prev == curr => no reset.
+    sched, batch, requests, state_idx = _preprocess_reset_case(
+        {"no_cross": 0, "cross": 1}
+    )
+    original_accepted = batch.num_accepted_tokens_cpu.copy()
+
+    any_reset = preprocess_mamba(
+        sched,
+        SimpleNamespace(),  # kv_cache_config
+        cache_config,
+        state_idx,
+        batch,
+        requests,
+        {},  # forward_context
+        (),  # mamba_state_copy_funcs
+        copy_bufs,
+    )
+
+    assert any_reset is False
+    np.testing.assert_array_equal(batch.num_accepted_tokens_cpu, original_accepted)
+
+
+def test_preprocess_mamba_returns_true_when_boundary_crossed(monkeypatch):
+    """A single boundary crossing must trip the reset flag and reset only
+    the affected request's ``num_accepted_tokens_cpu`` entry to 1."""
+    from vllm.v1.worker import mamba_utils as worker_mamba_utils
+
+    monkeypatch.setattr(
+        worker_mamba_utils, "collect_mamba_copy_meta", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        worker_mamba_utils, "do_mamba_copy_block", lambda copy_bufs: None
+    )
+
+    mamba_spec = SimpleNamespace(block_size=4, num_speculative_blocks=0)
+    cache_config: Any = SimpleNamespace(enable_prefix_caching=True)
+    copy_bufs: Any = SimpleNamespace(
+        mamba_group_ids=[0], mamba_spec=mamba_spec, offset=0
+    )
+    # cross: prev=0, curr=1 -> reset. no_cross: prev=0, curr=0 -> no reset.
+    sched, batch, requests, state_idx = _preprocess_reset_case(
+        {"no_cross": 0, "cross": 0}
+    )
+
+    any_reset = preprocess_mamba(
+        sched,
+        SimpleNamespace(),  # kv_cache_config
+        cache_config,
+        state_idx,
+        batch,
+        requests,
+        {},  # forward_context
+        (),  # mamba_state_copy_funcs
+        copy_bufs,
+    )
+
+    assert any_reset is True
+    # Only the crossing request gets reset to 1; the other is untouched.
+    np.testing.assert_array_equal(
+        batch.num_accepted_tokens_cpu, np.array([3, 1], dtype=np.int32)
+    )
+
+
+def test_preprocess_mamba_fresh_request_does_not_trigger_reset(monkeypatch):
+    """A fresh request (``num_computed_tokens == 0``) yields
+    ``prev_state_idx == -1`` and must skip the reset branch even when
+    ``curr_state_idx != -1``.
+    """
+    from vllm.v1.worker import mamba_utils as worker_mamba_utils
+
+    monkeypatch.setattr(
+        worker_mamba_utils, "collect_mamba_copy_meta", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        worker_mamba_utils, "do_mamba_copy_block", lambda copy_bufs: None
+    )
+
+    mamba_spec = SimpleNamespace(block_size=4, num_speculative_blocks=0)
+    cache_config: Any = SimpleNamespace(enable_prefix_caching=True)
+    copy_bufs: Any = SimpleNamespace(
+        mamba_group_ids=[0], mamba_spec=mamba_spec, offset=0
+    )
+    # num_computed=0, scheduled=1 -> curr_state_idx=0, prev derived as -1.
+    scheduler_output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_cached_reqs=SimpleNamespace(resumed_req_ids=set()),
+        num_scheduled_tokens={"fresh": 1},
+    )
+    input_batch = SimpleNamespace(
+        req_ids=["fresh"],
+        num_accepted_tokens_cpu=np.array([2], dtype=np.int32),
+    )
+    requests = {
+        "fresh": SimpleNamespace(req_id="fresh", num_computed_tokens=0),
+    }
+    mamba_state_idx: dict[str, int] = {}  # no entry -> derived prev = -1
+
+    any_reset = preprocess_mamba(
+        scheduler_output,
+        SimpleNamespace(),  # kv_cache_config
+        cache_config,
+        mamba_state_idx,
+        input_batch,
+        requests,
+        {},  # forward_context
+        (),  # mamba_state_copy_funcs
+        copy_bufs,
+    )
+
+    assert any_reset is False
+    np.testing.assert_array_equal(
+        input_batch.num_accepted_tokens_cpu, np.array([2], dtype=np.int32)
+    )
+    # The fresh request now has its slot registered for next step.
+    assert mamba_state_idx == {"fresh": 0}
 
 
 # -----------------------------------------------------------------------------
