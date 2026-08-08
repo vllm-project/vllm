@@ -239,7 +239,10 @@ def dispatch_cpu_unquantized_gemm(
     if layer.weight.ndim != 2:
         # this is not a linear layer
         # For now it should be a causal_conv1d op or MoE 3D expert weights
-        if torch.cpu._is_amx_tile_supported() and hasattr(
+        # The C++ causal_conv1d kernels use VDPBF16PS (no AMX tiles), so the
+        # VNNI weight prepack applies to any AVX-512BF16 CPU, not just AMX
+        # (e.g. AMD Zen5/Turin).
+        if torch.cpu._is_avx512_bf16_supported() and hasattr(
             ops, "causal_conv1d_weight_pack"
         ):
             # prepack conv weight
@@ -252,7 +255,7 @@ def dispatch_cpu_unquantized_gemm(
                 .clone()
             )
             # Stash the un-packed (dim, width) weight so the speculative-decode
-            # GDN path (which uses torch conv, not the AMX kernel) can use it.
+            # GDN path (which uses torch conv, not the C++ kernel) can use it.
             layer._cpu_unpacked_conv_weight = unpacked
             layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
         return
