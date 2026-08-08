@@ -133,7 +133,6 @@ class MooncakeStoreScheduler:
             request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
-            apply_eagle=not self.use_eagle_prefix_cache_hashing,
         )
         if num_external_hit_tokens is None:
             # Lookup not ready yet; scheduler will retry on a later step.

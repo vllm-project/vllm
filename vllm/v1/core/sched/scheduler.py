@@ -1714,6 +1714,8 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        # Draft forward may be skipped near its max model length, so only these
+        # requests may publish successor-aware hashes.
         draft_kv_materialized_req_ids = (
             model_runner_output.draft_kv_materialized_req_ids or set()
         )

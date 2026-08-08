@@ -834,7 +834,11 @@ def get_request_block_hash_event_data(
     int,
     list[tuple[Any, ...] | None],
 ]:
-    """Describe an individually emitted hash unit for a cache block."""
+    """Build hash metadata for one cache block emitted as a KV event.
+
+    A cache block may span multiple hash units. The event carries the final
+    chained hash, its parent, and each unit's extra keys for reconstruction.
+    """
     assert block_size > hash_block_size
     assert block_size % hash_block_size == 0
 

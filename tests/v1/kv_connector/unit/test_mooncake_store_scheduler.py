@@ -519,7 +519,6 @@ class _StubLookupClient:
         num_tokens: int,
         block_hashes: list[bytes],
         non_block: bool = False,
-        apply_eagle: bool = True,
     ) -> int:
         self.num_tokens.append(num_tokens)
         return self._hit_tokens
