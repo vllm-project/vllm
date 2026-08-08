@@ -95,11 +95,12 @@ def _resolve_gdn_prefill_backend(
     * ``platform == cuda``;
     * one of the following:
       - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
+      - Blackwell (SM10.x or SM12.x) with ``head_k_dim == 128``,
+        ``cuda_runtime >= 13``.
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
-    * Blackwell (SM10.x) with ``head_k_dim == 128``;
+    * SM10.x (datacenter Blackwell) with ``head_k_dim == 128``;
     """
     additional_config = vllm_config.additional_config
     backend_cfg = (
@@ -122,12 +123,17 @@ def _resolve_gdn_prefill_backend(
     if current_platform.is_device_capability(90):
         supports_flashinfer = True
     elif (
-        current_platform.is_device_capability_family(100)
+        (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
+        )
         and head_k_dim == 128
         and current_platform.get_cuda_runtime_major() >= 13
     ):
         supports_flashinfer = True
-        supports_cutedsl = True
+        # tcgen05/TMEM CuteDSL kernels are SM100 datacenter only
+        if current_platform.is_device_capability_family(100):
+            supports_cutedsl = True
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
