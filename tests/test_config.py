@@ -19,6 +19,7 @@ from vllm.config import (
     CompilationConfig,
     KernelConfig,
     ModelConfig,
+    ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
     SchedulerConfig,
@@ -35,6 +36,19 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_per_request_spec_decode_stats_requires_spec_decode():
+    # The flag only makes sense with speculative decoding configured; enabling
+    # it without --speculative-config should fail fast rather than silently
+    # produce no stats.
+    for level in ("summary", "detailed"):
+        with pytest.raises(ValueError, match="speculative"):
+            VllmConfig(
+                observability_config=ObservabilityConfig(
+                    per_request_spec_decode_stats=level
+                )
+            )
 
 
 def test_compile_config_repr_succeeds():
