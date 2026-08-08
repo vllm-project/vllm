@@ -431,11 +431,7 @@ class GeluAndMul(CustomOp):
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
             if approximate == "none":
                 self.op = torch.ops._C.gelu_and_mul
             elif approximate == "tanh":
@@ -552,11 +548,7 @@ class NewGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
             self.op = torch.ops._C.gelu_new
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
@@ -585,11 +577,7 @@ class FastGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
             self.op = torch.ops._C.gelu_fast
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
@@ -618,11 +606,7 @@ class QuickGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
             self.op = torch.ops._C.gelu_quick
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
