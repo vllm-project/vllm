@@ -1393,6 +1393,72 @@ class TestMessagesFullConverter:
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
 
+    def test_requested_model_alias_preserved(self):
+        """It is used to preserve requested model alias over generator.model."""
+        generator = ChatCompletionResponse(
+            id="chatcmpl-alias",
+            model="alias-a",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="Hello!"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+        )
+
+        result = _make_full_converter().messages_full_converter(
+            generator, requested_model="alias-b"
+        )
+
+        assert result.model == "alias-b"
+
+    def test_default_model_when_requested_model_is_none(self):
+        """generator.model is used When requested_model is None."""
+        generator = ChatCompletionResponse(
+            id="chatcmpl-default",
+            model="alias-a",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="Hello!"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        assert result.model == "alias-a"
+
+    @pytest.mark.asyncio
+    async def test_stream_converter_preserves_requested_model_alias(self):
+        """message_stream_converter preserves requested model alias in message_start."""
+        async def fake_stream():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant", content="Hello"),
+            )
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content=" world"),
+                finish_reason="stop",
+                usage=UsageInfo(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+            )
+            yield "data: [DONE]\n\n"
+
+        converter = _make_stream_converter()
+        events = _parse_sse_events([
+            chunk
+            async for chunk in converter.message_stream_converter(
+                fake_stream(), requested_model="alias-b"
+            )
+        ])
+
+        assert len(events) > 0
+        message_start_event = next(e for e in events if e[0] == "message_start")
+        assert message_start_event[1]["message"]["model"] == "alias-b"
+
 
 # ======================================================================
 # cache_salt pass-through (Issue #46688)
