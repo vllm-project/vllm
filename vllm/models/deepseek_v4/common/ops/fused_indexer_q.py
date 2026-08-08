@@ -118,8 +118,9 @@ def _fused_indexer_q_rope_quant_kernel(
     rot_base = base_ptr + INDEX_Q_NOPE_DIM
     x_even = tl.load(rot_base + half_offset * 2).to(tl.float32)
     x_odd = tl.load(rot_base + half_offset * 2 + 1).to(tl.float32)
-    r_even = x_even * cos - x_odd * sin
-    r_odd = x_odd * cos + x_even * sin
+    # Match CUDA/HIP rotary_embedding FMA contraction before bf16 materialization.
+    r_even = tl.fma(x_even, cos, -(x_odd * sin))
+    r_odd = tl.fma(x_odd, cos, x_even * sin)
 
     # Match reference numerics: fp32 → bf16 → fp32 before the ue8m0 absmax.
     # Same pattern as the K-side compressor kernel (fused_compress_quant_cache.py).
