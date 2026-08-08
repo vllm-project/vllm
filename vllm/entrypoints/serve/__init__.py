@@ -31,6 +31,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
+    from vllm.entrypoints.serve.devices.api_router import (
+        attach_router as attach_devices_router,
+    )
+
+    attach_devices_router(app)
+
 
 def register_vllm_dev_api_routers(app: FastAPI):
     logger.warning(
