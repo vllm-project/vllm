@@ -138,6 +138,9 @@ pub struct CompletionRequest {
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
+    /// List of bad words to avoid during generation
+    pub bad_words: Option<Vec<String>>,
+
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
