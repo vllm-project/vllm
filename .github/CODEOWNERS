@@ -126,6 +126,7 @@
 /tests/models/transformers @hmellor
 
 # Docs
+/docs/features/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /docs/mkdocs @hmellor
 /docs/**/*.yml @hmellor
 /requirements/docs.txt @hmellor
