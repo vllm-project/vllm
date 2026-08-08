@@ -219,8 +219,12 @@ def resolve_current_platform_cls_qualname() -> str:
             platform_cls_qualname = func()
             if platform_cls_qualname is not None:
                 activated_plugins.append(name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "Platform plugin %s failed to load and will be skipped",
+                name,
+                exc_info=e,
+            )
 
     activated_builtin_plugins = list(
         set(activated_plugins) & set(builtin_platform_plugins.keys())
