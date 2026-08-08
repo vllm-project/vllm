@@ -1292,7 +1292,7 @@ def test_reset_connector_cache_no_connector_is_no_op_success():
             [{"2": 1}, {"1": 1}],
         ),  # multiple sequences
         ([[1]], [[1, 2]], (1, 1, 1, [1]), [{"1": 1}]),  # single token sequence
-        ([[]], [[5]], (0, 0, 0, [0]), [None]),  # empty sequence
+        ([[]], [[5]], (0, 0, 0, [0]), [{}]),  # empty sequence -> empty accumulator
         (
             [[1, 2, 3], [4, 5, 6]],
             [[1, 2, 7], [4, 8]],
@@ -1403,13 +1403,11 @@ def test_schedule_spec_decoding_stats(
         assert stats.num_accepted_tokens_per_pos == expected[3]
 
     # Per-request accumulator: the same acceptance, bucketed by accepted draft
-    # count (j) on each request rather than summed across the batch.
+    # count (j) on each request rather than summed across the batch. The
+    # accumulator is created eagerly on add_request, so every request has one
+    # (an empty histogram when it drafted nothing).
     for i, req_id in enumerate(req_ids):
-        req_stats = scheduler.requests[req_id].spec_decode_stats
-        if expected_per_req[i] is None:
-            assert req_stats is None
-            continue
-        payload = req_stats.to_dict()
+        payload = scheduler.requests[req_id].spec_decode_stats.to_dict()
         assert payload["acceptance_histogram"] == expected_per_req[i]
         assert payload["num_draft_tokens"] == len(spec_tokens[i])
         assert "per_step_accepted" not in payload  # summary level

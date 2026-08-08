@@ -1187,6 +1187,15 @@ class VllmConfig:
             self.model_config.disable_cascade_attn = True
 
         if (
+            self.observability_config.per_request_spec_decode_stats != "none"
+            and self.speculative_config is None
+        ):
+            raise ValueError(
+                "--per-request-spec-decode-stats requires speculative decoding "
+                "to be enabled (via --speculative-config)."
+            )
+
+        if (
             self.model_config is not None
             and self.model_config.multimodal_config is not None
             and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"

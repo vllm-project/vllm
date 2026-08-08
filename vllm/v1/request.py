@@ -203,9 +203,9 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
-        # Per-request speculative-decoding acceptance accumulator. Created
-        # lazily on the first verify step when --per-request-spec-decode-stats
-        # (see Scheduler.update_from_output); stays None otherwise.
+        # Per-request speculative-decoding acceptance accumulator. Populated by
+        # the scheduler when --per-request-spec-decode-stats is set (eagerly on
+        # add_request, then observed each verify step); stays None otherwise.
         self.spec_decode_stats: RequestSpecDecodeStats | None = None
 
         self.block_hashes: list[BlockHash] = []
