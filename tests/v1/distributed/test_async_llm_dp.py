@@ -328,15 +328,28 @@ async def test_dp_pause_late_request_does_not_block_drain():
         await engine.pause_generation(mode="abort")
         await engine.wait_for_requests_to_drain(drain_timeout=30)
 
-        # Awaiting add_request guarantees the new-request notification has
-        # reached the coordinator - the message that used to latch the flag.
+        # Awaiting add_request guarantees the new-request notification has been
+        # sent to the coordinator - the message that used to latch the flag.
         collector = await engine.add_request(
             request_id="late",
             prompt=DP_PAUSE_PROMPT,
             params=SamplingParams(max_tokens=5),
         )
 
-        await engine.wait_for_requests_to_drain(drain_timeout=30)
+        # Wait for the front-end to mark the engines running off the back of
+        # that notification. This is what makes the test non-vacuous: it is
+        # the path that used to leave the coordinator stuck.
+        notified = False
+        for _ in range(100):
+            if engine.engine_core.dp_engines_running():
+                notified = True
+                break
+            await asyncio.sleep(0.05)
+        assert notified, "the late request did not notify the coordinator"
+
+        # It must settle back by itself. Unfixed it never does, because the
+        # paused engines discard the wake and so never report wave completion.
+        await engine.wait_for_requests_to_drain(drain_timeout=60)
 
         # The late request was held rather than dropped: it completes on resume.
         await engine.resume_generation()
