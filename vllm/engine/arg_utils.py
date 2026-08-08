@@ -618,6 +618,11 @@ class EngineArgs:
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
+    save_sharded_state_path: str | None = LoadConfig.save_sharded_state_path
+    save_sharded_state_pattern: str | None = LoadConfig.save_sharded_state_pattern
+    save_sharded_state_max_size: int | None = get_field(
+        LoadConfig, "save_sharded_state_max_size"
+    )
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -944,6 +949,18 @@ class EngineArgs:
         )
         load_group.add_argument("--ignore-patterns", **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
+        load_group.add_argument(
+            "--save-sharded-state-path",
+            **load_kwargs["save_sharded_state_path"],
+        )
+        load_group.add_argument(
+            "--save-sharded-state-pattern",
+            **load_kwargs["save_sharded_state_pattern"],
+        )
+        load_group.add_argument(
+            "--save-sharded-state-max-size",
+            **load_kwargs["save_sharded_state_max_size"],
+        )
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
         )
@@ -1817,6 +1834,9 @@ class EngineArgs:
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
+            save_sharded_state_path=self.save_sharded_state_path,
+            save_sharded_state_pattern=self.save_sharded_state_pattern,
+            save_sharded_state_max_size=self.save_sharded_state_max_size,
             pt_load_map_location=self.pt_load_map_location,
         )
 

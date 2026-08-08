@@ -103,6 +103,17 @@ class LoadConfig:
     use_tqdm_on_load: bool = True
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
+    save_sharded_state_path: str | None = None
+    """Directory where each worker saves its logical model state after loading
+    weights and before kernel-specific post-processing. This checkpoint can be
+    loaded with ``load_format="sharded_state"``. Online quantization is not
+    supported when this option is set."""
+    save_sharded_state_pattern: str | None = None
+    """Filename pattern used when ``save_sharded_state_path`` is set. The
+    pattern must contain ``{rank}`` and ``{part}`` placeholders."""
+    save_sharded_state_max_size: int | None = Field(default=None, gt=0)
+    """Maximum size in bytes of each file saved to
+    ``save_sharded_state_path``."""
     pt_load_map_location: str | dict[str, str] = "cpu"
     """
     The map location for loading pytorch checkpoint, to support loading
