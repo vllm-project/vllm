@@ -7009,6 +7009,7 @@ class GPUModelRunner(
                 remove_lora=False,
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
+                is_graph_capturing=force_attention,
             )
         if num_warmups > 0:
             # Warmups may use auxiliary streams. Ensure all of their work has
