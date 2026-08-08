@@ -7,12 +7,17 @@ Validates executor initialization, placement group support, RPC calls,
 and distributed execution with various TP/PP configurations.
 """
 
+import errno
 import gc
+import socket
 import threading
+from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 import ray
+from torch.distributed import TCPStore
 
 from vllm import LLM
 from vllm.config import VllmConfig
@@ -102,12 +107,30 @@ def assert_executor(executor, tp_size, pp_size):
         assert handle.node_id is not None
 
 
-def test_dist_init_port_probed_in_worker(monkeypatch):
-    """The TCPStore port is probed by the rank-0 worker on its own node
-    (the bind host), so the probe is valid on multi-node placements."""
-    monkeypatch.setattr(ray_executor_v2, "get_open_port", lambda: 54321)
+def test_dist_init_store_owns_port(monkeypatch):
+    """The rank-0 actor keeps the selected TCPStore port bound."""
     worker = ray_executor_v2.RayWorkerProc.__new__(ray_executor_v2.RayWorkerProc)
-    assert worker.get_dist_init_port() == 54321
+    worker._parallel_config = SimpleNamespace(world_size=1)
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "127.0.0.1")
+
+    init_method = worker.create_dist_init_method()
+    port = urlsplit(init_method).port
+    assert port is not None and port != 0
+
+    with socket.socket() as contender, pytest.raises(OSError) as exc_info:
+        contender.bind(("127.0.0.1", port))
+    assert exc_info.value.errno == errno.EADDRINUSE
+
+    reused_store = TCPStore(
+        "127.0.0.1",
+        port,
+        world_size=1,
+        is_master=True,
+        wait_for_workers=False,
+        multi_tenant=True,
+    )
+    worker._dist_init_store.set("key", "value")
+    assert reused_store.get("key") == b"value"
 
 
 @pytest.mark.parametrize("tp_size, pp_size", [(1, 1), (2, 1), (4, 1), (2, 2)])
