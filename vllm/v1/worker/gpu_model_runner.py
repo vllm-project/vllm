@@ -3069,7 +3069,7 @@ class GPUModelRunner(
 
                 self._cache_encoder_output(
                     mm_hashes[i],
-                    pe_tensor.to(self.device),
+                    async_tensor_h2d(pe_tensor, device=self.device),
                     scheduler_output.ec_manager_metadata,
                     scheduler_output.free_encoder_mm_hashes,
                 )
