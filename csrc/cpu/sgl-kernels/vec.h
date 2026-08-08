@@ -204,7 +204,6 @@ inline std::tuple<__m512bh, __m512bh> cvt_mxfp4_e2m1_bf16_intrinsic_lut(__m256i 
   const __m512i lut = (__m512i)(_mm512_cvtne2ps_pbh(values, values));
 
   const __m512i abs_mask = _mm512_set1_epi16(0x7FFF);
-  const __m512i zero = _mm512_setzero_si512();
 
   // expand values to 16-bit integers
   __m512i x0 = _mm512_cvtepu8_epi16(a);
@@ -214,17 +213,22 @@ inline std::tuple<__m512bh, __m512bh> cvt_mxfp4_e2m1_bf16_intrinsic_lut(__m256i 
   x0 = _mm512_permutexvar_epi16(x0, lut);
   x1 = _mm512_permutexvar_epi16(x1, lut);
 
-  // check for zeros
-  __mmask32 mask0 = _mm512_cmp_epi16_mask(_mm512_and_si512(x0, abs_mask), zero, _MM_CMPINT_EQ);
-  __mmask32 mask1 = _mm512_cmp_epi16_mask(_mm512_and_si512(x1, abs_mask), zero, _MM_CMPINT_EQ);
+  // Emulate the bf16 multiply by the E8M0 scale as an integer add on the
+  // exponent field, forcing zeros to stay zero.
+  //
+  // vptestmw sets a lane's mask bit when (x & 0x7FFF) != 0, i.e. exactly for
+  // the lanes that are not +0.0 or -0.0, and the zero-masking form of vpaddw
+  // writes 0 to the lanes the mask leaves clear. That is the same predicate as
+  // the previous and/cmp/add/blend sequence and the same result on every lane,
+  // including the LUT's -0.0 entry, which both versions turn into +0.0.
+  //
+  // 2 instructions per vector instead of 4, no extra ISA requirement:
+  // vptestmw is AVX512BW, which vpermw above already needs.
+  __mmask32 mask0 = _mm512_test_epi16_mask(x0, abs_mask);
+  __mmask32 mask1 = _mm512_test_epi16_mask(x1, abs_mask);
 
-  // emulate bf16 mul with scale factor
-  x0 = _mm512_add_epi16(x0, s0);
-  x1 = _mm512_add_epi16(x1, s1);
-
-  // blend with zero
-  x0 = _mm512_mask_blend_epi16(mask0, x0, zero);
-  x1 = _mm512_mask_blend_epi16(mask1, x1, zero);
+  x0 = _mm512_maskz_add_epi16(mask0, x0, s0);
+  x1 = _mm512_maskz_add_epi16(mask1, x1, s1);
 
   return std::make_tuple(__m512bh(x0), __m512bh(x1));
 }
