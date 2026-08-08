@@ -6,10 +6,11 @@ from unittest.mock import Mock
 
 import pytest
 
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
@@ -26,6 +27,44 @@ def _make_model_runner_output(
         req_ids=req_ids,
         req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=[[i] for i in range(len(req_ids))],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+
+def _take_snapshots(
+    scheduler: AsyncScheduler,
+    scheduler_output: SchedulerOutput,
+) -> dict[str, tuple[int, int]]:
+    # The model runner decides whether to return sampled tokens from the
+    # input length at schedule time; snapshot it before the request state can
+    # change (e.g. on a streaming update).
+    snapshots: dict[str, tuple[int, int]] = {}
+    for req_id in scheduler_output.num_scheduled_tokens:
+        request = scheduler.requests[req_id]
+        snapshots[req_id] = (request.num_computed_tokens, request.num_tokens)
+    return snapshots
+
+
+def _make_streaming_model_runner_output(
+    scheduler_output: SchedulerOutput,
+    snapshots: dict[str, tuple[int, int]],
+) -> ModelRunnerOutput:
+    req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+    sampled_token_ids: list[list[int]] = []
+    for req_id in req_ids:
+        num_computed_tokens, num_tokens = snapshots[req_id]
+        # Mirror gpu_model_runner's discard mask: sampled tokens are dropped
+        # while the input has not yet covered the full sequence.
+        if num_computed_tokens >= num_tokens:
+            sampled_token_ids.append([1])
+        else:
+            sampled_token_ids.append([])
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -64,6 +103,68 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert req1.num_output_tokens == max_tokens
     # Ensure we aren't scheduling more tokens than necessary.
     assert total_num_scheduled_tokens == expected_total_num_scheduled_tokens
+
+
+def test_streaming_update_while_decode_in_flight_does_not_underflow():
+    """Regression test for #35755.
+
+    A streaming update appends prompt tokens while a decode step is still in
+    flight. The final prefill chunk of the new segment still yields a sampled
+    token from the model runner, so it must reserve an output placeholder;
+    otherwise the in-flight decode's delivery underflows the counter.
+    """
+    scheduler = create_scheduler(async_scheduling=True,
+                                 max_num_batched_tokens=12)
+    request = Request(
+        request_id="streaming",
+        prompt_token_ids=[0] * 10,
+        sampling_params=SamplingParams(max_tokens=2),
+        pooling_params=None,
+        resumable=True,
+    )
+    scheduler.add_request(request)
+    session = scheduler.requests["streaming"]
+
+    # Schedule two steps before delivering any output so that a decode step
+    # is still in flight when the first segment finishes.
+    sched_outputs: deque[tuple[SchedulerOutput,
+                               dict[str, tuple[int, int]]]] = deque()
+    sched_output = scheduler.schedule()
+    sched_outputs.append((sched_output, _take_snapshots(scheduler,
+                                                        sched_output)))
+    sched_output = scheduler.schedule()
+    sched_outputs.append((sched_output, _take_snapshots(scheduler,
+                                                        sched_output)))
+
+    sent_update = False
+    while sched_outputs:
+        sched_output, snapshots = sched_outputs.popleft()
+        model_runner_output = _make_streaming_model_runner_output(
+            sched_output, snapshots)
+        scheduler.update_from_output(sched_output, model_runner_output)
+
+        if not sent_update and (
+            session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        ):
+            sent_update = True
+            # Append the next audio segment once the previous one finished.
+            update = Request(
+                request_id="streaming",
+                prompt_token_ids=[0] * 12,
+                sampling_params=SamplingParams(max_tokens=2),
+                pooling_params=None,
+                resumable=True,
+            )
+            scheduler.add_request(update)
+
+        sched_output = scheduler.schedule()
+        if sched_output.num_scheduled_tokens:
+            sched_outputs.append((sched_output, _take_snapshots(scheduler,
+                                                                sched_output)))
+
+    assert session.num_output_placeholders == 0
+    assert session.num_output_tokens == 2
+    assert scheduler.get_num_unfinished_requests() == 0
 
 
 def test_abort():
