@@ -33,10 +33,9 @@ if not has_helion():
 
 @default_vllm_config()
 def _generate_fake_input(
-    num_tokens: int, num_q_heads: int, num_kv_heads: int
+    num_tokens: int, num_q_heads: int, num_kv_heads: int, head_dim: int = 128
 ) -> tuple[Any, ...]:
     with FakeTensorMode():
-        head_dim = 128
         eps = 1e-6
         is_neox = True
         rotary_ratio = 1.0
@@ -123,8 +122,31 @@ class TestFusedQkNormRopeConfigPicker:
         args = _generate_fake_input(20, 3000, 70)
         selected_key = pick_config(args, config_keys)
         assert selected_key == CaseKey(
-            {"q_heads": 2048, "kv_heads": 64, "num_tokens": 32}
+            {"q_heads": 2048, "kv_heads": 64, "num_tokens": 16}
         )
+
+    def test_config_picker_head_mismatch_uses_lower_token_bucket(self):
+        config_keys = [
+            CaseKey({"q_heads": 16, "kv_heads": 8, "num_tokens": 256}),
+            CaseKey({"q_heads": 16, "kv_heads": 8, "num_tokens": 512}),
+        ]
+
+        args = _generate_fake_input(512, 8, 4)
+        selected_key = pick_config(args, config_keys)
+        assert selected_key == CaseKey(
+            {"q_heads": 16, "kv_heads": 8, "num_tokens": 256}
+        )
+
+    def test_config_picker_prefers_exact_head_dim(self):
+        generic = CaseKey({"q_heads": 64, "kv_heads": 8, "num_tokens": 32})
+        head_dim_256 = CaseKey(
+            {"q_heads": 64, "kv_heads": 8, "num_tokens": 256, "head_dim": 256}
+        )
+
+        args = _generate_fake_input(32, 64, 8, head_dim=256)
+        selected_key = pick_config(args, [generic, head_dim_256])
+
+        assert selected_key == head_dim_256
 
     def test_config_picker_no_configs(self):
         config_keys: list[dict] = []
