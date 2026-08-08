@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU-only unit tests for ExampleHiddenStatesConnector KV-cache-group logic."""
+"""CPU-only unit tests for ExampleHiddenStatesConnector."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (  # noqa: E501
-    ExampleHiddenStatesConnector,
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    example_hidden_states_connector as connector,
 )
 from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
@@ -18,6 +20,126 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+ExampleHiddenStatesConnector = connector.ExampleHiddenStatesConnector
+pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_copy_from_kv_cache_in_chunks_bounds_staging_and_preserves_output(
+    monkeypatch, dtype
+):
+    kv_cache = torch.arange(4 * 3 * 2 * 2, dtype=dtype).reshape(4, 3, 2, 2)
+    slot_mapping = torch.tensor([0, 5, 2, 7, 9, 1, 11, 4, 8, 3, 6, 10])
+    num_tokens = 10
+    output = torch.empty((num_tokens, 2, 2), dtype=kv_cache.dtype)
+    bytes_per_token = 2 * 2 * kv_cache.element_size()
+    staging_tokens = 3
+
+    chunk_slots = []
+    original_extract = connector.extract_from_kv_cache
+
+    def recorded_extract(kv_cache, slot_mapping, num_tokens):
+        chunk_slots.append(slot_mapping.tolist())
+        return original_extract(kv_cache, slot_mapping, num_tokens)
+
+    monkeypatch.setattr(connector, "extract_from_kv_cache", recorded_extract)
+    connector._copy_from_kv_cache_in_chunks(
+        kv_cache,
+        slot_mapping,
+        output,
+        max_device_staging_bytes=staging_tokens * bytes_per_token,
+    )
+
+    expected = kv_cache.flatten(0, 1)[slot_mapping[:num_tokens]]
+    torch.testing.assert_close(output, expected)
+    assert chunk_slots == [[0, 5, 2], [7, 9, 1], [11, 4, 8], [3]]
+
+
+@pytest.mark.parametrize("budget", [0, 7])
+def test_copy_from_kv_cache_in_chunks_rejects_invalid_budget(budget):
+    kv_cache = torch.empty((1, 2, 1, 2), dtype=torch.float32)
+    slot_mapping = torch.tensor([0, 1])
+    output = torch.empty((2, 1, 2), dtype=kv_cache.dtype)
+
+    with pytest.raises(ValueError, match="max_device_staging_bytes"):
+        connector._copy_from_kv_cache_in_chunks(
+            kv_cache, slot_mapping, output, max_device_staging_bytes=budget
+        )
+
+
+def test_submit_async_write_uses_bounded_gather_chunks(monkeypatch, tmp_path):
+    kv_cache = torch.arange(4 * 3 * 2 * 2, dtype=torch.float32).reshape(4, 3, 2, 2)
+    token_ids = torch.arange(10)
+    bytes_per_token = 2 * 2 * kv_cache.element_size()
+    timeline = []
+
+    class FakeEvent:
+        def record(self, stream=None):
+            timeline.append(("event", stream))
+
+    class FakeStream:
+        def wait_event(self, event):
+            timeline.append(("wait", event))
+
+    fake_stream = FakeStream()
+    fake_future = MagicMock()
+    fake_executor = MagicMock()
+    fake_executor.submit.return_value = fake_future
+    instance = object.__new__(connector.ExampleHiddenStatesConnector)
+    instance._is_tp_rank_zero = True
+    instance._kv_cache = kv_cache
+    instance._block_size = kv_cache.shape[1]
+    instance._max_device_staging_bytes = 3 * bytes_per_token
+    instance._get_copy_stream = lambda: fake_stream
+    instance._executor = fake_executor
+    instance._req_futures = {}
+    instance._req_copy_events = {}
+    instance._lock_fds = {}
+    instance.use_lock = False
+
+    original_empty = torch.empty
+    original_empty_like = torch.empty_like
+    original_extract = connector.extract_from_kv_cache
+
+    def unpinned_empty(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return original_empty(*args, **kwargs)
+
+    def unpinned_empty_like(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return original_empty_like(*args, **kwargs)
+
+    def recorded_extract(kv_cache, slot_mapping, num_tokens):
+        timeline.append(("gather", num_tokens))
+        return original_extract(kv_cache, slot_mapping, num_tokens)
+
+    monkeypatch.setattr(connector.torch, "empty", unpinned_empty)
+    monkeypatch.setattr(connector.torch, "empty_like", unpinned_empty_like)
+    monkeypatch.setattr(
+        connector, "extract_from_kv_cache", MagicMock(side_effect=recorded_extract)
+    )
+    monkeypatch.setattr(connector.torch.cuda, "Event", FakeEvent)
+    monkeypatch.setattr(
+        connector.torch.cuda, "stream", lambda stream: nullcontext(stream)
+    )
+
+    pending = connector.PendingSave(
+        req_id="request-0",
+        filename=str(tmp_path / "hidden-states.safetensors"),
+        token_ids=token_ids,
+        block_ids=[0, 1, 2, 3],
+    )
+    instance._submit_async_write(pending)
+
+    assert [item[1] for item in timeline if item[0] == "gather"] == [3, 3, 3, 1]
+    assert timeline[-1] == ("event", fake_stream)
+    fake_executor.submit.assert_called_once()
+
+    tensors = fake_executor.submit.call_args.args[1]
+    expected_slots = torch.arange(12)[: token_ids.numel()]
+    expected = kv_cache.flatten(0, 1)[expected_slots]
+    torch.testing.assert_close(tensors["hidden_states"], expected)
 
 
 def _full(block_size: int) -> FullAttentionSpec:

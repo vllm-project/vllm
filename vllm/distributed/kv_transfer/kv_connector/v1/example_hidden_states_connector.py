@@ -6,6 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_DEFAULT_MAX_DEVICE_STAGING_BYTES = 256 * 1024 * 1024
+
 
 def extract_from_kv_cache(
     kv_cache: torch.Tensor,
@@ -40,6 +43,48 @@ def extract_from_kv_cache(
     """Extract data from KV cache."""
     block_size = kv_cache.shape[1]
     return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
+
+
+def _copy_from_kv_cache_in_chunks(
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    output: torch.Tensor,
+    max_device_staging_bytes: int,
+) -> None:
+    """Copy cached hidden states without materializing the full device tensor."""
+    if (
+        not isinstance(max_device_staging_bytes, int)
+        or isinstance(max_device_staging_bytes, bool)
+        or max_device_staging_bytes <= 0
+    ):
+        raise ValueError("max_device_staging_bytes must be a positive integer")
+
+    num_tokens = output.shape[0]
+    if slot_mapping.numel() < num_tokens:
+        raise ValueError(
+            f"slot_mapping has {slot_mapping.numel()} entries, but output "
+            f"requires {num_tokens} tokens"
+        )
+    if num_tokens == 0:
+        return
+
+    bytes_per_token = prod(kv_cache.shape[2:]) * kv_cache.element_size()
+    if max_device_staging_bytes < bytes_per_token:
+        raise ValueError(
+            "max_device_staging_bytes must fit at least one hidden-state token "
+            f"({bytes_per_token} bytes required)"
+        )
+    tokens_per_chunk = max_device_staging_bytes // bytes_per_token
+
+    for start in range(0, num_tokens, tokens_per_chunk):
+        end = min(start + tokens_per_chunk, num_tokens)
+        hidden_states_chunk = extract_from_kv_cache(
+            kv_cache, slot_mapping[start:end], end - start
+        )
+        output[start:end].copy_(hidden_states_chunk, non_blocking=True)
+        # Gather and D2H run on the same stream, so any allocator reuse is
+        # ordered after the queued copy has consumed the staging buffer.
+        del hidden_states_chunk
 
 
 def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
@@ -196,6 +241,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._pending_saves: dict[str, PendingSave] = {}
         self._request_filenames: dict[str, str] = {}
 
+        self._max_device_staging_bytes = self._kv_transfer_config.get_from_extra_config(
+            "max_device_staging_bytes", _DEFAULT_MAX_DEVICE_STAGING_BYTES
+        )
+        if (
+            not isinstance(self._max_device_staging_bytes, int)
+            or isinstance(self._max_device_staging_bytes, bool)
+            or self._max_device_staging_bytes <= 0
+        ):
+            raise ValueError("max_device_staging_bytes must be a positive integer")
+
         # Worker-side state (set by register_kv_caches).
         self._kv_cache: torch.Tensor | None = None
 
@@ -308,6 +363,13 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self._kv_cache = kv_caches[self.cache_layers[0]]
 
+        bytes_per_token = prod(self._kv_cache.shape[2:]) * self._kv_cache.element_size()
+        if self._max_device_staging_bytes < bytes_per_token:
+            raise ValueError(
+                "max_device_staging_bytes must fit at least one hidden-state token "
+                f"({bytes_per_token} bytes required)"
+            )
+
         # Block size must match the indexed buffer, else reads hit the wrong
         # slots. Raise (not assert) so the check survives `python -O`.
         if self._block_size != self._kv_cache.shape[1]:
@@ -386,14 +448,18 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             slot_mapping_gpu = slot_mapping.to(
                 device=self._kv_cache.device, non_blocking=True
             )
-            hidden_states_gpu = extract_from_kv_cache(
-                self._kv_cache, slot_mapping_gpu, num_tokens
+            pinned_hs = torch.empty(
+                (num_tokens, *self._kv_cache.shape[2:]),
+                dtype=self._kv_cache.dtype,
+                device="cpu",
+                pin_memory=True,
             )
-            # Async DtoH copy into pinned host memory.
-            pinned_hs = torch.empty_like(
-                hidden_states_gpu, device="cpu", pin_memory=True
+            _copy_from_kv_cache_in_chunks(
+                self._kv_cache,
+                slot_mapping_gpu,
+                pinned_hs,
+                self._max_device_staging_bytes,
             )
-            pinned_hs.copy_(hidden_states_gpu, non_blocking=True)
 
         # Record completion of this copy on the copy stream.
         copy_done = torch.cuda.Event()
