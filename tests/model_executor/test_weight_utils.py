@@ -281,5 +281,128 @@ class TestKvCacheScaleMapper:
         )
 
 
+class TestWeightsMapperStacked:
+    """Regression tests for #48423 / #48449: stacked QKV remaps must not turn
+    ``qkv_proj`` into ``qkqkv_proj`` or overwrite q/k shard ids with ``v``."""
+
+    @pytest.fixture
+    def minicpm_style_mapper(self):
+        # MiniCPM-V-4.6 ViT attention uses bare component names (no leading dot).
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        return WeightsMapper(
+            orig_to_new_stacked={
+                "q_proj": ("qkv_proj", "q"),
+                "k_proj": ("qkv_proj", "k"),
+                "v_proj": ("qkv_proj", "v"),
+            }
+        )
+
+    @pytest.fixture
+    def dotted_style_mapper(self):
+        # Qwen2 / Siglip style: leading-dot patterns.
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        return WeightsMapper(
+            orig_to_new_stacked={
+                ".q_proj": (".qkv_proj", "q"),
+                ".k_proj": (".qkv_proj", "k"),
+                ".v_proj": (".qkv_proj", "v"),
+                ".gate_proj": (".gate_up_proj", 0),
+                ".up_proj": (".gate_up_proj", 1),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "name,expected_name,expected_shard",
+        [
+            ("q_proj.weight", "qkv_proj.weight", "q"),
+            ("k_proj.weight", "qkv_proj.weight", "k"),
+            ("v_proj.weight", "qkv_proj.weight", "v"),
+            ("q_proj.bias", "qkv_proj.bias", "q"),
+            (
+                "vit_merger.self_attn.q_proj.weight",
+                "vit_merger.self_attn.qkv_proj.weight",
+                "q",
+            ),
+            (
+                "vit_merger.self_attn.k_proj.weight",
+                "vit_merger.self_attn.qkv_proj.weight",
+                "k",
+            ),
+            (
+                "vit_merger.self_attn.v_proj.weight",
+                "vit_merger.self_attn.qkv_proj.weight",
+                "v",
+            ),
+            # Already-fused / unrelated names must not be mangled.
+            ("qkv_proj.weight", "qkv_proj.weight", None),
+            ("out_proj.weight", "out_proj.weight", None),
+        ],
+    )
+    def test_bare_component_names(
+        self, minicpm_style_mapper, name, expected_name, expected_shard
+    ):
+        mapped = minicpm_style_mapper._map_name_with_shard(name)
+        assert mapped == (expected_name, expected_shard)
+
+    @pytest.mark.parametrize(
+        "name,expected_name,expected_shard",
+        [
+            (
+                "model.layers.0.self_attn.q_proj.weight",
+                "model.layers.0.self_attn.qkv_proj.weight",
+                "q",
+            ),
+            (
+                "model.layers.0.self_attn.k_proj.weight",
+                "model.layers.0.self_attn.qkv_proj.weight",
+                "k",
+            ),
+            (
+                "model.layers.0.self_attn.v_proj.weight",
+                "model.layers.0.self_attn.qkv_proj.weight",
+                "v",
+            ),
+            (
+                "model.layers.0.self_attn.qkv_proj.weight",
+                "model.layers.0.self_attn.qkv_proj.weight",
+                None,
+            ),
+            (
+                "model.layers.0.mlp.gate_proj.weight",
+                "model.layers.0.mlp.gate_up_proj.weight",
+                0,
+            ),
+            (
+                "model.layers.0.mlp.up_proj.weight",
+                "model.layers.0.mlp.gate_up_proj.weight",
+                1,
+            ),
+        ],
+    )
+    def test_dotted_component_names(
+        self, dotted_style_mapper, name, expected_name, expected_shard
+    ):
+        mapped = dotted_style_mapper._map_name_with_shard(name)
+        assert mapped == (expected_name, expected_shard)
+
+    def test_qualified_fuse_map_beats_short_alias(self):
+        """Longer stacked keys (fuser qualnames) must win over short aliases."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        mapper = WeightsMapper(
+            orig_to_new_stacked={
+                "q_proj": ("qkv_proj", "q"),
+                "model.layers.0.self_attn.q_proj": (
+                    "model.layers.0.self_attn.qkv_proj",
+                    "q",
+                ),
+            }
+        )
+        mapped = mapper._map_name_with_shard("model.layers.0.self_attn.q_proj.weight")
+        assert mapped == ("model.layers.0.self_attn.qkv_proj.weight", "q")
+
+
 if __name__ == "__main__":
     test_download_weights_from_hf()
