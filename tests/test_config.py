@@ -1691,6 +1691,117 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
+def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
+    """Stand-in for the draft ModelConfig fields method resolution reads."""
+    return SimpleNamespace(
+        hf_config=SimpleNamespace(model_type=model_type, **hf_attrs),
+        model=model,
+        architectures=list(architectures),
+    )
+
+
+@pytest.mark.parametrize(
+    "method, draft_model_config, expected",
+    [
+        # Config parsing normalizes self-describing checkpoints to a registry
+        # drafter architecture, which resolves the method even at a path with
+        # no algorithm hint (e.g. a trainer's `checkpoints/6`).
+        pytest.param(
+            None,
+            _draft_config(
+                "/train/checkpoints/6", architectures=["Eagle3Qwen3ForCausalLM"]
+            ),
+            ("eagle3", False),
+            id="arch-at-neutral-path",
+        ),
+        # peagle architectures run as the eagle3 method, drafting in parallel.
+        pytest.param(
+            None,
+            _draft_config(
+                "/train/checkpoints/6", architectures=["PeagleQwen3ForCausalLM"]
+            ),
+            ("eagle3", True),
+            id="arch-peagle-parallel-eagle3",
+        ),
+        # Declarations outrank an unrelated algorithm name in the path.
+        pytest.param(
+            None,
+            _draft_config(
+                "/bench/dflash_vs_dspark/ckpt", architectures=["Qwen3DSparkModel"]
+            ),
+            ("dspark", True),
+            id="arch-beats-path-name",
+        ),
+        pytest.param(
+            None,
+            _draft_config("/bench/eagle3_vs_mtp/ckpt", model_type="deepseek_mtp"),
+            ("mtp", False),
+            id="model-type-beats-path-name",
+        ),
+        # yuhuili-style eagle3 checkpoints keep a plain llama config but
+        # declare a draft vocabulary, which only the eagle3 family has.
+        pytest.param(
+            None,
+            _draft_config("/train/checkpoints/6", draft_vocab_size=32000),
+            ("eagle3", False),
+            id="draft-vocab-fingerprint",
+        ),
+        # EAGLE research checkpoints declare nothing; the deprecated
+        # path-name fallback keeps them working.
+        pytest.param(
+            None,
+            _draft_config("yuhuili/EAGLE-LLaMA3-Instruct-8B"),
+            ("eagle", False),
+            id="undeclared-path-name-fallback",
+        ),
+        pytest.param(
+            None,
+            _draft_config("/train/checkpoints/6"),
+            ("draft_model", False),
+            id="undeclared-draft-model",
+        ),
+        # An explicit method is never overridden, but parallel drafting still
+        # follows the architecture when it implements that method.
+        pytest.param(
+            "draft_model",
+            _draft_config("/ckpt", architectures=["Eagle3Qwen3ForCausalLM"]),
+            ("draft_model", False),
+            id="explicit-never-overridden",
+        ),
+        pytest.param(
+            "eagle3",
+            _draft_config("/ckpt", architectures=["PeagleQwen3ForCausalLM"]),
+            ("eagle3", True),
+            id="explicit-keeps-arch-parallelism",
+        ),
+    ],
+)
+def test_speculative_method_resolution(method, draft_model_config, expected):
+    """Method resolution reads the checkpoint's declaration, not its path.
+
+    Exercised below the public API: reaching it through SpeculativeConfig
+    would download a checkpoint per case.
+    """
+    assert (
+        SpeculativeConfig._resolve_method_and_parallel(method, draft_model_config)
+        == expected
+    )
+
+
+def test_drafter_method_table_matches_registry():
+    from typing import get_args
+
+    from vllm.config.speculative import SpeculativeMethod
+    from vllm.model_executor.models.registry import (
+        _SPECULATIVE_DECODING_MODELS,
+        SPEC_METHOD_BY_DRAFTER_ARCH,
+    )
+
+    assert _SPECULATIVE_DECODING_MODELS.keys() <= SPEC_METHOD_BY_DRAFTER_ARCH.keys()
+    valid = set(get_args(SpeculativeMethod))
+    assert {m for m, _ in SPEC_METHOD_BY_DRAFTER_ARCH.values()} <= valid
+
+
 def test_draft_sample_method_probabilistic_is_accepted():
     speculative_config = SpeculativeConfig(
         method="ngram",

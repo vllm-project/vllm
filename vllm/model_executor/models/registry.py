@@ -673,6 +673,96 @@ _SPECULATIVE_DECODING_MODELS = {
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
+# Maps each drafter architecture to the speculative method it implements and
+# whether it drafts all speculative tokens in one forward pass. Config parsing
+# normalizes self-describing draft checkpoints to one of these architectures,
+# so `SpeculativeConfig` resolves an unset `method` from this table.
+SPEC_METHOD_BY_DRAFTER_ARCH: dict[str, tuple[str, bool]] = {
+    **dict.fromkeys(
+        (
+            "EagleCohereForCausalLM",
+            "EagleDeepSeekMTPModel",
+            "EagleLlamaForCausalLM",
+            "EagleLlama4ForCausalLM",
+            "EagleMiniCPMForCausalLM",
+            "EagleMistralForCausalLM",
+            "EagleMistralLarge3ForCausalLM",
+        ),
+        ("eagle", False),
+    ),
+    **dict.fromkeys(
+        (
+            "Eagle3DeepseekV2ForCausalLM",
+            "Eagle3DeepseekV3ForCausalLM",
+            "Eagle3LlamaForCausalLM",
+            "Eagle3MiniMaxM2ForCausalLM",
+            "Eagle3Qwen2_5vlForCausalLM",
+            "Eagle3Qwen3ForCausalLM",
+            "Eagle3Qwen3vlForCausalLM",
+            "LlamaForCausalLMEagle3",
+        ),
+        ("eagle3", False),
+    ),
+    # PEagle drafters run as the eagle3 method but draft in parallel.
+    **dict.fromkeys(
+        ("PEagleDraftModel", "PeagleLlamaForCausalLM", "PeagleQwen3ForCausalLM"),
+        ("eagle3", True),
+    ),
+    **dict.fromkeys(
+        ("DFlashDraftModel", "DFlashLagunaForCausalLM"),
+        ("dflash", True),
+    ),
+    **dict.fromkeys(
+        (
+            "DSparkDraftModel",
+            "Gemma4DSparkModel",
+            "K3DSparkModel",
+            "Qwen3DSparkModel",
+        ),
+        ("dspark", True),
+    ),
+    **dict.fromkeys(
+        (
+            "BailingMoeV25MTPModel",
+            "BailingMoeV3MTPModel",
+            "DeepSeekMTPModel",
+            "DeepSeekV4MTPModel",
+            "ErnieMTPModel",
+            "Exaone4_5_MTP",
+            "ExaoneMoeMTP",
+            "Gemma4MTPModel",
+            "Glm4MoeLiteMTPModel",
+            "Glm4MoeMTPModel",
+            "GlmOcrMTPModel",
+            "HYV3MTPModel",
+            "InklingMTPModel",
+            "InternS2MobiusMTP",
+            "KimiK3MTPModel",
+            "LongCatFlashMTPModel",
+            "MiMoMTPModel",
+            "MiMoV2MTPModel",
+            "MiMoV2OmniMTPModel",
+            "MiniMaxM3MTP",
+            "NemotronHMTPModel",
+            "OpenPanguMTPModel",
+            "Qwen3NextMTP",
+            "Qwen3_5MTP",
+            "Qwen3_5MoeMTP",
+            "Step3p5MTP",
+        ),
+        ("mtp", False),
+    ),
+    "MedusaModel": ("medusa", False),
+    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", False),
+    "ExtractHiddenStatesModel": ("extract_hidden_states", False),
+}
+
+assert _SPECULATIVE_DECODING_MODELS.keys() <= SPEC_METHOD_BY_DRAFTER_ARCH.keys(), (
+    "Every architecture in _SPECULATIVE_DECODING_MODELS must declare its "
+    "speculative method in SPEC_METHOD_BY_DRAFTER_ARCH: missing "
+    f"{sorted(_SPECULATIVE_DECODING_MODELS.keys() - SPEC_METHOD_BY_DRAFTER_ARCH)}"
+)
+
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),

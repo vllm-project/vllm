@@ -127,11 +127,6 @@ class SpeculatorsConfig(PretrainedConfig):
                 f"Missing 'speculative_tokens' in proposal method. Got: {first_method}"
             )
 
-        # Build base vLLM speculative configuration
-        result = {
-            "method": config_dict.get("speculators_model_type"),
-            "num_speculative_tokens": num_speculative_tokens,
-        }
-        if result["method"] == "peagle":
-            result.update({"method": "eagle3", "parallel_drafting": True})
-        return result
+        # method/parallel_drafting are resolved by SpeculativeConfig from the
+        # drafter architecture this conversion declares.
+        return {"num_speculative_tokens": num_speculative_tokens}
