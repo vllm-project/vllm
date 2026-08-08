@@ -251,7 +251,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         if mm_ranges is not None:
             attn_metadata.mm_prefix_range = mm_ranges
             attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
-                mm_ranges, num_reqs, seq_lens.device
+                mm_ranges,
+                num_reqs,
+                seq_lens.device,
+                pad_to_power_of_two=True,
             )
 
         rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens

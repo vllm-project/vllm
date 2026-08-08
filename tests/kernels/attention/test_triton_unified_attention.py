@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from unittest import mock
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils import jit_monitor
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
@@ -86,6 +89,123 @@ def ref_paged_attn(
         start_idx += query_len
 
     return torch.cat(outputs, dim=0)
+
+
+@pytest.mark.skipif(DEVICE_TYPE not in ("cuda", "rocm"), reason="Requires Triton")
+@pytest.mark.parametrize(
+    ("query_len", "seq_threshold_3D"),
+    [(4, 0), (1, 8)],
+    ids=["prefill-2d", "decode-3d"],
+)
+@pytest.mark.parametrize(
+    ("logical_range_count", "bucket_range_count"),
+    [(3, 4), (5, 8)],
+    ids=["3-to-4", "5-to-8"],
+)
+@torch.inference_mode()
+def test_mm_prefix_range_count_does_not_recompile(
+    query_len: int,
+    seq_threshold_3D: int,
+    logical_range_count: int,
+    bucket_range_count: int,
+) -> None:
+    """Changing the runtime range count must not create a Triton specialization."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_heads = 4
+    num_kv_heads = 4
+    head_size = 128
+    block_size = 16
+    kv_len = 64
+    scale = head_size**-0.5
+    query = torch.randn(query_len, num_heads, head_size, dtype=torch.bfloat16)
+    key_cache = torch.randn(
+        4, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+    )
+    value_cache = torch.randn_like(key_cache)
+    output = torch.empty_like(query)
+    cu_query_lens = torch.tensor([0, query_len], dtype=torch.int32)
+    seq_lens = torch.tensor([kv_len], dtype=torch.int32)
+    block_tables = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    softmax_segm_output = torch.empty(
+        (seq_threshold_3D, num_heads, 16, head_size), dtype=torch.float32
+    )
+    softmax_segm_max = torch.empty(
+        (seq_threshold_3D, num_heads, 16), dtype=torch.float32
+    )
+    softmax_segm_expsum = torch.empty(
+        (seq_threshold_3D, num_heads, 16), dtype=torch.float32
+    )
+
+    def run(mm_prefix_range: torch.Tensor | None) -> torch.Tensor:
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=seq_lens,
+            max_seqlen_q=query_len,
+            max_seqlen_k=kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_tables,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            mm_prefix_range=mm_prefix_range,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=16,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+        )
+        return output.clone()
+
+    output_without_prefix = run(None)
+    candidate_ranges = [
+        [0, 1],
+        [8, 9],
+        [16, 17],
+        [24, 25],
+        [kv_len - max(query_len, 2), kv_len - 1],
+    ]
+    logical_ranges = torch.tensor(
+        [[*candidate_ranges[: logical_range_count - 1], candidate_ranges[-1]]],
+        dtype=torch.int32,
+    )
+    output_logical_ranges = run(logical_ranges)
+    if query_len > 1:
+        assert not torch.allclose(output_without_prefix, output_logical_ranges)
+
+    from triton import knobs
+
+    previous_jit_hook = knobs.runtime.jit_post_compile_hook
+    try:
+        with (
+            mock.patch.object(jit_monitor, "_active", False),
+            mock.patch.object(jit_monitor, "_mode", "warn"),
+            mock.patch.object(jit_monitor, "_verbose", False),
+            mock.patch.object(jit_monitor, "_setup_triton_autotuning_print"),
+            mock.patch.object(jit_monitor, "_setup_cutedsl_jit_hook"),
+            mock.patch.object(jit_monitor, "_setup_tilelang_jit_hook"),
+        ):
+            jit_monitor.activate()
+            with mock.patch.object(jit_monitor.logger, "warning_once") as warning:
+                output_bucket_ranges = run(
+                    torch.nn.functional.pad(
+                        logical_ranges,
+                        (0, 0, 0, bucket_range_count - logical_range_count),
+                    )
+                )
+            warning.assert_not_called()
+    finally:
+        knobs.runtime.jit_post_compile_hook = previous_jit_hook
+
+    torch.testing.assert_close(output_logical_ranges, output_bucket_ranges)
 
 
 @pytest.mark.parametrize(
