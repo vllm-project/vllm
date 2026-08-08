@@ -52,6 +52,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             is_static_input_scheme=self.is_static_input_scheme,
             input_symmetric=self.input_symmetric,
             module_name=self.__class__.__name__,
+            weight_shape=(sum(output_partition_sizes), input_size_per_partition),
         )
 
         # WEIGHT
