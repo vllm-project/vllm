@@ -54,3 +54,13 @@ class ApertusReasoningParser(BaseThinkingReasoningParser):
         if self.start_token not in model_output and self.end_token not in model_output:
             return None, model_output
         return super().extract_reasoning(model_output, request)
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        # The base class only flips the phase once the end token appears.
+        # If the start token never appeared either, this is a direct tool
+        # call with no thinking block, so treat reasoning as already over.
+        if self.start_token_id not in input_ids:
+            return True
+        return super().is_reasoning_end_streaming(input_ids, delta_ids)
