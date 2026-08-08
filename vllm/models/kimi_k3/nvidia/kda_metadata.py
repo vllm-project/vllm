@@ -272,9 +272,32 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_spec_decodes = spec_sequence_masks_cpu.sum().item()
 
         if num_spec_decodes == 0:
-            # The runner orders ordinary decodes before prefills.
+            # The runner orders ordinary decodes before prefills. Query length
+            # alone cannot distinguish a true decode from a one-token prefill
+            # chunk, so classify by state instead: a chunk that resumes a
+            # partially prefilled request owns valid KDA state and stays a
+            # decode, while a *first* chunk owns none and must be a prefill.
+            # The decode route below reads its conv/recurrent slot
+            # unconditionally, and mamba blocks are not zeroed on reallocation;
+            # only the prefill route masks the slot with `has_initial_state`.
+            # The dummy batch used for cudagraph capture also has
+            # seq_len == query_len, so require the runner's prefill flag as
+            # well and only ever demote a row the runner is still prefilling.
+            assert m.seq_lens_cpu_upper_bound is not None
+            query_lens_cpu = query_start_loc_cpu.diff()
+            no_prior_state = (query_lens_cpu > 0) & (
+                m.seq_lens_cpu_upper_bound <= query_lens_cpu
+            )
+            if m.is_prefilling is not None:
+                no_prior_state &= m.is_prefilling
+            else:
+                no_prior_state = torch.zeros_like(no_prior_state)
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(m, decode_threshold=1)
+                split_decodes_and_prefills(
+                    m.replace(is_prefilling=no_prior_state),
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=False,
+                )
             )
             num_spec_decode_tokens = 0
             spec_token_indx = None
@@ -447,17 +470,19 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
 
+        # Decode-graph dispatch is shape-based, so a one-token batch can replay
+        # the captured decode graph even when a stateless first chunk made it a
+        # prefill batch above. Stage on the same condition the dispatcher uses,
+        # otherwise the replay would read state indices from an earlier step.
+        # `block_table_tensor` already holds NULL_BLOCK_ID for padded requests.
         if (
             self.use_full_cuda_graph
-            and num_prefills == 0
             and num_spec_decodes == 0
-            and num_decodes <= self.decode_cudagraph_max_bs
+            and m.max_query_len <= 1
+            and batch_size <= self.decode_cudagraph_max_bs
         ):
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
+            self.non_spec_state_indices_tensor[:batch_size].copy_(
                 non_spec_state_indices_tensor, non_blocking=True
-            )
-            self.non_spec_state_indices_tensor[num_decodes:batch_size].fill_(
-                NULL_BLOCK_ID
             )
             non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
                 :batch_size

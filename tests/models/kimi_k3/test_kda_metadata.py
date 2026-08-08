@@ -409,3 +409,155 @@ def test_aligned_block_table_matches_shared_gdn():
     )
 
     torch.testing.assert_close(actual, expected)
+
+
+def _build_non_spec(batch, is_prefilling, full_cuda_graph=False):
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=full_cuda_graph,
+    )
+    return builder, common_attn_metadata, builder.build(0, common_attn_metadata)
+
+
+def test_one_token_first_chunk_is_not_a_decode():
+    """A request being forwarded for the first time owns no KDA state, so its
+    one-token chunk must be a prefill: only the prefill path masks the state
+    slot with has_initial_state, and mamba blocks are not zeroed on reuse."""
+    _, _, actual = _build_non_spec(
+        BatchSpec(seq_lens=[100, 50, 1], query_lens=[1, 1, 1]),
+        is_prefilling=[False, False, True],
+    )
+
+    assert actual.num_prefills == 1
+    assert actual.num_prefill_tokens == 1
+    assert actual.num_decodes == 2
+    assert actual.num_decode_tokens == 2
+    assert actual.has_initial_state is not None
+    assert actual.has_initial_state.tolist() == [True, True, False]
+
+
+def test_one_token_extend_chunk_stays_a_decode():
+    """A one-token chunk that resumes a partially prefilled request does own
+    valid state, so it must stay on the decode path."""
+    _, _, actual = _build_non_spec(
+        BatchSpec(seq_lens=[100, 50, 65], query_lens=[1, 1, 1]),
+        is_prefilling=[False, False, True],
+    )
+
+    assert actual.num_decodes == 3
+    assert actual.num_decode_tokens == 3
+    assert actual.num_prefills == 0
+    assert actual.num_prefill_tokens == 0
+    assert actual.has_initial_state is None
+
+
+@pytest.mark.parametrize(
+    ("seq_lens", "is_prefilling"),
+    [
+        pytest.param([100, 50, 1], [False, False, True], id="first-token-chunk"),
+        pytest.param([100, 50, 20], [False, False, False], id="pure-decode"),
+    ],
+)
+def test_one_token_batch_stages_cudagraph_state_indices(seq_lens, is_prefilling):
+    """Decode-graph dispatch is shape based, so a one-token batch stages its
+    state indices even when a stateless first chunk makes it a prefill batch."""
+    builder, common_attn_metadata, actual = _build_non_spec(
+        BatchSpec(seq_lens=seq_lens, query_lens=[1, 1, 1]),
+        is_prefilling=is_prefilling,
+        full_cuda_graph=True,
+    )
+
+    staged = actual.non_spec_state_indices_tensor
+    assert staged is not None
+    assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
+    torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+
+
+def test_cudagraph_capture_batch_stays_decode_only():
+    """The dummy batch used for capture has seq_len == query_len for every row,
+    so classification must not promote it: the captured decode graph would
+    otherwise record the prefill kernels."""
+    batch = BatchSpec(seq_lens=[1] * 4, query_lens=[1] * 4)
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.zeros(4, dtype=torch.bool))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=True,
+    )
+    actual = builder.build_for_cudagraph_capture(common_attn_metadata)
+
+    assert actual.num_prefills == 0
+    assert actual.num_decodes == 4
+    assert actual.has_initial_state is None
+
+
+def test_all_stateless_one_token_batch_stages_cudagraph_state_indices():
+    """A batch of nothing but first chunks has no decodes at all, and still has
+    to stage its state indices: decode-graph dispatch keys on shape."""
+    builder, common_attn_metadata, actual = _build_non_spec(
+        BatchSpec(seq_lens=[1, 1, 1], query_lens=[1, 1, 1]),
+        is_prefilling=[True, True, True],
+        full_cuda_graph=True,
+    )
+
+    assert actual.num_decodes == 0
+    assert actual.num_prefills == 3
+    staged = actual.non_spec_state_indices_tensor
+    assert staged is not None
+    assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
+    torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+
+
+def test_zero_length_padding_row_is_not_a_prefill():
+    """A padded row carries no query tokens, so it must never be promoted out of
+    the decode group even if the runner still marks it as prefilling."""
+    _, _, actual = _build_non_spec(
+        BatchSpec(seq_lens=[100, 50, 0], query_lens=[1, 1, 0]),
+        is_prefilling=[False, False, True],
+    )
+
+    assert actual.num_decodes == 3
+    assert actual.num_prefills == 0
+    assert actual.has_initial_state is None
+
+
+def test_first_chunk_without_prefill_flag_is_left_unclassified():
+    """Without the runner's prefill flag (the microbatch path builds metadata
+    with is_prefilling unset), the builder cannot tell a first chunk from a
+    resumed one-token chunk, so it leaves the base classification unchanged
+    rather than promote a possibly-dummy batch."""
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[100, 50, 1], query_lens=[1, 1, 1]), BLOCK_SIZE, DEVICE
+    )
+    assert common_attn_metadata.is_prefilling is None
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+    )
+    actual = builder.build(0, common_attn_metadata)
+
+    assert actual.num_prefills == 0
+    assert actual.has_initial_state is None
+
+
+def test_multi_token_batch_does_not_stage_cudagraph_state_indices():
+    """A batch with a longer-than-one-token row is not a decode-graph batch, so
+    the staging guard must not fire even though it now keys on query length."""
+    builder, common_attn_metadata, actual = _build_non_spec(
+        BatchSpec(seq_lens=[100, 50], query_lens=[1, 2]),
+        is_prefilling=[False, False],
+        full_cuda_graph=True,
+    )
+
+    assert actual.num_prefills == 1
+    assert (
+        actual.non_spec_state_indices_tensor.data_ptr()
+        != builder.non_spec_state_indices_tensor.data_ptr()
+    )
