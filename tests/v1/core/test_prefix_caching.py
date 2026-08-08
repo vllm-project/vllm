@@ -73,6 +73,7 @@ def make_request(
     prompt_logprobs: int | None = None,
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
+    session_id: str | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -98,6 +99,7 @@ def make_request(
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
+        session_id=session_id,
     )
 
 
@@ -2294,6 +2296,71 @@ def test_block_stored_event_group_idx(group_id: int):
     )
 
 
+def test_block_stored_event_session_id():
+    block_size = 4
+    session_id = "agent-session-1"
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=5),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    req = make_request(
+        "req_session_id",
+        prompt_token_ids=list(range(block_size * 2)),
+        block_size=block_size,
+        hash_fn=sha256,
+        session_id=session_id,
+    )
+
+    manager.allocate_slots(req, req.num_tokens)
+    events = manager.take_events()
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].session_id == session_id
+
+
+def test_session_id_does_not_affect_prefix_cache_identity():
+    block_size = 4
+    prompt_token_ids = list(range(block_size * 2 + 1))
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=8),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    first_req = make_request(
+        "req_session_a",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        session_id="session-a",
+    )
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(first_req)
+    allocated_blocks = manager.allocate_slots(
+        first_req,
+        first_req.num_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert allocated_blocks is not None
+
+    second_req = make_request(
+        "req_session_b",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        session_id="session-b",
+    )
+    assert second_req.block_hashes == first_req.block_hashes
+
+    cached_blocks, num_cached_tokens, _ = manager.get_computed_blocks(second_req)
+    assert num_cached_tokens == block_size * 2
+    assert cached_blocks.get_block_ids() == (allocated_blocks.get_block_ids()[0][:2],)
+
+
 def test_block_stored_event_group_idx_multiple_groups():
     """
     Test BlockStored events for separate HMA groups that each carry the
@@ -2490,6 +2557,7 @@ def test_emit_cached_block_events():
         prompt_token_ids=list(range(num_tokens)),
         block_size=block_size,
         hash_fn=sha256,
+        session_id="agent-session-reuse",
     )
     assert len(req.block_hashes) >= num_cached_blocks
 
@@ -2527,6 +2595,7 @@ def test_emit_cached_block_events():
     assert event.medium == MEDIUM_GPU
     assert event.lora_id is None
     assert event.lora_name is None
+    assert event.session_id == "agent-session-reuse"
 
 
 def test_emit_cached_block_events_disabled():
