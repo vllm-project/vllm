@@ -147,6 +147,14 @@ def get_open_zmq_inproc_path() -> str:
     return f"inproc://{uuid4()}"
 
 
+def _get_reserved_port_range() -> range:
+    """Ports reserved for the data parallel master process (empty if unset)."""
+    if "VLLM_DP_MASTER_PORT" not in os.environ:
+        return range(0)
+    dp_master_port = envs.VLLM_DP_MASTER_PORT
+    return range(dp_master_port, dp_master_port + 10)
+
+
 def get_open_port() -> int:
     """
     Get an open port for the vLLM process to listen on.
@@ -156,14 +164,11 @@ def get_open_port() -> int:
     Right now we reserve 10 ports for the data parallel master
     process. Currently it uses 2 ports.
     """
-    if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_master_port = envs.VLLM_DP_MASTER_PORT
-        reserved_port_range = range(dp_master_port, dp_master_port + 10)
-        while True:
-            candidate_port = _get_open_port()
-            if candidate_port not in reserved_port_range:
-                return candidate_port
-    return _get_open_port()
+    reserved_port_range = _get_reserved_port_range()
+    port = _get_open_port()
+    if port in reserved_port_range:
+        port = _get_open_port(start_port=reserved_port_range.stop, max_attempts=1000)
+    return port
 
 
 def get_open_ports_list(count: int = 5) -> list[int]:
@@ -174,9 +179,14 @@ def get_open_ports_list(count: int = 5) -> list[int]:
     """
     ports_set = set[int]()
     if envs.VLLM_PORT is not None:
+        reserved_port_range = _get_reserved_port_range()
         next_port = envs.VLLM_PORT
         for _ in range(count):
             port = _get_open_port(start_port=next_port, max_attempts=1000)
+            if port in reserved_port_range:
+                port = _get_open_port(
+                    start_port=reserved_port_range.stop, max_attempts=1000
+                )
             ports_set.add(port)
             next_port = port + 1
         return list(ports_set)

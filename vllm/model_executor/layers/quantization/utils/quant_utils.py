@@ -62,6 +62,28 @@ def amax_for_moe_weight_quant(amax: torch.Tensor, moe_tp_size: int) -> torch.Ten
     return amax
 
 
+def amax_for_moe_activation_quant(
+    a_scale: torch.Tensor, enable_eplb: bool
+) -> torch.Tensor:
+    """Reduce a per-expert activation scale to one value shared by all experts.
+
+    Note: when EPLB is enabled and since this quantization scales get
+    folded into the per-expert dequantization alphas, we can only
+    ensure that the quant/dequant scales match by having a single
+    quantization scale shared across all ranks.
+    """
+    a_max = a_scale.max().to(torch.float32)
+    if enable_eplb:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        torch.distributed.all_reduce(
+            a_max,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_ep_group().device_group,
+        )
+    return a_max
+
+
 def get_fp8_min_max() -> tuple[float, float]:
     """Get the min and max values for FP8 quantization."""
     # Using the default value (240.0) from pytorch will cause accuracy
