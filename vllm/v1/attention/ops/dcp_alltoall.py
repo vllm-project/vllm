@@ -20,6 +20,7 @@ Reference: https://arxiv.org/abs/2507.07120
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -28,8 +29,108 @@ import torch.distributed as dist
 from vllm.triton_utils import tl, triton
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.attention.ops.common import CPTritonContext
+
+logger = logging.getLogger(__name__)
+
+
+# Module-level cache of the DCP A2A backend choice, resolved lazily by
+# ``ensure_dcp_a2a_backend`` the first time an attention backend selects the
+# A2A DCP-combine path. The dispatcher reads from cache during forward,
+# avoiding a dependency on ``get_current_vllm_config()`` that raises in V1's
+# async scheduling path.
+_DCP_A2A_BACKEND: str | None = None
+_DCP_A2A_INITIALIZED = False
+
+
+def set_dcp_a2a_backend(backend: str) -> None:
+    """Cache the DCP A2A backend on this worker process."""
+    global _DCP_A2A_BACKEND
+    _DCP_A2A_BACKEND = backend
+
+
+def _get_dcp_a2a_backend() -> str:
+    """Return the resolved DCP A2A kernel (``"nccl"`` or ``"flashinfer"``).
+
+    There is no user-facing flag: the choice is made automatically the first
+    time an attention backend selects the A2A combine path
+    (``ensure_dcp_a2a_backend``) — FlashInfer on Blackwell (sm_100+, where its
+    fused LL128 kernel is CUDA-graph captured and wins), NCCL packed everywhere
+    else — and cached here.
+    """
+    if _DCP_A2A_BACKEND is not None:
+        return _DCP_A2A_BACKEND
+    return "nccl"
+
+
+def ensure_dcp_a2a_backend(vllm_config: VllmConfig) -> None:
+    """Resolve the DCP A2A kernel and pre-allocate its workspace, once.
+
+    Called lazily from the attention backends when they select the A2A
+    DCP-combine path, so this hardware/feature-specific setup lives with the
+    feature rather than in the generic worker. Idempotent per process.
+
+    FlashInfer's fused LL128 A2A only wins when the decode a2a-reduce is
+    captured under a full CUDA graph on Blackwell (sm_100+); in eager /
+    piecewise-only cudagraph or on non-Blackwell its per-call launch overhead
+    makes it slower than NCCL packed, so those use NCCL.
+
+    The FlashInfer workspace must be allocated before CUDA-graph capture, which
+    holds because attention backends are constructed at model-runner /
+    attention-layer init, ahead of capture.
+
+    Args:
+        vllm_config: The active vLLM config, used to read the cudagraph mode
+            and the DCP group.
+    """
+    global _DCP_A2A_INITIALIZED
+    if _DCP_A2A_INITIALIZED:
+        return
+    _DCP_A2A_INITIALIZED = True
+
+    from vllm.config import CUDAGraphMode
+    from vllm.platforms import current_platform
+
+    cap = current_platform.get_device_capability()
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+    decode_full_cudagraph = (
+        cudagraph_mode is not None
+        and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+    )
+    use_fi = cap is not None and cap.major >= 10 and decode_full_cudagraph
+    if not use_fi:
+        set_dcp_a2a_backend("nccl")
+        return
+    set_dcp_a2a_backend("flashinfer")
+
+    from vllm.distributed.dcp_alltoall_flashinfer import DCPAllToAllFlashInfer
+    from vllm.distributed.parallel_state import get_dcp_group
+
+    g = get_dcp_group()
+    try:
+        DCPAllToAllFlashInfer.get(
+            cp_rank=g.rank_in_group,
+            cp_size=g.world_size,
+            cp_cpu_group=g.cpu_group,
+        )
+        logger.info("FlashInfer DCP A2A workspace pre-initialized.")
+    except Exception as e:
+        # FlashInfer A2A needs an MNNVL fabric workspace shared across the CP
+        # group. That works intra-node, and cross-node only on NVL72-class
+        # systems with IMEX/fabric handle exchange. On other setups the
+        # cross-node handle exchange (pidfd_open) or cuMemCreate(FABRIC) fails
+        # here. Rather than crash the engine, fall back to the NCCL all_to_all
+        # DCP path (the default; correct and portable).
+        logger.warning(
+            "FlashInfer DCP A2A workspace init failed (%s); falling back to "
+            "the NCCL all_to_all DCP path. FlashInfer A2A requires an MNNVL "
+            "fabric workspace across the CP group (GB200-NVL72-class for "
+            "cross-node); this configuration does not support it.",
+            repr(e),
+        )
+        set_dcp_a2a_backend("nccl")
 
 
 def _lse_weighted_combine(
@@ -432,8 +533,22 @@ def dcp_a2a_lse_reduce(
         cp_attn_lse = cp_attn_lse.to(torch.float32)
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
+    use_fi = _get_dcp_a2a_backend() == "flashinfer"
+    if use_fi:
+        # FlashInfer's LL128 kernel requires partial_o last-dim × elem_size
+        # to be 16-byte aligned. Pad ``D + lse_pack_dim`` up to the next
+        # 16-byte multiple. Pack writes only the first ``D + lse_pack_dim``
+        # slots; the padding is unread by unpack_combine (which loads via
+        # explicit offsets HEAD_DIM and HEAD_DIM+1).
+        elem_size = cp_attn_out.element_size()
+        elems_per_16B = 16 // elem_size
+        D_prime_raw = D + lse_pack_dim
+        D_prime = ((D_prime_raw + elems_per_16B - 1) // elems_per_16B) * elems_per_16B
+    else:
+        D_prime = D + lse_pack_dim
+
     send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(
-        (world_size, B, H_per_rank, D + lse_pack_dim),
+        (world_size, B, H_per_rank, D_prime),
         device=cp_attn_out.device,
         dtype=cp_attn_out.dtype,
     )
@@ -448,13 +563,47 @@ def dcp_a2a_lse_reduce(
         lse_pack_dim,
     )
 
-    work = dist.all_to_all_single(
-        recv_buffer.view(-1),
-        send_buffer.view(-1),
-        group=cp_group.device_group,
-        async_op=True,
-    )
-    work.wait()
+    if use_fi:
+        from vllm.distributed.dcp_alltoall_flashinfer import (
+            DCPAllToAllFlashInfer,
+        )
+
+        # send_buffer is [N, B, H_per_rank, D_prime]; permute to
+        # FlashInfer's convention [B*H_per_rank, N, D_prime] (cp_size
+        # is the second-to-last dim).
+        send_for_fi = (
+            send_buffer.permute(1, 2, 0, 3)
+            .reshape(B * H_per_rank, world_size, D_prime)
+            .contiguous()
+        )
+        # FlashInfer takes a softmax_stats arg as well. LSE is already
+        # bit-packed inside send_for_fi; pass a small placeholder.
+        placeholder = torch.zeros(
+            B * H_per_rank,
+            world_size,
+            2,
+            dtype=torch.float32,
+            device=send_buffer.device,
+        )
+        mgr = DCPAllToAllFlashInfer.get(
+            cp_rank=cp_group.rank_in_group,
+            cp_size=world_size,
+            cp_cpu_group=cp_group.cpu_group,
+        )
+        recv_fi, _ = mgr.run(send_for_fi, placeholder)
+        recv_buffer.copy_(
+            recv_fi.reshape(B, H_per_rank, world_size, D_prime)
+            .permute(2, 0, 1, 3)
+            .contiguous()
+        )
+    else:
+        work = dist.all_to_all_single(
+            recv_buffer.view(-1),
+            send_buffer.view(-1),
+            group=cp_group.device_group,
+            async_op=True,
+        )
+        work.wait()
 
     return _dcp_a2a_unpack_combine(
         recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
