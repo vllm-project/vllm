@@ -5,6 +5,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
+import regex as re
 from mistral_common.guidance.grammar_factory import GrammarFactory
 from mistral_common.guidance.tokenizer import from_mistral_tokenizer
 from mistral_common.protocol.instruct.request import (
@@ -204,6 +205,83 @@ def tekken_convert_tokens_to_string(
         ids = [_tekken_token_to_id(tokenizer, t) for t in tokens]
         return tokenizer.decode(ids, SpecialTokenPolicy.KEEP)
     return "".join(cast(Sequence[str], tokens))
+
+
+class _MistralCommonBackendWithSpecialTokens(MistralCommonBackend):
+    """`MistralCommonBackend` that encodes special tokens found in text.
+
+    mistral-common deliberately never encodes special tokens from text:
+    `encode("[IMG]")` tokenizes the literal string instead of returning the id
+    of the `[IMG]` token. HF processors (such as `PixtralProcessor`) insert
+    special placeholder tokens into the prompt text and rely on the tokenizer
+    to encode them back to their token ids, like HF tokenizers do for added
+    tokens.
+
+    This backend implements that behavior so HF processors can be used with
+    mistral-common tokenizers. It must only be used to tokenize trusted text,
+    not user-provided prompts.
+    """
+
+    @cached_property
+    def _special_token_to_id(self) -> dict[str, int]:
+        # `all_special_tokens` is aligned with `all_special_ids`.
+        return dict(zip(self.all_special_tokens, self.all_special_ids))
+
+    @cached_property
+    def _special_token_pattern(self) -> re.Pattern[str]:
+        # Longest match first, so a special token that is a prefix of another
+        # does not shadow it.
+        special_tokens = sorted(self.all_special_tokens, key=len, reverse=True)
+        return re.compile(f"({'|'.join(map(re.escape, special_tokens))})")
+
+    def _text_to_ids(self, text: str, add_special_tokens: bool) -> list[int]:
+        tokenizer = self.tokenizer.instruct_tokenizer.tokenizer
+
+        token_ids = list[int]()
+        # Segments at odd indices are the special tokens the pattern matched.
+        for i, segment in enumerate(self._special_token_pattern.split(text)):
+            if i % 2:
+                token_ids.append(self._special_token_to_id[segment])
+            elif segment:
+                token_ids.extend(tokenizer.encode(segment, bos=False, eos=False))
+
+        if add_special_tokens:
+            token_ids.insert(0, tokenizer.bos_id)
+            if self._mode == ValidationMode.finetuning:
+                token_ids.append(tokenizer.eos_id)
+
+        return token_ids
+
+
+def mistral_common_backend_with_special_tokens(
+    backend: MistralCommonBackend,
+) -> MistralCommonBackend:
+    """Variant of `backend` that encodes special tokens found in text,
+    which mistral-common never does.
+
+    HF processors insert special placeholder tokens (e.g. `"[IMG]"`) into the
+    prompt text and rely on the tokenizer to encode them back to their ids.
+    Only use the variant to tokenize trusted text, not user-provided prompts.
+    """
+    if isinstance(backend, _MistralCommonBackendWithSpecialTokens):
+        return backend
+
+    # Cache on the instance: callers (e.g. `cached_processor_from_config`)
+    # key their own caches on the tokenizer object, so returning a fresh
+    # instance per call would defeat them.
+    variant = getattr(backend, "_with_special_tokens_variant", None)
+    if variant is None:
+        variant = _MistralCommonBackendWithSpecialTokens(
+            tokenizer_path=backend._tokenizer_path,
+            mode=backend.mode,
+            model_max_length=backend.model_max_length,
+            padding_side=backend.padding_side,
+            truncation_side=backend.truncation_side,
+            model_input_names=backend.model_input_names,
+            clean_up_tokenization_spaces=backend.clean_up_tokenization_spaces,
+        )
+        backend._with_special_tokens_variant = variant
+    return variant
 
 
 class MistralTokenizer(TokenizerLike):
