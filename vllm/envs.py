@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
@@ -642,6 +643,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Same-step ghost-block defer guard (upstream PR #42359, unmerged).
+    # A block's hash is published to the shared BlockPool at SCHEDULING time,
+    # before the forward pass writes its KV, so another request admitted in the
+    # same step can match it and read unwritten values. MambaManager has guarded
+    # against this since #29387; every other manager -- including the MLA ones
+    # DeepSeek-V4 uses -- does not. When True, defer such a reader by one
+    # scheduling step. Off by default; only active when spec decode is enabled.
+    "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT": lambda: bool(
+        int(os.getenv("VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT", "0"))
+    ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
     # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
