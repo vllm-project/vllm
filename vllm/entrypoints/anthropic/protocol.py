@@ -74,13 +74,18 @@ class AnthropicTool(BaseModel):
 
     name: str
     description: str | None = None
-    input_schema: dict[str, Any]
+    # Optional: Anthropic server tools (web_search_20250305, computer_*, bash_*,
+    # text_editor_*, code_execution_*) are sent without an input_schema, so a
+    # required field rejects otherwise-valid requests (e.g. Claude Code).
+    input_schema: dict[str, Any] | None = None
     strict: bool | None = None
     defer_loading: bool | None = None
 
     @field_validator("input_schema")
     @classmethod
     def validate_input_schema(cls, v):
+        if v is None:
+            return v
         if not isinstance(v, dict):
             raise ValueError("input_schema must be a dictionary")
         if "type" not in v:
