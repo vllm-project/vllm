@@ -603,19 +603,33 @@ class FusedInputNorm(nn.Module):
 
         self.channel = channel
 
-        image_mean_tensor = torch.tensor(image_mean, dtype=dtype) * (
+        # Model construction can set the accelerator as PyTorch's default
+        # device. Determine whether the normalization is an identity on CPU
+        # so torch.allclose does not introduce a device synchronization while
+        # the model is being initialized. The actual buffers below still use
+        # the caller's default device.
+        image_mean_cpu = torch.tensor(image_mean, dtype=dtype, device="cpu") * (
             1.0 / rescale_factor
         )
-        image_std_tensor = torch.tensor(image_std, dtype=dtype) * (1.0 / rescale_factor)
-        weight = 1.0 / image_std_tensor
-        bias = -image_mean_tensor / image_std_tensor
-
+        image_std_cpu = torch.tensor(image_std, dtype=dtype, device="cpu") * (
+            1.0 / rescale_factor
+        )
+        weight_cpu = 1.0 / image_std_cpu
+        bias_cpu = -image_mean_cpu / image_std_cpu
         self.is_identity = bool(
-            torch.allclose(weight, torch.ones_like(weight))
-            and torch.allclose(bias, torch.zeros_like(bias))
+            torch.allclose(weight_cpu, torch.ones_like(weight_cpu))
+            and torch.allclose(bias_cpu, torch.zeros_like(bias_cpu))
         )
 
         if not self.is_identity:
+            image_mean_tensor = torch.tensor(image_mean, dtype=dtype) * (
+                1.0 / rescale_factor
+            )
+            image_std_tensor = torch.tensor(image_std, dtype=dtype) * (
+                1.0 / rescale_factor
+            )
+            weight = 1.0 / image_std_tensor
+            bias = -image_mean_tensor / image_std_tensor
             self.register_buffer("weight", weight)
             self.register_buffer("bias", bias)
             self.register_buffer("running_mean", torch.zeros_like(image_mean_tensor))

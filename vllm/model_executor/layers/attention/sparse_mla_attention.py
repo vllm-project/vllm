@@ -19,8 +19,10 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     MLACommonMetadata,
     MLACommonPrefillMetadata,
+    accumulate_mla_context_chunk,
     build_mla_chunked_context_metadata,
     get_mla_dims,
+    init_mla_context_partial,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -60,17 +62,14 @@ def _topk_mask_shape(
 def _masked_mha_workspace_fits(
     batch_size: int,
     max_query_len: int,
-    context_chunk_max_seq_lens: list[int] | None,
+    max_context_chunk_seq_len: int,
     workspace_numel: int,
 ) -> bool:
     """Return whether the suffix and per-context-chunk masks fit the workspace.
 
     The global mask is excluded: it always needs more, and has its own check.
     """
-    max_key_len = max(
-        max_query_len,
-        max(context_chunk_max_seq_lens or (), default=0),
-    )
+    max_key_len = max(max_query_len, max_context_chunk_seq_len)
     needed = math.prod(_topk_mask_shape(batch_size, max_query_len, max_key_len))
     return needed <= workspace_numel
 
@@ -185,10 +184,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             64 * 1024,
             scheduler_config.max_num_seqs * topk_tokens,
         )
-        return max(
-            workspace_size,
-            scheduler_config.max_num_seqs * cache_config.block_size,
-        )
+        return max(workspace_size, cache_config.block_size)
 
     def _build_req_id_per_token(
         self,
@@ -228,7 +224,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         return build_mla_chunked_context_metadata(
             context_lens_cpu=context_lens_cpu,
             prefill_query_start_loc_cpu=prefill_query_start_loc_cpu,
-            num_prefills=num_prefills,
             chunked_prefill_workspace=self.chunked_prefill_workspace,
             chunked_prefill_workspace_size=self.chunked_prefill_workspace_size,
             block_size=self.kv_cache_spec.block_size,
@@ -542,14 +537,15 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         workspace = prefill.topk_mask_workspace
         if workspace is None or prefill.query_lens_cpu is None:
             return False
+        max_context_chunk_seq_len = 0
+        if prefill.chunked_context is not None:
+            max_context_chunk_seq_len = max(
+                chunk.max_seq_len for chunk in prefill.chunked_context.chunks
+            )
         fits = _masked_mha_workspace_fits(
             batch_size=len(prefill.query_lens_cpu),
             max_query_len=prefill.max_query_len,
-            context_chunk_max_seq_lens=(
-                None
-                if prefill.chunked_context is None
-                else prefill.chunked_context.max_seq_lens
-            ),
+            max_context_chunk_seq_len=max_context_chunk_seq_len,
             workspace_numel=workspace.numel(),
         )
         if not fits:
@@ -716,69 +712,70 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context is not None
-        use_global_mask = dense_mask is not None
         output: torch.Tensor | None = None
         output_lse: torch.Tensor | None = None
         workspace = chunked_context.workspace
 
-        for i, toks in enumerate(chunked_context.seq_tot):
-            if toks == 0:
-                continue
+        for chunk in chunked_context.chunks:
+            toks = chunk.num_context_tokens
+            requests = chunk.request_slice
             ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
-                block_table=prefill_metadata.block_table,
-                cu_seq_lens=chunked_context.cu_seq_lens[i],
-                token_to_seq=chunked_context.token_to_seq[i],
-                num_tokens=chunked_context.chunk_total_token[i],
+                block_table=prefill_metadata.block_table[requests],
+                cu_seq_lens=chunk.cu_seq_lens,
+                token_to_seq=chunk.token_to_seq,
+                num_tokens=toks,
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=k_scale,
-                seq_starts=chunked_context.starts[i],
+                seq_starts=chunk.starts,
             )
 
             chunk_kv_c = workspace[:toks, : self.kv_lora_rank]
             chunk_k_pe = workspace[:toks, self.kv_lora_rank :].unsqueeze(1)
             k, v = self._project_kv(chunk_kv_c, chunk_k_pe)
-            chunk_lens = chunked_context.seq_lens[i].tolist()
-            chunk_topk = (
-                topk_per_req
-                if use_global_mask
-                else self._remap_topk_to_ranges(
-                    topk_per_req,
-                    chunked_context.starts[i],
-                    chunk_lens,
+            if dense_mask is not None:
+                chunk_mask: torch.Tensor | None = dense_mask[requests]
+                chunk_topk = topk_per_req[requests]
+                key_starts: torch.Tensor | None = chunk.starts
+            else:
+                chunk_mask = None
+                chunk_topk = self._remap_topk_to_ranges(
+                    topk_per_req[requests],
+                    chunk.starts,
+                    chunk.seq_lens.tolist(),
                 )
-            )
+                key_starts = None
             attn_out, lse = self._run_masked_mha(
-                q=q,
+                q=q[chunk.token_slice],
                 k=k,
                 v=v,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=chunked_context.cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=chunked_context.max_seq_lens[i],
+                cu_seqlens_q=chunk.query_start_loc,
+                cu_seqlens_k=chunk.cu_seq_lens,
+                max_seqlen_q=chunk.max_query_len,
+                max_seqlen_k=chunk.max_seq_len,
                 topk_per_req=chunk_topk,
-                q_lens=q_lens,
+                q_lens=q_lens[requests],
                 causal=False,
                 return_softmax_lse=True,
-                dense_mask=dense_mask,
-                key_starts=(chunked_context.starts[i] if use_global_mask else None),
+                dense_mask=chunk_mask,
+                key_starts=key_starts,
                 topk_mask_workspace=prefill_metadata.topk_mask_workspace,
             )
 
             if output is None:
-                output = attn_out
-                output_lse = lse
-            else:
-                assert output_lse is not None
-                merge_attn_states(
-                    output=output,
-                    output_lse=output_lse,
-                    prefix_output=output,
-                    prefix_lse=output_lse,
-                    suffix_output=attn_out,
-                    suffix_lse=lse,
+                if (
+                    len(chunked_context.chunks) == 1
+                    and not chunked_context.empty_token_slices
+                ):
+                    return attn_out, lse
+                output, output_lse = init_mla_context_partial(
+                    chunked_context,
+                    attn_out,
+                    lse,
+                    num_tokens=q.shape[0],
                 )
+            accumulate_mla_context_chunk(chunk, attn_out, lse, output, output_lse)
 
         assert output is not None and output_lse is not None
         return output, output_lse
@@ -844,7 +841,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             output.copy_(attn_out[..., : self.v_head_dim].flatten(start_dim=-2))
             return
 
-        context_lens = chunked_context.seq_lens.sum(dim=0).tolist()
+        context_lens = chunked_context.context_lens_list
         dense_mask = self._try_build_global_mask(
             topk_per_req,
             q_lens,
@@ -889,5 +886,4 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             prefix_lse=context_lse,
             suffix_output=suffix_output[..., : self.v_head_dim],
             suffix_lse=suffix_lse,
-            prefill_tokens_with_context=chunked_context.prefill_tokens_with_context,
         )

@@ -763,7 +763,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 prefix_lse=context_lse,
                 suffix_output=suffix_output[..., : self.v_head_dim],
                 suffix_lse=suffix_lse,
-                prefill_tokens_with_context=prefill.chunked_context.prefill_tokens_with_context,
             )
         elif not writes_out:
             out.copy_(output_prefill[..., : self.v_head_dim].flatten(start_dim=-2))

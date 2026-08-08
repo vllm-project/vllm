@@ -565,6 +565,11 @@ def has_humming() -> bool:
     return _has_module("humming")
 
 
+def has_quark():
+    """Whether the optional `quark` package is available."""
+    return _has_module("quark")
+
+
 def check_torchcodec_available():
     """Whether the optional `torchcodec` package is available."""
     try:

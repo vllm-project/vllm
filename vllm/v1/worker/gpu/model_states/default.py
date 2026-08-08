@@ -70,14 +70,7 @@ class DefaultModelState(ModelState):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor:
-        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
-            scheduled_encoder_inputs
-        )
-        if mm_kwargs:
-            # Execute the multimodal encoder.
-            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
-            # Cache the encoder outputs by mm_hash
-            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
+        self.execute_mm_encoder(scheduled_encoder_inputs)
 
         mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
         if self.mm_pruner is not None and mm_embeds:

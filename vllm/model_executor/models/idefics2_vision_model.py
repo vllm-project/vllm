@@ -19,6 +19,7 @@
 """PyTorch Idefics2 model."""
 
 from collections.abc import Iterable
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -352,7 +353,7 @@ class Idefics2Encoder(nn.Module):
 
 
 class Idefics2VisionTransformer(nn.Module):
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper: ClassVar[WeightsMapper] = WeightsMapper(
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),

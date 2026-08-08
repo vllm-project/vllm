@@ -162,15 +162,12 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
 
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from tokenspeed_mla import tokenspeed_mla_prefill
-
-        assert self._prefill_metadata.chunked_context is not None
-        chunked = self._prefill_metadata.chunked_context
 
         # See note in run_prefill_new_tokens — `v` is a split-view of `kv_nope`
         # in `_compute_prefill_context` and arrives non-contiguous.
@@ -180,15 +177,15 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
             query=q,
             key=k,
             value=v,
-            seq_lens=chunked.seq_lens[chunk_idx],
-            cum_seq_lens=chunked.cu_seq_lens[chunk_idx],
-            max_seq_len=chunked.max_seq_lens[chunk_idx],
-            batch_size=chunked.seq_lens[chunk_idx].shape[0],
+            seq_lens=chunk.seq_lens,
+            cum_seq_lens=chunk.cu_seq_lens,
+            max_seq_len=chunk.max_seq_len,
+            batch_size=chunk.num_requests,
             softmax_scale=self.scale,
             is_causal=False,
             return_lse=True,
-            cum_seq_lens_q=self._prefill_metadata.query_start_loc,
-            max_seq_len_q=self._prefill_metadata.max_query_len,
+            cum_seq_lens_q=chunk.query_start_loc,
+            max_seq_len_q=chunk.max_query_len,
             enable_pdl=False,
         )
 

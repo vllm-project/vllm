@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Sized
 from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
@@ -30,7 +30,7 @@ from transformers.models.audioflamingo3 import (
 from transformers.models.qwen2_audio import Qwen2AudioEncoder
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -226,6 +226,7 @@ class AudioFlamingo3DummyInputsBuilder(
         audio_len = int(hf_processor.max_audio_len * sampling_rate)
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
@@ -317,7 +318,7 @@ def _count_audio_tokens_from_mask(
         if isinstance(chunk_counts, torch.Tensor):
             counts = chunk_counts.tolist()
         elif chunk_counts and isinstance(chunk_counts[0], torch.Tensor):
-            counts = [count.item() for count in chunk_counts]
+            counts = [int(count) for count in chunk_counts]
         else:
             counts = chunk_counts
 
@@ -375,7 +376,7 @@ class AudioFlamingo3MultiModalProcessor(
     def _call_hf_processor(
         self,
         prompt: str,
-        mm_data: dict[str, object],
+        mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
@@ -412,7 +413,8 @@ class AudioFlamingo3MultiModalProcessor(
         chunk_counts = []
         for audio in audio_list:
             # audio is numpy array or list
-            n_samples = len(audio) if isinstance(audio, list) else audio.shape[0]
+            assert isinstance(audio, Sized)
+            n_samples = len(audio)
 
             n_win = max(1, (n_samples + window_size - 1) // window_size)
             if n_win > max_windows:
@@ -457,6 +459,7 @@ class AudioFlamingo3MultiModalProcessor(
                 )
             else:
                 audio_embeds = out_mm_data["audio_embeds"][item_idx]
+                assert isinstance(audio_embeds, torch.Tensor)
                 num_features = audio_embeds.shape[0]
 
             if num_features == 0:
@@ -556,8 +559,8 @@ class AudioFlamingo3ForConditionalGeneration(
     def _process_audio_input(
         self, audio_input: AudioFlamingo3Inputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        if audio_input["type"] == "audio_embeds":
-            audio_embeds = audio_input["audio_embeds"]
+        if audio_input.type == "audio_embeds":
+            audio_embeds = audio_input.audio_embeds
             return tuple(audio_embeds)
 
         (
