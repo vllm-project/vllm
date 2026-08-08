@@ -164,9 +164,13 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
 def get_developer_message(
     instructions: str | None = None,
     tools: list[Tool | ChatCompletionToolsParam] | None = None,
+    *,
+    force_instructions: bool = False,
 ) -> Message:
     dev_msg_content = DeveloperContent.new()
-    if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
+    if instructions is not None and (
+        force_instructions or not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS
+    ):
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
         function_tools: list[Tool | ChatCompletionToolsParam] = []
@@ -318,12 +322,15 @@ def build_harmony_preamble(
     python_description: str | None = None,
     container_description: str | None = None,
     with_custom_tools: bool = False,
+    force_developer_instructions: bool = False,
 ) -> list[Message]:
     """
     Build the standard Harmony system/developer prefix for a request.
     """
     developer_instructions = system_instructions = None
-    if envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
+    if force_developer_instructions:
+        developer_instructions = instructions
+    elif envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         system_instructions = instructions
     else:
         developer_instructions = instructions
@@ -343,6 +350,7 @@ def build_harmony_preamble(
             get_developer_message(
                 instructions=developer_instructions,
                 tools=tools,
+                force_instructions=force_developer_instructions,
             )
         )
     return messages

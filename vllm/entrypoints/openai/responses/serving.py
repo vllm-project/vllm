@@ -1182,6 +1182,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         request.reasoning.effort if request.reasoning else None
                     ),
                     with_custom_tools=with_custom_tools,
+                    force_developer_instructions=True,
                     **tool_descriptions,
                 )
             )
