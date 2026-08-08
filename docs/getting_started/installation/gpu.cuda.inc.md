@@ -64,9 +64,9 @@ uv pip install -U vllm \
 !!! warning "`pip` caveat"
 
     Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
-
+    
     If you insist on using `pip`, you have to specify the full URL of the wheel file (which can be obtained from the web page).
-
+    
     ```bash
     pip install -U https://wheels.vllm.ai/2f3f441f84bd5b35ec8aa9fcfffb540f107da8a7/vllm-0.23.1rc1.dev901%2Bg2f3f441f8-cp38-abi3-manylinux_2_28_x86_64.whl # current nightly build (the filename will change!)
     pip install -U https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-0.23.1rc1.dev901%2Bg2f3f441f8-cp38-abi3-manylinux_2_28_x86_64.whl # from specific commit
@@ -114,7 +114,7 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
     ./build_rust.sh          # release build
     ./build_rust.sh --debug  # faster build for development
     ```
-
+    
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
 In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the `main` branch was just merged and its precompiled wheel is not available yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to automatically select the most recent already-built commit on `main`.
@@ -161,9 +161,9 @@ uv pip install -e . --torch-backend=auto
 
     For example, you can install [ccache](https://github.com/ccache/ccache) using `conda install ccache` or `apt install ccache` .
     As long as `which ccache` command can find the `ccache` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
-
+    
     When using `ccache` with `pip install -e .`, you should run `CCACHE_NOHASHDIR="true" pip install --no-build-isolation -e .`. This is because `pip` creates a new folder with a random name for each build, preventing `ccache` from recognizing that the same files are being built.
-
+    
     [sccache](https://github.com/mozilla/sccache) works similarly to `ccache`, but has the capability to utilize caching in remote storage environments.
     The following environment variables can be set to configure the vLLM `sccache` remote: `SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1`. We also recommend setting `SCCACHE_IDLE_TIMEOUT=0`.
 
@@ -296,10 +296,10 @@ You can add any other [engine-args](https://docs.vllm.ai/en/latest/configuration
 
     If you need to use those dependencies (having accepted the license terms),
     create a custom Dockerfile on top of the base image with an extra layer that installs them:
-
+    
     ```Dockerfile
     FROM vllm/vllm-openai:v0.11.0
-
+    
     # e.g. install the `audio` optional dependencies
     # NOTE: Make sure the version of vLLM matches the base image!
     RUN uv pip install --system vllm[audio]==0.11.0
@@ -310,10 +310,10 @@ You can add any other [engine-args](https://docs.vllm.ai/en/latest/configuration
 
     To use the development version of `transformers`, create a custom Dockerfile on top of the base image
     with an extra layer that installs their code from source:
-
+    
     ```Dockerfile
     FROM vllm/vllm-openai:latest
-
+    
     RUN uv pip install --system git+https://github.com/huggingface/transformers.git
     ```
 
@@ -336,6 +336,33 @@ This will automatically configure `LD_LIBRARY_PATH` to point to the compatibilit
 
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]
+
+
+
+--8<-- [start:arm-gb10-notes]
+
+### ARM + NVIDIA GB10 (DGX Spark) Notes
+
+When using vLLM's embedding mode on the ARM architecture with NVIDIA GPUs (e.g., NVIDIA GB10 / DGX Spark), please be aware of the following known issue.
+
+#### Known Issue: NGC 26.01 Container
+
+In the NVIDIA NGC container `nvcr.io/nvidia/vllm:26.01-py3`, using the `--convert embed` flag with MoE models like `Qwen3MoE` may fail with:
+
+```text
+AttributeError: 'Qwen3MoeForEmbedding' object has no attribute 'logits_processor'
+```
+
+**Root cause**: This is a container-specific packaging issue. vLLM upstream has confirmed that this error **does not exist** in the latest main branch and that the issue is isolated to the `26.01` NGC container build. See [vllm-project/vllm#49657](https://github.com/vllm-project/vllm/issues/49657) for the full discussion.
+
+**Solutions**:
+
+- **Recommended**: Use `nvcr.io/nvidia/vllm:26.05-py3` or later.
+- **Workaround**: Deploy chat models with vLLM on GPU, and serve embedding/reranker models on CPU using frameworks like `sentence-transformers`.
+
+--8<-- [end:arm-gb10-notes]
+
+
 
 You can build and run vLLM from source via the provided [docker/Dockerfile](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile). To build vLLM:
 
@@ -361,7 +388,7 @@ DOCKER_BUILDKIT=1 docker build . \
     *   **Enable the feature** by adding the build argument: `--build-arg VLLM_USE_PRECOMPILED="1"`.
     *   **How it works**: By default, vLLM automatically finds the correct wheels from our [Nightly Builds](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds/) by using the merge-base commit with the upstream `main` branch.
     *   **Override commit**: To use wheels from a specific commit, provide the `--build-arg VLLM_PRECOMPILED_WHEEL_COMMIT=<commit_hash>` argument.
-
+    
     For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds/#precompiled-wheels-usage), these args are similar.
 
 #### Building vLLM's Docker Image from Source for Arm64/aarch64
@@ -410,11 +437,11 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
     If you are building the `linux/arm64` image on a non-ARM host (e.g., an x86_64 machine), you need to ensure your system is set up for cross-compilation using QEMU. This allows your host machine to emulate ARM64 execution.
 
     Run the following command on your host machine to register QEMU user static handlers:
-
+    
     ```bash
     docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
     ```
-
+    
     After setting up QEMU, you can use the `--platform "linux/arm64"` flag in your `docker build` command.
 
 #### Use the custom-built vLLM Docker image**
