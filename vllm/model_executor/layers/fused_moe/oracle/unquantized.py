@@ -84,6 +84,18 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         if moe_config.moe_parallel_config.dp_size > 1:
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
+        # HACK: the unquantized FlashInfer CUTLASS MoE kernel hangs in the first
+        # forward pass when the per-partition intermediate size is not a multiple
+        # of 128. Observed on SM100 (B200) with Gemma 4 26B A4B, whose
+        # moe_intermediate_size is 704 (704 % 128 == 64): the engine never
+        # reaches the profiling/warmup run and the process spins on CPU forever.
+        # FLASHINFER_TRTLLM already declines this shape (see the % 128 check in
+        # _trtllm_bf16_lora_supported), but CUTLASS has no equivalent guard, so
+        # it gets selected and hangs. Demote it and let Triton take over.
+        # Same demotion pattern as the Qwen3.5/dp_size hack above.
+        if moe_config.intermediate_size_per_partition % 128 != 0:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
         # HACK: unquantized FlashInfer aliases SWIGLUOAI to plain Swiglu
         # (swiglu_alpha/limit only set on the MXFP4 branch). Route to
         # Triton's swigluoai_and_mul until that's plumbed through. Same
