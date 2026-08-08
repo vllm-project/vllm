@@ -897,21 +897,22 @@ class TestAdjustRequest:
     COMMENTARY = (
         "<|channel|>commentary<|message|>commentary message<|end|><|start|>assistant"
     )
+    # Harmony renders tool calls recipient-first with the channel attached
+    # directly to the function name and a bare `` json`` marker, matching
+    # ``openai_harmony`` output (see TestHarmonyGrammarAcceptsRealRenders).
     TOOL_CALL_1 = (
-        ANALYSIS + f"<|channel|>commentary to=functions.{TOOL_1_NAME} json<|message|>"
+        ANALYSIS + f" to=functions.{TOOL_1_NAME}<|channel|>commentary json<|message|>"
         "{}<|call|>"
     )
     TOOL_CALL_2 = (
-        ANALYSIS + f"<|channel|>commentary to=functions.{TOOL_2_NAME} json<|message|>"
+        ANALYSIS + f" to=functions.{TOOL_2_NAME}<|channel|>commentary json<|message|>"
         '{"city": "Tokyo"}<|call|>'
     )
     FINAL_JSON_SCHEMA = (
-        ANALYSIS
-        + '<|channel|>final <|constrain|>json<|message|>{"answer": "Tokyo"}<|end|>'
+        ANALYSIS + '<|channel|>final json<|message|>{"answer": "Tokyo"}<|end|>'
     )
     FINAL_JSON_OBJECT = (
-        ANALYSIS
-        + '<|channel|>final <|constrain|>json<|message|>{"city": "Tokyo"}<|end|>'
+        ANALYSIS + '<|channel|>final json<|message|>{"city": "Tokyo"}<|end|>'
     )
     FINAL_TEXT_ONLY = ANALYSIS + "<|channel|>final<|message|>any<|end|>"
     FINAL_REGEX = ANALYSIS + "<|channel|>final<|message|>regex<|end|>"
@@ -1194,3 +1195,50 @@ class TestAdjustRequest:
             adjusted_request,
             expected_admission,
         )
+
+
+class TestHarmonyGrammarAcceptsRealRenders:
+    """The strict tool-call grammar must accept the exact byte sequences that
+    ``openai_harmony`` renders; otherwise constrained decoding can never satisfy
+    it. Sourcing samples from the harmony encoder keeps this guard tied to
+    reality, unlike hand-written begin strings.
+    """
+
+    @staticmethod
+    def _auto_grammar(harmony_parser) -> Grammar:
+        request = TestAdjustRequest._build_request(
+            "chat", tool_choice="auto", strict_tools=True
+        )
+        adjusted = harmony_parser.adjust_request(request)
+        structural_tag = adjusted.structured_outputs.structural_tag
+        return Grammar.from_structural_tag(structural_tag)
+
+    @staticmethod
+    def _rendered_output(*response_messages: Message) -> str:
+        prompt = [Message.from_role_and_content(Role.USER, "Hi")]
+        tokens = get_model_output_tokens(prompt, list(response_messages))
+        return get_encoding().decode_utf8(tokens)
+
+    @pytest.mark.parametrize("content_type", ["json", "<|constrain|>json"])
+    def test_tool_call_render_accepted(self, harmony_parser, content_type):
+        output = self._rendered_output(
+            assistant("reasoning", "analysis"),
+            tool_call(
+                f"functions.{TestAdjustRequest.TOOL_2_NAME}",
+                '{"city": "Tokyo"}',
+                content_type=content_type,
+            ),
+        )
+        assert _is_grammar_accept_string(
+            self._auto_grammar(harmony_parser), output, require_termination=False
+        ), f"grammar rejected real harmony tool-call render: {output!r}"
+
+    @pytest.mark.parametrize("content_type", ["json", "<|constrain|>json"])
+    def test_json_final_render_accepted(self, harmony_parser, content_type):
+        final = assistant('{"answer": "Tokyo"}', "final").with_content_type(
+            content_type
+        )
+        output = self._rendered_output(assistant("reasoning", "analysis"), final)
+        assert _is_grammar_accept_string(
+            self._auto_grammar(harmony_parser), output, require_termination=False
+        ), f"grammar rejected real harmony json-final render: {output!r}"
