@@ -420,6 +420,42 @@ def test_non_structural_tag_parser_uses_schema_constraints(
     assert out.structured_outputs.structural_tag is None
 
 
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+    ids=["required", "named"],
+)
+def test_parser_without_required_and_named_support_skips_schema_constraints(
+    tool_choice: str | dict[str, object],
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    """``supports_required_and_named=False`` parsers must not get the tool
+    JSON schema installed as a decoding constraint.
+
+    Their models emit a native, non-JSON tool-call syntax (GLM's XML tags,
+    thinking special tokens), which the JSON grammar rejects: the FSM fails
+    to advance and the request 500s or hangs forever when ``max_tokens`` is
+    unset. The serving layer already falls back to auto parsing here, so the
+    request must stay unconstrained.
+    """
+    parser = Glm47MoeModelToolParser(MagicMock(), tools=sample_tools)
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [],
+            "model": "m",
+            "tools": [tool.model_dump() for tool in sample_tools],
+            "tool_choice": tool_choice,
+        }
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is None
+
+
 def test_get_structural_tag_disables_reasoning(
     monkeypatch: pytest.MonkeyPatch,
     sample_tools_strict: list[ChatCompletionToolsParam],
