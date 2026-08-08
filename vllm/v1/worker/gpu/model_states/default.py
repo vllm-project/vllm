@@ -161,6 +161,9 @@ class DefaultModelState(ModelState):
                 req_ids=input_batch.req_ids,
                 mm_features=self.encoder_cache.mm_features,
                 sliding_window=self.model_config.get_sliding_window(),
+                clamp_in_kernel=getattr(
+                    self.model, "mm_prefix_clamp_sliding_window", False
+                ),
             )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

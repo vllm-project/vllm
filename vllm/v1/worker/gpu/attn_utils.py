@@ -594,11 +594,17 @@ def compute_mm_prefix_ranges(
     req_ids: list[str],
     mm_features: dict[str, list[MultiModalFeatureSpec]],
     sliding_window: int | None = None,
+    clamp_in_kernel: bool = False,
 ) -> dict[int, list[tuple[int, int]]]:
     """Compute PrefixLM bidirectional ranges for multimodal tokens.
 
-    Ranges exceeding sliding_window are skipped to prevent early tokens
-    from attending across the entire image span.
+    By default, ranges exceeding sliding_window are skipped to prevent early
+    tokens from attending across the entire image span. Models that clamp
+    mm_prefix to the sliding window *in-kernel* (e.g. Gemma4, which needs HF's
+    (causal OR blockwise) AND sliding_window on sliding layers) pass
+    ``clamp_in_kernel=True`` to opt out of the skip, so the bidirectional range
+    survives for images larger than the window; the kernel then bounds it
+    per-query.
     """
     req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
     for req_idx, req_id in enumerate(req_ids):
@@ -607,7 +613,11 @@ def compute_mm_prefix_ranges(
             if mm_feature.modality not in ("image", "video"):
                 continue
             for r in mm_feature.mm_position.extract_embeds_range():
-                if sliding_window is not None and (r[1] - r[0] + 1) > sliding_window:
+                if (
+                    not clamp_in_kernel
+                    and sliding_window is not None
+                    and (r[1] - r[0] + 1) > sliding_window
+                ):
                     continue
                 image_doc_ranges.append(r)
         req_doc_ranges[req_idx] = image_doc_ranges
