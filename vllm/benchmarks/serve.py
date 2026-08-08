@@ -675,7 +675,10 @@ def calculate_metrics(
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
 
-        for i, output in enumerate(successful_outputs):
+        for i, output in enumerate(outputs):
+            if not output.success:
+                continue
+
             # Calculate token generation timestamp using
             # start_time, ttft, and itl
             token_times = [output.start_time + output.ttft]
@@ -684,11 +687,15 @@ def calculate_metrics(
                 current_time += itl_value
                 token_times.append(current_time)
 
+            # A chunk can bundle several tokens under speculative decoding,
+            # so weight it by the request's tokens per chunk.
+            tokens_per_chunk = actual_output_lens[i] / len(token_times)
+
             # Add tokens to second buckets
             for token_time in token_times:
                 second_bucket = int(token_time - min_start_time)
                 if 0 <= second_bucket < duration_seconds:
-                    tokens_per_second[second_bucket] += 1
+                    tokens_per_second[second_bucket] += tokens_per_chunk
 
             # Track concurrent requests for each second this request was active
             request_start_second = int(output.start_time - min_start_time)
