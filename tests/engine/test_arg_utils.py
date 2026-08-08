@@ -707,6 +707,17 @@ class TestDeviceIds:
         with pytest.raises(ValueError, match="out of range"):
             args._resolve_device_ids()
 
+    def test_device_ids_with_cvd_negative_index(self, monkeypatch):
+        """A negative --device-ids index raises instead of silently
+        negative-indexing into the CVD set and selecting the wrong device."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "4,5")
+        args = EngineArgs(model="m", device_ids=[-1])
+        with pytest.raises(ValueError, match="out of range"):
+            args._resolve_device_ids()
+
     def test_device_ids_with_cvd_resolve_to_physical_ids(self, monkeypatch):
         """--device-ids are CVD-local indices resolved to physical ids."""
         from vllm.platforms import current_platform
