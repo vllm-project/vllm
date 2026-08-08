@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
@@ -118,43 +119,80 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # is intended for static-quantisation backends (TRTLLM/CUTLASS) and
         # causes every intermediate activation to saturate at max FP4 when
         # multiplied by values that large.  Force to 1.0 so the kernel uses
-        # its own per-block dynamic scale.
+        # its own per-block dynamic scale.  W4A16 NVFP4 checkpoints have no
+        # calibrated a2_gscale at all; b12x performs dynamic per-block
+        # FC2-input quantization, so a uniform 1.0 scale per expert is
+        # equivalent in both cases.  Allocate once here so apply() stays
+        # alloc-free.
         if self.a2_gscale is not None:
             self.a2_gscale.fill_(1.0)
-            self._fc2_input_scale = self.a2_gscale
-        else:
-            # W4A16 NVFP4 checkpoints have no calibrated a2_gscale; b12x
-            # performs dynamic per-block FC2-input quantization, so a uniform
-            # 1.0 scale per expert is equivalent to the bake-in above for
-            # static-quant checkpoints. Allocate once here so apply() stays
-            # alloc-free.
-            self._fc2_input_scale = torch.ones(
+        self._fc2_input_scale = self._stable_runtime_tensor(
+            layer,
+            "fc2_input_scale",
+            torch.ones(
                 self.num_local_experts,
                 device=layer.w13_weight.device,
                 dtype=torch.float32,
-            )
+            ),
+        )
+
+        # Bind the flashinfer wrapper cached on the layer. The wrapper
+        # pre-allocates its CUDA-graph workspaces and output buffer at
+        # construction, so captured graphs bake those addresses too; a fresh
+        # wrapper per experts rebuild would leave replayed graphs writing
+        # into freed workspace storage after a weight reload.
+        wrapper = getattr(layer, "_flashinfer_b12x_wrapper", None)
+        if wrapper is None:
+            wrapper = self._build_wrapper()
+            layer._flashinfer_b12x_wrapper = wrapper
+        self._wrapper = wrapper
 
         # Precompute MMA-layout views of the weight scale factors once here
         # rather than recomputing on every forward pass.
         assert self.w1_scale is not None
         num_experts_w1, m1, k1_sf = self.w1_scale.shape
         k1 = k1_sf * 16
-        self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1,
-            k=k1,
-            num_groups=num_experts_w1,
+        self.w1_sf_mma = self._stable_runtime_tensor(
+            layer,
+            "w1_sf_mma",
+            flashinfer_convert_sf_to_mma_layout(
+                self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
+                m=m1,
+                k=k1,
+                num_groups=num_experts_w1,
+            ),
         )
 
         assert self.w2_scale is not None
         num_experts_w2, m2, k2_sf = self.w2_scale.shape
         k2 = k2_sf * 16
-        self.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2,
-            k=k2,
-            num_groups=num_experts_w2,
+        self.w2_sf_mma = self._stable_runtime_tensor(
+            layer,
+            "w2_sf_mma",
+            flashinfer_convert_sf_to_mma_layout(
+                self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
+                m=m2,
+                k=k2,
+                num_groups=num_experts_w2,
+            ),
         )
+
+    def _stable_runtime_tensor(
+        self, layer: torch.nn.Module, name: str, value: torch.Tensor
+    ) -> torch.Tensor:
+        """Bind a runtime tensor to a reload-stable address on the layer.
+
+        This experts object is rebuilt by every process_weights_after_loading
+        pass, and these tensors are passed to the fused kernel each forward,
+        so captured CUDA graphs bake their addresses (see #48312).
+        Registering them on the owning layer with
+        replace_parameter(prefer_copy=True) makes every rebuild copy into the
+        storage the graph captured instead of allocating fresh tensors, and
+        layer registration puts them inside layerwise reload's kernel-tensor
+        copy-back so a reload refreshes them at the captured address.
+        """
+        replace_parameter(layer, name, value, prefer_copy=True)
+        return getattr(layer, name)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -227,14 +265,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # from pre-quantizing activations.
         return True
 
-    def _ensure_wrapper(self) -> None:
-        """Lazily create B12xMoEWrapper on first use."""
-        if self._wrapper is not None:
-            return
-
+    def _build_wrapper(self) -> Any:
         from flashinfer.fused_moe import B12xMoEWrapper
 
-        self._wrapper = B12xMoEWrapper(
+        return B12xMoEWrapper(
             num_experts=self.global_num_experts,
             top_k=self.topk,
             hidden_size=self.hidden_dim,
@@ -244,6 +278,13 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.num_local_experts,
             activation=self._activation_str,
         )
+
+    def _ensure_wrapper(self) -> None:
+        """Create B12xMoEWrapper on first use if process_weights_after_loading
+        did not already bind the layer-cached one (tests, direct use)."""
+        if self._wrapper is not None:
+            return
+        self._wrapper = self._build_wrapper()
 
     def apply(
         self,
