@@ -194,6 +194,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -202,6 +203,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    session_id=session_id,
                 )
             else:
                 generator = self.engine_client.generate(
@@ -210,8 +212,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     request_id_item,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority,
+                    priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                 )
 
             generators.append(generator)
@@ -386,6 +389,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
+                            logprob_token_ids=request.logprob_token_ids,
                             initial_text_offset=previous_text_lens[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
@@ -560,6 +564,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                         num_output_top_logprobs=request.logprobs,
+                        logprob_token_ids=request.logprob_token_ids,
                         return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
@@ -653,6 +658,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
         tokenizer: TokenizerLike | None,
+        logprob_token_ids: list[int] | None = None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
@@ -717,7 +723,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
                         for i, top_lp in enumerate(step_top_logprobs.items())
-                        if num_output_top_logprobs >= i
+                        if logprob_token_ids or num_output_top_logprobs >= i
                     }
                 )
 

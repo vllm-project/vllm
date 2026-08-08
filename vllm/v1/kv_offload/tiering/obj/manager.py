@@ -7,12 +7,13 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
-from vllm.distributed.kv_events import MEDIUM_OBJ
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
@@ -97,7 +98,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
-    medium: ClassVar[str] = MEDIUM_OBJ
+    medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
         self,
@@ -108,6 +109,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         prefix: str = "",
         io_threads: int = 4,
         enable_kv_events: bool = False,
+        locality: str | None = None,
     ):
         """
         Args:
@@ -120,8 +122,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             enable_kv_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
+            locality: Whether this tier's storage is LOCAL or REMOTE relative
+                to the publishing vLLM instance.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:
@@ -302,15 +307,36 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             else:
                 if state == NIXL_PROC:
                     continue
-                elif state == NIXL_DONE:
+                if state == NIXL_DONE:
                     success = True
                 else:
                     success = False
                     logger.warning("transfer failed job=%d state=%s", job_id, state)
+
+            try:
+                self._agent.release_xfer_handle(entry.xfer_handle)
+            except Exception as exc:
+                # Keep the entry until NIXL confirms that the transfer handle
+                # can be released. The transfer may still access primary-tier
+                # memory, so publishing its result would allow unsafe reuse.
+                logger.warning("release_xfer_handle failed for job %d: %s", job_id, exc)
+                continue
+
+            # Once the transfer handle is released, these remaining cleanup
+            # failures must not suppress the job completion. They can leak
+            # NIXL metadata, but cannot leave an active data transfer behind.
+            try:
+                self._agent.release_dlist_handle(entry.obj_handle)
+            except Exception as exc:
+                logger.warning(
+                    "release_dlist_handle failed for job %d: %s", job_id, exc
+                )
+            try:
+                self._agent.deregister_memory(entry.files_desc)
+            except Exception as exc:
+                logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
+
             del self._transfers[job_id]
-            self._agent.release_xfer_handle(entry.xfer_handle)
-            self._agent.release_dlist_handle(entry.obj_handle)
-            self._agent.deregister_memory(entry.files_desc)
             self._pending_results.append(JobResult(job_id=job_id, success=success))
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -323,7 +349,12 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 keys = self._store_job_keys.pop(result.job_id, None)
                 if result.success and keys:
                     self.events.append(
-                        OffloadingEvent(keys=keys, medium=self.medium, removed=False)
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.medium,
+                            removed=False,
+                            locality=self.locality,
+                        )
                     )
         return results
 

@@ -781,6 +781,7 @@ def _rms_norm_kernel(
     n_cols,
     eps,
     BLOCK_SIZE: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
 ):
     """
     Compute RMS normalization along the last dimension of a 2D tensor.
@@ -813,18 +814,19 @@ def _rms_norm_kernel(
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
         mask = col_idx < n_cols
         vals = tl.load(row_start_ptr + col_idx, mask=mask, other=0.0)
-        weight = tl.load(weight_ptr + col_idx, mask=mask, other=1.0)
         # Compute in float32 then convert back to input dtype
         vals_f32 = vals.to(tl.float32)
-        weight_f32 = weight.to(tl.float32)
-        output_f32 = vals_f32 * inv_rms * weight_f32
+        output_f32 = vals_f32 * inv_rms
+        if HAS_WEIGHT:
+            weight = tl.load(weight_ptr + col_idx, mask=mask, other=1.0)
+            output_f32 = output_f32 * weight.to(tl.float32)
         output = output_f32.to(vals.dtype)
         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
 
 
 def rms_norm_batch_invariant(
     input: torch.Tensor,
-    weight: torch.Tensor,
+    weight: torch.Tensor | None,
     eps: float = 1e-6,
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -834,7 +836,8 @@ def rms_norm_batch_invariant(
 
     Args:
         input: Input tensor of shape (..., hidden_size)
-        weight: Weight tensor of shape (hidden_size,)
+        weight: Weight tensor of shape (hidden_size,), or None to skip the
+            per-channel multiply (``RMSNorm(has_weight=False)``)
         eps: Small constant for numerical stability
         residual: Optional residual tensor fused into the normalization path
 
@@ -851,17 +854,18 @@ def rms_norm_batch_invariant(
         ops.fused_add_rms_norm(input, residual, weight, eps)
         return input, residual
 
-    assert weight.dim() == 1, "Weight must be 1-dimensional"
-    assert input.shape[-1] == weight.shape[0], (
-        f"Input last dimension ({input.shape[-1]}) must match "
-        f"weight dimension ({weight.shape[0]})"
-    )
+    if weight is not None:
+        assert weight.dim() == 1, "Weight must be 1-dimensional"
+        assert input.shape[-1] == weight.shape[0], (
+            f"Input last dimension ({input.shape[-1]}) must match "
+            f"weight dimension ({weight.shape[0]})"
+        )
+        weight = weight.contiguous()
 
     # Flatten all dimensions except the last one
     original_shape = input.shape
     input_2d = input.reshape(-1, input.shape[-1])
     input_2d = input_2d.contiguous()
-    weight = weight.contiguous()
 
     n_rows, n_cols = input_2d.shape
 
@@ -870,13 +874,14 @@ def rms_norm_batch_invariant(
     grid = (n_rows,)
     _rms_norm_kernel[grid](
         input_2d,
-        weight,
+        weight if weight is not None else input_2d,
         output,
         input_2d.stride(0),
         output.stride(0),
         n_cols,
         eps,
         BLOCK_SIZE=BLOCK_SIZE,
+        HAS_WEIGHT=weight is not None,
     )
     return output.reshape(original_shape)
 
@@ -904,37 +909,41 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    if current_platform.is_device_capability_family(80):
-        # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
-        # triton persistent matmul overrides for mm/addmm/matmul/linear.
-        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
-    else:
-        # Hopper (SM90) and Blackwell (SM100): the only source of batch
-        # variance is split-k, which we disable via the cuBLAS workspace
-        # config.
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-        os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+    key = current_platform.dispatch_key
 
-    # Triton bmm/persistent-matmul kernels read this for the FP16 N-tile size;
-    # set unconditionally because bmm is overridden on all CUDA platforms.
     if current_platform.is_cuda():
+        if current_platform.is_device_capability_family(80):
+            # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
+            # triton persistent matmul overrides for mm/addmm/matmul/linear.
+            _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
+        else:
+            # Hopper (SM90) and Blackwell (SM100): the only source of batch
+            # variance is split-k, which we disable via the cuBLAS workspace
+            # config.
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+            os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
+    elif current_platform.is_xpu():
+        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
+        # TODO: register matmul and linear for XPU
+        # once suitable Triton kernels are implemented
 
-    _batch_invariant_LIB.impl(
-        "aten::_log_softmax", _log_softmax_batch_invariant, "CUDA"
-    )
-    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "CUDA")
+        _fp16_block_size_n = 128
 
+    _batch_invariant_LIB.impl("aten::_log_softmax", _log_softmax_batch_invariant, key)
+    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
+    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
+    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
     # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
     # (torch._native.ops.bmm_outer_product), so we need allow_override
     # to replace it at the dispatcher level.
     _batch_invariant_LIB.impl(
-        "aten::bmm", bmm_batch_invariant, "CUDA", allow_override=True
+        "aten::bmm", bmm_batch_invariant, key, allow_override=True
     )
     torch.bmm = bmm_batch_invariant
 
@@ -947,7 +956,8 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
         reduced_precision_val
     )
-    torch.backends.cuda.preferred_blas_library(backend="cublaslt")
+    if current_platform.is_cuda():
+        torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
 def override_envs_for_invariance():

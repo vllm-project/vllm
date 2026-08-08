@@ -33,6 +33,7 @@ from vllm.parser.engine.registered_adapters import (
     DeepSeekV32Parser,
     Gemma4Parser,
     Glm47MoeParser,
+    InklingParser,
     KimiK2Parser,
     MinimaxM2Parser,
     NemotronV3Parser,
@@ -948,6 +949,77 @@ _KIMI_K2_SCENARIOS = [
 ]
 
 
+# ── Inkling (typed content blocks, JSON tool payloads) ───────────────────
+
+_TML_VOCAB: dict[str, int] = {
+    "<|message_model|>": 200001,
+    "<|content_text|>": 200004,
+    "<|content_model_end_sampling|>": 200006,
+    "<|content_thinking|>": 200008,
+    "<|end_message|>": 200010,
+    "<|content_tool_error|>": 200022,
+    "<|content_invoke_tool_json|>": 200049,
+    "<|content_invoke_tool_text|>": 200057,
+}
+
+
+def _inkling_block(
+    segs: list[tuple[str, bool]],
+    kind_token: str,
+    body: str,
+) -> None:
+    """Append one Inkling content block; blocks after the first start with
+    the ``<|message_model|>`` role token (the first block continues the
+    generation prompt directly)."""
+    if segs:
+        segs.append(("<|message_model|>", True))
+    segs.append((kind_token, True))
+    if body:
+        segs.append((body, False))
+    segs.append(("<|end_message|>", True))
+
+
+def _inkling_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        _inkling_block(segs, "<|content_thinking|>", scenario.reasoning)
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        _inkling_block(segs, "<|content_invoke_tool_json|>", "")
+    if scenario.content is not None:
+        _inkling_block(segs, "<|content_text|>", scenario.content)
+    if scenario.tool_calls:
+        for tc in scenario.tool_calls:
+            args = json.dumps(tc.arguments, ensure_ascii=False, separators=(",", ":"))
+            payload = f'{{"name":"{tc.name}","args":{args}}}'
+            _inkling_block(segs, "<|content_invoke_tool_json|>", payload)
+    return segs
+
+
+def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
+    prompt_token_ids = None
+    if scenario.after_tool_response:
+        # Prompt ends with a closed tool-response block and the
+        # generation-prompt role token.
+        prompt_token_ids = [
+            _TML_VOCAB["<|end_message|>"],
+            _TML_VOCAB["<|message_model|>"],
+        ]
+    sample = _make_sample(
+        sample_id=f"inkling-{scenario.id}",
+        description=scenario.description,
+        vocab=_TML_VOCAB,
+        segments=_inkling_segments(scenario),
+        expected_reasoning=scenario.reasoning,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+        prompt_token_ids=prompt_token_ids,
+    )
+    if validate:
+        _validate_sample(sample, InklingParser)
+    return sample
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
@@ -960,6 +1032,7 @@ _BUILDERS: dict[str, Any] = {
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
+    "inkling": _build_inkling,
 }
 
 
