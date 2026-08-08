@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import json
+import time
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 from uuid import uuid4
@@ -30,6 +32,10 @@ from .serving import OpenAIServingRealtime
 
 logger = init_logger(__name__)
 
+# Grace period granted for an in-flight generation to finalize gracefully
+# after an idle timeout before it is forcibly cancelled.
+_IDLE_FINALIZE_GRACE_S = 5.0
+
 
 class RealtimeConnection:
     """Manages WebSocket lifecycle and state for realtime transcription.
@@ -54,6 +60,14 @@ class RealtimeConnection:
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
+        # Idle watchdog: close sessions that stop sending audio without ever
+        # finalizing, so the engine request releases its KV cache blocks.
+        # See https://github.com/vllm-project/vllm/issues/46815.
+        self._idle_timeout_s = envs.VLLM_REALTIME_IDLE_TIMEOUT_S
+        self._idle_finalize_grace_s = _IDLE_FINALIZE_GRACE_S
+        self._last_activity_monotonic = time.monotonic()
+        self._watchdog_task: asyncio.Task | None = None
+
     async def handle_connection(self):
         """Main connection loop."""
         await self.websocket.accept()
@@ -62,6 +76,11 @@ class RealtimeConnection:
 
         # Send session created event
         await self.send(SessionCreated())
+
+        # Start the idle watchdog (no-op when disabled via the env var).
+        self._touch()
+        if self._idle_timeout_s > 0:
+            self._watchdog_task = asyncio.create_task(self._idle_watchdog())
 
         try:
             while True:
@@ -134,6 +153,8 @@ class RealtimeConnection:
 
                 # Put audio chunk in queue
                 self.audio_queue.put_nowait(audio_array)
+                # Valid audio input counts as activity for the idle watchdog.
+                self._touch()
 
             except Exception as e:
                 logger.error("Failed to decode audio: %s", e)
@@ -173,6 +194,10 @@ class RealtimeConnection:
         if self.generation_task is not None and not self.generation_task.done():
             logger.warning("Generation already in progress, ignoring commit")
             return
+
+        # Starting generation counts as activity; repeated no-op commits that
+        # hit the guard above intentionally do not reset the idle watchdog.
+        self._touch()
 
         # Create audio stream generator
         audio_stream = self.audio_stream_generator()
@@ -277,8 +302,71 @@ class RealtimeConnection:
         error_event = ErrorEvent(error=message, code=code)
         await self.websocket.send_text(error_event.model_dump_json())
 
+    def _touch(self) -> None:
+        """Record meaningful client activity for the idle watchdog."""
+        self._last_activity_monotonic = time.monotonic()
+
+    async def _idle_watchdog(self) -> None:
+        """Close the session when it stops receiving audio for too long.
+
+        A realtime client can otherwise pin engine resources (KV cache) by
+        keeping the WebSocket open while never sending more audio or a
+        ``final`` commit, leaving the generation request blocked on the audio
+        queue. See https://github.com/vllm-project/vllm/issues/46815.
+        """
+        timeout = self._idle_timeout_s
+        while self._is_connected:
+            idle = time.monotonic() - self._last_activity_monotonic
+            remaining = timeout - idle
+            if remaining <= 0:
+                await self._handle_idle_timeout(idle)
+                return
+            # Sleep until the session would next become idle. If activity
+            # arrives meanwhile the timer is pushed back and we re-check.
+            await asyncio.sleep(remaining)
+
+    async def _handle_idle_timeout(self, idle: float) -> None:
+        """Finalize and tear down a session that has been idle too long."""
+        logger.warning(
+            "Realtime session %s idle for %.1fs (timeout=%ds); finalizing and "
+            "closing to release engine resources.",
+            self.connection_id,
+            idle,
+            self._idle_timeout_s,
+        )
+
+        # Best-effort notification to the client before tearing down.
+        with contextlib.suppress(Exception):
+            await self.send_error("Session closed due to inactivity.", "idle_timeout")
+
+        # Gracefully end any in-flight generation: the None sentinel stops
+        # audio_stream_generator, which lets engine.generate() complete and
+        # release its KV cache blocks. Force-cancel if it does not unwind in
+        # time.
+        self.audio_queue.put_nowait(None)
+        if self.generation_task is not None and not self.generation_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self.generation_task),
+                    timeout=self._idle_finalize_grace_s,
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                self.generation_task.cancel()
+            except Exception:
+                pass
+
+        # Closing the socket unblocks handle_connection()'s receive loop, which
+        # then runs cleanup() and fully releases the connection.
+        self._is_connected = False
+        with contextlib.suppress(Exception):
+            await self.websocket.close(code=1000, reason="idle timeout")
+
     async def cleanup(self):
         """Cleanup resources."""
+        # Stop the idle watchdog.
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+
         # Signal audio stream to stop
         self.audio_queue.put_nowait(None)
 
