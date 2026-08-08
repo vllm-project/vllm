@@ -110,7 +110,7 @@ RUN git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com
 
 # Install vllm dependencies in advance. Effect: As long as common.txt remains unchanged, the docker cache layer will be valid.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r /workspace/vllm-ascend/requirements.txt
+    pip install -r /workspace/vllm-ascend/requirements.txt --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
