@@ -206,6 +206,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "apertus_tool_parser",
         "ApertusToolParser",
     ),
+    "telechat4": (
+        "telechat4_tool_parser",
+        "TeleChat4ToolParser",
+    ),
 }
 
 
