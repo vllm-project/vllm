@@ -354,7 +354,7 @@ class Scheduler(SchedulerInterface):
             self._re_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
-        self._num_admitted_while_paused = 0
+        self._admitted_while_paused: set[str] = set()
 
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
@@ -2231,8 +2231,7 @@ class Scheduler(SchedulerInterface):
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self._pause_state != PauseState.UNPAUSED:
-                self._num_admitted_while_paused += 1
-                if self._num_admitted_while_paused == 1:
+                if not self._admitted_while_paused:
                     logger.warning(
                         "Request %s was admitted while the scheduler is paused "
                         "(%s). It is queued and will not be scheduled until "
@@ -2240,6 +2239,7 @@ class Scheduler(SchedulerInterface):
                         request.request_id,
                         self._pause_state.name,
                     )
+                self._admitted_while_paused.add(request.request_id)
             if self.connector is not None:
                 self.connector.on_new_request(request)
             if self.log_stats:
@@ -2347,12 +2347,22 @@ class Scheduler(SchedulerInterface):
         return self._pause_state
 
     def set_pause_state(self, pause_state: PauseState) -> None:
-        if pause_state == PauseState.UNPAUSED and self._num_admitted_while_paused:
-            logger.warning(
-                "%d request(s) admitted while paused are now schedulable.",
-                self._num_admitted_while_paused,
+        # Tracked by id rather than by count so that moving between pause
+        # states does not lose the tally, and so that requests aborted during
+        # the pause are not reported as becoming schedulable.
+        if pause_state == PauseState.UNPAUSED:
+            num_live = sum(
+                1
+                for req_id in self._admitted_while_paused
+                if (req := self.requests.get(req_id)) is not None
+                and not req.is_finished()
             )
-        self._num_admitted_while_paused = 0
+            if num_live:
+                logger.warning(
+                    "%d request(s) admitted while paused are now schedulable.",
+                    num_live,
+                )
+            self._admitted_while_paused.clear()
         self._pause_state = pause_state
 
     def _free_request_blocks(self, request: Request):

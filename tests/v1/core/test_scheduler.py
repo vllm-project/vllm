@@ -5734,22 +5734,105 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     assert replay.num_tokens - num_scheduled == block_size
 
 
-def test_requests_admitted_while_paused_are_reported(caplog):
+@pytest.mark.parametrize("pause_state", [PauseState.PAUSED_NEW, PauseState.PAUSED_ALL])
+def test_requests_admitted_while_paused_are_reported(caplog, pause_state):
     """A request arriving during a pause is queued rather than rejected, and
     that must not be silent: it is invisible to the unfinished-request count,
     so nothing else would tell the caller it is being held."""
     scheduler = create_scheduler()
-    requests = create_requests(num_requests=2)
+    requests = create_requests(num_requests=3)
 
-    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    scheduler.set_pause_state(pause_state)
     with caplog.at_level(logging.WARNING):
         for request in requests:
             scheduler.add_request(request)
     assert requests[0].request_id in caplog.text
+    # One line per pause, not one per request.
+    assert caplog.text.count("was admitted while the scheduler is paused") == 1
 
     assert scheduler.get_num_unfinished_requests() == 0
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert "3 request(s) admitted while paused" in caplog.text
+    assert scheduler.get_num_unfinished_requests() == 3
+
+
+def test_admitted_while_paused_survives_a_change_of_pause_state(caplog):
+    """`pause(abort)` followed by `sleep()` moves PAUSED_NEW -> PAUSED_ALL with
+    no resume in between. The tally must span the whole paused period rather
+    than restart, or the resume report undercounts what was held."""
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=2)
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    scheduler.add_request(requests[0])
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.add_request(requests[1])
+
+    with caplog.at_level(logging.WARNING):
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert "2 request(s) admitted while paused" in caplog.text
+
+
+def test_admitted_while_paused_excludes_aborted_requests(caplog):
+    """The warning tells the caller to abort what it does not want. Having done
+    so, the resume report must not still claim those requests are schedulable.
+    """
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=3)
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    for request in requests:
+        scheduler.add_request(request)
+    scheduler.finish_requests(
+        [requests[0].request_id, requests[1].request_id],
+        RequestStatus.FINISHED_ABORTED,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert "1 request(s) admitted while paused" in caplog.text
+    assert scheduler.get_num_unfinished_requests() == 1
+
+
+def test_admitted_while_paused_is_silent_when_nothing_was_held(caplog):
+    """Regression guard: the unpaused path must not log, and a pause that
+    admitted nothing (or whose requests were all aborted) must not report."""
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=2)
+
+    with caplog.at_level(logging.WARNING):
+        scheduler.add_request(requests[0])
+        scheduler.set_pause_state(PauseState.PAUSED_NEW)
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert "admitted while" not in caplog.text
+
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.add_request(requests[1])
+    scheduler.finish_requests(requests[1].request_id, RequestStatus.FINISHED_ABORTED)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert "admitted while paused" not in caplog.text
+
+
+def test_admitted_while_paused_reports_each_pause_episode(caplog):
+    """State must not leak across pauses: a second pause warns again, and
+    reports only its own requests."""
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=3)
+
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    scheduler.add_request(requests[0])
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        scheduler.set_pause_state(PauseState.PAUSED_NEW)
+        scheduler.add_request(requests[1])
+        scheduler.add_request(requests[2])
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert requests[1].request_id in caplog.text
     assert "2 request(s) admitted while paused" in caplog.text
