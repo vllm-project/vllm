@@ -3,9 +3,13 @@
 """
 Inference-only LLaVA-OneVision-2 (OV2) model for vLLM.
 
+Also serves ``MageVLForConditionalGeneration`` (``microsoft/Mage-VL``), which
+uses the same architecture with a Qwen3-4B backbone and its own remote-code
+module names (resolved from the checkpoint's ``auto_map``).
+
 Architecture notes:
 
-  * LLM backbone is plain Qwen3-8B with 1-D position_ids (no M-RoPE).
+  * LLM backbone is plain Qwen3 with 1-D position_ids (no M-RoPE).
   * Vision tower removes the CLS token (no class_embedding/class_pos_emb).
   * Vision RoPE is 3-D (T:H:W) with a 4:6:6 head_dim split and uses
     ``patch_positions`` instead of grid_thw to compute per-token freqs.
@@ -112,6 +116,26 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 logger = init_logger(__name__)
 
 
+# Remote-code entry points, keyed by the ``auto_map`` entry each checkpoint
+# publishes. Every OV2-architecture checkpoint ships the same three modules
+# under its own name (OV2: ``*_llava_onevision2``; Mage-VL: ``*_mage_vl``), so
+# the references are read from ``auto_map`` rather than hardcoded.
+_DEFAULT_AUTO_MAP = {
+    "AutoProcessor": "processing_llava_onevision2.LlavaOnevision2Processor",
+    "AutoVideoProcessor": (
+        "video_processing_llava_onevision2.LlavaOnevision2VideoProcessor"
+    ),
+}
+
+
+def _codec_module_name(processor_module: str) -> str:
+    """Map a processor module to its sibling codec module.
+
+    ``processing_mage_vl`` -> ``codec_video_processing_mage_vl``.
+    """
+    return f"codec_video_processing_{processor_module.removeprefix('processing_')}"
+
+
 @lru_cache
 def _load_ov2_processor(
     model: str,
@@ -129,14 +153,29 @@ def _load_ov2_processor(
     path = convert_model_repo_to_path(model)
     revision = revision or "main"
 
+    # Codec defaults live under the "codec" key of preprocessor_config.json,
+    # which Qwen2VLImageProcessor does not preserve; read them directly so the
+    # codec video backend keeps its configured defaults. The same file carries
+    # the ``auto_map`` naming the checkpoint's remote-code classes.
+    codec_config: dict = {}
+    auto_map: dict = {}
+    try:
+        preprocessor_config = get_hf_file_to_dict(
+            "preprocessor_config.json", path, revision
+        )
+        codec_config = (preprocessor_config or {}).get("codec", {}) or {}
+        auto_map = (preprocessor_config or {}).get("auto_map", {}) or {}
+    except Exception:
+        logger.debug("OV2: no codec defaults found in preprocessor_config.json")
+
     processor_cls = get_class_from_dynamic_module(
-        "processing_llava_onevision2.LlavaOnevision2Processor",
+        auto_map.get("AutoProcessor", _DEFAULT_AUTO_MAP["AutoProcessor"]),
         path,
         revision=revision,
         trust_remote_code=trust_remote_code,
     )
     video_processor_cls = get_class_from_dynamic_module(
-        "video_processing_llava_onevision2.LlavaOnevision2VideoProcessor",
+        auto_map.get("AutoVideoProcessor", _DEFAULT_AUTO_MAP["AutoVideoProcessor"]),
         path,
         revision=revision,
         trust_remote_code=trust_remote_code,
@@ -157,18 +196,6 @@ def _load_ov2_processor(
         patch_size=getattr(image_processor, "patch_size", 14),
         spatial_merge_size=getattr(image_processor, "merge_size", 2),
     )
-
-    # Codec defaults live under the "codec" key of preprocessor_config.json,
-    # which Qwen2VLImageProcessor does not preserve; read them directly so the
-    # codec video backend keeps its configured defaults.
-    codec_config: dict = {}
-    try:
-        preprocessor_config = get_hf_file_to_dict(
-            "preprocessor_config.json", path, revision
-        )
-        codec_config = (preprocessor_config or {}).get("codec", {}) or {}
-    except Exception:
-        logger.debug("OV2: no codec defaults found in preprocessor_config.json")
 
     return processor_cls(
         image_processor=image_processor,
@@ -343,14 +370,12 @@ def _codec_fps_for(video_path: str, hf_processor) -> float:
         return _CODEC_FPS_CACHE[video_path]
     # The codec module is shipped inside the HF transformers_modules package
     # for OV2, so an absolute import does not resolve. Locate it relative to
-    # the processor module (which lives in the same package).
+    # the processor module (which lives in the same package, and whose name
+    # carries the checkpoint's module suffix).
     proc_module_name = type(hf_processor).__module__
-    pkg = proc_module_name.rsplit(".", 1)[0] if "." in proc_module_name else ""
-    codec_mod = importlib.import_module(
-        f"{pkg}.codec_video_processing_llava_onevision2"
-        if pkg
-        else "codec_video_processing_llava_onevision2"
-    )
+    pkg, _, leaf = proc_module_name.rpartition(".")
+    codec_leaf = _codec_module_name(leaf)
+    codec_mod = importlib.import_module(f"{pkg}.{codec_leaf}" if pkg else codec_leaf)
     CodecConfig = codec_mod.CodecConfig
     process_codec_video = codec_mod.process_codec_video
     cfg_defaults = dict(getattr(hf_processor, "_codec_config_defaults", {}))
@@ -637,15 +662,15 @@ def _ov2_smart_nframes(
 
 @VIDEO_LOADER_REGISTRY.register(
     "llava_onevision2",
-    video_processor="LlavaOnevision2VideoProcessor",
+    video_processor=("LlavaOnevision2VideoProcessor", "MageVLVideoProcessor"),
 )
 class LlavaOnevision2VideoBackend(VideoBackend):
-    """Frame-sampling backend for LLaVA-OneVision-2.
+    """Frame-sampling backend for LLaVA-OneVision-2 and Mage-VL.
 
-    Selected automatically for OV2 via the ``video_processor`` binding
-    (``video_processor_type == "LlavaOnevision2VideoProcessor"`` in the model's
-    ``video_preprocessor_config.json``). Decoding uses the inherited OpenCV /
-    PyAV codecs; only the sampling index policy is overridden to match qwen.
+    Selected automatically via the ``video_processor`` binding (the
+    ``video_processor_type`` in the model's ``video_preprocessor_config.json``).
+    Decoding uses the inherited OpenCV / PyAV codecs; only the sampling index
+    policy is overridden to match qwen.
     """
 
     _sampling_suffix = "_llava_onevision2"

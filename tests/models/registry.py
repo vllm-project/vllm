@@ -1102,6 +1102,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
     ),
+    "MageVLForConditionalGeneration": _HfExamplesInfo(
+        "microsoft/Mage-VL",
+        trust_remote_code=True,
+        # Keep the init/schema harness eager (these tests never run forward).
+        enforce_eager=True,
+    ),
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
     ),
