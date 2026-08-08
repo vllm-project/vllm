@@ -66,7 +66,7 @@ class FlashAttnMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_batch_invariance(cls) -> bool:
-        return True
+        return False
 
     @staticmethod
     def get_builder_cls() -> type["FlashAttnMLAMetadataBuilder"]:
