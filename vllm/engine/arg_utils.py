@@ -695,7 +695,6 @@ class EngineArgs:
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
-    override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     kv_cache_dtype_skip_layers: list[str] = get_field(
@@ -906,9 +905,6 @@ class EngineArgs:
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
-        model_group.add_argument(
-            "--override-attention-dtype", **model_kwargs["override_attention_dtype"]
-        )
         model_group.add_argument(
             "--logits-processors", **model_kwargs["logits_processors"]
         )
@@ -1772,7 +1768,6 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             enable_cumem_allocator=self.enable_cumem_allocator,
             model_impl=self.model_impl,
-            override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             video_pruning_method=self.video_pruning_method,
