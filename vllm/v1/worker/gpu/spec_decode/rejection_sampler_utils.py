@@ -246,7 +246,12 @@ def _compute_local_logits_stats_kernel(
             other=float("-inf"),
         ).to(tl.float32)
         value, idx = tl.max(target_logits, axis=0, return_indices=True)
-        token_id = block_idx * BLOCK_SIZE + idx
+        # Out-of-vocab tail lanes of this tile are loaded as -inf; when every
+        # in-vocab lane is also -inf/NaN the reduction can settle on one of
+        # them, yielding token_id >= vocab_size. Nothing downstream bounds a
+        # sampled token id. Clamp -- in that degenerate tile any index is
+        # equally arbitrary.
+        token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
         tl.store(
             target_local_argmax_ptr
             + logit_idx * target_local_argmax_stride
@@ -839,7 +844,9 @@ def _resample_kernel(
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    # See the note in _compute_local_logits_stats_kernel: bound the tile-local
+    # argmax so an all--inf tile cannot produce an out-of-vocab token id.
+    token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
     tl.store(
         resampled_local_argmax_ptr
         + req_idx * resampled_local_argmax_stride
