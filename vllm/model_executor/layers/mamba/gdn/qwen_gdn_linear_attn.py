@@ -388,6 +388,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             self._forward_method = self.forward_cuda
 
+        self.use_native_conv = (
+            current_platform.is_cpu()
+            and torch.cpu._is_amx_tile_supported()
+            and not is_conv_state_dim_first()
+        )
+
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv1d = ColumnParallelLinear(
