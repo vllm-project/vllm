@@ -392,7 +392,7 @@ pub fn calculate_multi_turn_metrics(
         for turn in &conv.turns {
             all_requests.push(SampleRequest {
                 prompt: std::sync::Arc::from(""),
-                prompt_len: turn.cumulative_input_tokens,
+                prompt_len: turn.request_output.prompt_len,
                 expected_output_len: turn.request_output.output_tokens,
                 request_id: None,
                 ..Default::default()
@@ -420,7 +420,7 @@ pub fn calculate_multi_turn_metrics(
             if let Some(turn) = conv.turns.get(turn_idx) {
                 turn_requests.push(SampleRequest {
                     prompt: std::sync::Arc::from(""),
-                    prompt_len: turn.cumulative_input_tokens,
+                    prompt_len: turn.request_output.prompt_len,
                     expected_output_len: turn.request_output.output_tokens,
                     request_id: None,
                     ..Default::default()
@@ -501,5 +501,42 @@ mod tests {
         let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let p99 = percentile_sorted(&data, 99.0);
         assert!((p99 - 98.01).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_multi_turn_metrics_use_request_prompt_lengths() {
+        let turn = |turn_index, prompt_len, output_tokens| crate::multi_turn::TurnOutput {
+            turn_index,
+            request_output: RequestFuncOutput {
+                success: true,
+                prompt_len,
+                output_tokens,
+                latency: 1.0,
+                ttft: 0.1,
+                ..Default::default()
+            },
+        };
+        let conversation_outputs = [ConversationOutput {
+            conversation_id: "conversation-0".to_string(),
+            turns: vec![turn(0, 500, 200), turn(1, 1200, 200)],
+            total_duration_ms: 2000.0,
+            all_success: true,
+        }];
+
+        let metrics = calculate_multi_turn_metrics(
+            &conversation_outputs,
+            2.0,
+            &[],
+            &GoodputConfig::default(),
+            2,
+        );
+
+        assert_eq!(metrics.overall.total_input, 1700);
+        assert_eq!(metrics.overall.total_output, 400);
+        assert_eq!(metrics.overall.input_throughput, 850.0);
+        assert_eq!(metrics.overall.total_token_throughput, 1050.0);
+        assert_eq!(metrics.per_turn.len(), 2);
+        assert_eq!(metrics.per_turn[0].total_input, 500);
+        assert_eq!(metrics.per_turn[1].total_input, 1200);
     }
 }
