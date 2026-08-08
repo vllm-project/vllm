@@ -301,6 +301,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             kv_b_proj=self.kv_b_proj,
             indexer=None,
         )
+        if getattr(self.impl, "dcp_world_size", -1) < 1:
+            # FlashAttention requires the cp_world_size is positive and the cp_rank
+            # is non negative; manually set here if not set by caller (-1 is unset)
+            self.impl.dcp_world_size = 1
+            self.impl.dcp_rank = 0
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
 
         vllm_config = get_current_vllm_config()
@@ -758,7 +763,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 prefix_lse=context_lse,
                 suffix_output=suffix_output[..., : self.v_head_dim],
                 suffix_lse=suffix_lse,
-                prefill_tokens_with_context=prefill.chunked_context.prefill_tokens_with_context,
             )
         elif not writes_out:
             out.copy_(output_prefill[..., : self.v_head_dim].flatten(start_dim=-2))
