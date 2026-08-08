@@ -251,6 +251,15 @@ def test_hf_token_cli_arg(cli_args, expected):
     assert args.hf_token == expected
 
 
+@pytest.mark.parametrize("activation_format", ["standard", "batched"])
+def test_nccl_ep_activation_format_cli_arg(activation_format):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args(["--nccl-ep-activation-format", activation_format])
+
+    assert args.nccl_ep_activation_format == activation_format
+
+
 @pytest.mark.parametrize(
     ("arg", "expected"),
     [
