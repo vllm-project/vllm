@@ -189,8 +189,13 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self.embed_dim = config.d_model
         self.num_heads = config.encoder_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
+        # Audio encoder uses 20 heads. Shard across TP when divisible
+        # (e.g. TP=2/4); otherwise keep unreplicated (e.g. TP=8).
         tp_size = get_tensor_model_parallel_world_size()
-        self.num_local_heads = self.num_heads // tp_size
+        self.disable_tp = self.num_heads % tp_size != 0
+        self.num_local_heads = (
+            self.num_heads if self.disable_tp else self.num_heads // tp_size
+        )
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
@@ -207,6 +212,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             total_num_kv_heads=self.num_heads,
             bias=True,
             prefix=f"{prefix}.qkv",
+            disable_tp=self.disable_tp,
         )
 
         self.out_proj = RowParallelLinear(
@@ -214,6 +220,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             output_size=self.embed_dim,
             bias=True,
             prefix=f"{prefix}.out_proj",
+            disable_tp=self.disable_tp,
         )
 
         self.attn = MMEncoderAttention(
