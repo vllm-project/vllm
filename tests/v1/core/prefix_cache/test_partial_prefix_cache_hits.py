@@ -11,6 +11,7 @@ import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
 from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
     get_block_hash,
@@ -588,6 +589,65 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
     assert [len(group) for group in truncated.blocks] == [2, 1]
     assert truncated.blocks[1][0].is_null
     assert [len(group) for group in blocks.blocks] == [3, 2]
+
+
+def test_truncate_computed_blocks_pads_lagging_mamba_align_group():
+    """A connector's external hit can reach past what the mamba "align" lookup
+    returned, leaving that group with fewer blocks than the truncation point
+    needs. The missing recurrent positions become null placeholders (the
+    connector allocates and fills the final state slot) instead of tripping an
+    assert and killing the engine."""
+    hash_block_size = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=2 * hash_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    producer = make_request("producer", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert manager.allocate_slots(producer, 6, num_computed, blocks) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    consumer = make_request(
+        "consumer", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256
+    )
+    blocks, num_computed, _ = manager.get_computed_blocks(consumer)
+    assert num_computed == 6
+
+    # The mamba group lags the full-attention hit the connector reported.
+    lagging = KVCacheBlocks((blocks.blocks[0], ()))
+    truncated = manager.truncate_computed_blocks(lagging, 4)
+
+    assert [len(group) for group in truncated.blocks] == [2, 1]
+    assert truncated.blocks[1][0].is_null
+    # Pure view: the caller's groups are not mutated.
+    assert [len(group) for group in lagging.blocks] == [3, 0]
 
 
 def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
