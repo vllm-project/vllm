@@ -1543,10 +1543,12 @@ steps:
   - vllm/_aiter_ops.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
   - rocm-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
@@ -1849,7 +1851,7 @@ steps:
   commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
-  - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray"
   - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
 
 - label: Model Runner V2 Spec Decode # TBD
@@ -3441,10 +3443,12 @@ steps:
   - vllm/_aiter_ops.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
   - rocm-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
