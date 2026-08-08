@@ -91,9 +91,9 @@ def parse_from_filename(file: str) -> WheelFileInfo:
     else:
         if "+" in version:
             version_part, suffix = version.split("+", 1)
-            # Only treat known patterns as variants (rocmXXX, cuXXX, cpu)
+            # Only treat known patterns as variants (rocmXXX, cuXXX, cpu, xpu)
             # Git hashes and other suffixes are NOT variants
-            if suffix.startswith(("rocm", "cu", "cpu")):
+            if suffix.startswith(("rocm", "cu", "cpu", "xpu")):
                 variant = suffix
                 version = version_part
             # Otherwise keep the full version string (variant stays None)
