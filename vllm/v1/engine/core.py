@@ -1346,12 +1346,17 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            # Ignore further signals during cleanup so ProcessManager's
+            # concurrent SIGTERM (from APIServer shutdown) doesn't kill
+            # EngineCore before engine_core.shutdown() completes.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             if signal_callback is not None:
                 signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
