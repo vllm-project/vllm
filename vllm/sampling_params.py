@@ -313,7 +313,6 @@ class SamplingParams(
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
-    output_text_buffer_length: int = 0
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
@@ -488,11 +487,6 @@ class SamplingParams(
 
         if self.prompt_logprobs is True:
             self.prompt_logprobs = 1
-
-        # Number of characters to hold back for stop string evaluation
-        # until sequence is finished.
-        if self.stop and not self.include_stop_str_in_output:
-            self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
 
         self._verify_args()
 
