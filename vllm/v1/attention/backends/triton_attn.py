@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-Performance Triton-only Attention layer."""
 
+import weakref
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -417,6 +418,21 @@ class TritonAttentionImpl(AttentionImpl):
     # Per-token-head quant: scale views carved from inline head padding.
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
+    # KV-cache views whose inline scale regions have been initialized; maps
+    # the view's data_ptr (base + storage_offset, so distinct layers packed
+    # into one storage each initialize their own region) to a weakref of the
+    # underlying storage, honored only while that exact storage is alive so a
+    # freed-and-reallocated cache is re-initialized. Relies on torch's
+    # storage PyObject preservation (torch >= 2.1) for weakref stability.
+    # Shared across impls because KV-sharing layers alias their target
+    # layer's cache view.
+    # NOTE: cumem sleep/wake keeps the storage object alive and remaps
+    # physical pages under it, so entries survive wake; post-wake scale
+    # sanity comes from the runner zeroing the cache on wake, and every
+    # written slot's scale is rewritten before it can be read.
+    _scale_initialized_storages: ClassVar[
+        dict[int, "weakref.ReferenceType[torch.UntypedStorage]"]
+    ] = {}
 
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
         """Extract per-head scale views from the padded content dimension.
@@ -470,7 +486,6 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=k_scale_off_f32,
         )
-        self._k_scale_cache.fill_(1.0)
 
         # V scales (second content half)
         self._v_scale_cache = torch.as_strided(
@@ -479,7 +494,20 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=v_scale_off_f32,
         )
-        self._v_scale_cache.fill_(1.0)
+
+        # Initialize the scale regions exactly once per underlying storage.
+        # KV-sharing layers alias their target layer's cache tensor and build
+        # their own views lazily on their first forward, which can happen
+        # AFTER the target layer has already written real per-token scales in
+        # the same pass; an unconditional fill here would wipe those scales
+        # and corrupt every request in the first batch (issues #50702/#50749).
+        registry = TritonAttentionImpl._scale_initialized_storages
+        view_ptr = kv_cache.data_ptr()
+        ref = registry.get(view_ptr)
+        if ref is None or ref() is None:
+            self._k_scale_cache.fill_(1.0)
+            self._v_scale_cache.fill_(1.0)
+            registry[view_ptr] = weakref.ref(kv_cache.untyped_storage())
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
