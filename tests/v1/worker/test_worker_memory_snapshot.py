@@ -10,13 +10,54 @@ from unittest.mock import patch
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.mem_utils import MemorySnapshot
-from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
+from vllm.v1.worker.gpu_worker import (
+    Worker,
+    _validate_free_memory_did_not_increase_during_profiling,
+    init_worker_distributed_environment,
+)
 
 # Global queue to track operation order across processes
 _QUEUE: Queue | None = None
+
+
+def test_memory_profiling_free_memory_increase_raises_by_default(monkeypatch):
+    monkeypatch.setattr(
+        envs,
+        "VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE",
+        False,
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE=1",
+    ):
+        _validate_free_memory_did_not_increase_during_profiling(
+            init_free_memory=100,
+            free_gpu_memory=200,
+        )
+
+
+def test_memory_profiling_free_memory_increase_can_be_allowed(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        envs,
+        "VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE",
+        True,
+    )
+
+    with patch("vllm.v1.worker.gpu_worker.logger.warning") as warning:
+        _validate_free_memory_did_not_increase_during_profiling(
+            init_free_memory=100,
+            free_gpu_memory=200,
+        )
+
+    warning.assert_called_once()
+    assert "may overestimate available KV cache memory" in warning.call_args.args[0]
 
 
 def track_operation(operation: str, rank: int):
