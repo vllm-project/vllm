@@ -43,11 +43,11 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
-    JobMetadata,
     JobResult,
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.fs.io import (
     batch_load_block,
@@ -204,12 +204,13 @@ class FileSystemTierManager(SecondaryTierManager):
         return LookupResult.HIT if result else LookupResult.MISS
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
+        keys = list(job_metadata.keys)
         if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+            self._store_job_keys[job_metadata.job_id] = keys
         task = functools.partial(
             batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
+            [self.file_mapper.get_file_name(key) for key in keys],
             self._primary_kv_view,
             [int(bid) * self._block_size for bid in job_metadata.block_ids],
             self._block_size,
@@ -218,16 +219,16 @@ class FileSystemTierManager(SecondaryTierManager):
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
+        keys = list(job_metadata.keys)
         task = functools.partial(
             batch_load_block,
-            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
+            [self.file_mapper.get_file_name(key) for key in keys],
             self._primary_kv_view,
             [int(bid) * self._block_size for bid in job_metadata.block_ids],
             self._block_size,
             self._use_o_direct,
         )
-
         self._pool.enqueue_load(job_metadata.job_id, 1, [task])
 
     @override
@@ -236,7 +237,7 @@ class FileSystemTierManager(SecondaryTierManager):
         Collect completed jobs from the finished-jobs queue.
         """
         results = []
-        for job_id, success in self._pool.get_finished():
+        for job_id, success, transfer_time in self._pool.get_finished():
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:
@@ -248,7 +249,13 @@ class FileSystemTierManager(SecondaryTierManager):
                             locality=self.locality,
                         )
                     )
-            results.append(JobResult(job_id=job_id, success=success))
+            results.append(
+                JobResult(
+                    job_id=job_id,
+                    success=success,
+                    transfer_time=transfer_time,
+                )
+            )
         return results
 
     @override
