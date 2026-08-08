@@ -39,7 +39,8 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -118,6 +119,80 @@ def _resolve_dsv4_kv_cache_dtype(
         return kv_cache_dtype, torch.float8_e4m3fn
     # auto / bfloat16 -> plain bf16 KV row.
     return kv_cache_dtype, torch.bfloat16
+
+
+def _resolve_skip_topk(
+    config: Any,
+    layer_id: int,
+    local_start_layer: int = 0,
+    local_end_layer: int | None = None,
+) -> bool:
+    """Whether ``layer_id`` reuses the previous C4A layer's top-k (IndexCache).
+
+    Refer: https://arxiv.org/abs/2603.12201. Only C4A layers
+    (``compress_ratio == 4``) run an indexer, so ``index_topk_freq`` and
+    ``index_topk_pattern`` (``F`` = compute, ``S`` = reuse) are indexed over
+    those layers, not over all layers; trailing ``compress_ratios`` entries
+    (MTP / draft slots) are ignored. ``topk_indices_buffer`` is rank-local, so
+    each pipeline stage's first C4A layer computes its own top-k.
+
+    Args:
+        config: The model's hf_config.
+        layer_id: Index of this layer in ``config.compress_ratios``.
+        local_start_layer: First layer built on this pipeline rank.
+        local_end_layer: One past the last; defaults to ``num_hidden_layers``.
+
+    Returns:
+        True if this layer must not run its indexer.
+
+    Raises:
+        ValueError: If ``index_topk_pattern`` is not one ``F``/``S`` character
+            per C4A layer, or marks a stage's first C4A layer as shared.
+    """
+    if not getattr(config, "use_index_cache", False):
+        return False
+    compress_ratios = getattr(config, "compress_ratios", None)
+    if compress_ratios is None:
+        return False
+    num_hidden_layers = getattr(config, "num_hidden_layers", len(compress_ratios))
+    c4a_layers = [
+        i for i, ratio in enumerate(compress_ratios[:num_hidden_layers]) if ratio == 4
+    ]
+    if layer_id not in c4a_layers:
+        return False
+    c4a_idx = c4a_layers.index(layer_id)
+
+    if local_end_layer is None:
+        local_end_layer = num_hidden_layers
+    local_c4a_layers = [
+        i for i in c4a_layers if local_start_layer <= i < local_end_layer
+    ]
+    is_first_on_rank = bool(local_c4a_layers) and layer_id == local_c4a_layers[0]
+
+    pattern = getattr(config, "index_topk_pattern", None)
+    if pattern is None:
+        skip = c4a_idx % getattr(config, "index_topk_freq", 1) != 0
+        return skip and not is_first_on_rank
+
+    invalid = sorted(set(pattern) - {"F", "S"})
+    if invalid:
+        raise ValueError(
+            f"index_topk_pattern only accepts 'F' (full) and 'S' (shared), "
+            f"got {invalid}."
+        )
+    if len(pattern) != len(c4a_layers):
+        raise ValueError(
+            f"index_topk_pattern has {len(pattern)} entries but this model has "
+            f"{len(c4a_layers)} C4A layers; one F/S character per C4A layer is "
+            "required (V4 patterns are shorter than V3.2 ones)."
+        )
+    if pattern[c4a_idx] == "S" and is_first_on_rank:
+        raise ValueError(
+            f"index_topk_pattern marks C4A layer {layer_id} as shared, but it is "
+            "the first C4A layer on its pipeline rank and has no previous "
+            "top-k to reuse."
+        )
+    return pattern[c4a_idx] == "S"
 
 
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
@@ -274,6 +349,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.eager_scratch_pool = eager_scratch_pool
 
         self.indexer = None
+        # IndexCache: skipped layers keep their indexer allocated but never run
+        # it. The topk buffer is rank-local, hence this rank's layer range.
+        pp_group = get_pp_group()
+        local_start, local_end = get_pp_indices(
+            config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size
+        )
+        self.skip_topk = _resolve_skip_topk(config, layer_id, local_start, local_end)
+        if self.skip_topk:
+            logger.info_once("IndexCache: some C4A layers reuse the previous top-k.")
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
             # aux_stream_list[2] is free here (outer GEMMs joined) for the inner
@@ -425,7 +509,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
             aux_fns[0] = compressor_kv_score
 
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             indexer = self.indexer
 
             def indexer_weights_proj() -> torch.Tensor:
@@ -477,7 +561,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # on the default stream so q stays on its consumer stream (forward_mqa
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             aux_streams = self.aux_stream_list
             indexer = self.indexer
             # Local ref so the closure keeps a non-None type for mypy.
