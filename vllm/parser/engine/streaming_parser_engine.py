@@ -262,6 +262,7 @@ class StreamingParserEngine:
                     SemanticEvent(
                         EventType.TOOL_CALL_END,
                         tool_index=self.tool_index,
+                        truncated=True,
                     )
                 )
             self.state = ParserState.CONTENT
