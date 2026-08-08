@@ -182,7 +182,7 @@ class Granite4ToolParser(ToolParser):
 
             content = delta_text[:start_token_pos]
             if end_token_pos > 0:
-                self.start_in_tc = False
+                self.in_tc = False
                 tc_text = delta_text[start_token_end:end_token_pos]
                 self.look_ahead = delta_text[end_token_end:]
                 done = False  # There could be more content already buffered
