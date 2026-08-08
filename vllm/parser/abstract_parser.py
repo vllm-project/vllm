@@ -62,8 +62,9 @@ class StreamState:
         self,
         delta_text: str,
         delta_token_ids: list[int],
+        force_previous_text_and_tokens_accumulation: bool,
     ) -> tuple[str, list[int]]:
-        if self.engine_based:
+        if self.engine_based and not force_previous_text_and_tokens_accumulation:
             return delta_text, delta_token_ids
         return (
             self.previous_text + delta_text,
@@ -74,8 +75,9 @@ class StreamState:
         self,
         current_text: str,
         current_token_ids: list[int],
+        force_previous_text_and_tokens_accumulation: bool,
     ) -> None:
-        if self.engine_based:
+        if self.engine_based and not force_previous_text_and_tokens_accumulation:
             self.previous_text = ""
             self.previous_token_ids = []
         else:
@@ -268,6 +270,37 @@ class Parser:
             A DeltaMessage with reasoning and/or content fields, or None.
         """
 
+    # ========== Utility Parser Methods ==========
+
+    def support_and_is_required_or_named_tool_choice(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> tuple[bool, bool, bool]:
+        supports_required_and_named = False
+        is_named_tool_choice = False
+        tool_parser = self._tool_parser
+        if tool_parser is not None:
+            supports_required_and_named = tool_parser.supports_required_and_named
+            is_named_tool_choice = request.tool_choice and isinstance(
+                request.tool_choice,
+                (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+            )  # type: ignore
+        is_required_tool_choice = request.tool_choice == "required"
+        return (
+            supports_required_and_named,
+            is_required_tool_choice,
+            is_named_tool_choice,
+        )
+
+    def _accumulate_previous_text_and_tokens_ids_state(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> bool:
+        supports_required_and_named, is_required_tool_choice, is_named_tool_choice = (
+            self.support_and_is_required_or_named_tool_choice(request)
+        )
+        return supports_required_and_named and (
+            is_required_tool_choice or is_named_tool_choice
+        )
+
     # ========== Tool Parser Methods ==========
 
     def adjust_request(
@@ -430,12 +463,9 @@ class DelegatingParser(Parser):
                 return [], result.content
             return [], content
 
-        supports_required_and_named = tool_parser.supports_required_and_named
-        is_named_tool_choice = request.tool_choice and isinstance(
-            request.tool_choice,
-            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+        supports_required_and_named, is_required_tool_choice, is_named_tool_choice = (
+            self.support_and_is_required_or_named_tool_choice(request)
         )
-        is_required_tool_choice = request.tool_choice == "required"
         is_auto_tool_choice = enable_auto_tools and (
             request.tool_choice == "auto"
             or request.tool_choice is None
@@ -657,7 +687,9 @@ class DelegatingParser(Parser):
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
         assert self._tool_parser is not None
-        supports_required_and_named = self._tool_parser.supports_required_and_named
+        supports_required_and_named, is_required_tool_choice, is_named_tool_choice = (
+            self.support_and_is_required_or_named_tool_choice(request)
+        )
 
         if request.tool_choice == "none":
             if self._engine_based:
@@ -678,14 +710,7 @@ class DelegatingParser(Parser):
                 return delta_message, False
             return (DeltaMessage(content=delta_text) if delta_text else None), False
 
-        if (
-            supports_required_and_named
-            and request.tool_choice
-            and isinstance(
-                request.tool_choice,
-                (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
-            )
-        ):
+        if supports_required_and_named and is_named_tool_choice:
             delta_message, function_name_returned = extract_named_tool_call_streaming(
                 delta_text=delta_text,
                 function_name=self._get_function_name(request),
@@ -696,7 +721,7 @@ class DelegatingParser(Parser):
             )
             return delta_message, function_name_returned
 
-        if supports_required_and_named and request.tool_choice == "required":
+        if supports_required_and_named and is_required_tool_choice:
             delta_message, function_name_returned = (
                 extract_required_tool_call_streaming(
                     previous_text=previous_text,
@@ -824,7 +849,11 @@ class DelegatingParser(Parser):
                     prompt_token_ids
                 )
 
-        current_text, current_token_ids = state.advance(delta_text, delta_token_ids)
+        current_text, current_token_ids = state.advance(
+            delta_text,
+            delta_token_ids,
+            self._accumulate_previous_text_and_tokens_ids_state(request),
+        )
         delta_message: DeltaMessage | None = None
         reasoning_transitioned = False
 
@@ -922,7 +951,11 @@ class DelegatingParser(Parser):
         ):
             delta_message = DeltaMessage(content=delta_text)
 
-        state.commit(current_text, current_token_ids)
+        state.commit(
+            current_text,
+            current_token_ids,
+            self._accumulate_previous_text_and_tokens_ids_state(request),
+        )
 
         if finished:
             delta_message = self.finalize_generation(delta_message, request, state)
