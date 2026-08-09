@@ -684,7 +684,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
-            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -714,7 +713,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert not self.block_quant
             assert w13_input_scale is not None and w2_input_scale is not None
             w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
-                w13_input_scale, w2_input_scale
+                w13_input_scale,
+                w2_input_scale,
+                layer.moe_config.moe_parallel_config.enable_eplb,
             )
             replace_parameter(layer, "w13_input_scale", w13_input_scale)
             replace_parameter(layer, "w2_input_scale", w2_input_scale)
