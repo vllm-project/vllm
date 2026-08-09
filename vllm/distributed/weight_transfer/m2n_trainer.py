@@ -30,9 +30,11 @@ from vllm.distributed.weight_transfer.m2n_common import (
     REPLICATED,
     M2NMesh,
     M2NParamMeta,
+    Placements,
     check_transferable,
     comm_ptr,
     import_m2n,
+    publish_destination_placements,
     resolve_layout,
     to_mesh,
     to_placements,
@@ -75,10 +77,10 @@ class M2NTrainerInitInfo(TrainerInitInfo):
     """Trainer ranks + all inference workers."""
     num_trainer_ranks: int = 1
     dst_mesh_dims: tuple[int, int] | None = None
-    """How the inference ranks are laid out, e.g. `(dp_size, tp_size)`. The
-    trainer declares it so both sides describe the destination identically;
-    defaults to a flat `(num_workers, 1)`, which is all a replicated
-    destination needs."""
+    """How the inference ranks are laid out: axis 0 replicates and axis 1
+    shards. The trainer declares it so both sides describe the destination
+    identically; defaults to a flat `(num_workers, 1)`, which is all a
+    replicated destination needs."""
     max_cta: int | None = None
 
     @property
@@ -137,6 +139,7 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         self._metas: list[M2NParamMeta] = []
         self._src_mesh: M2NMesh | None = None
         self._dst_mesh: M2NMesh | None = None
+        self._dst_placements: list[Placements | None] = []
         self._executor: ThreadPoolExecutor | None = None
 
     @classmethod
@@ -231,6 +234,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         engine._dst_mesh = M2NMesh(
             init_info.destination_mesh_dims, init_info.num_trainer_ranks
         )
+        engine._dst_placements = engine._receive_destination_plan(
+            init_info.num_trainer_ranks
+        )
         logger.info(
             "nccl_m2n trainer ready: %d parameters, trainer ranks [0, %d), "
             "inference ranks [%d, %d)",
@@ -252,6 +258,33 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
         if rendezvous is not None:
             rendezvous.result()
         return engine
+
+    def _receive_destination_plan(
+        self, first_worker_rank: int
+    ) -> list[Placements | None]:
+        """Receive and validate the inference-side per-parameter placements."""
+        if self.group is None or self._dst_mesh is None:
+            raise RuntimeError(
+                "destination plan requires the communicator and destination mesh"
+            )
+
+        # The first inference worker publishes one placement per parameter.
+        # Every trainer rank receives the complete plan in this single,
+        # initialization-time broadcast.
+        placements = publish_destination_placements(self.group, first_worker_rank, None)
+        # The send loop matches placements to metadata by position, so reject
+        # an incomplete or oversized plan before entering any M2N collective.
+        if len(placements) != len(self._metas):
+            raise RuntimeError(
+                f"inference side planned {len(placements)} parameters, but "
+                f"this trainer announced {len(self._metas)}"
+            )
+        # Check every worker-selected destination against the corresponding
+        # global parameter shape before the first transfer.
+        for meta, placement in zip(self._metas, placements):
+            mesh, resolved = resolve_layout(self._dst_mesh, placement)
+            validate_layout(mesh, resolved, meta.shape, "destination")
+        return placements
 
     def _worker_init_info(self, init_info: M2NTrainerInitInfo) -> dict[str, Any]:
         """Handshake payload: rendezvous, both meshes, and the transfer plan."""
@@ -312,7 +345,9 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
                 )
             shard = tensor.detach().contiguous()
             src_mesh, src_placements = resolve_layout(self._src_mesh, meta.placements)
-            dst_mesh, dst_placements = resolve_layout(self._dst_mesh, REPLICATED)
+            dst_mesh, dst_placements = resolve_layout(
+                self._dst_mesh, self._dst_placements[index]
+            )
             m2n.reshard(
                 shard,
                 None,

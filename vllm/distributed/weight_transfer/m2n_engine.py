@@ -20,7 +20,7 @@ trainer is the trainer engine's job.
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -31,18 +31,25 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 from vllm.distributed.weight_transfer.m2n_common import (
+    DESTINATION_SHARD_AXIS,
     MESH_NDIMS,
     REPLICATED,
     M2NMesh,
     M2NParamMeta,
+    Placements,
     check_plan_limits,
     check_transferable,
     comm_ptr,
     import_m2n,
+    publish_destination_placements,
     resolve_layout,
     to_mesh,
     to_placements,
     validate_layout,
+)
+from vllm.distributed.weight_transfer.m2n_layout import (
+    M2NDestination,
+    resolve_parameter_destinations,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
@@ -151,6 +158,9 @@ class M2NWeightTransferEngine(
 
     init_info_cls = M2NWeightTransferInitInfo
     update_info_cls = M2NWeightTransferUpdateInfo
+    # The destination plan is resolved against the model this engine was built
+    # for, so it cannot be retargeted at a draft model mid-flight.
+    supports_draft_weight_update = False
 
     def __init__(
         self,
@@ -166,7 +176,9 @@ class M2NWeightTransferEngine(
         self._metas: list[M2NParamMeta] = []
         self._src_mesh: M2NMesh | None = None
         self._dst_mesh: M2NMesh | None = None
+        self._parameter_destinations: list[M2NDestination] = []
         self._index: dict[str, int] = {}
+        self._uses_load_weights = False
 
     def init_transfer_engine(self, init_info: M2NWeightTransferInitInfo) -> None:
         """Join the trainer's communicator and rebuild the transfer plan.
@@ -177,7 +189,9 @@ class M2NWeightTransferEngine(
         self._m2n = import_m2n()
         self._metas = []
 
-        self._src_mesh = M2NMesh(tuple(init_info.src_mesh_dims), 0)
+        self._src_mesh = M2NMesh(
+            cast(tuple[int, int], tuple(init_info.src_mesh_dims)), 0
+        )
         if self._src_mesh.size != init_info.rank_offset:
             raise ValueError(
                 f"source mesh covers {self._src_mesh.size} ranks, but there are "
@@ -187,7 +201,10 @@ class M2NWeightTransferEngine(
         # a sharded destination is placed over; a replicated one is described
         # by the alternate descriptor `resolve_layout` derives from it, which
         # covers the same ranks but is not this mesh.
-        self._dst_mesh = M2NMesh(tuple(init_info.dst_mesh_dims), init_info.rank_offset)
+        self._dst_mesh = M2NMesh(
+            cast(tuple[int, int], tuple(init_info.dst_mesh_dims)),
+            init_info.rank_offset,
+        )
 
         for name, name_dtype, shape, placements in zip(
             init_info.names,
@@ -202,7 +219,11 @@ class M2NWeightTransferEngine(
                     f"'{name_dtype}'; expected the name of a torch.dtype"
                 )
             check_transferable(name, dtype, shape)
-            codes = REPLICATED if placements is None else tuple(placements)
+            codes = (
+                REPLICATED
+                if placements is None
+                else cast(Placements, tuple(placements))
+            )
             src_mesh, src_placements = resolve_layout(
                 self._src_mesh, codes, f"parameter '{name}' source placements"
             )
@@ -214,7 +235,44 @@ class M2NWeightTransferEngine(
             )
             self._metas.append(M2NParamMeta(name, dtype, tuple(shape), codes))
 
+        parallel_config = self.parallel_config
+        shard_axis_size = self._dst_mesh.dims[DESTINATION_SHARD_AXIS]
+        quantization = getattr(self.model_config, "quantization", None)
+        # A quantized weight loader may dequantize / transpose / requantize, and
+        # under PP a rank's local shape is not the checkpoint shape split over
+        # the shard axis. Both break shape-derived resolution, so take the
+        # fallback.
+        allow_direct = (
+            quantization is None and parallel_config.pipeline_parallel_size == 1
+        )
+        # Match every incoming checkpoint parameter to its rank-local target.
+        # Resolvable parameters can be resharded directly into live model
+        # storage; the rest receive a full tensor for `load_weights`.
+        self._parameter_destinations = resolve_parameter_destinations(
+            self.model,
+            [m.name for m in self._metas],
+            [m.dtype for m in self._metas],
+            [m.shape for m in self._metas],
+            num_workers=self._dst_mesh.size,
+            shard_axis_size=shard_axis_size,
+            allow_direct=allow_direct,
+        )
+        # Reject an inferred destination that M2N cannot represent before any
+        # rank enters the transfer collectives.
+        for meta, destination in zip(self._metas, self._parameter_destinations):
+            mesh, resolved_dst_placements = resolve_layout(
+                self._dst_mesh,
+                destination.placements,
+                f"parameter '{meta.name}' destination placements",
+            )
+            validate_layout(mesh, resolved_dst_placements, meta.shape, "destination")
+
+        # Update requests carry names only, so cache their plan indices. Track
+        # whether any fallback entry requires the `load_weights` lifecycle.
         self._index = {meta.name: i for i, meta in enumerate(self._metas)}
+        self._uses_load_weights = any(
+            not destination.direct for destination in self._parameter_destinations
+        )
 
         self.model_update_group = worker_init_process_group(
             NCCLWeightTransferInitInfo(
@@ -223,25 +281,53 @@ class M2NWeightTransferEngine(
                 rank_offset=init_info.rank_offset,
                 world_size=init_info.world_size,
             ),
-            self.parallel_config,
+            parallel_config,
         )
+        # Destinations are per-parameter and depend on the inference model, so
+        # the trainer cannot derive them. The first worker publishes the plan
+        # and every other rank checks its own against it — a silent
+        # disagreement between workers would mean mismatched collectives.
+        mine = [destination.placements for destination in self._parameter_destinations]
+        agreed = publish_destination_placements(
+            self.model_update_group, init_info.rank_offset, mine
+        )
+        if agreed != mine:
+            mismatched = next(
+                meta.name for meta, a, b in zip(self._metas, mine, agreed) if a != b
+            )
+            raise RuntimeError(
+                "inference workers resolved different nccl_m2n destinations "
+                f"(first mismatch: '{mismatched}'); all workers must run the "
+                "same model and parallel config"
+            )
+
         self._handle = self._m2n.Handle.create(
             self._m2n.Config(max_cta=init_info.max_cta)
         )
 
     def start_weight_update(self) -> None:
-        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        """Set up layerwise reloading, but only if some parameter needs it.
+
+        Directly-resharded parameters are written in place and never go through
+        `load_weights`, so a plan with no fallback entries has nothing to
+        reload.
+        """
+        if not self._uses_load_weights:
+            return
         from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
 
         initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading after all weights have been received."""
+        """Finalize layerwise reloading when the plan uses fallback entries."""
+        if not self._uses_load_weights:
+            return
         from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
         finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
+        """Receive each requested parameter using its initialization-time plan."""
         if self._handle is None or self.model_update_group is None:
             raise RuntimeError(
                 "nccl_m2n weight transfer not initialized. "
@@ -267,40 +353,62 @@ class M2NWeightTransferEngine(
         with disable_mtp_completeness_check():
             for name, index in requested:
                 meta = self._metas[index]
-                buffer = torch.empty(meta.shape, dtype=meta.dtype, device=self.device)
-                self._reshard(comm, stream, meta, buffer)
-                # `load_weights` reads on the host stream, so the transfer has
-                # to have landed before it runs.
-                stream.synchronize()
-                self.model.load_weights([(name, buffer)])
-                del buffer
+                destination = self._parameter_destinations[index]
+                buffer = destination.tensor
+                if buffer is None:
+                    buffer = torch.empty(
+                        meta.shape, dtype=meta.dtype, device=self.device
+                    )
+
+                self._reshard(comm, stream, meta, destination.placements, buffer)
+
+                if destination.tensor is None:
+                    # `load_weights` reads on the host stream, so the transfer
+                    # has to have landed before it runs.
+                    stream.synchronize()
+                    self.model.load_weights([(name, buffer)])
+                    del buffer
 
     def _reshard(
         self,
         comm: int,
         stream: torch.cuda.Stream,
-        meta: M2NParamMeta,
-        buffer: torch.Tensor,
+        src_meta: M2NParamMeta,
+        dst_placements: Placements | None,
+        dst_buffer: torch.Tensor,
     ) -> None:
+        """Reshard one parameter from its trainer layout into a worker buffer.
+
+        `dst_placements` describes the buffer's logical placement over the
+        worker mesh; `dst_buffer` is this rank's physical storage.
+        """
+        assert self._src_mesh is not None
+        assert self._dst_mesh is not None
         m2n = self._m2n
-        src_mesh, src_placements = resolve_layout(self._src_mesh, meta.placements)
-        dst_mesh, dst_placements = resolve_layout(self._dst_mesh, REPLICATED)
+        src_mesh, resolved_src_placements = resolve_layout(
+            self._src_mesh, src_meta.placements
+        )
+        dst_mesh, resolved_dst_placements = resolve_layout(
+            self._dst_mesh, dst_placements
+        )
         m2n.reshard(
             None,
-            buffer,
+            dst_buffer,
             comm,
             stream,
             src_mesh=to_mesh(m2n, src_mesh),
-            src_placements=to_placements(m2n, src_placements),
+            src_placements=to_placements(m2n, resolved_src_placements),
             dst_mesh=to_mesh(m2n, dst_mesh),
-            dst_placements=to_placements(m2n, dst_placements),
+            dst_placements=to_placements(m2n, resolved_dst_placements),
             handle=self._handle,
         )
 
     def shutdown(self) -> None:
+        """Finish pending GPU work and release M2N communication state."""
         if self._handle is not None:
             # M2N does not synchronize caller streams on finalize.
             torch.accelerator.synchronize()
             self._handle.destroy()
             self._handle = None
         self.model_update_group = None
+        self._parameter_destinations = []

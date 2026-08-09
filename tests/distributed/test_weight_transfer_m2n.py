@@ -33,6 +33,9 @@ from vllm.distributed.weight_transfer.m2n_engine import (
     M2NWeightTransferInitInfo,
     M2NWeightTransferUpdateInfo,
 )
+from vllm.distributed.weight_transfer.m2n_layout import (
+    resolve_parameter_destinations,
+)
 from vllm.distributed.weight_transfer.m2n_source import (
     mesh_from_tensor,
     placements_from_tensor,
@@ -157,9 +160,7 @@ class TestWireTypes:
         engine._handle = object()
         engine.model_update_group = object()
         engine._index = {"valid": 0}
-        engine._metas = [
-            M2NParamMeta("valid", torch.float32, (4,), REPLICATED)
-        ]
+        engine._metas = [M2NParamMeta("valid", torch.float32, (4,), REPLICATED)]
         engine._reshard = Mock()
 
         with pytest.raises(ValueError, match=r"parameter 'unknown'"):
@@ -210,6 +211,7 @@ class TestWireTypes:
             master_address="127.0.0.1", master_port=1234, world_size=4, rank=0
         )
         assert info.is_sender
+
 
 class TestRegistration:
     def test_both_registries_expose_the_backend(self):
@@ -295,6 +297,7 @@ def _m2n_trainer_send(master_address: str, master_port: int, world_size: int) ->
             master_port=master_port,
             world_size=world_size,
             num_trainer_ranks=1,
+            dst_mesh_dims=(1, world_size - 1),
             rank=0,
         ),
         client=NoopClient(),
@@ -307,7 +310,12 @@ def _m2n_trainer_send(master_address: str, master_port: int, world_size: int) ->
 
 
 @ray.remote(num_gpus=1)
-def _m2n_worker_receive(master_address: str, master_port: int, world_size: int) -> dict:
+def _m2n_worker_receive(
+    master_address: str,
+    master_port: int,
+    world_size: int,
+    worker_rank: int = 0,
+) -> dict:
     """Receive that parameter through the real worker engine."""
     import contextlib
     from unittest.mock import MagicMock
@@ -326,17 +334,26 @@ def _m2n_worker_receive(master_address: str, master_port: int, world_size: int) 
         def __init__(self):
             super().__init__()
             self.received = []
+            if world_size > 2:
+                self.weight = torch.nn.Parameter(
+                    torch.zeros(
+                        SHAPE[0] // (world_size - 1),
+                        SHAPE[1],
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                )
 
         def load_weights(self, weights):
             for name, tensor in weights:
                 self.received.append((name, tensor.clone()))
 
     parallel_config = MagicMock(spec=ParallelConfig)
-    parallel_config.rank = 0
-    parallel_config.world_size = 1
+    parallel_config.rank = worker_rank
+    parallel_config.world_size = world_size - 1
     parallel_config.data_parallel_rank = 0
     parallel_config.data_parallel_index = 0
-    parallel_config.tensor_parallel_size = 1
+    parallel_config.tensor_parallel_size = world_size - 1
     parallel_config.pipeline_parallel_size = 1
     vllm_config = MagicMock()
     vllm_config.parallel_config = parallel_config
@@ -360,7 +377,7 @@ def _m2n_worker_receive(master_address: str, master_port: int, world_size: int) 
             rank_offset=1,  # trainer occupies rank 0
             world_size=world_size,
             src_mesh_dims=[1, 1],
-            dst_mesh_dims=[1, 1],
+            dst_mesh_dims=[1, world_size - 1],
             names=["weight"],
             dtype_names=[DTYPE],
             shapes=[SHAPE],
@@ -370,15 +387,24 @@ def _m2n_worker_receive(master_address: str, master_port: int, world_size: int) 
     engine.receive_weights(M2NWeightTransferUpdateInfo(names=["weight"]))
     torch.accelerator.synchronize()
 
-    expected = torch.arange(
+    full = torch.arange(
         SHAPE[0] * SHAPE[1], dtype=torch.float32, device=device
     ).reshape(SHAPE)
-    name, got = recorder.received[0] if recorder.received else (None, None)
+    direct = world_size > 2
+    name: str | None
+    got: torch.Tensor | None
+    if direct:
+        name, got = "weight", recorder.weight
+        expected = full.chunk(world_size - 1, dim=0)[worker_rank]
+    else:
+        name, got = recorder.received[0] if recorder.received else (None, None)
+        expected = full
     result = {
         "count": len(recorder.received),
         "name": name,
         "shape": list(got.shape) if got is not None else None,
         "exact": bool(torch.equal(got, expected)) if got is not None else False,
+        "direct": direct,
     }
     engine.shutdown()
     return result
@@ -411,3 +437,111 @@ def test_m2n_weight_transfer_between_processes():
     assert result["name"] == "weight"
     assert result["shape"] == SHAPE
     assert result["exact"], "resharded tensor does not match what the trainer sent"
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 3,
+    reason="Need at least 3 GPUs: one trainer rank and two inference workers.",
+)
+def test_m2n_weight_transfer_to_tp2_shards():
+    """Two inference workers receive their own TP shard in live model storage."""
+    pytest.importorskip("nccl.m2n", reason="nccl_m2n backend needs the m2n runtime")
+    _init_ray()
+
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
+    world_size = 3
+
+    workers = [
+        _m2n_worker_receive.remote(master_address, master_port, world_size, rank)
+        for rank in range(2)
+    ]
+    trainer = _m2n_trainer_send.remote(master_address, master_port, world_size)
+    trainer_ok, *results = ray.get([trainer, *workers])
+
+    assert trainer_ok, "trainer engine did not complete"
+    for rank, result in enumerate(results):
+        assert result["count"] == 0, f"worker {rank} unexpectedly called load_weights"
+        assert result["name"] == "weight"
+        assert result["shape"] == [SHAPE[0] // 2, SHAPE[1]]
+        assert result["direct"]
+        assert result["exact"], f"worker {rank} received the wrong shard"
+
+
+class _Model(torch.nn.Module):
+    """Stand-in for a TP=2 shard of a tiny model.
+
+    `column` is sharded on dim 0 and `row` on dim 1 (the two shapes a TP linear
+    layer produces), `norm` is replicated, and `fused` has no checkpoint-name
+    counterpart — the shape a fused parameter presents to the resolver.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.column = torch.nn.Parameter(torch.zeros(8, 16))
+        self.row = torch.nn.Parameter(torch.zeros(16, 8))
+        self.norm = torch.nn.Parameter(torch.zeros(16))
+        self.fused = torch.nn.Parameter(torch.zeros(24, 16))
+
+
+def _resolve(names, dtypes, shapes, **kwargs):
+    defaults = dict(num_workers=2, shard_axis_size=2, allow_direct=True)
+    defaults.update(kwargs)
+    return resolve_parameter_destinations(_Model(), names, dtypes, shapes, **defaults)
+
+
+class TestDestinationResolution:
+    @pytest.mark.parametrize(
+        "name,expected_dim",
+        [("column", 0), ("row", 1)],
+    )
+    def test_sharded_parameter_resolves_to_its_tp_dim(self, name, expected_dim):
+        [destination] = _resolve([name], [torch.float32], [(16, 16)])
+        assert destination.direct
+        assert destination.placements == (REPLICATE, expected_dim)
+
+    def test_replicated_parameter_needs_no_placement(self):
+        """A parameter every rank holds in full is REPLICATED, so it works
+        whatever way the inference mesh happens to be factored."""
+        [destination] = _resolve(["norm"], [torch.float32], [(16,)])
+        assert destination.direct
+        assert destination.placements is REPLICATED
+
+    def test_direct_destination_is_the_live_parameter(self):
+        model = _Model()
+        [destination] = resolve_parameter_destinations(
+            model,
+            ["column"],
+            [torch.float32],
+            [(16, 16)],
+            num_workers=2,
+            shard_axis_size=2,
+            allow_direct=True,
+        )
+        assert destination.tensor.data_ptr() == model.column.data_ptr()
+
+    def test_unknown_name_falls_back(self):
+        """Fused parameters reach the worker under checkpoint names that do not
+        exist in the model; those must take the full-tensor path."""
+        [destination] = _resolve(["mlp.gate_proj.weight"], [torch.float32], [(16, 16)])
+        assert not destination.direct
+        assert destination.placements is REPLICATED
+
+    def test_shape_the_tp_factor_cannot_explain_falls_back(self):
+        [destination] = _resolve(["fused"], [torch.float32], [(16, 16)])
+        assert not destination.direct
+
+    def test_dtype_mismatch_falls_back(self):
+        """A parameter stored in a different dtype than the wire dtype means a
+        quantized or otherwise transformed layout — never write into it."""
+        [destination] = _resolve(["column"], [torch.bfloat16], [(16, 16)])
+        assert not destination.direct
+
+    def test_allow_direct_false_forces_every_parameter_to_fall_back(self):
+        destinations = _resolve(
+            ["column", "norm"],
+            [torch.float32] * 2,
+            [(16, 16), (16,)],
+            allow_direct=False,
+        )
+        assert not any(d.direct for d in destinations)
