@@ -1936,41 +1936,23 @@ class Scheduler(SchedulerInterface):
                     )
 
             indexer_topk = None
-            if (
-                self.enable_return_indexer_topk
-                and indexer_topk_data is not None
-                and new_token_ids
-            ):
-                req_offset = indexer_topk_offsets[req_id]
-                end = req_offset + num_tokens_scheduled
-                block_ids = self._it_block_ids.get(req_id, [])
+            if self.enable_return_indexer_topk and indexer_topk_data is not None:
+                sp = request.sampling_params
+                indexer_topk = self.indexer_topk_mgr.get_request_topk(
+                    topk_data=indexer_topk_data,
+                    req_offset=indexer_topk_offsets[req_id],
+                    num_tokens_scheduled=num_tokens_scheduled,
+                    new_token_ids=new_token_ids,
+                    num_output_tokens_before=num_output_tokens_before,
+                    block_ids=self._it_block_ids.get(req_id, []),
+                    num_prompt_tokens=request.num_prompt_tokens,
+                    indexer_topk_prompt_start=(
+                        sp.indexer_topk_prompt_start if sp is not None else 0
+                    ),
+                    scheduled_spec_token_ids=scheduled_spec_token_ids,
+                )
                 if num_output_tokens_before == 0:
-                    # Prefill completed: read full prompt topk from slot
-                    # buffer using the block-ID snapshot taken at
-                    # schedule time (immune to async preemption).
-                    if request.sampling_params is not None:
-                        prompt_start = request.sampling_params.indexer_topk_prompt_start
-                        if prompt_start < 0 or prompt_start > request.num_prompt_tokens:
-                            raise ValueError(
-                                "indexer_topk_prompt_start "
-                                f"({prompt_start}) must be >= 0 and "
-                                "<= num_prompt_tokens "
-                                f"({request.num_prompt_tokens})"
-                            )
-                    else:
-                        prompt_start = 0
-                    indexer_topk = self.indexer_topk_mgr.get(
-                        block_ids,
-                        request.num_prompt_tokens,
-                        token_start=prompt_start,
-                    )
                     self._it_block_ids.pop(req_id, None)
-                elif scheduled_spec_token_ids:
-                    indexer_topk = indexer_topk_data[
-                        req_offset : req_offset + len(new_token_ids)
-                    ]
-                else:
-                    indexer_topk = indexer_topk_data[end - len(new_token_ids) : end]
 
             finish_reason = None
             if stopped:
