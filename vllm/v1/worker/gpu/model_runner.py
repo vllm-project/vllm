@@ -54,10 +54,6 @@ from vllm.model_executor.offloader import (
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.encoder_budget import (
-    MultiModalBudget,
-    get_dummy_encoder_profile_inputs,
-)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -230,8 +226,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
         # Multimodal
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
             self.model_config
         )
         self.uses_inputs_embeds = (
@@ -840,44 +835,48 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert self.pooling_runner is not None
         self.pooling_runner.dummy_pooler_run(hidden_states)
 
-    @torch.inference_mode()
+    def halve_encoder_budget(self) -> bool:
+        """Halve the per-step encoder token budget; False when not reducible."""
+        if not (self.supports_mm_inputs and self.is_first_pp_rank):
+            return False
+        return self.model_state.halve_encoder_budget()
+
+    def warmup_multimodal_encoder(self) -> None:
+        """Re-run the worst-case encoder pass so its memory stays resident
+        for post-warmup measurement (and to JIT-warm the vision tower). If it
+        does not fit alongside the memory warmup already retains, the per-step
+        encoder token budget is halved until it does; the engine hands the
+        reduced budget to the scheduler."""
+        if not (self.supports_mm_inputs and self.is_first_pp_rank):
+            return
+        if self.extensible_kv_buffers is None and not self.is_encoder_only:
+            # Without measured sizing there is nothing to keep resident.
+            return
+        try:
+            self.model_state.profile_encoder_cache(fit_budget=True)
+        finally:
+            self.reset_encoder_cache()
+
     def profile_run(self) -> None:
         if self.supports_mm_inputs and self.is_first_pp_rank:
-            mm_config = self.model_config.multimodal_config
-            if mm_config is not None and not mm_config.skip_mm_profiling:
-                mm_budget = MultiModalBudget(
-                    self.vllm_config,
-                    self.mm_registry,
-                    enable_cache=False,
-                )
-                dummy_mm_inputs = get_dummy_encoder_profile_inputs(
-                    self.mm_registry,
-                    mm_budget,
-                )
-                self.model_state.encoder_runner.profile_encoder_cache(
-                    dummy_mm_inputs, mm_budget
-                )
+            self.model_state.profile_encoder_cache()
 
-        if self.is_encoder_only:
-            torch.accelerator.synchronize()
-            self.reset_encoder_cache()
-            gc.collect()
-            return
+        if not self.is_encoder_only:
+            hidden_states, sample_hidden_states = self._dummy_run(
+                self.max_num_tokens, skip_attn=True, is_profile=True
+            )
 
-        hidden_states, sample_hidden_states = self._dummy_run(
-            self.max_num_tokens, skip_attn=True, is_profile=True
-        )
+            # Only run sampler/pooler on last PP rank (non-last ranks return None).
+            if self.is_last_pp_rank:
+                assert sample_hidden_states is not None
+                if self.pooling_runner is None:
+                    self._dummy_sampler_run(sample_hidden_states)
+                else:
+                    self._dummy_pooler_run(hidden_states)
 
-        # Only run sampler/pooler on last PP rank (non-last ranks return None).
-        if self.is_last_pp_rank:
-            assert sample_hidden_states is not None
-            if self.pooling_runner is None:
-                self._dummy_sampler_run(sample_hidden_states)
-            else:
-                self._dummy_pooler_run(hidden_states)
+            del hidden_states, sample_hidden_states
 
         torch.accelerator.synchronize()
-        del hidden_states, sample_hidden_states
         self.reset_encoder_cache()
         gc.collect()
 

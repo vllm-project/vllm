@@ -11,6 +11,7 @@ import torch
 from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -21,6 +22,8 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec, MambaSpec
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+from vllm.v1.worker.gpu.sample.prompt_logprob import PROMPT_LOGPROBS_CHUNK_SIZE
 
 logger = init_logger(__name__)
 
@@ -203,6 +206,77 @@ def run_mixed_prefill_decode_warmup(
 
 
 @torch.inference_mode()
+def _warmup_grammar_bitmask(model_runner) -> None:
+    """Compile and load the grammar-bitmask Triton kernel.
+
+    Its first launch otherwise happens on the first structured-output
+    request, after the measured KV sizing has claimed the GPU -- when even
+    the kernel module load can fail for lack of memory.
+    """
+    worker = model_runner.structured_outputs_worker
+    if worker is None or not model_runner.is_last_pp_rank:
+        return
+    from vllm.v1.worker.gpu.structured_outputs import _apply_grammar_bitmask_kernel
+
+    device = model_runner.device
+    vocab_size = model_runner.model_config.get_vocab_size()
+    logits = torch.zeros(1, vocab_size, dtype=torch.float32, device=device)
+    bitmask = worker.grammar_bitmask[:1]
+    logits_indices = worker.logits_indices[:1]
+    cu_num_logits = torch.zeros(2, dtype=torch.int32, device=device)
+    BLOCK_SIZE = 8192
+    grid = (1, triton.cdiv(vocab_size, BLOCK_SIZE))
+    _apply_grammar_bitmask_kernel[grid](
+        logits,
+        logits.stride(0),
+        logits_indices,
+        cu_num_logits,
+        bitmask,
+        bitmask.stride(0),
+        vocab_size,
+        MASK_STRIDE=worker.mask_stride,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    torch.accelerator.synchronize()
+
+
+def _warmup_prompt_logprobs(model_runner) -> None:
+    """Exercise one worst-case prompt-logprobs chunk.
+
+    Prompt logprobs materialize full-vocab logits in fixed-size chunks at
+    runtime; nothing else in warmup allocates that shape, so without this the
+    first prompt-logprobs request carves it out of the post-measurement
+    margin (and its repeated alloc/free fragments the allocator).
+    """
+    if model_runner.is_pooling_model or not model_runner.is_last_pp_rank:
+        return
+    max_logprobs = model_runner.model_config.max_logprobs
+    if max_logprobs == 0:
+        return
+    hidden_size = model_runner.model_config.get_hidden_size()
+    if hidden_size <= 0:
+        # Composite configs (e.g. encoder-decoder ASR) may not expose a
+        # top-level hidden size; skip rather than guess the head width.
+        return
+    if not hasattr(model_runner.model, "compute_logits"):
+        # E.g. generate-architecture models served as embedders.
+        return
+    device = model_runner.device
+    hidden = torch.zeros(
+        PROMPT_LOGPROBS_CHUNK_SIZE,
+        hidden_size,
+        dtype=model_runner.model_config.dtype,
+        device=device,
+    )
+    logits = model_runner.model.compute_logits(hidden)
+    token_ids = torch.zeros(
+        PROMPT_LOGPROBS_CHUNK_SIZE, dtype=torch.int64, device=device
+    )
+    num_logprobs = logits.shape[-1] if max_logprobs == -1 else max_logprobs
+    compute_topk_scores(logits, num_logprobs, token_ids)
+    torch.accelerator.synchronize()
+
+
 def warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -214,7 +288,11 @@ def warmup_kernels(
     coordination.
     """
     if model_runner.is_encoder_only:
+        model_runner.warmup_multimodal_encoder()
         return
+
+    _warmup_prompt_logprobs(model_runner)
+    _warmup_grammar_bitmask(model_runner)
 
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
@@ -274,6 +352,12 @@ def warmup_kernels(
     # committed so far; commit the prefix this warmup writes to.
     model_runner.ensure_kv_cache_blocks(1 + num_reqs * max_blocks_per_req)
 
+    # Re-runs the worst-case encoder pass (JIT-compiling the vision tower)
+    # and keeps its memory resident for the post-warmup measured KV sizing
+    # (profiling's pass is empty_cache'd). After the KV commit above, so the
+    # encoder budget fitting sees the memory warmup actually holds.
+    model_runner.warmup_multimodal_encoder()
+
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
 
     # SamplingParams exercising all sampling features.
@@ -324,98 +408,115 @@ def warmup_kernels(
 
     # Disable KV connector for warmup run.
     model_runner.kv_connector.set_disabled(True)
-    worker_execute_model(prefill_output)
+    try:
+        worker_execute_model(prefill_output)
 
-    if not model_runner.is_pooling_model:
-        # Warm up sampler and perform a decode step for non-pooling models.
+        if not model_runner.is_pooling_model:
+            # Warm up sampler and perform a decode step for non-pooling models.
 
-        grammar_output = None
-        if model_runner.is_last_pp_rank:
-            # Build a GrammarOutput to exercise the structured output bitmask
-            # kernel during the prefill step.
-            vocab_size = model_runner.model_config.get_vocab_size()
-            bitmask_width = (vocab_size + 31) // 32
-            grammar_bitmask = np.full(
-                (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
-            )
-            grammar_output = GrammarOutput(
-                structured_output_request_ids=req_ids, grammar_bitmask=grammar_bitmask
-            )
-
-        worker_sample_tokens(grammar_output)
-
-        # Per-request state carried across the decode steps.
-        req_computed = [prompt_len] * num_reqs
-        req_blocks = [list(prefill_block_counts) for _ in range(num_reqs)]
-
-        def _run_decode_step(indices: list[int], spec_flags: list[bool]) -> None:
-            """Decode `indices`, spec-decoding the ones flagged in `spec_flags`."""
-            cached_req_data = CachedRequestData.make_empty()
-            cached_req_data.req_ids = [req_ids[i] for i in indices]
-            cached_req_data.num_computed_tokens = [req_computed[i] for i in indices]
-            cached_req_data.num_output_tokens = [1] * len(indices)
-            cached_req_data.new_block_ids = []
-
-            step_num_scheduled_tokens: dict[str, int] = {}
-            step_spec_tokens: dict[str, list[int]] = {}
-            for i, use_spec in zip(indices, spec_flags):
-                num_tokens = decode_query_len if use_spec else 1
-                after = req_computed[i] + num_tokens
-                deltas = [
-                    block_count(after, spec) - held
-                    for spec, held in zip(kv_cache_specs, req_blocks[i])
-                ]
-                cached_req_data.new_block_ids.append(
-                    tuple(_alloc_blocks(n) for n in deltas) if any(deltas) else None
+            grammar_output = None
+            if model_runner.is_last_pp_rank:
+                # Build a GrammarOutput to exercise the structured output bitmask
+                # kernel during the prefill step.
+                vocab_size = model_runner.model_config.get_vocab_size()
+                bitmask_width = (vocab_size + 31) // 32
+                grammar_bitmask = np.full(
+                    (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
                 )
-                req_blocks[i] = [
-                    held + delta for held, delta in zip(req_blocks[i], deltas)
-                ]
-                step_num_scheduled_tokens[req_ids[i]] = num_tokens
-                if use_spec:
-                    step_spec_tokens[req_ids[i]] = [0] * num_spec_steps
+                grammar_output = GrammarOutput(
+                    structured_output_request_ids=req_ids,
+                    grammar_bitmask=grammar_bitmask,
+                )
 
-            decode_output = SchedulerOutput.make_empty()
-            decode_output.scheduled_cached_reqs = cached_req_data
-            decode_output.num_scheduled_tokens = step_num_scheduled_tokens
-            decode_output.scheduled_spec_decode_tokens = step_spec_tokens
-            decode_output.total_num_scheduled_tokens = sum(
-                step_num_scheduled_tokens.values()
-            )
-            decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+            worker_sample_tokens(grammar_output)
 
-            worker_execute_model(decode_output)
-            worker_sample_tokens(None)
+            # Per-request state carried across the decode steps.
+            req_computed = [prompt_len] * num_reqs
+            req_blocks = [list(prefill_block_counts) for _ in range(num_reqs)]
 
-            for i, use_spec in zip(indices, spec_flags):
-                req_computed[i] += decode_query_len if use_spec else 1
+            def _run_decode_step(indices: list[int], spec_flags: list[bool]) -> None:
+                """Decode `indices`, spec-decoding the ones flagged in `spec_flags`."""
+                cached_req_data = CachedRequestData.make_empty()
+                cached_req_data.req_ids = [req_ids[i] for i in indices]
+                cached_req_data.num_computed_tokens = [req_computed[i] for i in indices]
+                cached_req_data.num_output_tokens = [1] * len(indices)
+                cached_req_data.new_block_ids = []
 
-        all_indices = list(range(num_reqs))
-        use_spec_decode = num_spec_steps > 0
+                step_num_scheduled_tokens: dict[str, int] = {}
+                step_spec_tokens: dict[str, list[int]] = {}
+                for i, use_spec in zip(indices, spec_flags):
+                    num_tokens = decode_query_len if use_spec else 1
+                    after = req_computed[i] + num_tokens
+                    deltas = [
+                        block_count(after, spec) - held
+                        for spec, held in zip(kv_cache_specs, req_blocks[i])
+                    ]
+                    cached_req_data.new_block_ids.append(
+                        tuple(_alloc_blocks(n) for n in deltas) if any(deltas) else None
+                    )
+                    req_blocks[i] = [
+                        held + delta for held, delta in zip(req_blocks[i], deltas)
+                    ]
+                    step_num_scheduled_tokens[req_ids[i]] = num_tokens
+                    if use_spec:
+                        step_spec_tokens[req_ids[i]] = [0] * num_spec_steps
 
-        # Decode steps to warm, as (request indices, per-request spec flag).
-        # Under spec decoding the scheduler drops requests the drafter proposed
-        # nothing for, so warm each batch shape with and without draft tokens.
-        decode_steps: list[tuple[list[int], list[bool]]] = [
-            (all_indices, [use_spec_decode] * num_reqs),
-        ]
-        if num_reqs >= 2:
-            # Mixed spec / non-spec: GDN and KDA reclassify the non-spec decode
-            # as a prefill and split the batch into spec/non-spec token indices.
-            decode_steps.append(([0, 1], [use_spec_decode, False]))
-            if use_spec_decode:
-                # Exercise the model paths that split a batch by whether each
-                # request received draft tokens.
-                decode_steps.append(([0, 1], [False, False]))
-        if num_reqs > 1:
-            decode_steps.append(([0], [use_spec_decode]))
-            if use_spec_decode:
+                decode_output = SchedulerOutput.make_empty()
+                decode_output.scheduled_cached_reqs = cached_req_data
+                decode_output.num_scheduled_tokens = step_num_scheduled_tokens
+                decode_output.scheduled_spec_decode_tokens = step_spec_tokens
+                decode_output.total_num_scheduled_tokens = sum(
+                    step_num_scheduled_tokens.values()
+                )
+                decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+
+                worker_execute_model(decode_output)
+                worker_sample_tokens(None)
+
+                for i, use_spec in zip(indices, spec_flags):
+                    req_computed[i] += decode_query_len if use_spec else 1
+
+            all_indices = list(range(num_reqs))
+            use_spec_decode = num_spec_steps > 0
+
+            # Decode steps to warm, as (request indices, per-request spec flag).
+            # Under spec decoding the scheduler drops requests the drafter proposed
+            # nothing for, so warm each batch shape with and without draft tokens.
+            decode_steps: list[tuple[list[int], list[bool]]] = [
+                (all_indices, [use_spec_decode] * num_reqs),
+            ]
+            if num_reqs >= 2:
+                # Mixed spec / non-spec: GDN and KDA reclassify the non-spec decode
+                # as a prefill and split the batch into spec/non-spec token indices.
+                decode_steps.append(([0, 1], [use_spec_decode, False]))
+                if use_spec_decode:
+                    # Exercise the model paths that split a batch by whether each
+                    # request received draft tokens.
+                    decode_steps.append(([0, 1], [False, False]))
+            if num_reqs > 1:
+                decode_steps.append(([0], [use_spec_decode]))
+                if use_spec_decode:
+                    decode_steps.append(([0], [False]))
+            elif use_spec_decode:
                 decode_steps.append(([0], [False]))
-        elif use_spec_decode:
-            decode_steps.append(([0], [False]))
 
-        for step_indices, step_spec_flags in decode_steps:
-            _run_decode_step(step_indices, step_spec_flags)
+            for step_indices, step_spec_flags in decode_steps:
+                _run_decode_step(step_indices, step_spec_flags)
+
+    except torch.OutOfMemoryError:
+        if model_runner.extensible_kv_buffers is not None:
+            # Measured sizing depends on warmup coverage; fail loudly.
+            raise
+        # The profiling-estimated KV cache size left less headroom than the
+        # full-scale warmup batches need (the estimate never ran them). Skip
+        # the remaining warmup instead of failing startup -- matching the V1
+        # runner's lighter warmup -- though the same worst-case batches may
+        # run out of memory at runtime.
+        logger.warning(
+            "Warmup ran out of memory with the profiling-estimated KV cache "
+            "size; skipping the remaining warmup steps."
+        )
+        torch.accelerator.empty_cache()
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()

@@ -82,7 +82,8 @@ def _make_runner(
         is_last_pp_rank=True,
         max_num_reqs=4,
         max_model_len=MAX_MODEL_LEN,
-        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64, max_logprobs=0),
+        structured_outputs_worker=None,
         model_state=SimpleNamespace(max_encoder_len=0),
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=2048),
         kv_cache_config=SimpleNamespace(
@@ -94,6 +95,7 @@ def _make_runner(
         # No-op without the extensible KV cache; warmup calls it to commit
         # the block prefix it writes to.
         ensure_kv_cache_blocks=lambda num_blocks: None,
+        warmup_multimodal_encoder=lambda: None,
     )
 
 
@@ -362,3 +364,72 @@ def test_num_lookahead_tokens_without_speculation():
     config = _Config()
 
     assert config.num_lookahead_tokens == 0
+
+
+def test_encoder_warmup_fit_budget_halves_until_fit(monkeypatch):
+    """OOM during the warmup encoder pass halves the per-step encoder budget
+    (floored at one worst-case item) until the batch fits; the reduced budget
+    is left on the scheduler config for the engine to adopt."""
+    from types import SimpleNamespace
+
+    import torch
+
+    import vllm.v1.worker.gpu.model_states.interface as msi
+
+    class FakeBudget:
+        def __init__(self, vllm_config, registry, enable_cache=True):
+            self.mm_max_toks_per_item = {"image": 1000}
+
+    monkeypatch.setattr(msi, "MultiModalBudget", FakeBudget)
+    monkeypatch.setattr(
+        msi, "get_dummy_encoder_profile_inputs", lambda registry, budget: []
+    )
+    monkeypatch.setattr(msi.torch.accelerator, "synchronize", lambda: None)
+
+    attempts: list[int] = []
+
+    def make_state(sched, fail_while):
+        def profile(dummy, budget):
+            attempts.append(sched.max_num_encoder_input_tokens)
+            if fail_while(sched.max_num_encoder_input_tokens):
+                raise torch.OutOfMemoryError("out of memory")
+
+        return SimpleNamespace(
+            model_config=SimpleNamespace(
+                multimodal_config=SimpleNamespace(skip_mm_profiling=False)
+            ),
+            vllm_config=SimpleNamespace(
+                scheduler_config=sched,
+                compilation_config=SimpleNamespace(
+                    encoder_cudagraph_max_vision_items_per_batch=0
+                ),
+            ),
+            encoder_runner=SimpleNamespace(profile_encoder_cache=profile),
+            encoder_cache=SimpleNamespace(reset_encoder_cache=lambda: None),
+        )
+
+    sched = SimpleNamespace(max_num_encoder_input_tokens=8192, encoder_cache_size=8192)
+    msi.ModelState.profile_encoder_cache(
+        make_state(sched, lambda budget: budget > 2048), fit_budget=True
+    )
+    assert attempts == [8192, 4096, 2048]
+    assert sched.max_num_encoder_input_tokens == 2048
+    assert sched.encoder_cache_size == 2048
+
+    # The floor is one worst-case item; a persistent OOM there gives up
+    # (with a warning) instead of looping.
+    attempts.clear()
+    sched = SimpleNamespace(max_num_encoder_input_tokens=1500, encoder_cache_size=1500)
+    msi.ModelState.profile_encoder_cache(
+        make_state(sched, lambda budget: True), fit_budget=True
+    )
+    assert attempts == [1500, 1000]
+    assert sched.max_num_encoder_input_tokens == 1000
+
+    # Without fit_budget (profiling), the OOM propagates untouched.
+    sched = SimpleNamespace(max_num_encoder_input_tokens=8192, encoder_cache_size=8192)
+    import pytest
+
+    with pytest.raises(torch.OutOfMemoryError):
+        msi.ModelState.profile_encoder_cache(make_state(sched, lambda budget: True))
+    assert sched.max_num_encoder_input_tokens == 8192

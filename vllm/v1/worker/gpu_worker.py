@@ -559,95 +559,152 @@ class Worker(WorkerBase):
                 getattr(self.parallel_config, "_api_process_count", 1),
             )
 
-        # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
-            self.model_runner.profile_run()
-
-        # Profile CUDA graph memory if graphs will be captured.
-        # ROCm is included: #44825 moved the profiler to
-        # torch.accelerator.get_memory_info (reliable on ROCm, as used by
-        # the AMD-CI mem tests), and graph_pool_handle resolves to the same
-        # torch.cuda handle the live capture path already uses on ROCm.
-        # XPU stays excluded (see #39977).
-        cudagraph_memory_estimate = 0
-        if (
-            current_platform.is_cuda_alike()
-            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and not self.cache_config.enable_extensible_kv_cache
-        ):
-            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
-
-        # Respect the opt-in flag as originally designed.
-        cudagraph_memory_estimate_applied = (
-            cudagraph_memory_estimate
-            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-            else 0
+        # The worst-case encoder profile can starve the KV budget on a small
+        # GPU: when the estimate cannot fit even one max-length request, halve
+        # the per-step encoder token budget (a real scheduler constraint,
+        # reported to the engine after warmup) and re-profile.
+        min_kv_needed = sum(
+            spec.max_memory_usage_bytes(self.vllm_config)
+            for spec in self.model_runner.get_kv_cache_spec().values()
         )
+        self._original_encoder_budget = (
+            self.scheduler_config.max_num_encoder_input_tokens
+        )
+        while True:
+            # Execute a forward pass with dummy inputs to profile the memory usage
+            # of the model.
+            with memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result:
+                self.model_runner.profile_run()
 
-        self.total_consumed = profile_result.total_consumed
-        self.transient_peak_headroom = profile_result.transient_peak_headroom
-        self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
-        )
-        self.cudagraph_memory_estimate = cudagraph_memory_estimate
+            # Profile CUDA graph memory if graphs will be captured.
+            # ROCm is included: #44825 moved the profiler to
+            # torch.accelerator.get_memory_info (reliable on ROCm, as used by
+            # the AMD-CI mem tests), and graph_pool_handle resolves to the same
+            # torch.cuda handle the live capture path already uses on ROCm.
+            # XPU stays excluded (see #39977).
+            cudagraph_memory_estimate = 0
+            if (
+                current_platform.is_cuda_alike()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+                and not self.cache_config.enable_extensible_kv_cache
+            ):
+                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
-        free_gpu_memory = profile_result.after_profile.free_memory
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory >= free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {format_gib(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
-        )
-        self.available_kv_cache_memory_bytes = (
-            self.requested_memory
-            - profile_result.non_kv_cache_memory
-            - cudagraph_memory_estimate_applied
-        )
-        if self.cache_config.enable_extensible_kv_cache:
-            # The utilization budget is a fraction of *total* memory, so as it
-            # approaches 1 it can exceed what is actually free. Warmup
-            # physically commits a prefix of this size before CUDA graph
-            # capture, so bound it by measured free memory less the activation
-            # peak warmup re-creates. The post-warmup resize, which measures
-            # rather than estimates, sets the final size regardless.
-            # VMM commits round every layout segment up to the allocation
-            # granule; segments are per layer slot (at most two head planes
-            # each), so reserve that worst case up front.
-            granule = granule_size(getattr(self.device, "index", 0) or 0)
-            num_layers = self.model_config.get_num_layers(self.parallel_config)
-            commit_rounding = (2 * num_layers + 4) * granule
-            # Warmup's real batches can out-peak the profiled estimate (e.g.
-            # Mamba's per-sequence fp32 chunk states across a full warmup
-            # batch), and a deferred KV connector may still allocate its GPU
-            # staging buffer. Over-reserving here only shrinks the initial
-            # commit; the post-warmup measured resize reclaims it.
-            # The floor covers warmup transients profiling never sees (e.g.
-            # FlashInfer's sampling buffers at full batch); over-reserving
-            # only shrinks the initial commit, which the measured resize
-            # reclaims.
-            warmup_headroom = max(
-                2 * profile_result.transient_peak_headroom,
-                profile_result.transient_peak_headroom + 1536 * (1 << 20),
-            )
-            kv_transfer_config = self.vllm_config.kv_transfer_config
-            connector_buffer = (
-                int(kv_transfer_config.kv_buffer_size)
-                if kv_transfer_config is not None
-                and kv_transfer_config.kv_buffer_device == "cuda"
+            # Respect the opt-in flag as originally designed.
+            cudagraph_memory_estimate_applied = (
+                cudagraph_memory_estimate
+                if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
                 else 0
             )
-            self.available_kv_cache_memory_bytes = min(
-                self.available_kv_cache_memory_bytes,
-                free_gpu_memory - warmup_headroom - commit_rounding - connector_buffer,
+
+            self.total_consumed = profile_result.total_consumed
+            self.transient_peak_headroom = profile_result.transient_peak_headroom
+            self.peak_activation_memory = (
+                profile_result.transient_peak_headroom
+                + cudagraph_memory_estimate_applied
+            )
+            self.cudagraph_memory_estimate = cudagraph_memory_estimate
+
+            free_gpu_memory = profile_result.after_profile.free_memory
+            # NOTE(woosuk): Here we assume that the other processes using the same
+            # GPU did not change their memory usage during the profiling.
+            assert self.init_snapshot.free_memory >= free_gpu_memory, (
+                "Error in memory profiling. Initial free memory "
+                f"{format_gib(self.init_snapshot.free_memory)} GiB, "
+                f"current free memory {format_gib(free_gpu_memory)} GiB. "
+                "This happens when other processes sharing the same container "
+                "release GPU memory while vLLM is profiling during initialization. "
+                "To fix this, ensure consistent GPU memory allocation or "
+                "isolate vLLM in its own container."
+            )
+            self.available_kv_cache_memory_bytes = (
+                self.requested_memory
+                - profile_result.non_kv_cache_memory
+                - cudagraph_memory_estimate_applied
+            )
+            if self.cache_config.enable_extensible_kv_cache:
+                # The utilization budget is a fraction of *total* memory, so as it
+                # approaches 1 it can exceed what is actually free. Warmup
+                # physically commits a prefix of this size before CUDA graph
+                # capture, so bound it by measured free memory less the activation
+                # peak warmup re-creates. The post-warmup resize, which measures
+                # rather than estimates, sets the final size regardless.
+                # VMM commits round every layout segment up to the allocation
+                # granule; segments are per layer slot (at most two head planes
+                # each), so reserve that worst case up front.
+                granule = granule_size(getattr(self.device, "index", 0) or 0)
+                num_layers = self.model_config.get_num_layers(self.parallel_config)
+                commit_rounding = (2 * num_layers + 4) * granule
+                # Warmup's real batches can out-peak the profiled estimate (e.g.
+                # Mamba's per-sequence fp32 chunk states across a full warmup
+                # batch), and a deferred KV connector may still allocate its GPU
+                # staging buffer. Over-reserving here only shrinks the initial
+                # commit; the post-warmup measured resize reclaims it.
+                # The floor covers warmup transients profiling never sees (e.g.
+                # FlashInfer's sampling buffers at full batch); over-reserving
+                # only shrinks the initial commit, which the measured resize
+                # reclaims.
+                warmup_headroom = max(
+                    2 * profile_result.transient_peak_headroom,
+                    profile_result.transient_peak_headroom + 1536 * (1 << 20),
+                )
+                kv_transfer_config = self.vllm_config.kv_transfer_config
+                connector_buffer = (
+                    int(kv_transfer_config.kv_buffer_size)
+                    if kv_transfer_config is not None
+                    and kv_transfer_config.kv_buffer_device == "cuda"
+                    else 0
+                )
+                self.available_kv_cache_memory_bytes = min(
+                    self.available_kv_cache_memory_bytes,
+                    free_gpu_memory
+                    - warmup_headroom
+                    - commit_rounding
+                    - connector_buffer,
+                )
+
+            if self.available_kv_cache_memory_bytes >= min_kv_needed:
+                break
+            if self.cache_config.enable_extensible_kv_cache:
+                # The estimate books the whole transient activation peak
+                # against the budget even though it is freed after profiling.
+                # When that leaves less than one max-length request but the
+                # measured free memory can hold the minimum KV cache plus the
+                # peak (warmup re-creates it), commit the minimum for warmup
+                # and let the post-warmup measurement set the final size.
+                min_feasible = (
+                    free_gpu_memory
+                    - profile_result.transient_peak_headroom
+                    - commit_rounding
+                    - connector_buffer
+                )
+                if min_feasible >= min_kv_needed:
+                    logger.warning(
+                        "The profiling estimate leaves %s GiB for the KV "
+                        "cache, less than the %s GiB one max-length request "
+                        "needs; provisionally taking the %s GiB measured "
+                        "free memory can hold and sizing the KV cache from "
+                        "the post-warmup memory measurement.",
+                        format_gib(self.available_kv_cache_memory_bytes),
+                        format_gib(min_kv_needed),
+                        format_gib(min_feasible),
+                    )
+                    self.available_kv_cache_memory_bytes = min_feasible
+                    break
+            halve = getattr(self.model_runner, "halve_encoder_budget", None)
+            if halve is None or not halve():
+                break
+            logger.warning(
+                "The profiling estimate leaves %s GiB for the KV cache, less "
+                "than the %s GiB one max-length request needs; halving the "
+                "per-step encoder token budget to %d tokens and re-profiling.",
+                format_gib(self.available_kv_cache_memory_bytes),
+                format_gib(min_kv_needed),
+                self.scheduler_config.max_num_encoder_input_tokens,
             )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -946,6 +1003,13 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
+        # Baseline from before memory profiling, which may itself have reduced
+        # the budget; the engine only learns of a reduction via this report.
+        original_encoder_budget = getattr(
+            self,
+            "_original_encoder_budget",
+            self.scheduler_config.max_num_encoder_input_tokens,
+        )
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
             warmup_kernels(
@@ -1051,11 +1115,18 @@ class Worker(WorkerBase):
         # intra-op parallelism.
         set_torch_threads_for_runtime()
 
+        # Encoder warmup may have reduced the budget to fit memory.
+        fitted_encoder_budget = self.scheduler_config.max_num_encoder_input_tokens
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
             warmup_memory=warmup_memory_bytes,
             transient_peak_headroom=getattr(self, "transient_peak_headroom", 0),
+            encoder_budget_tokens=(
+                fitted_encoder_budget
+                if fitted_encoder_budget != original_encoder_budget
+                else None
+            ),
         )
 
     def reset_mm_cache(self) -> None:

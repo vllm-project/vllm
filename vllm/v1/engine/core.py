@@ -367,6 +367,29 @@ class EngineCore:
         compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             compilation_times = self.model_executor.compile_or_warm_up_model()
+
+        # A worker may have reduced its per-step encoder token budget so the
+        # worst-case encoder batch fits in memory; the scheduler (constructed
+        # after this) must not batch more encoder tokens than every worker
+        # proved to fit.
+        fitted_budgets = [
+            times.encoder_budget_tokens
+            for times in compilation_times
+            if times.encoder_budget_tokens is not None
+        ]
+        if fitted_budgets:
+            scheduler_config = vllm_config.scheduler_config
+            budget = min(fitted_budgets)
+            logger.warning(
+                "Limiting the per-step encoder budget to %d tokens "
+                "(from %d) to fit the worst-case encoder batch in memory.",
+                budget,
+                scheduler_config.max_num_encoder_input_tokens,
+            )
+            scheduler_config.max_num_encoder_input_tokens = budget
+            scheduler_config.encoder_cache_size = min(
+                scheduler_config.encoder_cache_size, budget
+            )
         if extensible:
             # Re-size from the memory warmup and CUDA graph capture actually
             # consumed, then commit. One CompilationTimes per worker.

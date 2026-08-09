@@ -46,6 +46,10 @@ class CompilationTimes(NamedTuple):
     # Profiled transient activation peak (bytes) above steady-state usage; the
     # extensible KV cache flow scales its safety margin off this.
     transient_peak_headroom: int = 0
+    # Per-step encoder token budget after warmup fitting, if warmup had to
+    # reduce it to fit the worst-case encoder batch in memory; the engine
+    # applies the smallest worker value to the scheduler.
+    encoder_budget_tokens: int | None = None
 
 
 class WorkerBase:

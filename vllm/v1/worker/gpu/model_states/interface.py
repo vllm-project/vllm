@@ -8,9 +8,15 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     supports_encoder_cudagraph,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import (
+    MultiModalBudget,
+    get_dummy_encoder_profile_inputs,
 )
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -22,6 +28,8 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
 
 
 class ModelSpecificAttnMetadata:
@@ -168,6 +176,94 @@ class ModelState(ABC):
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
         """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
         return None
+
+    @torch.inference_mode()
+    def profile_encoder_cache(self, fit_budget: bool = False) -> None:
+        """Profile the encoder and encoder cache at their worst case,
+        holding the memory until the caller resets the encoder cache.
+
+        With ``fit_budget=True`` (warmup), an OOM halves the per-step encoder
+        token budget and retries: the worst case fit during profiling, which
+        ran it nearly alone, but at warmup it must fit alongside everything
+        else warmup keeps resident. The scheduler adopts the reduced budget,
+        so it never batches more encoder tokens than warmup proved to fit.
+        """
+        multimodal_config = self.model_config.multimodal_config
+        if not multimodal_config or multimodal_config.skip_mm_profiling:
+            return
+        scheduler_config = self.vllm_config.scheduler_config
+        original_budget = scheduler_config.max_num_encoder_input_tokens
+        while True:
+            mm_budget = MultiModalBudget(
+                self.vllm_config, MULTIMODAL_REGISTRY, enable_cache=False
+            )
+            dummy_mm_inputs = get_dummy_encoder_profile_inputs(
+                MULTIMODAL_REGISTRY, mm_budget
+            )
+            if fit_budget:
+                # The encoder-cudagraph padding buffers are sized to this cap
+                # and runtime batches respect it; the warmup re-run must too
+                # (profiling runs before cudagraph capture, unclamped).
+                compilation_config = self.vllm_config.compilation_config
+                cg_cap = compilation_config.encoder_cudagraph_max_vision_items_per_batch
+                if cg_cap and len(dummy_mm_inputs) > cg_cap:
+                    dummy_mm_inputs = dummy_mm_inputs[:cg_cap]
+            try:
+                self.encoder_runner.profile_encoder_cache(dummy_mm_inputs, mm_budget)
+                if fit_budget:
+                    torch.accelerator.synchronize()
+                break
+            except torch.OutOfMemoryError:
+                if not fit_budget:
+                    raise
+                self.encoder_cache.reset_encoder_cache()
+                # One worst-case item is the floor: below that no encoder
+                # batch is schedulable at all.
+                floor = max(mm_budget.mm_max_toks_per_item.values(), default=0)
+                budget = scheduler_config.max_num_encoder_input_tokens
+                if budget <= floor:
+                    logger.warning(
+                        "A single worst-case multimodal item does not fit "
+                        "alongside the memory warmup keeps resident; leaving "
+                        "the encoder budget at %d tokens. Encoder batches "
+                        "may OOM at runtime.",
+                        budget,
+                    )
+                    break
+                budget = max(budget // 2, floor)
+                scheduler_config.max_num_encoder_input_tokens = budget
+                scheduler_config.encoder_cache_size = min(
+                    scheduler_config.encoder_cache_size, budget
+                )
+        if scheduler_config.max_num_encoder_input_tokens != original_budget:
+            logger.warning(
+                "Reduced the per-step encoder budget from %d to %d tokens to "
+                "fit the worst-case encoder batch in memory.",
+                original_budget,
+                scheduler_config.max_num_encoder_input_tokens,
+            )
+
+    def halve_encoder_budget(self) -> bool:
+        """Halve the per-step encoder token budget, or return False when it is
+        already at the single worst-case-item floor (below which no encoder
+        batch is schedulable at all)."""
+        multimodal_config = self.model_config.multimodal_config
+        if not multimodal_config or multimodal_config.skip_mm_profiling:
+            return False
+        mm_budget = MultiModalBudget(
+            self.vllm_config, MULTIMODAL_REGISTRY, enable_cache=False
+        )
+        floor = max(mm_budget.mm_max_toks_per_item.values(), default=0)
+        scheduler_config = self.vllm_config.scheduler_config
+        budget = scheduler_config.max_num_encoder_input_tokens
+        if floor <= 0 or budget <= floor:
+            return False
+        budget = max(budget // 2, floor)
+        scheduler_config.max_num_encoder_input_tokens = budget
+        scheduler_config.encoder_cache_size = min(
+            scheduler_config.encoder_cache_size, budget
+        )
+        return True
 
     def execute_mm_encoder(
         self, scheduled_encoder_inputs: dict[str, list[int]]
