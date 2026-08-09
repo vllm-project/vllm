@@ -48,7 +48,10 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 from transformers.video_utils import VideoMetadata
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig
 from vllm.config.multimodal import (
     BaseDummyOptions,
@@ -356,6 +359,13 @@ def pos_embed_interpolate_native(
     return repeated.to(dtype=dtype)
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class Qwen3_VisionPatchEmbed(nn.Module):
     def __init__(
         self,
@@ -422,6 +432,17 @@ class Qwen3_VisionMLP(nn.Module):
         return mlp_output
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb_cos": 0,
+        "rotary_pos_emb_sin": 0,
+        "sequence_lengths": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class Qwen3_VisionBlock(nn.Module):
     def __init__(
         self,
@@ -879,6 +900,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def _get_vision_info(
