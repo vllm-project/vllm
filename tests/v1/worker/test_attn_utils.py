@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode, MambaSpec
+from vllm.v1.worker.gpu.attn_utils import (
+    _reshape_kv_cache,
+    _reshape_mamba_kv_cache,
+    zero_mamba_kv_cache,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -25,6 +33,116 @@ class FakeFlashAttentionBackend:
     ) -> tuple[int, ...]:
         assert not include_num_layers_dimension
         return (0, 1, 2, 3, 4)
+
+
+@pytest.mark.parametrize("packing", [None, (8, 32)])
+def test_reshape_mamba_kv_cache_preserves_block_layout(packing):
+    spec = MambaSpec(
+        block_size=1,
+        shapes=((2,), (4,)),
+        dtypes=(torch.float32, torch.float16),
+    )
+    num_blocks = 3
+    page_size = spec.page_size_bytes
+    block_stride = page_size if packing is None else packing[1]
+    raw = torch.full((num_blocks * block_stride,), -1, dtype=torch.int8)
+
+    cache = _reshape_mamba_kv_cache(raw, spec, num_blocks, packing)
+
+    expected_offset = 0 if packing is None else packing[0]
+    assert cache.shape == (num_blocks, 1, 1, page_size)
+    assert cache.stride() == (block_stride, page_size, page_size, 1)
+    assert cache.data_ptr() == raw.data_ptr() + expected_offset
+
+    cache.fill_(0)
+    raw_blocks = raw.view(num_blocks, block_stride)
+    assert (
+        torch.count_nonzero(
+            raw_blocks[:, expected_offset : expected_offset + page_size]
+        )
+        == 0
+    )
+    if packing is not None:
+        assert torch.all(raw_blocks[:, :expected_offset] == -1)
+        assert torch.all(raw_blocks[:, expected_offset + page_size :] == -1)
+
+    layer = SimpleNamespace(
+        get_state_shape=lambda: spec.shapes,
+        get_state_dtype=lambda: spec.dtypes,
+    )
+    MambaBase.bind_kv_cache(layer, cache)
+    for state, shape in zip(layer.kv_cache, spec.shapes):
+        assert state.shape == (num_blocks, *shape)
+        assert state.stride(0) * state.element_size() == block_stride
+
+
+@pytest.mark.parametrize("state_container", [list, tuple])
+def test_zero_mamba_kv_cache_only_zeros_state_cache(state_container):
+    mamba_spec = MambaSpec(
+        block_size=1,
+        shapes=((2,), (3,)),
+        dtypes=(torch.float32, torch.float32),
+    )
+    attention_spec = FullAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    groups = [
+        [
+            AttentionGroup(
+                backend=FakeFlashAttentionBackend,
+                layer_names=["mamba"],
+                kv_cache_spec=mamba_spec,
+                kv_cache_group_id=0,
+            ),
+            AttentionGroup(
+                backend=FakeFlashAttentionBackend,
+                layer_names=["attention"],
+                kv_cache_spec=attention_spec,
+                kv_cache_group_id=0,
+            ),
+        ]
+    ]
+    mamba_backing = torch.ones(4, 6)
+    mamba_states = state_container([mamba_backing[:, ::2], mamba_backing[:, 1::2]])
+    attention_cache = torch.ones(4)
+    forward_context = {
+        "mamba": SimpleNamespace(kv_cache=mamba_states),
+        "attention": SimpleNamespace(kv_cache=attention_cache),
+    }
+
+    zero_mamba_kv_cache(groups, forward_context)
+
+    assert all(torch.count_nonzero(state) == 0 for state in mamba_states)
+    assert torch.count_nonzero(mamba_backing) == 0
+    assert torch.all(attention_cache == 1)
+
+
+def test_zero_mamba_kv_cache_deduplicates_shared_views():
+    mamba_spec = MambaSpec(
+        block_size=1,
+        shapes=((2,),),
+        dtypes=(torch.float32,),
+    )
+    group = AttentionGroup(
+        backend=FakeFlashAttentionBackend,
+        layer_names=["mamba", "mamba_alias"],
+        kv_cache_spec=mamba_spec,
+        kv_cache_group_id=0,
+    )
+    state = torch.ones(4, 2)
+    forward_context = {
+        "mamba": SimpleNamespace(kv_cache=(state,)),
+        "mamba_alias": SimpleNamespace(kv_cache=(state,)),
+    }
+    version = state._version
+
+    zero_mamba_kv_cache([[group]], forward_context)
+
+    assert state._version == version + 1
+    assert torch.count_nonzero(state) == 0
 
 
 class FakeHNDFlashAttentionBackend(FakeFlashAttentionBackend):

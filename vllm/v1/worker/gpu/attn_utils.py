@@ -264,6 +264,27 @@ def _reshape_attention_kv_cache(
     return kv_cache.permute(*inv_order)
 
 
+def _reshape_mamba_kv_cache(
+    kv_raw_tensor: torch.Tensor,
+    kv_cache_spec: MambaSpec,
+    num_blocks: int,
+    packing: tuple[int, int] | None,
+) -> torch.Tensor:
+    page_size_bytes = kv_cache_spec.page_size_bytes
+    if packing is not None:
+        offset, block_stride = packing
+        assert kv_raw_tensor.element_size() == 1
+        assert offset >= 0 and offset + page_size_bytes <= block_stride
+        kv_cache = kv_raw_tensor.view(num_blocks, block_stride)[
+            :, offset : offset + page_size_bytes
+        ]
+    else:
+        kv_cache = kv_raw_tensor[: num_blocks * page_size_bytes].view(
+            num_blocks, page_size_bytes
+        )
+    return kv_cache.view(num_blocks, 1, 1, page_size_bytes)
+
+
 def _reshape_kv_cache(
     attn_groups: Sequence[AttentionGroup],
     kv_cache_raw_tensors: dict[str, torch.Tensor],
@@ -350,15 +371,12 @@ def _reshape_kv_cache(
                 )
 
             elif isinstance(kv_cache_spec, MambaSpec):
-                page_size_bytes = kv_cache_spec.page_size_bytes
-                # Hold a single contiguous [num_blocks, 1, 1, page_size_bytes]
-                # int8 page view per layer; the layer's bind_kv_cache unpacks
-                # each block's bytes into its conv/ssm state views. Keeping
-                # one tensor per layer lets the KV connector register it
-                # without special-casing Mamba.
-                kv_caches[layer_name] = kv_raw_tensor[
-                    : num_blocks * page_size_bytes
-                ].view(num_blocks, 1, 1, page_size_bytes)
+                # The layer's bind_kv_cache unpacks this raw page view into its
+                # conv/SSM states. Keeping one tensor per layer lets KV
+                # connectors register it without special-casing Mamba.
+                kv_caches[layer_name] = _reshape_mamba_kv_cache(
+                    kv_raw_tensor, kv_cache_spec, num_blocks, packing
+                )
             else:
                 raise NotImplementedError(
                     f"Unsupported KV cache spec type: {type(kv_cache_spec)}"
@@ -484,6 +502,33 @@ def init_kv_cache(
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
     return kv_caches
+
+
+@torch.inference_mode()
+def zero_mamba_kv_cache(
+    attn_groups: Sequence[Sequence[AttentionGroup]],
+    forward_context: Mapping[str, AttentionLayerBase],
+) -> None:
+    """Zero state caches whose physical storage was discarded during sleep."""
+    seen_views: set[tuple[int, torch.dtype, tuple[int, ...], tuple[int, ...]]] = set()
+    for groups in attn_groups:
+        for group in groups:
+            if not isinstance(group.kv_cache_spec, MambaSpec):
+                continue
+            for layer_name in group.layer_names:
+                kv_cache = forward_context[layer_name].kv_cache
+                assert isinstance(kv_cache, (list, tuple))
+                for state in kv_cache:
+                    view = (
+                        state.data_ptr(),
+                        state.dtype,
+                        tuple(state.shape),
+                        state.stride(),
+                    )
+                    if view in seen_views:
+                        continue
+                    seen_views.add(view)
+                    state.zero_()
 
 
 def build_slot_mappings_by_layer(

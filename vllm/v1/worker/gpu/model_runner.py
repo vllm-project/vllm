@@ -78,6 +78,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
+    zero_mamba_kv_cache,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import (
@@ -771,6 +772,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def post_kv_cache_wake_up(self) -> None:
         self.block_tables.init_block_table_layout_tensors()
+        zero_mamba_kv_cache(
+            self.attn_groups, self.compilation_config.static_forward_context
+        )
 
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
