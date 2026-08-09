@@ -1214,11 +1214,25 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        indexer_topk_capture = True
+        if self.enable_return_indexer_topk:
+            indexer_topk_capture = any(
+                (
+                    self.requests[req_id].num_computed_tokens
+                    >= self.requests[req_id].num_tokens
+                    or self.requests[req_id].sampling_params is None
+                    or self.requests[req_id].sampling_params.indexer_topk_prompt_start
+                    != -1
+                )
+                for req_id in num_scheduled_tokens
+            )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
+            indexer_topk_capture=indexer_topk_capture,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
@@ -1950,7 +1964,9 @@ class Scheduler(SchedulerInterface):
                     # schedule time (immune to async preemption).
                     if request.sampling_params is not None:
                         prompt_start = request.sampling_params.indexer_topk_prompt_start
-                        if prompt_start < 0 or prompt_start > request.num_prompt_tokens:
+                        if prompt_start == -1:
+                            prompt_start = request.num_prompt_tokens
+                        elif prompt_start < 0 or prompt_start > request.num_prompt_tokens:
                             raise ValueError(
                                 "indexer_topk_prompt_start "
                                 f"({prompt_start}) must be >= 0 and "

@@ -184,10 +184,11 @@ class CompletionRequest(OpenAIBaseModel):
     )
     indexer_topk_prompt_start: int = Field(
         default=0,
-        ge=0,
+        ge=-1,
         description=(
             "When enable_return_indexer_topk is active, skip the first "
-            "N prompt tokens from the returned indexer topk indices."
+            "N prompt tokens from the returned indexer topk indices. "
+            "Use -1 to skip the complete prompt."
         ),
     )
     return_token_offsets: bool | None = Field(

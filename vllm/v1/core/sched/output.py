@@ -225,6 +225,8 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+    # Whether the worker should capture indexer top-k for this step.
+    indexer_topk_capture: bool = True
 
     scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
 
@@ -275,6 +277,7 @@ class SchedulerOutput:
             scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens={},
             total_num_scheduled_tokens=0,
+            indexer_topk_capture=True,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[],

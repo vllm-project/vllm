@@ -162,9 +162,11 @@ class IndexerTopkCapturer:
             device=device,
         )
         self._captured_layers = [False] * num_indexer_layers
+        self._enabled = True
 
-    def begin_step(self) -> None:
+    def begin_step(self, enabled: bool = True) -> None:
         """Reset the small per-step callback completeness tracker."""
+        self._enabled = enabled
         self._captured_layers[:] = [False] * self.num_indexer_layers
 
     def capture(self, compact_layer_id: int, topk_indices: torch.Tensor) -> None:
@@ -175,6 +177,8 @@ class IndexerTopkCapturer:
                 assigned at bind time, NOT the model layer_id.
             topk_indices: Tensor of shape (batch_size, index_topk).
         """
+        if not self._enabled:
+            return
         if compact_layer_id < 0 or compact_layer_id >= self.device_buffer.shape[1]:
             raise IndexError(
                 f"indexer capture layer {compact_layer_id} exceeds buffer "
@@ -196,6 +200,8 @@ class IndexerTopkCapturer:
 
     def validate_step(self) -> None:
         """Fail closed when a model path skipped an indexer callback."""
+        if not self._enabled:
+            return
         missing = [
             layer_id
             for layer_id, captured in enumerate(self._captured_layers)

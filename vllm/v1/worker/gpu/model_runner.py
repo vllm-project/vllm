@@ -1316,7 +1316,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.indexer_topk_capturer is not None and not dummy_run:
-            self.indexer_topk_capturer.begin_step()
+            self.indexer_topk_capturer.begin_step(
+                scheduler_output.indexer_topk_capture
+            )
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1563,7 +1565,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             routed_experts = capturer.get_routed_experts(slot_mappings, num_toks)
 
         indexer_topk = None
-        if self.indexer_topk_capturer is not None and not dummy_run:
+        if (
+            self.indexer_topk_capturer is not None
+            and not dummy_run
+            and scheduler_output.indexer_topk_capture
+        ):
             assert slot_mappings is not None
             self.indexer_topk_capturer.validate_step()
             indexer_topk = IndexerTopkTensors(

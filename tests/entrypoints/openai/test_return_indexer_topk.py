@@ -196,6 +196,13 @@ async def test_indexer_topk_prompt_start_offset(server):
             temperature=0,
             extra_body={"indexer_topk_prompt_start": prompt_start},
         )
+        generated_only = await client.completions.create(
+            model=MODEL_NAME,
+            prompt=prompt,
+            max_tokens=3,
+            temperature=0,
+            extra_body={"indexer_topk_prompt_start": -1},
+        )
 
         full_topk = _decode_indexer_topk(
             full.model_dump()["choices"][0]["indexer_topk"]
@@ -209,3 +216,9 @@ async def test_indexer_topk_prompt_start_offset(server):
         assert full_topk.shape[0] - trimmed_topk.shape[0] == prompt_start
         # Layer / index_topk dimensions are unaffected.
         assert full_topk.shape[1:] == trimmed_topk.shape[1:]
+
+        generated_only_topk = _decode_indexer_topk(
+            generated_only.model_dump()["choices"][0]["indexer_topk"]
+        )
+        assert generated_only_topk.shape[0] == 3
+        assert generated_only_topk.shape[1:] == full_topk.shape[1:]

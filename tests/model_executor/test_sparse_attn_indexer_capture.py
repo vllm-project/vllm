@@ -73,6 +73,17 @@ def test_indexer_capture_rejects_invalid_tensor_shape_and_layer():
         capturer.capture(0, torch.ones(1, 2, dtype=torch.int32))
 
 
+def test_indexer_capture_can_skip_prompt_step():
+    capturer = IndexerTopkCapturer(4, 1, 3, "cpu")
+    capturer.begin_step(enabled=False)
+    capturer.capture(0, torch.ones(1, 3, dtype=torch.int32))
+    capturer.validate_step()
+    torch.testing.assert_close(
+        capturer.get_device_buffer(),
+        torch.zeros(4, 1, 3, dtype=torch.int32),
+    )
+
+
 def test_indexer_shape_requires_positive_config():
     config = SimpleNamespace(
         index_topk=0,
