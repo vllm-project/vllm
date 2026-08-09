@@ -728,6 +728,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         output_final_state=True,
                         use_qk_l2norm_in_kernel=True,
                         cu_seqlens=non_spec_query_start_loc,
+                        chunk_indices=m.non_spec_chunk_indices,
                     )
                 recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
             else:

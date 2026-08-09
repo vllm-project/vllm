@@ -706,13 +706,13 @@ def chunk_kda_with_fused_gate_fwd(
     output_final_state: bool,
     lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
-    )
+    # Deriving these from `cu_seqlens` reads it back to the host; callers that
+    # have the segmentation already (see GDNAttentionMetadata) pass it in.
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     g, beta = fused_kda_gate_chunk_cumsum(
         raw_g,
         raw_beta=raw_beta,
@@ -787,6 +787,7 @@ def chunk_kda_with_fused_gate(
     lower_bound: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
     **kwargs,
 ):
     """Run chunk KDA from raw gate and beta projections."""
@@ -810,6 +811,7 @@ def chunk_kda_with_fused_gate(
         output_final_state=output_final_state,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     return o, final_state
 
