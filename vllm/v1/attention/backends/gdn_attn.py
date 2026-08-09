@@ -209,8 +209,26 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
         if spec_sequence_masks is None:
+            # A one-token first chunk has no GDN state and must take the
+            # prefill path, which masks recycled state pages. Resumed short
+            # prefills already own state and can stay on the decode path.
+            assert m.seq_lens_cpu_upper_bound is not None
+            query_lens_cpu = query_start_loc_cpu.diff()
+            no_prior_state = (query_lens_cpu > 0) & (
+                m.seq_lens_cpu_upper_bound <= query_lens_cpu
+            )
+            if m.is_prefilling is not None:
+                no_prior_state &= m.is_prefilling
+            else:
+                # Metadata without this runner flag is indistinguishable from
+                # the dummy batch used for cudagraph capture.
+                no_prior_state = torch.zeros_like(no_prior_state)
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(m, decode_threshold=1)
+                split_decodes_and_prefills(
+                    m.replace(is_prefilling=no_prior_state),
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=False,
+                )
             )
             num_spec_decode_tokens = 0
             spec_token_indx = None
@@ -463,26 +481,25 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
+        # FULL-graph dispatch is shape-based, so stage uniform one-token
+        # metadata even when a stateless row was classified as a prefill.
         if (
             self.use_full_cuda_graph
-            and num_prefills == 0
             and num_spec_decodes == 0
-            and num_decodes <= self.decode_cudagraph_max_bs
+            and m.max_query_len <= 1
+            and batch_size <= self.decode_cudagraph_max_bs
         ):
-            self.non_spec_state_indices_tensor[:num_decodes].copy_(
+            self.non_spec_state_indices_tensor[:batch_size].copy_(
                 non_spec_state_indices_tensor, non_blocking=True
             )
             non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
                 :batch_size
             ]
-            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
 
-            self.non_spec_query_start_loc[: num_decodes + 1].copy_(
+            self.non_spec_query_start_loc[: batch_size + 1].copy_(
                 non_spec_query_start_loc, non_blocking=True
             )
-            non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
-            non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
