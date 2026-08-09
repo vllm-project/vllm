@@ -109,6 +109,39 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 !!! note
     When tools are specified in the request, vLLM includes tool definitions in the prompt by default, regardless of the `tool_choice` setting. To exclude tool definitions when `tool_choice='none'`, use the `--exclude-tools-when-tool-choice-none` option.
 
+## Allowed Tools in the Rust Frontend
+
+The Rust frontend accepts `tool_choice.allowed_tools` on `/v1/chat/completions`
+to restrict a request to a subset of its declared function tools. Without this
+option, the normal `tool_choice` behavior applies.
+
+For example, when `tools` declares both `get_weather` and `get_time`, this choice
+exposes only `get_time` to the chat renderer:
+
+```json
+{
+  "type": "allowed_tools",
+  "allowed_tools": {
+    "mode": "auto",
+    "tools": [
+      {"type": "function", "function": {"name": "get_time"}}
+    ]
+  }
+}
+```
+
+Pass this object as `tool_choice` alongside the request's `messages` and `tools`.
+Use `mode: "auto"` to allow a text response or tool calls, or `mode: "required"`
+to require tool calling from the allowed subset. Every allowed name must appear
+in the top-level `tools` list; a tool declared only in a developer message does
+not authorize an allowed name. Filtering also applies to developer-message tool
+declarations and preserves declaration order.
+
+An empty list in `auto` mode disables tool calling. An empty list in `required`
+mode, an undeclared function name, or an unsupported reference type returns an
+HTTP 400 error. This option does not change the tool parser and model setup
+needed for tool calling.
+
 ## Constrained Decoding Behavior
 
 Structural-tag parsers resolve call obligation, grammar activation, and argument-schema enforcement separately. With structural-tag enforcement enabled:
