@@ -418,25 +418,20 @@ class Qwen2_5_VisionAttention(nn.Module):
         )
 
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
-            qk, v = qkv[:, :, :2], qkv[:, :, 2]
-
-            qk_reshaped = einops.rearrange(
-                qk, "b s two head head_dim -> (two b) s head head_dim", two=2
-            )
-            qk_reshaped = qk_reshaped.contiguous()
+            # Rotate q and k as one packed [b, s, 2 * head, head_dim] view of
+            # the qkv buffer: q/k heads are adjacent in memory, so flattening
+            # (two, head) is a zero-copy stride merge, and the rotary kernel
+            # handles strided inputs. This avoids materializing the
+            # rearrange((two b) s ...).contiguous() copy of q+k that this
+            # path used to make before rotation.
+            qk = qkv[:, :, :2].flatten(2, 3)
             qk_rotated = self.apply_rotary_emb(
-                qk_reshaped,
+                qk,
                 rotary_pos_emb_cos,
                 rotary_pos_emb_sin,
             )
-            qk_rotated = qk_rotated.view(
-                2,
-                batch_size,
-                seq_len,
-                self.num_attention_heads_per_partition,
-                self.hidden_size_per_attention_head,
-            )
-            q, k = qk_rotated.unbind(dim=0)
+            q, k = qk_rotated.unflatten(2, (2, -1)).unbind(dim=2)
+            v = qkv[:, :, 2]
         else:
             q, k, v = qkv.unbind(dim=2)
 
