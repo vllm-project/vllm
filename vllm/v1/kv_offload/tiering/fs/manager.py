@@ -201,7 +201,6 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
-        self._job_transfer_sizes: dict[JobId, int] = {}
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -227,7 +226,6 @@ class FileSystemTierManager(SecondaryTierManager):
             self._block_size,
             self._use_o_direct,
         )
-        self._job_transfer_sizes[job_metadata.job_id] = len(keys) * self._block_size
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
@@ -267,7 +265,6 @@ class FileSystemTierManager(SecondaryTierManager):
                 )
                 raise
 
-        self._job_transfer_sizes[job_id] = len(keys) * self._block_size
         self._pool.enqueue_load(job_id, 1, [load_task])
 
     @override
@@ -287,7 +284,6 @@ class FileSystemTierManager(SecondaryTierManager):
                             locality=self.locality,
                         )
                     )
-            transfer_size = self._job_transfer_sizes.pop(job_id, None)
             load_keys = self._load_job_keys.pop(job_id, None)
             num_succeeded = self._load_progress.pop(job_id, 0)
             if load_keys is not None and not success:
@@ -298,17 +294,11 @@ class FileSystemTierManager(SecondaryTierManager):
                 successful = load_keys[:num_succeeded]
                 failed = load_keys[num_succeeded:]
                 self._lookup_manager.mark_miss(failed)
-                successful_transfer_size = (
-                    num_succeeded * self._block_size
-                    if transfer_size is not None
-                    else None
-                )
                 results.append(
                     JobResult(
                         job_id=job_id,
                         success=False,
                         successful_keys=tuple(successful) if successful else None,
-                        transfer_size=successful_transfer_size,
                         transfer_time=transfer_time,
                     )
                 )
@@ -317,7 +307,6 @@ class FileSystemTierManager(SecondaryTierManager):
                 JobResult(
                     job_id=job_id,
                     success=success,
-                    transfer_size=transfer_size,
                     transfer_time=transfer_time,
                 )
             )
