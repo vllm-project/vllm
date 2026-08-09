@@ -109,21 +109,26 @@ def test_gfx942_gluon_graph_shape_gate(num_heads, qlen, num_reqs, expected):
     assert AiterMLAHelper.use_gluon_gfx942_graph(num_heads, qlen, num_reqs) is expected
 
 
-def test_existing_single_token_gluon_requires_gfx950(monkeypatch):
+def test_existing_single_token_gluon_respects_small_head_mode(monkeypatch):
     monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: False)
     assert not AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1)
 
     monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
+    assert not AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1)
+
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "gluon")
     assert AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1)
 
 
-def test_nondivisor_head_padding_and_unpadding():
+def test_nondivisor_head_tile_padding_and_unpadding():
     q = torch.arange(2 * NUM_HEADS * 3).reshape(2, NUM_HEADS, 3)
     padded = AiterMLAHelper.get_mla_padded_q(NUM_HEADS, q)
 
     assert padded.shape == (2, 16, 3)
+    assert padded.is_contiguous()
     torch.testing.assert_close(padded[:, :NUM_HEADS], q)
-    assert torch.count_nonzero(padded[:, NUM_HEADS:]) == 0
+    torch.testing.assert_close(padded[:, NUM_HEADS:], q[:, :4])
 
     output = torch.arange(2 * 16 * 3).reshape(2, 16, 3)
     unpadded = AiterMLAHelper.get_mla_unpadded_o(NUM_HEADS, output)
