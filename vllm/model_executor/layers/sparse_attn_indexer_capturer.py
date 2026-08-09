@@ -346,7 +346,6 @@ class IndexerTopkManager:
         num_tokens: int,
         token_start: int = 0,
     ) -> np.ndarray:
-        """Read indexer topk for a completed request."""
         bs = self.block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)
         block_offsets = np.arange(bs)
@@ -355,3 +354,32 @@ class IndexerTopkManager:
         ).flatten()[:num_tokens]
         slot_mapping = slot_mapping[token_start:]
         return self.indexer_topk_by_slot[slot_mapping]
+
+    def get_request_topk(
+        self,
+        *,
+        topk_data: np.ndarray,
+        req_offset: int,
+        num_tokens_scheduled: int,
+        new_token_ids: list[int],
+        num_output_tokens_before: int,
+        block_ids: list[int],
+        num_prompt_tokens: int,
+        indexer_topk_prompt_start: int,
+        scheduled_spec_token_ids: list | None,
+    ) -> np.ndarray | None:
+        """Resolve per-request topk slice for one scheduler iteration."""
+        if not new_token_ids:
+            return None
+        end = req_offset + num_tokens_scheduled
+        if num_output_tokens_before == 0:
+            prompt_start = indexer_topk_prompt_start
+            if prompt_start < 0 or prompt_start > num_prompt_tokens:
+                raise ValueError(
+                    f"indexer_topk_prompt_start ({prompt_start}) must be "
+                    f">= 0 and <= num_prompt_tokens ({num_prompt_tokens})"
+                )
+            return self.get(block_ids, num_prompt_tokens, token_start=prompt_start)
+        if scheduled_spec_token_ids:
+            return topk_data[req_offset : req_offset + len(new_token_ids)]
+        return topk_data[end - len(new_token_ids) : end]
