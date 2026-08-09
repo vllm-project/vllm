@@ -5,7 +5,6 @@
 import inspect
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -261,35 +260,6 @@ def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
     return get_model_architecture(model_config)[1]
-
-
-@dataclass
-class ParamMapping:
-    """
-    A class to handle parameter mapping for model weight loading.
-    It creates a bidirectional mapping between packed parameters and their
-    constituent parts.
-    """
-
-    packed_mapping: dict[str, list[str]]
-    inverse_packed_mapping: dict[str, tuple[str, int]] = field(default_factory=dict)
-
-    def __post_init__(self):
-        for packed_name, sub_params in self.packed_mapping.items():
-            # Skip self-contained cases (e.g., {"W_pack": ["W_pack"]})
-            if len(sub_params) == 1 and sub_params[0] == packed_name:
-                continue
-            for index, param_name in enumerate(sub_params):
-                self.inverse_packed_mapping[param_name] = (
-                    packed_name,
-                    index,
-                )
-
-    def get_sub_modules(self, module_name: str) -> tuple[str, list[str]] | None:
-        for key, value in self.packed_mapping.items():
-            if module_name.endswith(key):
-                return key, value
-        return None
 
 
 def configure_quant_config(
