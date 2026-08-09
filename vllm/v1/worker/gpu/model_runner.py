@@ -20,7 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from copy import copy, deepcopy
+from copy import deepcopy
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -31,7 +31,6 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.ec_transfer import has_ec_transfer
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -61,7 +60,6 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
     DraftTokenIds,
     ECConnectorOutput,
     ModelRunnerOutput,
@@ -70,9 +68,6 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
-from vllm.v1.worker.ec_connector_model_runner_mixin import (
-    ECConnectorModelRunnerMixin,
-)
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
@@ -140,7 +135,7 @@ from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 logger = init_logger(__name__)
 
 
-class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
+class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -1251,27 +1246,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
     ) -> ModelRunnerOutput:
         """Merge the EC connector's send/recv bookkeeping into `output` for a
-        step with no work to run. The EC connector only ever runs on the
-        first PP rank (that's where the multimodal encoder lives); other
-        ranks have nothing of their own to report and must not touch
-        encoder_cache.
+        step with no work to run.
+
+        A no-op unless this rank runs the EC connector: the connector is the
+        no-op one unless an encoder cache exists, which is only built on the
+        first PP rank of a multimodal model.
         """
-        if not (
-            has_ec_transfer()
-            and self.is_first_pp_rank
-            and self.encoder_cache is not None
-        ):
-            return output
-        ec_connector_output = self.ec_connector.no_forward(
-            scheduler_output
-        ).ec_connector_output
-        if ec_connector_output is None or ec_connector_output.is_empty():
-            return output
-        if output is EMPTY_MODEL_RUNNER_OUTPUT:
-            # Don't mutate the shared singleton in place.
-            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.ec_connector_output = ec_connector_output
-        return output
+        return ModelRunnerOutput.attach_ec_conn_output(
+            output,
+            self.ec_connector.no_forward(scheduler_output).ec_connector_output,
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -1428,9 +1412,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 input_ids = None
 
         if self.is_encoder_only:
-            output = make_empty_encoder_model_runner_output(scheduler_output)
-            output.ec_connector_output = ec_connector_output
-            return output
+            return ModelRunnerOutput.attach_ec_conn_output(
+                make_empty_encoder_model_runner_output(scheduler_output),
+                ec_connector_output,
+            )
 
         model_inputs = {
             "input_ids": input_ids,
@@ -1578,12 +1563,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             # is_last_pp_rank early return in execute_model above), but may have
             # produced ec_connector_output on the first PP rank -- pass it through.
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            if ec_connector_output is not None and not ec_connector_output.is_empty():
-                if output is EMPTY_MODEL_RUNNER_OUTPUT:
-                    # Don't mutate the shared singleton in place.
-                    output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-                output.ec_connector_output = ec_connector_output
-            return output
+            return ModelRunnerOutput.attach_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
@@ -1712,6 +1692,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         input_batch = self.execute_model_state.input_batch
         hidden_states = self.execute_model_state.hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
+        ec_connector_output = self.execute_model_state.ec_connector_output
         self.execute_model_state = None
 
         # Post-step KV connector related operations.
@@ -1719,7 +1700,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            return ModelRunnerOutput.attach_ec_conn_output(
+                ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output),
+                ec_connector_output,
+            )
 
         assert self.pooling_runner is not None
         pooler_output, finished_mask = self.pooling_runner.pool(
@@ -1731,6 +1715,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
+            ec_connector_output=ec_connector_output,
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,

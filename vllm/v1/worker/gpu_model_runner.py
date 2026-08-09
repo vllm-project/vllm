@@ -3463,6 +3463,7 @@ class GPUModelRunner(
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: KVConnectorOutput | None,
+        ec_connector_output: ECConnectorOutput | None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs == len(self.input_batch.pooling_params), (
@@ -3500,6 +3501,7 @@ class GPUModelRunner(
             req_ids=self.input_batch.req_ids.copy(),
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
             kv_connector_output=kv_connector_output,
+            ec_connector_output=ec_connector_output,
         )
 
         if raw_pooler_output is None or not any(finished_mask):
@@ -4210,22 +4212,13 @@ class GPUModelRunner(
                     encoder_cache=self.encoder_cache,
                 ) as ec_connector_output:
                     self._execute_mm_encoder(scheduler_output)
-                # Read ec_connector_output only after the context manager's
-                # __exit__ has run: that's what populates
-                # ec_connector_worker_meta (build_connector_worker_meta() is
-                # called in its finally block). Returning from inside the
-                # `with` would exit before that assignment lands, silently
-                # dropping the worker's completion report.
-                output = make_empty_encoder_model_runner_output(scheduler_output)
-                if (
-                    ec_connector_output is not None
-                    and not ec_connector_output.is_empty()
-                ):
-                    if output is EMPTY_MODEL_RUNNER_OUTPUT:
-                        # Don't mutate the shared singleton in place.
-                        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-                    output.ec_connector_output = ec_connector_output
-                return output
+                # attach_ec_conn_output tests is_empty(), so it must run after
+                # the context manager's finally block has populated
+                # ec_connector_worker_meta.
+                return ModelRunnerOutput.attach_ec_conn_output(
+                    make_empty_encoder_model_runner_output(scheduler_output),
+                    ec_connector_output,
+                )
 
             if not num_scheduled_tokens:
                 if (
@@ -4256,10 +4249,9 @@ class GPUModelRunner(
                     ec_output = self.ec_connector_no_forward(
                         scheduler_output, self.vllm_config, self.encoder_cache
                     )
-                    if output is EMPTY_MODEL_RUNNER_OUTPUT:
-                        # Don't mutate the shared singleton in place.
-                        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-                    output.ec_connector_output = ec_output.ec_connector_output
+                    output = ModelRunnerOutput.attach_ec_conn_output(
+                        output, ec_output.ec_connector_output
+                    )
                 return output
 
             if self.cache_config.kv_sharing_fast_prefill:
@@ -4501,6 +4493,7 @@ class GPUModelRunner(
                         num_scheduled_tokens,
                         num_scheduled_tokens_np,
                         kv_connector_output,
+                        ec_connector_output,
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
@@ -4587,12 +4580,7 @@ class GPUModelRunner(
             # outputs -- this rank never has a "real" ModelRunnerOutput of its
             # own (see the is_last_rank early return in execute_model above).
             output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
-            if ec_connector_output is not None and not ec_connector_output.is_empty():
-                if output is EMPTY_MODEL_RUNNER_OUTPUT:
-                    # Don't mutate the shared singleton in place.
-                    output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-                output.ec_connector_output = ec_connector_output
-            return output
+            return ModelRunnerOutput.attach_ec_conn_output(output, ec_connector_output)
 
         # Unpack ephemeral state.
         (

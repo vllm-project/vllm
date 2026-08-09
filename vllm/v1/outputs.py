@@ -343,6 +343,24 @@ class ModelRunnerOutput:
         output.ec_connector_output = ec_connector_output
         return output
 
+    @staticmethod
+    def attach_ec_conn_output(
+        output: "ModelRunnerOutput",
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return `output` carrying `ec_connector_output`.
+
+        Sets the field on `output` and returns it, except that the shared
+        empty output is copied first rather than written to. Callers must use
+        the return value.
+        """
+        if ec_connector_output is None or ec_connector_output.is_empty():
+            return output
+        if output is EMPTY_MODEL_RUNNER_OUTPUT:
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.ec_connector_output = ec_connector_output
+        return output
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
@@ -373,10 +391,7 @@ def make_empty_encoder_model_runner_output(
     per-request bookkeeping but no generated data yet.
     """
     if not scheduler_output.num_scheduled_tokens:
-        # We don't want conusumers of this output to mutate shared
-        # module-level empty output object.
-        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        return output
+        return EMPTY_MODEL_RUNNER_OUTPUT
 
     # Convert to list so we get a deterministic, indexable sequence
     req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
