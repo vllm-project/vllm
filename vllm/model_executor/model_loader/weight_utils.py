@@ -724,10 +724,13 @@ def _get_numa_membind_nodes() -> list[int] | None:
         if not mask:
             return None
         total = libnuma.numa_num_configured_nodes()
+        # libnuma stores the mask in `unsigned long` words, whose width is the
+        # platform's, and `size` counts bits rather than words.
+        word_bits = ctypes.sizeof(ctypes.c_ulong) * 8
         nodes = [
             n
             for n in range(min(int(mask.contents.size), max(total, 0)))
-            if (mask.contents.maskp[n // 64] >> (n % 64)) & 1
+            if (mask.contents.maskp[n // word_bits] >> (n % word_bits)) & 1
         ]
     except (AttributeError, OSError, ValueError):
         return None

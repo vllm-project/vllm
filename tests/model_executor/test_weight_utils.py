@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import tempfile
 
 import huggingface_hub.constants
@@ -284,38 +285,36 @@ class TestKvCacheScaleMapper:
         )
 
 
-def test_node_available_bytes_reads_sysfs(tmp_path, monkeypatch):
+def _fake_node7_meminfo(monkeypatch, text):
+    """Serve *text* for /sys/devices/system/node/node7/meminfo."""
+    real_open = open
+
+    def fake_open(path, *a, **kw):
+        if str(path) == "/sys/devices/system/node/node7/meminfo":
+            return io.StringIO(text)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+
+def test_node_available_bytes_reads_sysfs(monkeypatch):
     """The per-node estimate, since sysfs publishes no per-node MemAvailable."""
-    node = tmp_path / "node7"
-    node.mkdir()
-    (node / "meminfo").write_text(
+    _fake_node7_meminfo(
+        monkeypatch,
         "Node 7 MemTotal:       1048576 kB\n"
         "Node 7 MemFree:         262144 kB\n"
         "Node 7 FilePages:       524288 kB\n"
         "Node 7 Shmem:            65536 kB\n"
-        "Node 7 SReclaimable:     32768 kB\n"
+        "Node 7 SReclaimable:     32768 kB\n",
     )
-    monkeypatch.setattr(
-        weight_utils, "_node_available_bytes", weight_utils._node_available_bytes
-    )
-    real_open = open
-
-    def fake_open(path, *a, **kw):
-        if str(path).startswith("/sys/devices/system/node/node7/"):
-            return real_open(node / "meminfo", *a, **kw)
-        return real_open(path, *a, **kw)
-
-    monkeypatch.setattr("builtins.open", fake_open)
     # free + filepages + sreclaimable - shmem = 262144 + 524288 + 32768 - 65536
     assert _node_available_bytes([7]) == 753664 * 1024
 
 
 def test_node_available_bytes_missing_fields(monkeypatch):
     """An unexpected sysfs layout must disable the check, not guess."""
-    monkeypatch.setattr(
-        "builtins.open", lambda *a, **kw: pytest.fail("should not be reached")
-    )
-    assert _node_available_bytes([]) == 0
+    _fake_node7_meminfo(monkeypatch, "Node 7 MemFree:         262144 kB\n")
+    assert _node_available_bytes([7]) is None
 
 
 @pytest.mark.parametrize(
