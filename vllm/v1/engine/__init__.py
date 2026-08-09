@@ -208,8 +208,6 @@ class EngineCoreOutput(
     prefill_stats: PrefillStats | None = None
 
     routed_experts: np.ndarray | None = None
-    # Per-token indexer topk indices (sparse-attention selected KV slots).
-    # Shape: (num_tokens, num_indexer_layers, index_topk), dtype int32.
     indexer_topk: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
