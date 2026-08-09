@@ -808,6 +808,9 @@ class SpeculativeConfig:
         )
 
         if method is not None:
+            parallel_drafting = method in ("dflash", "dspark") or (
+                declared is not None and declared[0] == method and declared[1]
+            )
             if declared is not None and declared[0] != method:
                 logger.warning(
                     "Using requested speculative method '%s', but the draft "
@@ -816,8 +819,7 @@ class SpeculativeConfig:
                     draft_model_config.architectures,
                     declared[0],
                 )
-                return method, False
-            return method, declared is not None and declared[1]
+            return method, parallel_drafting
 
         legacy_method = _legacy_eagle_method(draft_model_config.model)
         if legacy_method is not None:
@@ -854,6 +856,7 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
+        requested_method = self.method
         if self.method is None and SpeculativeConfig._is_custom_proposer_path(
             self.model
         ):
@@ -869,8 +872,8 @@ class SpeculativeConfig:
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
             self.method = "mtp"
-
-        requested_method = self.method
+            if requested_method is not None:
+                requested_method = "mtp"
 
         if self.model is None and self.num_speculative_tokens is not None:
             if self.method == "mtp":

@@ -2046,6 +2046,33 @@ def test_deprecated_mtp_method_is_normalized_before_resolution():
     resolve.assert_called_once_with("mtp", draft_model_config)
 
 
+def test_constructor_auto_detects_method_from_drafter_architecture(caplog):
+    draft_model_config = _draft_config(
+        "draft", architectures=["Eagle3Qwen3ForCausalLM"]
+    )
+
+    with (
+        patch(
+            "vllm.config.speculative.ModelConfig",
+            return_value=draft_model_config,
+        ),
+        patch.object(
+            SpeculativeConfig,
+            "_maybe_override_draft_max_position_embeddings",
+            side_effect=RuntimeError("stop after detection"),
+        ),
+        caplog.at_level(logging.INFO),
+        pytest.raises(RuntimeError, match="stop after detection"),
+    ):
+        SpeculativeConfig(
+            model="draft",
+            num_speculative_tokens=1,
+            target_model_config=MagicMock(),
+        )
+
+    assert "Auto-detected speculative method 'eagle3'" in caplog.text
+
+
 @pytest.mark.parametrize(
     "method, draft_model_config, expected",
     [
@@ -2123,6 +2150,12 @@ def test_deprecated_mtp_method_is_normalized_before_resolution():
             _draft_config("/ckpt", architectures=["PeagleQwen3ForCausalLM"]),
             ("eagle3", True),
             id="explicit-keeps-arch-parallelism",
+        ),
+        pytest.param(
+            "dspark",
+            _draft_config("/ckpt"),
+            ("dspark", True),
+            id="explicit-dspark-keeps-parallelism",
         ),
     ],
 )
