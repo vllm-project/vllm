@@ -21,6 +21,7 @@
 from collections.abc import Iterable
 from dataclasses import replace
 from itertools import islice
+from typing import TypedDict
 
 import regex as re
 import torch
@@ -219,6 +220,100 @@ def _get_text_config(config):
     if hasattr(config, "text_config"):
         return config.text_config
     return config
+
+
+class Gemma4LayerParams(TypedDict):
+    """Attention and FFN parameters for one Gemma4 decoder layer.
+
+    ``has_v_proj`` reports whether the checkpoint has an independent V
+    projection. ``kv_shared_target`` is the source layer index, when present.
+    """
+
+    head_dim: int
+    num_kv_heads: int
+    has_v_proj: bool
+    intermediate_size: int
+    is_kv_shared: bool
+    kv_shared_target: int | None
+    is_sliding: bool
+
+
+def get_layer_params(config) -> list[Gemma4LayerParams]:
+    """Return the attention and FFN parameters for each Gemma4 layer.
+
+    Args:
+        config: A Gemma4 text config or a config containing ``text_config``.
+
+    Returns:
+        One parameter dictionary per decoder layer.
+
+    Raises:
+        ValueError: If a KV-shared layer has no non-shared layer of the same
+            attention type.
+    """
+    config = _get_text_config(config)
+    num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+    first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
+
+    last_non_shared_layer_by_type = {
+        layer_type: layer_idx
+        for layer_idx, layer_type in enumerate(
+            config.layer_types[:first_kv_shared_layer_idx]
+        )
+    }
+
+    layer_params: list[Gemma4LayerParams] = []
+    for layer_idx, layer_type in enumerate(config.layer_types):
+        is_full_attention = layer_type == "full_attention"
+        is_sliding = layer_type == "sliding_attention"
+        use_k_eq_v = is_full_attention and getattr(config, "attention_k_eq_v", False)
+
+        head_dim = (
+            getattr(config, "global_head_dim", config.head_dim)
+            if is_full_attention
+            else config.head_dim
+        )
+        num_kv_heads = (
+            getattr(
+                config,
+                "num_global_key_value_heads",
+                config.num_key_value_heads,
+            )
+            if use_k_eq_v
+            else config.num_key_value_heads
+        )
+
+        is_kv_shared = (
+            num_kv_shared_layers > 0 and layer_idx >= first_kv_shared_layer_idx
+        )
+        kv_shared_target = None
+        if is_kv_shared:
+            kv_shared_target = last_non_shared_layer_by_type.get(layer_type)
+            if kv_shared_target is None:
+                raise ValueError(
+                    "Gemma4 KV-shared layer "
+                    f"{layer_idx} has no non-shared {layer_type} layer"
+                )
+
+        use_double_wide_mlp = (
+            getattr(config, "use_double_wide_mlp", False)
+            and layer_idx >= first_kv_shared_layer_idx > 0
+        )
+        intermediate_size = config.intermediate_size * (2 if use_double_wide_mlp else 1)
+
+        layer_params.append(
+            Gemma4LayerParams(
+                head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
+                has_v_proj=not use_k_eq_v,
+                intermediate_size=intermediate_size,
+                is_kv_shared=is_kv_shared,
+                kv_shared_target=kv_shared_target,
+                is_sliding=is_sliding,
+            )
+        )
+
+    return layer_params
 
 
 class Gemma4MLP(nn.Module):
@@ -436,10 +531,11 @@ class Gemma4Attention(nn.Module):
         # V norm: no learnable scale (pure normalization only)
         self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
 
-        # Determine layer type and sliding window
+        # Determine layer type and sliding window.
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
-        self.is_sliding = layer_type == "sliding_attention"
+        layer_params = get_layer_params(config)[layer_idx]
+        self.is_sliding = layer_params["is_sliding"]
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Initialize RoPE based on layer type.
@@ -460,33 +556,22 @@ class Gemma4Attention(nn.Module):
                     config, "rope_local_base_freq", 10000.0
                 )
 
-        # KV sharing: layers in the last `num_kv_shared_layers` share KV
-        # cache with earlier layers of the same type.
+        # KV-shared layers reuse the cache of an earlier layer of the same type.
         kv_sharing_target_layer_name = None
-        self.is_kv_shared_layer = False
-        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
-        if num_kv_shared_layers > 0:
-            first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
-            if layer_idx >= first_kv_shared_layer_idx:
-                self.is_kv_shared_layer = True
-                # Find the last non-shared layer of the same attention type
-                prev_layers = config.layer_types[:first_kv_shared_layer_idx]
-                current_layer_type = config.layer_types[layer_idx]
-                kv_shared_layer_index = (
-                    len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
+        self.is_kv_shared_layer = layer_params["is_kv_shared"]
+        kv_shared_layer_index = layer_params["kv_shared_target"]
+        if kv_shared_layer_index is not None:
+            if ".layers." in prefix:
+                param_name_before_layers = prefix.split(".layers.")[0]
+            else:
+                raise ValueError(
+                    "Unexpected prefix format for Gemma4Attention: "
+                    f"'{prefix}'. Expected to contain '.layers.'."
                 )
-                if kv_shared_layer_index >= 0:
-                    if ".layers." in prefix:
-                        param_name_before_layers = prefix.split(".layers.")[0]
-                    else:
-                        raise ValueError(
-                            "Unexpected prefix format for Gemma4Attention: "
-                            f"'{prefix}'. Expected to contain '.layers.'."
-                        )
-                    kv_sharing_target_layer_name = (
-                        f"{param_name_before_layers}.layers."
-                        f"{kv_shared_layer_index}.self_attn.attn"
-                    )
+            kv_sharing_target_layer_name = (
+                f"{param_name_before_layers}.layers."
+                f"{kv_shared_layer_index}.self_attn.attn"
+            )
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -568,61 +653,28 @@ class Gemma4DecoderLayer(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
+        layer_params = get_layer_params(config)[layer_idx]
 
-        # Gemma4 uses different head dimensions for sliding vs full attention
         layer_type = config.layer_types[layer_idx]
         self.is_full_attention = layer_type == "full_attention"
-        if self.is_full_attention:
-            head_dim = getattr(config, "global_head_dim", config.head_dim)
-        else:
-            head_dim = config.head_dim
-
-        # Determine if this full-attention layer uses k_eq_v
-        # (laptop variant: no v_proj, K reused as V on full attention layers)
-        use_k_eq_v = self.is_full_attention and getattr(
-            config, "attention_k_eq_v", False
-        )
-
-        # For k_eq_v full-attention layers, use num_global_key_value_heads
-        # as the KV head count when k_eq_v is enabled.
-        if use_k_eq_v:
-            num_kv_heads = getattr(
-                config, "num_global_key_value_heads", config.num_key_value_heads
-            )
-        else:
-            num_kv_heads = config.num_key_value_heads
 
         self.self_attn = Gemma4Attention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
+            num_kv_heads=layer_params["num_kv_heads"],
+            head_dim=layer_params["head_dim"],
             max_position_embeddings=config.max_position_embeddings,
-            use_k_eq_v=use_k_eq_v,
+            use_k_eq_v=not layer_params["has_v_proj"],
             cache_config=cache_config,
             quant_config=quant_config,
             attn_logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
             prefix=f"{prefix}.self_attn",
         )
 
-        # Compute per-layer intermediate_size from config.
-        # When use_double_wide_mlp is set, intermediate_size doubles for
-        # KV-shared layers (layers >= first_kv_shared_layer_idx).
-        first_kv_shared_layer_idx = config.num_hidden_layers - getattr(
-            config, "num_kv_shared_layers", 0
-        )
-        is_kv_shared_layer = layer_idx >= first_kv_shared_layer_idx > 0
-        use_double_wide_mlp = (
-            getattr(config, "use_double_wide_mlp", False) and is_kv_shared_layer
-        )
-        layer_intermediate_size = config.intermediate_size * (
-            2 if use_double_wide_mlp else 1
-        )
-
         self.mlp = Gemma4MLP(
             hidden_size=self.hidden_size,
-            intermediate_size=layer_intermediate_size,
+            intermediate_size=layer_params["intermediate_size"],
             hidden_activation=config.hidden_activation,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
@@ -1627,15 +1679,14 @@ class Gemma4ForCausalLM(
         # Gemma4ForConditionalGeneration wrapper). Strip it to map to our
         # model tree which is just "model.*".
         def _weight_iterator():
-            use_k_eq_v = getattr(self.config, "attention_k_eq_v", False)
             # Build set of k_eq_v layer indices (full_attention layers
             # when attention_k_eq_v is enabled). These layers have k_proj
             # but no v_proj in checkpoint — we duplicate k_proj as v_proj.
-            k_eq_v_layer_indices: set[int] = set()
-            if use_k_eq_v:
-                for idx, lt in enumerate(self.config.layer_types):
-                    if lt == "full_attention":
-                        k_eq_v_layer_indices.add(idx)
+            k_eq_v_layer_indices = {
+                idx
+                for idx, params in enumerate(get_layer_params(self.config))
+                if not params["has_v_proj"]
+            }
 
             for name, weight in weights:
                 # Remap "language_model." → "" to match our model tree.
