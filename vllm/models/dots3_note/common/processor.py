@@ -36,7 +36,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
-from .video import preprocess_dots3note_video
+from .video import preprocess_dots3_note_video
 
 IMAGE_START = "<|img|>"
 IMAGE_PAD = "<|imgpad|>"
@@ -261,7 +261,7 @@ class Dots3NoteProcessor:
             raise ValueError("This NOTE checkpoint has no vision encoder")
         if not self.video_audio_enabled:
             audio_cap = 0.0
-        parts = preprocess_dots3note_video(
+        parts = preprocess_dots3_note_video(
             video,
             tokenizer=self.tokenizer,
             question=question,

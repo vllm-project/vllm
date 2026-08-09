@@ -380,7 +380,7 @@ def _group_bounds(
     return [0, *cuts, num_frames]
 
 
-def preprocess_dots3note_video(
+def preprocess_dots3_note_video(
     video,
     *,
     tokenizer,
