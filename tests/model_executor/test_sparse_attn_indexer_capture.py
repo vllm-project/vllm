@@ -9,10 +9,21 @@ import torch
 
 from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
     IndexerTopkCapturer,
+    _check_indexer_topk_cpu_buffer_size,
     _get_num_indexer_layers,
     get_indexer_shape,
     get_sparse_attn_indexers,
 )
+
+
+def test_indexer_cpu_buffer_guard_fails_before_oom():
+    with pytest.raises(ValueError, match="CPU buffer is too large"):
+        _check_indexer_topk_cpu_buffer_size(
+            max_num_slots=136_960,
+            num_indexer_layers=21,
+            index_topk=512,
+            available_bytes=5 * 2**30,
+        )
 
 
 def test_num_indexer_layers_with_short_pattern():
