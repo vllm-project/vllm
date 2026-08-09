@@ -181,6 +181,45 @@ The completion notif sent from P to D after a WRITE is the existing
 is D's own request id, taken from the registration), so the D-side
 accounting code is unchanged.
 
+## Pipeline parallelism and hybrid KV caches
+
+The pull connector requires the local and remote workers to expose a
+congruent list of KV regions — region *i* here corresponds to region
+*i* there. That assumption breaks under pipeline parallelism (PP)
+combined with a hybrid (HMA) KV layout:
+
+* a PP-sharded prefiller (**P**) holds only a slice of the model's
+  layers while the `PP=1` decoder (**D**) holds them all, so region
+  counts differ;
+* with HMA, several layer names are pooled into one region and the layer
+  that represents a pooled region can differ between P and D.
+
+`NixlPushConnector` handles this for PP-sharded producers by routing
+**by layer-name (member) identity** instead of by region index. Each
+worker advertises which layer names back each of its NIXL regions in the
+handshake metadata (`NixlAgentMetadata.region_members`). A producer that
+needs member routing derives its member-major layout once, when it
+registers its KV caches, and every transfer it issues uses that order.
+`add_remote_agent` then selects exactly the remote regions this stage
+owns and reorders them to match, so both sides stay paired regardless of
+how each remote rank happens to order its metadata.
+
+Invariants enforced when the remote regions are aligned:
+
+* every locally owned member must be advertised exactly once by the
+  remote; a missing member fails the handshake rather than silently
+  leaving that layer's KV stale, and remote-only members (owned by other
+  PP stages) are ignored;
+* a remote that omits member metadata while the local layout requires
+  member routing fails the handshake instead of falling back to
+  region-index routing;
+* member order is a property of the local layout alone, so the same local
+  source descriptors serve every remote engine and TP rank; only the
+  remote descriptor list is rebuilt per rank.
+
+Decode-side PP is unsupported because completions are counted per
+consumer rank. Mamba/SSM hybrids are unsupported under PP.
+
 ## Scheduler-side responsibilities
 
 `NixlPushConnectorScheduler` extends the base scheduler with:
