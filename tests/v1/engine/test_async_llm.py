@@ -1163,3 +1163,95 @@ async def test_pause_rejection_races_with_concurrent_adds():
                 out = await asyncio.wait_for(collector.get(), timeout=60.0)
                 if out.finished:
                     break
+
+
+@pytest.mark.asyncio
+async def test_failed_pause_does_not_strand_admission():
+    """Admission is closed before the pause is requested so nothing slips
+    through. If the pause itself fails the engine keeps running, so admission
+    must reopen -- otherwise every later request is rejected by an engine that
+    was never paused, and only an unprompted resume_generation() would fix it.
+    """
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        original = engine.engine_core.pause_scheduler_async
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("pause failed")
+
+        engine.engine_core.pause_scheduler_async = boom
+        with pytest.raises(RuntimeError, match="pause failed"):
+            await engine.pause_generation(mode="abort")
+        engine.engine_core.pause_scheduler_async = original
+
+        assert not await engine.is_paused()
+        async for out in engine.generate(
+            request_id="after-failed-pause",
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished
+
+
+@pytest.mark.asyncio
+async def test_switching_to_keep_reopens_admission():
+    """`keep` carries requests across the pause by design, so a caller that
+    moves from a boundary mode to `keep` is asking for them to be accepted."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        await engine.pause_generation(mode="abort")
+        with pytest.raises(EnginePausedError):
+            await _add(engine, "rejected")
+
+        await engine.pause_generation(mode="keep")
+        collector = await _add(engine, "kept")
+
+        await engine.resume_generation()
+        while True:
+            out = await asyncio.wait_for(collector.get(), timeout=60.0)
+            if out.finished:
+                break
+
+
+@pytest.mark.asyncio
+async def test_resume_while_asleep_keeps_rejecting():
+    """Resuming the scheduler does not make a sleeping executor's memory
+    resident. Reopening admission here would schedule against freed KV cache,
+    so it must stay closed until wake_up."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        await engine.sleep(level=1)
+        await engine.resume_generation()
+        with pytest.raises(EnginePausedError):
+            await _add(engine, "after-resume-while-asleep")
+
+        await engine.wake_up()
+        async for out in engine.generate(
+            request_id="after-wake",
+            prompt=TEXT_PROMPT,
+            sampling_params=SamplingParams(max_tokens=5),
+        ):
+            pass
+        assert out.finished
+
+
+def test_paused_error_maps_to_retryable_status():
+    """The exception says it is retryable; the HTTP layer has to agree.
+    Without an explicit branch it falls through to VLLMServerError and a
+    client sees a 500, which no retry policy acts on."""
+    from http import HTTPStatus
+
+    from vllm.entrypoints.serve.utils.error_response import create_error_response
+
+    response = create_error_response(EnginePausedError("paused"))
+    assert response.error.code == HTTPStatus.SERVICE_UNAVAILABLE
