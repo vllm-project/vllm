@@ -548,17 +548,18 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             let dataset_id = config.dataset_path.as_deref().ok_or_else(|| {
                 BenchError::Config("--dataset-path is required for --dataset-name hf".into())
             })?;
-            let (downloaded_path, _config, _split) =
-                crate::datasets::hf_dataset::download_hf_dataset(
-                    dataset_id,
-                    config.hf_subset.as_deref(),
-                    config.hf_split.as_deref(),
-                    config.num_prompts,
-                )
-                .await?;
+            let (entries, _config, _split) = crate::datasets::hf_dataset::download_hf_dataset(
+                dataset_id,
+                config.hf_subset.as_deref(),
+                config.hf_split.as_deref(),
+                config.num_prompts,
+                config.seed,
+                config.disable_shuffle,
+            )
+            .await?;
             crate::datasets::hf_dataset::load_hf_dataset(
                 tok,
-                &downloaded_path,
+                &entries,
                 config.num_prompts,
                 config.hf_output_len,
                 config.seed,

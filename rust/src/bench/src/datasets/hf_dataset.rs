@@ -1,37 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::path::Path;
 use std::sync::Arc;
 
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use super::SampleRequest;
-use super::progress::RowDownloadReporter;
 use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
-
-/// Cache directory for downloaded HF datasets.
-fn cache_dir() -> std::path::PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("vllm-bench")
-        .join("datasets")
-}
-
-/// Sanitize a dataset name for use in filenames (replace `/` and other unsafe chars).
-fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
 
 /// Detected column format for extracting prompts from HF dataset rows.
 enum ColumnFormat {
@@ -103,28 +83,38 @@ async fn get_with_retry(
 
 /// Download an arbitrary HuggingFace dataset via the datasets-server REST API.
 ///
-/// Returns `(cache_path, resolved_config, resolved_split)`.
+/// Returns `(rows, resolved_config, resolved_split)`.
 ///
 /// If both `subset` and `split` are provided, the `/info` call is skipped as an optimization.
-/// Paginated download fetches rows in pages of 100 until `num_rows_needed` are collected
-/// or the dataset is exhausted.
+/// Rows come from parquet shards downloaded via hf-hub into the standard HF hub cache:
+/// the dataset-viewer's `refs/convert/parquet` export when available, otherwise native
+/// `*.parquet` files on the main branch (e.g. private datasets the viewer does not
+/// process). Shard order is shuffled with `seed` (unless `disable_shuffle`) so samples
+/// are not always drawn from the start of the split, and up to twice `num_rows_needed`
+/// rows are read so downstream validity filtering can backfill from real rows.
 pub async fn download_hf_dataset(
     dataset: &str,
     subset: Option<&str>,
     split: Option<&str>,
     num_rows_needed: usize,
-) -> Result<(String, String, String)> {
+    seed: u64,
+    disable_shuffle: bool,
+) -> Result<(Vec<serde_json::Value>, String, String)> {
     let encoded_dataset: String =
         url::form_urlencoded::byte_serialize(dataset.as_bytes()).collect();
 
     let mut client_builder =
         reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
 
-    // Add HF_TOKEN auth header if available
-    if let Ok(token) = std::env::var("HF_TOKEN") {
+    // Match hf-hub's auth for shard downloads: HF_TOKEN env var, then the hub token file
+    let token = std::env::var("HF_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .or_else(|| hf_hub::Cache::from_env().token());
+    if let Some(token) = token {
         let mut headers = reqwest::header::HeaderMap::new();
         let header_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|e| BenchError::Config(format!("Invalid HF_TOKEN: {e}")))?;
+            .map_err(|e| BenchError::Config(format!("Invalid HF token: {e}")))?;
         headers.insert(reqwest::header::AUTHORIZATION, header_value);
         client_builder = client_builder.default_headers(headers);
     }
@@ -211,96 +201,192 @@ pub async fn download_hf_dataset(
         "resolved Hugging Face dataset"
     );
 
-    // Check cache
-    let dir = cache_dir();
-    std::fs::create_dir_all(&dir)?;
-    let cache_path = dir.join(format!(
-        "hf-{}-{}-{}.json",
-        sanitize_name(dataset),
-        sanitize_name(&resolved_config),
-        sanitize_name(&resolved_split)
-    ));
-
-    if cache_path.exists() {
-        let path_str = cache_path.to_string_lossy().to_string();
-        tracing::info!(dataset, path = %path_str, "using cached Hugging Face dataset");
-        return Ok((path_str, resolved_config, resolved_split));
-    }
-
-    tracing::info!(
-        dataset,
-        config = resolved_config,
-        split = resolved_split,
-        "downloading Hugging Face dataset"
-    );
-
-    let encoded_config: String =
-        url::form_urlencoded::byte_serialize(resolved_config.as_bytes()).collect();
-    let encoded_split: String =
-        url::form_urlencoded::byte_serialize(resolved_split.as_bytes()).collect();
-
-    let mut all_rows: Vec<serde_json::Value> = Vec::new();
-    let mut offset = 0usize;
-    let page_size = 100usize;
-    let mut progress = RowDownloadReporter::new();
-
-    loop {
-        let url = format!(
-            "https://datasets-server.huggingface.co/rows\
-             ?dataset={encoded_dataset}\
-             &config={encoded_config}\
-             &split={encoded_split}\
-             &offset={offset}\
-             &length={page_size}"
-        );
-
-        let data = get_with_retry(&client, &url, "HF dataset /rows").await?;
-
-        let rows = data["rows"]
-            .as_array()
-            .ok_or_else(|| BenchError::Config("No 'rows' in API response".into()))?;
-
-        if rows.is_empty() {
-            break;
-        }
-
-        for row in rows {
-            if let Some(row_data) = row.get("row") {
-                all_rows.push(row_data.clone());
+    let (revision, mut shard_paths) =
+        match convert_parquet_shards(&client, dataset, &resolved_config, &resolved_split).await {
+            Ok(paths) => (PARQUET_REVISION, paths),
+            Err(e) => {
+                tracing::info!(
+                    dataset,
+                    error = %e,
+                    "no dataset-viewer parquet export; trying native parquet files on main"
+                );
+                (
+                    "main",
+                    native_parquet_shards(dataset, &resolved_config, &resolved_split).await?,
+                )
             }
-        }
+        };
 
-        let fetched = rows.len();
-        offset += fetched;
-
-        let total = data["num_rows_total"].as_u64().unwrap_or(0);
-        progress.update(offset, total);
-
-        // Stop if we have enough rows or reached end of dataset
-        if all_rows.len() >= num_rows_needed || fetched < page_size {
-            break;
-        }
+    // Sort for determinism, then shuffle shard order so samples are not always drawn
+    // from the start of the split (mirrors the datasets library's streaming shuffle).
+    shard_paths.sort();
+    if !disable_shuffle {
+        shard_paths.shuffle(&mut StdRng::seed_from_u64(seed));
     }
-    progress.finish();
 
-    if all_rows.is_empty() {
+    // Read up to 2x the requested rows so validity filtering during sampling backfills
+    // from real rows instead of duplicating samples.
+    let target_rows = num_rows_needed.saturating_mul(2);
+
+    let repo =
+        crate::hub::HubRepo::dataset_with_revision(dataset.to_string(), revision.to_string())
+            .map_err(BenchError::Config)?;
+    let rows = read_shards(&repo, dataset, shard_paths, target_rows).await?;
+    Ok((rows, resolved_config, resolved_split))
+}
+
+/// Hub revision holding the dataset-viewer's auto-converted parquet export.
+const PARQUET_REVISION: &str = "refs/convert/parquet";
+
+/// Extract the shard's repo path within `refs/convert/parquet` from its resolve URL.
+fn shard_repo_path(url: &str) -> Option<String> {
+    url.split_once("refs%2Fconvert%2Fparquet/")
+        .or_else(|| url.split_once("refs/convert/parquet/"))
+        .map(|(_, path)| path.to_string())
+}
+
+/// List the dataset-viewer's auto-converted parquet shards for a config/split.
+async fn convert_parquet_shards(
+    client: &reqwest::Client,
+    dataset: &str,
+    config: &str,
+    split: &str,
+) -> Result<Vec<String>> {
+    let encoded_dataset: String =
+        url::form_urlencoded::byte_serialize(dataset.as_bytes()).collect();
+    let url = format!("https://datasets-server.huggingface.co/parquet?dataset={encoded_dataset}");
+    let listing = get_with_retry(client, &url, "HF dataset /parquet").await?;
+
+    // Partially converted datasets (>5GB) export under a "partial-" split prefix.
+    let partial_split = format!("partial-{split}");
+    let shard_paths: Vec<String> = listing["parquet_files"]
+        .as_array()
+        .map(|files| {
+            files
+                .iter()
+                .filter(|f| {
+                    f["config"].as_str() == Some(config)
+                        && matches!(f["split"].as_str(), Some(s) if s == split || s == partial_split)
+                })
+                .filter_map(|f| shard_repo_path(f["url"].as_str()?))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if shard_paths.is_empty() {
         return Err(BenchError::Config(format!(
-            "HF dataset '{dataset}' download returned no rows"
+            "no parquet export for config '{config}' split '{split}'"
         )));
     }
+    Ok(shard_paths)
+}
 
-    // Save to cache
-    let json_str = serde_json::to_string(&all_rows)?;
-    std::fs::write(&cache_path, &json_str)?;
+/// Discover native `*.parquet` files on the main branch matching a config/split,
+/// following the datasets library's default layout conventions (config directories,
+/// split-named files). Used when the dataset viewer has no parquet export, e.g. for
+/// private datasets.
+async fn native_parquet_shards(dataset: &str, config: &str, split: &str) -> Result<Vec<String>> {
+    let repo = crate::hub::HubRepo::dataset(dataset.to_string()).map_err(BenchError::Config)?;
+    let files = repo.list_files().await.map_err(|e| {
+        BenchError::Config(format!(
+            "failed to list files of HF dataset '{dataset}': {e}"
+        ))
+    })?;
 
-    let path_str = cache_path.to_string_lossy().to_string();
+    let parquet: Vec<String> = files.into_iter().filter(|f| f.ends_with(".parquet")).collect();
+
+    // Multi-config layout scopes files under a config directory (e.g. "main/test-*.parquet")
+    let config_prefix = format!("{config}/");
+    let scoped: Vec<String> = if parquet.iter().any(|f| f.starts_with(&config_prefix)) {
+        parquet.into_iter().filter(|f| f.starts_with(&config_prefix)).collect()
+    } else {
+        parquet
+    };
+
+    let matched: Vec<String> =
+        scoped.into_iter().filter(|f| path_matches_split(f, split)).collect();
+
+    if matched.is_empty() {
+        return Err(BenchError::Config(format!(
+            "HF dataset '{dataset}' has no usable parquet data for config '{config}' split \
+             '{split}': no dataset-viewer export and no native *.parquet files matching the \
+             split on the main branch. Check the dataset page or the --hf-subset/--hf-split \
+             values; non-parquet private datasets are not supported."
+        )));
+    }
+    Ok(matched)
+}
+
+/// Split match on a repo file path: a split-named file ("{split}-00000-of-00001.parquet",
+/// "{split}.parquet", "{split}_0.parquet") or a "{split}/" directory segment.
+fn path_matches_split(path: &str, split: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    base.strip_prefix(split)
+        .is_some_and(|rest| rest == ".parquet" || rest.starts_with('-') || rest.starts_with('_'))
+        || path.starts_with(&format!("{split}/"))
+        || path.contains(&format!("/{split}/"))
+}
+
+/// Fetch shards via hf-hub (cached under `$HF_HOME/hub`, shared with other Hub tooling)
+/// and decode rows in order until `target_rows` are collected or all shards are read.
+async fn read_shards(
+    repo: &crate::hub::HubRepo,
+    dataset: &str,
+    shard_paths: Vec<String>,
+    target_rows: usize,
+) -> Result<Vec<serde_json::Value>> {
+    let total_shards = shard_paths.len();
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for (i, shard_path) in shard_paths.into_iter().enumerate() {
+        if rows.len() >= target_rows {
+            break;
+        }
+        tracing::info!(
+            dataset,
+            shard = i + 1,
+            total_shards,
+            path = %shard_path,
+            "fetching parquet shard"
+        );
+        let local_path = repo.get(&shard_path).await.map_err(BenchError::Config)?;
+        let limit = target_rows - rows.len();
+        let shard_rows = tokio::task::spawn_blocking(move || read_parquet_rows(&local_path, limit))
+            .await
+            .map_err(|e| BenchError::Config(format!("parquet read task failed: {e}")))??;
+        rows.extend(shard_rows);
+    }
+
+    if rows.is_empty() {
+        return Err(BenchError::Config(format!(
+            "HF dataset '{dataset}' parquet shards contained no rows"
+        )));
+    }
     tracing::info!(
         dataset,
-        rows = all_rows.len(),
-        path = %path_str,
-        "saved Hugging Face dataset"
+        rows = rows.len(),
+        "loaded HF dataset from parquet shards"
     );
-    Ok((path_str, resolved_config, resolved_split))
+    Ok(rows)
+}
+
+/// Read up to `limit` rows from a parquet file as JSON objects.
+fn read_parquet_rows(path: &Path, limit: usize) -> Result<Vec<serde_json::Value>> {
+    let file = std::fs::File::open(path)?;
+    let reader = SerializedFileReader::new(file)
+        .map_err(|e| BenchError::Config(format!("failed to open parquet shard: {e}")))?;
+    let iter = reader
+        .get_row_iter(None)
+        .map_err(|e| BenchError::Config(format!("failed to read parquet shard: {e}")))?;
+    let mut rows = Vec::new();
+    for row in iter {
+        if rows.len() >= limit {
+            break;
+        }
+        let row =
+            row.map_err(|e| BenchError::Config(format!("failed to decode parquet row: {e}")))?;
+        rows.push(row.to_json_value());
+    }
+    Ok(rows)
 }
 
 /// Check if a JSON value looks like a chat message (has role+content or from+value).
@@ -472,10 +558,10 @@ fn extract_chat_completion(messages: &[serde_json::Value]) -> Option<String> {
     None
 }
 
-/// Load an HF dataset from the cached JSON file and convert to SampleRequests.
+/// Convert downloaded HF dataset rows to SampleRequests.
 pub fn load_hf_dataset(
     tokenizer: &TokenizerKind,
-    dataset_path: &str,
+    entries: &[serde_json::Value],
     num_requests: usize,
     hf_output_len: Option<usize>,
     seed: u64,
@@ -484,19 +570,8 @@ pub fn load_hf_dataset(
     no_oversample: bool,
     disable_shuffle: bool,
 ) -> Result<Vec<SampleRequest>> {
-    let content = std::fs::read_to_string(dataset_path).map_err(|e| {
-        BenchError::Config(format!(
-            "Failed to read HF dataset file '{dataset_path}': {e}"
-        ))
-    })?;
-
-    let entries: Vec<serde_json::Value> = serde_json::from_str(&content)
-        .map_err(|e| BenchError::Config(format!("Invalid JSON in HF dataset file: {e}")))?;
-
     if entries.is_empty() {
-        return Err(BenchError::Config(
-            "HF dataset file contains no rows".into(),
-        ));
+        return Err(BenchError::Config("HF dataset contains no rows".into()));
     }
 
     // Detect column format from first row
@@ -638,7 +713,6 @@ pub fn load_hf_dataset(
             } else {
                 if !warned_no_output {
                     tracing::warn!(
-                        path = dataset_path,
                         default_output_tokens = 128,
                         "no dataset output column or --hf-output-len; using default output length"
                     );
@@ -649,7 +723,6 @@ pub fn load_hf_dataset(
         } else {
             if !warned_no_output {
                 tracing::warn!(
-                    path = dataset_path,
                     default_output_tokens = 128,
                     "no dataset output column or --hf-output-len; using default output length"
                 );
@@ -965,16 +1038,6 @@ mod tests {
         assert!(!is_chat_array(&serde_json::json!("not an array")));
     }
 
-    #[test]
-    fn test_sanitize_name() {
-        assert_eq!(
-            sanitize_name("allenai/WildChat-4.8M"),
-            "allenai_WildChat-4.8M"
-        );
-        assert_eq!(sanitize_name("simple-name"), "simple-name");
-        assert_eq!(sanitize_name("org/sub/deep"), "org_sub_deep");
-    }
-
     // --- extract_chat_prompt edge cases ---
 
     #[test]
@@ -1043,13 +1106,6 @@ mod tests {
         )
     }
 
-    /// Write JSON data to a unique temp file and return the path string.
-    fn write_temp_json(name: &str, data: &serde_json::Value) -> String {
-        let path = std::env::temp_dir().join(format!("vllm-bench-test-{name}.json"));
-        std::fs::write(&path, serde_json::to_string(data).unwrap()).unwrap();
-        path.to_string_lossy().to_string()
-    }
-
     #[test]
     fn test_load_hf_dataset_chat_format() {
         let tok = builtin_tokenizer();
@@ -1067,10 +1123,19 @@ mod tests {
                 ]
             }
         ]);
-        let path = write_temp_json("chat-format", &data);
 
-        let result =
-            load_hf_dataset(&tok, &path, 2, Some(50), 42, "test-", None, false, false).unwrap();
+        let result = load_hf_dataset(
+            &tok,
+            data.as_array().unwrap(),
+            2,
+            Some(50),
+            42,
+            "test-",
+            None,
+            false,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 2);
         assert!(
@@ -1087,9 +1152,19 @@ mod tests {
             {"prompt": "Explain the difference between machine learning and deep learning in simple terms.", "completion": "Machine learning is a subset of AI."},
             {"prompt": "How does photosynthesis work in plants and what role does chlorophyll play?", "completion": "Photosynthesis converts light to energy."}
         ]);
-        let path = write_temp_json("plain-text-format", &data);
 
-        let result = load_hf_dataset(&tok, &path, 3, None, 0, "req-", None, false, false).unwrap();
+        let result = load_hf_dataset(
+            &tok,
+            data.as_array().unwrap(),
+            3,
+            None,
+            0,
+            "req-",
+            None,
+            false,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 3);
         // Without hf_output_len override, output len is derived from the completion tokens
@@ -1111,10 +1186,19 @@ mod tests {
                 "answers": ["Albert Einstein"]
             }
         ]);
-        let path = write_temp_json("combined-format", &data);
 
-        let result =
-            load_hf_dataset(&tok, &path, 2, Some(64), 1, "comb-", None, false, false).unwrap();
+        let result = load_hf_dataset(
+            &tok,
+            data.as_array().unwrap(),
+            2,
+            Some(64),
+            1,
+            "comb-",
+            None,
+            false,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|r| r.expected_output_len == 64));
@@ -1126,9 +1210,18 @@ mod tests {
     fn test_load_hf_dataset_empty_returns_error() {
         let tok = builtin_tokenizer();
         let data = serde_json::json!([]);
-        let path = write_temp_json("empty-dataset", &data);
 
-        let result = load_hf_dataset(&tok, &path, 5, None, 0, "test-", None, false, false);
+        let result = load_hf_dataset(
+            &tok,
+            data.as_array().unwrap(),
+            5,
+            None,
+            0,
+            "test-",
+            None,
+            false,
+            false,
+        );
 
         assert!(result.is_err(), "empty dataset should return an error");
         let err = result.unwrap_err().to_string();
@@ -1147,9 +1240,18 @@ mod tests {
             {"prompt": "Yes", "completion": "No"},
             {"prompt": "Ok", "completion": "Fine"}
         ]);
-        let path = write_temp_json("all-filtered", &data);
 
-        let result = load_hf_dataset(&tok, &path, 3, None, 0, "test-", None, false, false);
+        let result = load_hf_dataset(
+            &tok,
+            data.as_array().unwrap(),
+            3,
+            None,
+            0,
+            "test-",
+            None,
+            false,
+            false,
+        );
 
         assert!(
             result.is_err(),
@@ -1165,12 +1267,11 @@ mod tests {
             {"prompt": "What are the key differences between supervised and unsupervised machine learning?", "completion": "Supervised learning uses labeled data while unsupervised does not."},
             {"prompt": "Explain how neural networks are inspired by the human brain structure and function.", "completion": "Neural networks mimic brain neurons with layers of nodes."}
         ]);
-        let path = write_temp_json("output-len-override", &data);
 
         let fixed_len = 77usize;
         let result = load_hf_dataset(
             &tok,
-            &path,
+            data.as_array().unwrap(),
             3,
             Some(fixed_len),
             42,
@@ -1196,11 +1297,10 @@ mod tests {
             {"prompt": "Explain how photosynthesis converts sunlight to energy in plant cells.", "completion": "Plants use chlorophyll to absorb sunlight."},
             {"prompt": "What is the difference between a virus and a bacterium in terms of biology?", "completion": "Viruses need host cells while bacteria are self-sufficient."}
         ]);
-        let path = write_temp_json("no-oversample", &data);
 
         let result = load_hf_dataset(
             &tok,
-            &path,
+            data.as_array().unwrap(),
             10,
             Some(32),
             0,
@@ -1227,11 +1327,10 @@ mod tests {
             {"prompt": "Beta prompt about the second topic continuing from our ordered sequence here.", "completion": "Beta answer"},
             {"prompt": "Gamma prompt about the third item in our clearly ordered alphabetical sequence.", "completion": "Gamma answer"}
         ]);
-        let path = write_temp_json("disable-shuffle", &data);
 
         let result = load_hf_dataset(
             &tok,
-            &path,
+            data.as_array().unwrap(),
             3,
             Some(20),
             99,
@@ -1264,13 +1363,73 @@ mod tests {
             {"prompt": "What is the boiling point of water at sea level under standard atmospheric pressure?", "completion": "Water boils at 100 degrees Celsius."},
             {"prompt": "Describe the structure of DNA and how genetic information is encoded within it.", "completion": "DNA is a double helix with base pairs."}
         ]);
-        let path = write_temp_json("request-id-prefix", &data);
 
-        let result =
-            load_hf_dataset(&tok, &path, 2, Some(10), 0, "myprefix-", None, false, false).unwrap();
+        let result = load_hf_dataset(
+            &tok,
+            data.as_array().unwrap(),
+            2,
+            Some(10),
+            0,
+            "myprefix-",
+            None,
+            false,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].request_id.as_deref(), Some("myprefix-0"));
         assert_eq!(result[1].request_id.as_deref(), Some("myprefix-1"));
+    }
+
+    // Network test: the full GSM8k test split must arrive via parquet shards regardless
+    // of how many rows earlier runs requested (run with --ignored).
+    #[tokio::test]
+    #[ignore]
+    async fn test_download_gsm8k_full_split_via_parquet() {
+        let (rows, config, split) =
+            download_hf_dataset("openai/gsm8k", None, Some("test"), 1319, 0, false)
+                .await
+                .unwrap();
+        assert_eq!(config, "main");
+        assert_eq!(split, "test");
+        assert_eq!(rows.len(), 1319);
+        assert!(rows[0].get("question").is_some_and(|q| q.is_string()));
+        assert!(rows[0].get("answer").is_some_and(|a| a.is_string()));
+    }
+
+    // Network test: native parquet discovery on the main branch (private-dataset path)
+    // must find GSM8k's config-dir layout (run with --ignored).
+    #[tokio::test]
+    #[ignore]
+    async fn test_native_parquet_shards_main_branch() {
+        let shards = native_parquet_shards("openai/gsm8k", "main", "test").await.unwrap();
+        assert_eq!(shards, vec!["main/test-00000-of-00001.parquet".to_string()]);
+    }
+
+    // --- native parquet split matching ---
+
+    #[test]
+    fn test_path_matches_split() {
+        assert!(path_matches_split(
+            "data/train-00000-of-00042.parquet",
+            "train"
+        ));
+        assert!(path_matches_split(
+            "main/test-00000-of-00001.parquet",
+            "test"
+        ));
+        assert!(path_matches_split("test.parquet", "test"));
+        assert!(path_matches_split("test_0.parquet", "test"));
+        assert!(path_matches_split("data/test/0000.parquet", "test"));
+        assert!(path_matches_split("test/0000.parquet", "test"));
+
+        assert!(!path_matches_split(
+            "data/train-00000-of-00042.parquet",
+            "test"
+        ));
+        assert!(!path_matches_split("testing-00000.parquet", "test"));
+        assert!(!path_matches_split("contest/0000.parquet", "test"));
+        assert!(!path_matches_split("data/latest/0000.parquet", "test"));
     }
 }

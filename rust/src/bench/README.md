@@ -148,7 +148,8 @@ vllm-bench \
   --sonnet-input-len 550 --sonnet-output-len 150 --sonnet-prefix-len 200 \
   --num-prompts 500
 
-# Any public HuggingFace dataset (auto-downloads, auto-detects columns)
+# Any HuggingFace dataset (downloads parquet shards into the standard HF hub
+# cache — shared with `hf download` and Python tooling — auto-detects columns)
 vllm-bench \
   --backend openai-chat --base-url http://127.0.0.1:8000 --model <model-name> \
   --dataset-name hf --dataset-path allenai/WildChat-4.8M \
@@ -160,7 +161,9 @@ vllm-bench \
   --dataset-name hf --dataset-path THUDM/LongBench \
   --hf-subset narrativeqa --hf-split test --hf-output-len 512 --num-prompts 200
 
-# Gated HuggingFace dataset (requires HF_TOKEN)
+# Gated HuggingFace dataset (auth via HF_TOKEN or the `hf auth login` token file).
+# Private datasets work too when the repo stores native parquet files
+# (pass both --hf-subset and --hf-split for private repos).
 HF_TOKEN=hf_xxx vllm-bench \
   --backend openai-chat --base-url http://127.0.0.1:8000 --model <model-name> \
   --dataset-name hf --dataset-path lmsys/lmsys-chat-1m \
@@ -431,7 +434,7 @@ Pooling backends are non-streaming and report E2EL (end-to-end latency) only. Us
 | `sharegpt` | Real conversations from ShareGPT (auto-downloads from HuggingFace, or use `--dataset-path`) |
 | `sonnet` | Built-in Shakespeare sonnets; controllable token length + shared prefix, no dataset file needed |
 | `speed-bench` | NVIDIA SPEED-Bench for speculative decoding evaluation (auto-downloads, 11 categories) |
-| `hf` | Any HuggingFace dataset (auto-downloads via datasets-server API, auto-detects chat/text columns) |
+| `hf` | Any HuggingFace dataset with parquet data (downloads parquet shards via hf-hub into the standard HF hub cache, auto-detects chat/text columns) |
 
 ## Metrics
 
@@ -507,7 +510,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--random-input-len` | `1024` | Input token length |
 | `--random-output-len` | `128` | Output token length |
 | `--random-prefix-len` | `0` | Shared prefix length |
-| `--random-range-ratio` | `1.0` | Length jitter, range `(0, 1]`. Lengths sampled from `[ratio × target, target]`; `1.0` = fixed length |
+| `--random-range-ratio` | `0.0` | Length jitter `r`, range `[0, 1)`. Lengths sampled uniformly from `[len×(1−r), len×(1+r)]`; `0.0` = exact target lengths. Also accepts `'{"input": r1, "output": r2}'` for independent input/output jitter |
 | `--prompt-token-ids` | `false` | Send prompts as token-ID arrays (skips server-side tokenization, exact counts). Random dataset only |
 | **Random multimodal** | | |
 | `--random-mm-base-items-per-request` | `1` | Base number of multimodal items (images) per request |
@@ -794,13 +797,15 @@ The Rust implementation matches Python `vllm bench serve` in:
 - Rate control (Gamma distribution, normalization, burstiness, linear/exponential ramp-up)
 - Metrics (TTFT/TPOT/ITL/E2EL percentiles, peak tokens/sec, peak concurrency, goodput)
 - Sampling parameters merged into the request body via `extra_body` (same precedence rules)
+- HF dataset prompt construction (token-identical input totals vs. Python on full GSM8k / MT-Bench splits; Python-only per-dataset chat templating is intentionally not applied — prompts are sent raw)
 
 ## Environment Variables
 
 | Variable | Description |
 | ---------- | ------------- |
 | `OPENAI_API_KEY` | API key for authenticated endpoints (cached, not read per-request) |
-| `HF_TOKEN` | HuggingFace token for gated model tokenizers and gated datasets |
+| `HF_TOKEN` | HuggingFace token for gated/private tokenizers and datasets (falls back to the `hf auth login` token file) |
+| `HF_HOME` | Overrides the HuggingFace cache location (default `~/.cache/huggingface`) used for tokenizers and dataset parquet shards |
 | `TOKIO_WORKER_THREADS` | Override tokio worker thread count (default: physical cores) |
 
 ## License

@@ -69,6 +69,7 @@ openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmon
 openai-protocol = "1.6.0"
 openssl = "0.10"
 parking_lot = "0.12.5"
+parquet = { version = "59.2.0", default-features = false, features = ["json", "snap", "zstd", "flate2", "flate2-rust_backend", "lz4"] }
 paste = "1.0.15"
 prometheus-client = "0.24.0"
 prometheus-client-derive-encode = "0.5.0"
