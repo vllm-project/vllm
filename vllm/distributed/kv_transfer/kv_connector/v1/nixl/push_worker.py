@@ -77,6 +77,8 @@ _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     """Push-specific (WRITE) worker logic. See module docstring."""
 
+    _supports_member_identity = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

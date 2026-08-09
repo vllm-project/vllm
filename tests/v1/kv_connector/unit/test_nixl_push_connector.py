@@ -32,6 +32,9 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    NixlBaseConnectorWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -330,11 +333,13 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
         w._recving_transfers = defaultdict(list)
+        w._is_hma_required = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.world_size = 1
+        w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
@@ -1248,3 +1253,74 @@ class TestPushPrefixCaching:
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
         assert remote == [500, 501, 502]
+
+
+def _agent_metadata(
+    region_members: list[list[str]],
+    base_addresses: list[int],
+    block_lens: list[int],
+) -> NixlAgentMetadata:
+    return NixlAgentMetadata(
+        engine_id="remote-engine",
+        agent_metadata=b"agent",
+        kv_caches_base_addr=base_addresses,
+        device_id=7,
+        num_blocks=2,
+        block_lens=block_lens,
+        kv_cache_layout="HND",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="FLASH_ATTN",
+        physical_blocks_per_logical_kv_block=1,
+        region_members=region_members,
+    )
+
+
+def _member_worker(
+    region_members: list[list[str]],
+    group_by_member: dict[str, int],
+    pp_size: int = 2,
+    is_hma: bool = True,
+) -> _StubWriterWorker:
+    worker = _StubWriterWorker.fresh()
+    worker.pp_size = pp_size
+    worker._has_mamba = False
+    worker._is_hma_required = is_hma
+    worker._layer_name_to_kv_group_index = group_by_member
+    worker.transfer_topo = MagicMock()
+    worker._set_region_members(region_members)
+    return worker
+
+
+def test_member_metadata_round_trip():
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+
+    encoded = msgspec.msgpack.encode(metadata)
+    assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
+
+
+def test_member_identity_gate_preserves_the_non_hma_path():
+    assert _member_worker([["a"]], {"a": 0})._member_local_regions == (0,)
+
+    # A bare base worker (pull) never routes by member identity, and reading
+    # the derived state must not require a fully constructed worker.
+    pull = object.__new__(NixlBaseConnectorWorker)
+    pull._set_region_members([["a"]])
+    assert pull._member_local_regions == ()
+
+    # A non-HMA local layout does not require member routing.
+    assert _member_worker([["a"]], {"a": 0}, is_hma=False)._member_local_regions == ()
+
+    # PP=1 has congruent local/remote regions and keeps the region route even
+    # when its allocator is hybrid.
+    assert _member_worker([["a"]], {"a": 0}, pp_size=1)._member_local_regions == ()
+
+
+def test_set_region_members_rejects_duplicate_local_member():
+    with pytest.raises(AssertionError, match="spans multiple NIXL regions"):
+        _member_worker([["a"], ["a"]], {"a": 0})
+
+
+def test_set_region_members_rejects_layer_outside_any_kv_group():
+    with pytest.raises(AssertionError, match="outside any local group"):
+        _member_worker([["a"], ["b"]], {"a": 0})
