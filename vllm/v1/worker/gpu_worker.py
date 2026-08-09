@@ -434,6 +434,21 @@ class Worker(WorkerBase):
                 current_platform.dist_backend,
             )
 
+            if parallel_config.pipeline_parallel_size_local is not None:
+                logger.info(
+                    "Pipeline-local worker placement: global_rank=%d, node_rank=%d, "
+                    "dp_rank=%d, dp_index=%d, pp_rank=%d, tp_rank=%d, "
+                    "local_rank=%d, device=%s",
+                    torch.distributed.get_rank(),
+                    parallel_config.node_rank,
+                    parallel_config.data_parallel_rank,
+                    parallel_config.data_parallel_index,
+                    get_pp_group().rank_in_group,
+                    get_tp_group().rank_in_group,
+                    self.local_rank,
+                    self.device,
+                )
+
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
 

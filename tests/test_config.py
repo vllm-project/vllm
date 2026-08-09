@@ -913,6 +913,102 @@ def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
+@pytest.mark.parametrize("use_v2_model_runner", ["0", "1"], ids=["v1", "v2"])
+def test_pipeline_parallel_size_local_is_model_runner_agnostic(
+    monkeypatch, use_v2_model_runner: str
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", use_v2_model_runner)
+
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            pipeline_parallel_size_local=1,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        )
+    )
+
+    assert config.parallel_config.pipeline_parallel_size_local == 1
+
+
+@pytest.mark.parametrize("data_parallel_size", [1, 2])
+def test_pipeline_parallel_size_local_uses_stage_local_placement(
+    data_parallel_size: int,
+):
+    default_config = ParallelConfig(
+        tensor_parallel_size=2,
+        pipeline_parallel_size=2,
+        data_parallel_size=data_parallel_size,
+        data_parallel_size_local=1,
+        distributed_executor_backend="mp",
+        nnodes=2,
+    )
+    stage_local_config = ParallelConfig(
+        tensor_parallel_size=2,
+        pipeline_parallel_size=2,
+        pipeline_parallel_size_local=1,
+        data_parallel_size=data_parallel_size,
+        data_parallel_size_local=data_parallel_size,
+        distributed_executor_backend="mp",
+        nnodes=2,
+    )
+
+    assert default_config.nnodes_within_dp == 2 // data_parallel_size
+    assert stage_local_config.nnodes_within_dp == 2
+    assert stage_local_config.local_world_size == 2
+
+
+def test_pipeline_parallel_size_local_supports_multiple_stages_per_node():
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        pipeline_parallel_size=4,
+        pipeline_parallel_size_local=2,
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        distributed_executor_backend="mp",
+        nnodes=2,
+    )
+
+    assert parallel_config.local_world_size == 4
+
+
+def test_pipeline_parallel_size_local_supports_prefill_context_parallelism():
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=2,
+        pipeline_parallel_size_local=1,
+        prefill_context_parallel_size=2,
+        data_parallel_size_local=1,
+        distributed_executor_backend="mp",
+        nnodes=2,
+    )
+
+    assert parallel_config.local_world_size == 2
+
+
+def test_pipeline_parallel_size_local_rejects_inconsistent_global_size():
+    with pytest.raises(ValueError, match="must equal nnodes"):
+        ParallelConfig(
+            pipeline_parallel_size=2,
+            pipeline_parallel_size_local=2,
+            data_parallel_size=2,
+            data_parallel_size_local=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        )
+
+
+def test_pipeline_parallel_size_local_rejects_partial_local_dp():
+    with pytest.raises(ValueError, match="data_parallel_size_local"):
+        ParallelConfig(
+            pipeline_parallel_size=2,
+            pipeline_parallel_size_local=1,
+            data_parallel_size=2,
+            data_parallel_size_local=1,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        )
+
+
 @pytest.mark.parametrize("port", [1, 29550, 65535])
 def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
     assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
@@ -922,6 +1018,61 @@ def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
 def test_data_parallel_rpc_port_rejects_invalid_ports(port: int):
     with pytest.raises(ValidationError):
         ParallelConfig(data_parallel_rpc_port=port)
+
+
+@pytest.mark.parametrize("port", [-1, 0, 65536])
+def test_master_port_rejects_invalid_ports(port: int):
+    with pytest.raises(ValidationError):
+        ParallelConfig(master_port=port)
+
+
+def test_master_port_accepts_single_data_parallel_boundary():
+    assert ParallelConfig(master_port=65535).master_port == 65535
+
+
+def test_pipeline_local_dense_dp_accepts_last_port_range():
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=2,
+        pipeline_parallel_size_local=1,
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        master_port=65534,
+        is_moe_model=False,
+    )
+
+    assert parallel_config.master_port == 65534
+
+
+@pytest.mark.parametrize("is_moe_model", [None, False])
+def test_pipeline_local_independent_dp_rejects_port_range_overflow(is_moe_model):
+    with pytest.raises(ValidationError, match="master_port"):
+        ParallelConfig(
+            pipeline_parallel_size=2,
+            pipeline_parallel_size_local=1,
+            data_parallel_size=2,
+            data_parallel_size_local=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+            master_port=65535,
+            is_moe_model=is_moe_model,
+        )
+
+
+def test_pipeline_local_moe_dp_accepts_single_combined_world_port():
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=2,
+        pipeline_parallel_size_local=1,
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        master_port=65535,
+        is_moe_model=True,
+    )
+
+    assert parallel_config.master_port == 65535
 
 
 def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
@@ -947,6 +1098,54 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.nnodes == 1
     assert parallel_config.node_rank == 0
     assert parallel_config.world_size == 8
+
+
+def test_pipeline_local_independent_dp_ranks_use_distinct_master_ports():
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=2,
+        pipeline_parallel_size_local=1,
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        data_parallel_rank=1,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+        master_port=29501,
+    )
+
+    parallel_config.reconfigure_for_independent_dp_rank()
+
+    assert parallel_config.master_port == 29502
+    assert parallel_config.data_parallel_size == 1
+    assert parallel_config.nnodes == 2
+    assert parallel_config.node_rank == 1
+
+    parallel_config.reconfigure_for_independent_dp_rank()
+
+    assert parallel_config.master_port == 29502
+
+
+def test_pipeline_local_dp_rank_uses_the_same_port_on_each_node():
+    parallel_configs = [
+        ParallelConfig(
+            pipeline_parallel_size=2,
+            pipeline_parallel_size_local=1,
+            data_parallel_size=2,
+            data_parallel_size_local=2,
+            data_parallel_rank=1,
+            distributed_executor_backend="mp",
+            nnodes=2,
+            node_rank=node_rank,
+            master_port=29501,
+            is_moe_model=False,
+        )
+        for node_rank in range(2)
+    ]
+
+    for parallel_config in parallel_configs:
+        parallel_config.reconfigure_for_independent_dp_rank()
+
+    assert [config.master_port for config in parallel_configs] == [29502, 29502]
 
 
 def test_draft_model_enables_async_scheduling_by_default():

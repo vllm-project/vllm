@@ -121,6 +121,10 @@ class ParallelConfig:
 
     pipeline_parallel_size: int = Field(default=1, ge=1)
     """Number of pipeline parallel groups."""
+    pipeline_parallel_size_local: int | None = Field(default=None, ge=1)
+    """Number of pipeline stages per node. Each stage contains all data-parallel
+    ranks. Requires pipeline_parallel_size = nnodes * pipeline_parallel_size_local
+    and the multiprocessing backend; the global pipeline size is not inferred."""
     tensor_parallel_size: int = Field(default=1, ge=1)
     """Number of tensor parallel groups."""
     prefill_context_parallel_size: int = Field(default=1, ge=1)
@@ -279,7 +283,7 @@ class ParallelConfig:
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
-    master_port: int = 29501
+    master_port: int = Field(default=29501, ge=1, le=65535)
     """distributed master port for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     node_rank: int = Field(default=0, ge=0)
@@ -500,6 +504,53 @@ class ParallelConfig:
                 f"data_parallel_size_local ({self.data_parallel_size_local}) "
                 f"must be <= data_parallel_size ({self.data_parallel_size})"
             )
+
+        if self.pipeline_parallel_size_local is not None:
+            expected_pipeline_parallel_size = (
+                self.nnodes * self.pipeline_parallel_size_local
+            )
+            if self.pipeline_parallel_size != expected_pipeline_parallel_size:
+                raise ValueError(
+                    "pipeline_parallel_size "
+                    f"({self.pipeline_parallel_size}) must equal nnodes "
+                    f"({self.nnodes}) * pipeline_parallel_size_local "
+                    f"({self.pipeline_parallel_size_local}) = "
+                    f"{expected_pipeline_parallel_size}."
+                )
+            if self.data_parallel_size_local != self.data_parallel_size:
+                raise ValueError(
+                    "pipeline_parallel_size_local requires data_parallel_size_local "
+                    "to equal data_parallel_size so every pipeline stage contains "
+                    "its complete data-parallel group."
+                )
+            if self.data_parallel_backend != "mp":
+                raise ValueError(
+                    "pipeline_parallel_size_local requires the MP DP backend."
+                )
+            if self.distributed_executor_backend not in (None, "mp"):
+                raise ValueError(
+                    "pipeline_parallel_size_local requires the MP executor backend."
+                )
+            if self.data_parallel_external_lb or self.data_parallel_hybrid_lb:
+                raise ValueError(
+                    "pipeline_parallel_size_local currently supports internal DP "
+                    "load balancing only; external and hybrid launch modes are "
+                    "not implemented for this placement."
+                )
+            if self.enable_elastic_ep:
+                raise ValueError(
+                    "pipeline_parallel_size_local does not support elastic EP."
+                )
+            if (
+                self.data_parallel_size > 1
+                and self.is_moe_model is not True
+                and self.master_port + self.data_parallel_size - 1 > 65535
+            ):
+                raise ValueError(
+                    "pipeline_parallel_size_local with independent data parallel "
+                    "ranks requires master_port + data_parallel_size - 1 to be "
+                    "at most 65535."
+                )
 
         if self.data_parallel_size <= 1 and self.data_parallel_external_lb:
             raise ValueError(
@@ -821,6 +872,7 @@ class ParallelConfig:
             "data_parallel_rank",
             "data_parallel_rank_local",
             "data_parallel_size_local",
+            "pipeline_parallel_size_local",
             "data_parallel_index",
             "data_parallel_backend",
             "data_parallel_external_lb",
@@ -1085,6 +1137,11 @@ class ParallelConfig:
         # Capture these before changing DP fields.
         nnodes = self.nnodes_within_dp
         node_rank = self.node_rank_within_dp
+        if (
+            self.pipeline_parallel_size_local is not None
+            and self.data_parallel_size > 1
+        ):
+            self.master_port += self.data_parallel_index
         self.data_parallel_size = 1
         self.data_parallel_size_local = 1
         self.data_parallel_rank = 0
