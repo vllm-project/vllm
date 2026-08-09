@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+import uuid
 
 import numpy as np
 import pytest
@@ -19,6 +20,7 @@ from vllm.v1.kv_offload.cpu.gpu_worker import (
     _canonical_block_sizes,
     _canonical_page_ids,
 )
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 
 def _ref(mapping: CanonicalPageMapping, tensor_idx: int = 0) -> CanonicalKVCacheRef:
@@ -169,3 +171,100 @@ def test_gpu_roundtrip_assembles_canonical_page_across_ranks():
     _transfer(load_full, num_blocks, gpu_to_cpu=False)
     torch.accelerator.synchronize()
     assert torch.equal(gpu_full.cpu(), cpu_canonical)
+
+
+# 4-token NHD page, 4 total heads of 64 bytes: canonical page holds
+# [K: token x head][V: token x head] = 2048 bytes per block
+_TOTAL_HEADS = 4
+_HEAD_BYTES = 64
+_BLOCK_TOKENS = 4
+_CANONICAL_PAGE = 2 * _BLOCK_TOKENS * _TOTAL_HEADS * _HEAD_BYTES
+
+
+def _nhd_shard_mapping(tp: int, rank: int) -> CanonicalPageMapping:
+    """Rank's head-shard mapping into the canonical NHD page at the given tp."""
+    local_heads = _TOTAL_HEADS // tp
+    frag = local_heads * _HEAD_BYTES
+    canonical_row = _TOTAL_HEADS * _HEAD_BYTES
+    k_run = CopyRun(0, rank * frag, frag, _BLOCK_TOKENS, frag, canonical_row)
+    v_run = CopyRun(
+        _BLOCK_TOKENS * frag,
+        _BLOCK_TOKENS * canonical_row + rank * frag,
+        frag,
+        _BLOCK_TOKENS,
+        frag,
+        canonical_row,
+    )
+    return CanonicalPageMapping(
+        _CANONICAL_PAGE, 2 * _BLOCK_TOKENS * frag, (k_run, v_run), 1, 0, True
+    )
+
+
+def _head_shard(full_kv: torch.Tensor, tp: int, rank: int) -> torch.Tensor:
+    """This rank's local page rows out of the (blocks, 2, tokens, heads,
+    head_bytes) ground truth."""
+    local_heads = _TOTAL_HEADS // tp
+    shard = full_kv[:, :, :, rank * local_heads : (rank + 1) * local_heads, :]
+    return shard.reshape(full_kv.shape[0], -1).contiguous()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("writer_tp,reader_tp", [(2, 4), (4, 2), (2, 1), (4, 4)])
+def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
+    """KV written at one tp must be readable at another: writer ranks scatter
+    head shards into a shared canonical region, reader ranks gather their own
+    shards, and every reader must see the writers' ground-truth bytes."""
+    torch.manual_seed(0)
+    num_blocks = 3
+    full_kv = torch.randint(
+        -128,
+        128,
+        (num_blocks, 2, _BLOCK_TOKENS, _TOTAL_HEADS, _HEAD_BYTES),
+        dtype=torch.int8,
+    )
+
+    engine_id = str(uuid.uuid4())
+    row_stride = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    assert row_stride >= _CANONICAL_PAGE
+    regions: list[SharedOffloadRegion] = []
+
+    def canonical_view(rank: int, world_size: int) -> torch.Tensor:
+        region = SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=num_blocks,
+            rank=rank,
+            kv_bytes_per_block=row_stride,
+            cpu_page_size=row_stride // world_size,
+        )
+        regions.append(region)
+        return region.create_next_canonical_view(_CANONICAL_PAGE)
+
+    try:
+        for rank in range(writer_tp):
+            store = _canonical_handler(
+                _head_shard(full_kv, writer_tp, rank).cuda(),
+                canonical_view(rank, writer_tp),
+                _nhd_shard_mapping(writer_tp, rank),
+                gpu_to_cpu=True,
+            )
+            _transfer(store, num_blocks, gpu_to_cpu=True)
+        torch.accelerator.synchronize()
+
+        for rank in range(reader_tp):
+            expected = _head_shard(full_kv, reader_tp, rank)
+            gpu_out = torch.zeros_like(expected, device="cuda")
+            load = _canonical_handler(
+                gpu_out,
+                canonical_view(rank, reader_tp),
+                _nhd_shard_mapping(reader_tp, rank),
+                gpu_to_cpu=False,
+            )
+            _transfer(load, num_blocks, gpu_to_cpu=False)
+            torch.accelerator.synchronize()
+            assert torch.equal(gpu_out.cpu(), expected), (
+                f"reader tp={reader_tp} rank={rank} bytes diverge from the "
+                f"tp={writer_tp} writers' ground truth"
+            )
+    finally:
+        for region in regions:
+            region.cleanup()

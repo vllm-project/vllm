@@ -47,6 +47,9 @@ def _make_vllm_config(
     config.cache_config.cache_dtype = torch.float16
     config.model_config.model = "test-model"
     config.model_config.use_mla = False
+    # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
+    # requires the head shard to cover the model's KV heads exactly
+    config.model_config.get_total_num_kv_heads.return_value = 4
     world_size = (
         tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
     )
@@ -601,6 +604,37 @@ def test_parallelism_agnostic_for_single_full_attention_group():
 )
 def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     assert not _parallelism_agnostic(kv_cache_groups)
+
+
+def test_canonical_layout_widens_parallelism_agnostic_to_mla():
+    """The canonical layout dedups the TP-replicated MLA latent into one
+    portable copy, so the gate admits MLA — but only when canonical_layout
+    is requested."""
+    mla_groups = [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))]
+    assert not _parallelism_agnostic(mla_groups)
+
+    config = _make_vllm_config(extra_config={"canonical_layout": True})
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=mla_groups,
+    )
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    assert offloading_config.parallel.is_parallelism_agnostic
+    assert offloading_config.canonical_layout
+
+    # canonical_layout widens only the MLA case; a hybrid grouping stays out
+    hybrid_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["l0"], _full_attention_spec()),
+            KVCacheGroupSpec(["l1"], _full_attention_spec()),
+        ],
+    )
+    assert not build_offloading_config(
+        config, hybrid_config
+    ).parallel.is_parallelism_agnostic
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():

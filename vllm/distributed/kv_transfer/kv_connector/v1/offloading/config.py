@@ -135,6 +135,8 @@ def build_offloading_config(
         and parallel_config.nnodes_within_dp == 1
     )
 
+    canonical_layout = bool(extra_config.get("canonical_layout", False))
+
     # Only a single non-MLA full-attention group with genuinely head-sharded
     # pages is parallelism-invariant: replicated latent or GQA heads,
     # per-token-head scales, CP token sharding, and the V2 model runner's
@@ -150,6 +152,24 @@ def build_offloading_config(
         and parallel_config.decode_context_parallel_size == 1
         and parallel_config.prefill_context_parallel_size == 1
     )
+    # The canonical layout additionally certifies the TP-replicated MLA
+    # latent statically: one canonical copy stands in for all replicas, so
+    # the persisted bytes are portable across TP sizes. Replicated GQA heads
+    # stay excluded — their certification depends on worker tensor strides
+    # and may fall back to an opaque, topology-specific mapping, which
+    # create_worker rejects fail-closed against this flag.
+    if canonical_layout and not is_parallelism_agnostic:
+        is_parallelism_agnostic = (
+            not vllm_config.use_v2_model_runner
+            and type(single_group_spec) is MLAAttentionSpec
+            and single_group_spec.compress_ratio == 1
+            and single_group_spec.real_page_size_bytes % single_group_spec.block_size
+            == 0
+            and not single_group_spec.kv_quant_mode.is_per_token_head
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.world_size == parallel_config.tensor_parallel_size
+        )
 
     kv_events_config = vllm_config.kv_events_config
     cache_dtype = (
@@ -185,4 +205,5 @@ def build_offloading_config(
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        canonical_layout=canonical_layout,
     )

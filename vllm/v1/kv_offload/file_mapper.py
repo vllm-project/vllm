@@ -69,7 +69,7 @@ class FileMapper:
         # unchanged (False is the historical default and must not appear).
         if replicated_layout:
             self.fields["replicated_layout"] = True
-        # The canonical byte format is not interchangeable with the legacy
+        # The canonical byte format is not interchangeable with the direct
         # layout (or with other canonical format versions/families), so its
         # identity participates in the storage namespace.
         if canonical_format is not None:
@@ -94,11 +94,7 @@ class FileMapper:
             for group in config.groups
         ]
         parallel = config.parallel
-        canonical_format = (
-            canonical_format_id()
-            if config.extra_config.get("canonical_layout", False)
-            else None
-        )
+        canonical_format = canonical_format_id() if config.canonical_layout else None
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,

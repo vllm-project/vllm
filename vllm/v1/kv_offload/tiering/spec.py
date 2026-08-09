@@ -261,21 +261,20 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
-        canonical_layout = bool(self.extra_config.get("canonical_layout", False))
-        if canonical_layout:
+        if self.config.canonical_layout:
             self._validate_canonical_refs(kv_caches)
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
             num_cpu_blocks=self.num_blocks,
             mmap_region=worker_mmap,
-            canonical_layout=canonical_layout,
+            canonical_layout=self.config.canonical_layout,
         )
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
         """Require a mapping on every ref and record layer portability.
 
-        Fails loudly rather than persist legacy-layout bytes under a
+        Fails loudly rather than persist direct-layout bytes under a
         canonical format identity."""
         all_refs = [
             ref for group_refs in kv_caches.group_data_refs for ref in group_refs
@@ -292,6 +291,19 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             ref.mapping is not None and ref.mapping.parallelism_agnostic
             for ref in all_refs
         )
+        if self.config.parallel.is_parallelism_agnostic and not (
+            self.all_layers_portable
+        ):
+            # The scheduler-side storage namespace was already collapsed on
+            # the static portability claim; opaque per-topology bytes must
+            # not land in it.
+            raise RuntimeError(
+                "canonical_layout could not certify every layer as "
+                "parallelism-agnostic, but the storage namespace is shared "
+                "across topologies. Remove canonical_layout from "
+                "kv_connector_extra_config or disable parallel-agnostic "
+                "secondary tiers."
+            )
         logger.info(
             "Canonical KV layout enabled (all_layers_portable=%s)",
             self.all_layers_portable,

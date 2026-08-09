@@ -159,10 +159,36 @@ class SharedOffloadRegion:
 
     def create_next_canonical_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view shared by all workers for one
-        canonical tensor (canonical layout). Canonical views are carved from
-        the start of each block row; workers write disjoint bytes within them
-        as described by their mappings. Must be called once per canonical
-        tensor, instead of create_next_worker_view."""
+        canonical tensor (canonical layout).
+
+        Must be called once per canonical tensor, instead of
+        create_next_worker_view. The full mmap layout is:
+
+            |<-------- canonical area ------->|<-------- unused ------->|
+            |  all workers share this area    |                         |
+            |                                 |                         |
+            | [ canonical_t0 | canonical_t1 ] |                         |
+            | [ canonical_t0 | canonical_t1 ] |                         |
+            | [ canonical_t0 | canonical_t1 ] |                         |
+            ^                ^
+            _canonical_offset=0, then advances by each tensor's size
+
+        Each canonical_t{i} cell is that tensor's canonical page for the
+        block. Canonical areas are carved consecutively from the start of
+        each block row; consecutive rows are separated by row_stride. Every
+        worker gets the identical byte ranges and writes only its disjoint
+        bytes within them, as described by its canonical mappings — unlike
+        create_next_worker_view, which gives each worker a private
+        cpu_page_size slot per row.
+
+        The trailing unused bytes exist only when the canonical pages sum to
+        less than row_stride: page-alignment padding of the row, or
+        deduplication of KV replicated across workers (e.g. the MLA latent),
+        where one canonical copy replaces world_size worker copies.
+
+        Args:
+            tensor_page_size: Canonical bytes per block for this tensor.
+        """
         new_offset = self._canonical_offset + tensor_page_size
         assert new_offset <= self._row_stride
         view = torch.as_strided(

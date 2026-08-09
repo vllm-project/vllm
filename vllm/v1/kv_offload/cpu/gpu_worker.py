@@ -131,6 +131,7 @@ class CopyPlan(NamedTuple):
     frag_offsets_src: np.ndarray
     frag_offsets_dst: np.ndarray
     frag_sizes: np.ndarray
+    total_bytes: int
 
     @property
     def num_frags(self) -> int:
@@ -154,6 +155,7 @@ def _build_copy_plan(ref: CanonicalKVCacheRef, gpu_to_cpu: bool) -> CopyPlan:
         frag_offsets_src=np.asarray(src, dtype=np.uint64),
         frag_offsets_dst=np.asarray(dst, dtype=np.uint64),
         frag_sizes=np.asarray(sizes, dtype=np.int64),
+        total_bytes=sum(sizes),
     )
 
 
@@ -315,6 +317,14 @@ class SingleDirectionOffloadingHandler:
             if canonical_layout
             else None
         )
+        self._fill_group_ops = (
+            self._fill_canonical_ops if canonical_layout else self._fill_direct_ops
+        )
+        # Reusable per-block base-pointer scratch for the canonical fill,
+        # sized to the largest possible group (grown on demand)
+        num_scratch_blocks = gpu_tensors[0].shape[0] if canonical_layout else 0
+        self._scratch_bases_src = np.empty(num_scratch_blocks, dtype=np.uint64)
+        self._scratch_bases_dst = np.empty(num_scratch_blocks, dtype=np.uint64)
 
         # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
         self._mmap_region = mmap_region
@@ -332,7 +342,7 @@ class SingleDirectionOffloadingHandler:
     def _estimate_max_copy_ops(self, group_sizes: Sequence[int]) -> int:
         """Upper bound on the number of copy descriptors for a transfer.
 
-        Exact for the legacy layout. The canonical path may fill fewer:
+        Exact for the direct layout. The canonical path may fill fewer:
         writer rotation later drops the blocks this rank does not write."""
         num_copy_ops = 0
         for g_idx, (group_size, layer_refs) in enumerate(
@@ -346,7 +356,7 @@ class SingleDirectionOffloadingHandler:
                 )
         return num_copy_ops
 
-    def _fill_legacy_ops(
+    def _fill_direct_ops(
         self,
         g_idx: int,
         group_src: np.ndarray,
@@ -359,7 +369,7 @@ class SingleDirectionOffloadingHandler:
         all_sizes: np.ndarray,
         op_idx: int,
     ) -> tuple[int, int]:
-        """Fill one group's copy descriptors for the legacy (worker-private)
+        """Fill one group's copy descriptors for the direct (worker-private)
         layout: one whole-page copy per (block, ref).
 
         Returns (op_idx past the filled descriptors, bytes added)."""
@@ -407,6 +417,14 @@ class SingleDirectionOffloadingHandler:
 
         Returns (op_idx past the filled descriptors, bytes added)."""
         assert self._canonical_copy_plans is not None
+        # Zero-copy reinterpretation for pointer arithmetic: uint64 and the
+        # buffers' int64 are bit-equivalent for addresses
+        all_src_u64 = all_src.view(np.uint64)
+        all_dst_u64 = all_dst.view(np.uint64)
+        if group_size > len(self._scratch_bases_src):
+            self._scratch_bases_src = np.empty(group_size, dtype=np.uint64)
+            self._scratch_bases_dst = np.empty(group_size, dtype=np.uint64)
+
         num_bytes = 0
         for plan, data_ref in zip(
             self._canonical_copy_plans[g_idx], self.layer_refs_per_group[g_idx]
@@ -414,8 +432,10 @@ class SingleDirectionOffloadingHandler:
             if plan.num_frags == 0:
                 continue
             t_idx = data_ref.tensor_idx
-            block_bases_src = np.empty(group_size, dtype=np.uint64)
-            block_bases_dst = np.empty(group_size, dtype=np.uint64)
+
+            # 1. Base byte pointer of every block on each side
+            block_bases_src = self._scratch_bases_src[:group_size]
+            block_bases_dst = self._scratch_bases_dst[:group_size]
             compute_sub_block_ptrs(
                 group_src,
                 self.src_blocks_per_chunk,
@@ -430,6 +450,8 @@ class SingleDirectionOffloadingHandler:
                 self.dst_tensors[t_idx],
                 skip_count=dst_skip_count,
             )
+
+            # 2. On store, keep only the blocks this rank is elected to write
             mapping = data_ref.mapping
             assert mapping is not None
             if self.gpu_to_cpu and mapping.num_writers > 1:
@@ -442,15 +464,30 @@ class SingleDirectionOffloadingHandler:
                     dst_skip_count,
                 )
             num_active_blocks = len(block_bases_src)
+
+            # 3. Expand (block base + fragment offset) into one descriptor
+            #    per (block, fragment), writing straight into the descriptor
+            #    buffers: reshaping a contiguous 1D slice is a view, so the
+            #    broadcasts below allocate nothing
             end_idx = op_idx + num_active_blocks * plan.num_frags
-            all_src[op_idx:end_idx] = (
-                block_bases_src[:, None] + plan.frag_offsets_src[None, :]
-            ).ravel()
-            all_dst[op_idx:end_idx] = (
-                block_bases_dst[:, None] + plan.frag_offsets_dst[None, :]
-            ).ravel()
-            all_sizes[op_idx:end_idx] = np.tile(plan.frag_sizes, num_active_blocks)
-            num_bytes += num_active_blocks * int(plan.frag_sizes.sum())
+            np.add(
+                block_bases_src[:, None],
+                plan.frag_offsets_src[None, :],
+                out=all_src_u64[op_idx:end_idx].reshape(
+                    num_active_blocks, plan.num_frags
+                ),
+            )
+            np.add(
+                block_bases_dst[:, None],
+                plan.frag_offsets_dst[None, :],
+                out=all_dst_u64[op_idx:end_idx].reshape(
+                    num_active_blocks, plan.num_frags
+                ),
+            )
+            all_sizes[op_idx:end_idx].reshape(num_active_blocks, plan.num_frags)[:] = (
+                plan.frag_sizes
+            )
+            num_bytes += num_active_blocks * plan.total_bytes
             op_idx = end_idx
         return op_idx, num_bytes
 
@@ -536,12 +573,6 @@ class SingleDirectionOffloadingHandler:
         all_dst = dst.numpy()
         all_sizes = sizes.numpy()
 
-        fill_group_ops = (
-            self._fill_legacy_ops
-            if self._canonical_copy_plans is None
-            else self._fill_canonical_ops
-        )
-
         src_offset = 0
         dst_offset = 0
         op_idx = 0
@@ -566,7 +597,7 @@ class SingleDirectionOffloadingHandler:
             src_end_offset = src_offset + src_blocks_count
             assert src_end_offset <= num_src_blocks
 
-            op_idx, group_bytes = fill_group_ops(
+            op_idx, group_bytes = self._fill_group_ops(
                 g_idx,
                 group_src=src_blocks[src_offset:src_end_offset],
                 group_dst=dst_blocks[dst_offset:dst_end_offset],
