@@ -10,6 +10,7 @@ vLLM's parallel linear layers, MLA kernel, KDA kernel and fused MoE loader.
 
 import copy
 from collections.abc import Callable, Iterable
+from typing import TypeGuard
 
 import torch
 import torch.nn as nn
@@ -55,6 +56,8 @@ from vllm.model_executor.layers.mla import (
     MultiHeadLatentAttentionWrapper,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -79,7 +82,13 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers, maybe_prefix
+from .utils import (
+    PPMissingLayer,
+    WeightsMapper,
+    is_pp_missing_parameter,
+    make_layers,
+    maybe_prefix,
+)
 
 
 def bailing_v3_kda_attention(
@@ -191,6 +200,38 @@ def _load_a_log(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
         param.data.copy_(shard.view_as(param.data))
     else:
         sharded_weight_loader(2)(param, loaded_weight)
+
+
+def _is_block_fp8_config(
+    quant_config: QuantizationConfig | None,
+) -> TypeGuard[Fp8Config]:
+    return (
+        isinstance(quant_config, Fp8Config)
+        and quant_config.weight_block_size is not None
+    )
+
+
+def _configure_ling_fp8_quant_config(
+    quant_config: QuantizationConfig | None,
+) -> None:
+    if _is_block_fp8_config(quant_config):
+        quant_config.ignored_layers_match_mode = "suffix"
+
+
+def _is_fp8_module_excluded(
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> bool:
+    """Match Ling's abbreviated FP8 exclusions against mapped vLLM prefixes."""
+    if not _is_block_fp8_config(quant_config):
+        return False
+
+    return is_layer_skipped(
+        prefix=prefix,
+        ignored_layers=quant_config.ignored_layers,
+        fused_mapping=quant_config.packed_modules_mapping,
+        match_mode=quant_config.ignored_layers_match_mode,
+    )
 
 
 class _IdentityProjection(nn.Module):
@@ -446,13 +487,36 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
 
         projection_size = self.head_dim * self.num_heads
         self.projection_size_per_partition = projection_size // self.tp_size
-        self.qkvb_proj = MergedColumnParallelLinear(
-            self.hidden_size,
-            [projection_size, projection_size, projection_size, self.num_heads],
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkvb_proj",
-        )
+        self.separate_b_proj = _is_fp8_module_excluded(quant_config, f"{prefix}.b_proj")
+        self.qkv_proj: MergedColumnParallelLinear | None
+        self.b_proj: ColumnParallelLinear | None
+        self.qkvb_proj: MergedColumnParallelLinear | None
+        if self.separate_b_proj:
+            self.qkv_proj = MergedColumnParallelLinear(
+                self.hidden_size,
+                [projection_size, projection_size, projection_size],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.b_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.num_heads,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.b_proj",
+            )
+            self.qkvb_proj = None
+        else:
+            self.qkvb_proj = MergedColumnParallelLinear(
+                self.hidden_size,
+                [projection_size, projection_size, projection_size, self.num_heads],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkvb_proj",
+            )
+            self.qkv_proj = None
+            self.b_proj = None
         self.f_proj = ColumnParallelLinear(
             self.hidden_size,
             projection_size,
@@ -532,16 +596,23 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
     ) -> None:
         del positions
         num_tokens = hidden_states.size(0)
-        qkvb = self.qkvb_proj(hidden_states)[0]
-        q, k, v, beta_logits = qkvb.split(
-            [
-                self.projection_size_per_partition,
-                self.projection_size_per_partition,
-                self.projection_size_per_partition,
-                self.local_num_heads,
-            ],
-            dim=-1,
-        )
+        if self.separate_b_proj:
+            assert self.qkv_proj is not None and self.b_proj is not None
+            qkv = self.qkv_proj(hidden_states)[0]
+            q, k, v = qkv.split(self.projection_size_per_partition, dim=-1)
+            beta_logits = self.b_proj(hidden_states)[0]
+        else:
+            assert self.qkvb_proj is not None
+            qkvb = self.qkvb_proj(hidden_states)[0]
+            q, k, v, beta_logits = qkvb.split(
+                [
+                    self.projection_size_per_partition,
+                    self.projection_size_per_partition,
+                    self.projection_size_per_partition,
+                    self.local_num_heads,
+                ],
+                dim=-1,
+            )
         beta = beta_logits.float().sigmoid().unsqueeze(0)
         g1 = self.f_proj(hidden_states)[0]
         g1 = fused_kda_gate(
@@ -910,7 +981,6 @@ class BailingMoeV3MoE(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.hidden_size = config.hidden_size
@@ -1149,8 +1219,11 @@ class BailingMoeV3Model(nn.Module):
 
 
 class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".attention.": ".self_attn."})
+
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "qkvb_proj": ["q_proj", "k_proj", "v_proj", "b_proj"],
     }
 
@@ -1158,6 +1231,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        _configure_ling_fp8_quant_config(quant_config)
         self.config = config
         self.quant_config = quant_config
         self.model = BailingMoeV3Model(
@@ -1226,11 +1300,15 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         return self.model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = self.hf_to_vllm_mapper.apply(weights)
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         stacked_mappings = [
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            (".qkv_proj", ".q_proj", 0),
+            (".qkv_proj", ".k_proj", 1),
+            (".qkv_proj", ".v_proj", 2),
             (".qkvb_proj", ".q_proj", 0),
             (".qkvb_proj", ".k_proj", 1),
             (".qkvb_proj", ".v_proj", 2),
@@ -1263,7 +1341,6 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 layer_idx = int(name.split("model.layers.")[1].split(".")[0])
                 if layer_idx >= self.config.num_hidden_layers:
                     return None
-            name = name.replace("attention.", "self_attn.")
             return maybe_remap_kv_scale_name(name, params_dict)
 
         for orig_name, weight in weights:
