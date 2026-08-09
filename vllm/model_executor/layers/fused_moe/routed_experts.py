@@ -573,16 +573,6 @@ class RoutedExperts(PluggableLayer):
         # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
 
-    @staticmethod
-    def _encode_mxfp4_weight_scale(loaded_weight: torch.Tensor) -> torch.Tensor:
-        if loaded_weight.dtype == torch.uint8:
-            return loaded_weight
-        if loaded_weight.dtype == torch.float8_e8m0fnu:
-            return loaded_weight.view(torch.uint8)
-        if loaded_weight.is_floating_point():
-            return loaded_weight.to(torch.float8_e8m0fnu).view(torch.uint8)
-        return loaded_weight
-
     def _load_g_idx(
         self,
         shard_id: str,
@@ -646,9 +636,6 @@ class RoutedExperts(PluggableLayer):
             return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
-        if quant_method_name == "Mxfp4MoEMethod" and "weight_scale" in weight_name:
-            loaded_weight = self._encode_mxfp4_weight_scale(loaded_weight)
-
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
