@@ -573,6 +573,8 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)
+                elif "--no-" + key in self._option_string_actions:
+                    processed_args.append("--no-" + key)
             elif isinstance(value, list):
                 if value:
                     processed_args.append("--" + key)

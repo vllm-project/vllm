@@ -379,7 +379,50 @@ def test_load_config_file(tmp_path):
     os.remove(str(config_file_path))
 
 
-def test_load_config_file_nested(tmp_path):
+def test_load_config_file_false_boolean_optional(tmp_path):
+    """False values for BooleanOptionalAction flags produce --no-{key}."""
+    import argparse
+
+    config_data = {
+        "enable-autotune": False,
+        "port": 8000,
+    }
+
+    config_file_path = tmp_path / "config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--enable-autotune", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--port", type=int)
+
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    assert "--no-enable-autotune" in processed_args
+    assert "--enable-autotune" not in processed_args
+    assert "--port" in processed_args
+
+
+def test_load_config_file_false_store_true_dropped(tmp_path):
+    """False values for store_true flags are silently dropped (correct)."""
+    config_data = {
+        "enable-feature": False,
+        "port": 8000,
+    }
+
+    config_file_path = tmp_path / "config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--enable-feature", action="store_true")
+    parser.add_argument("--port", type=int)
+
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    assert "--enable-feature" not in processed_args
+    assert "--no-enable-feature" not in processed_args
+    assert "--port" in processed_args
     """Test that nested dicts in YAML config are converted to JSON strings."""
     config_data = {
         "port": 8000,
