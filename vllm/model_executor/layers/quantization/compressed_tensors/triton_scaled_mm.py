@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from functools import cache
+
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -13,6 +16,87 @@ def is_weak_contiguous(x: torch.Tensor):
     is_not_transpose = strides[0] == 1 and (strides[1] >= max(1, sizes[0]))
     is_transpose = strides[1] == 1 and (strides[0] >= max(1, sizes[1]))
     return is_transpose or is_not_transpose
+
+
+# Tile configs are (BLOCK_M, BLOCK_N, BLOCK_K, GROUP_SIZE_M, num_warps, num_stages).
+# num_warps/num_stages of None means "use the Triton defaults" and GROUP_SIZE_M=1
+# reduces the grouped program ordering to the original row-major order, so a
+# (bm, bn, bk, 1, None, None) entry compiles to exactly the pre-existing kernel.
+TileConfig = tuple[int, int, int, int, int | None, int | None]
+
+# Tuned tile configs for NVIDIA GPUs, from an offline sweep over tile sizes,
+# num_warps, num_stages and grouped program ordering on representative W8A8
+# linear shapes (see https://github.com/vllm-project/vllm/issues/44998 for
+# data and methodology). Keyed by (m_bucket, is_small_n), where m_bucket is
+# next_power_of_2(M) clamped to [32, 1024] and is_small_n is N < 8192,
+# mirroring the buckets of the default heuristic below.
+_NVIDIA_TUNED_TILES: dict[tuple[int, int], dict[tuple[int, bool], TileConfig]] = {
+    # Ada (e.g. L20/RTX 4090): 99KB shared memory favors small tiles with
+    # shallow pipelines; (64, 64, 128) x 4 warps x 3 stages dominates M >= 256.
+    (8, 9): {
+        (32, True): (64, 64, 256, 8, 8, 3),
+        (32, False): (64, 64, 256, 8, 8, 4),
+        (64, True): (64, 64, 256, 8, 4, 4),
+        (64, False): (64, 64, 256, 8, 4, 4),
+        # The sweep found no config beating the default heuristic here.
+        (128, True): (64, 128, 128, 1, None, None),
+        (128, False): (64, 64, 256, 8, 8, 4),
+        (256, True): (64, 64, 128, 8, 4, 3),
+        (256, False): (64, 64, 128, 8, 4, 3),
+        (512, True): (64, 64, 128, 8, 4, 3),
+        (512, False): (64, 64, 128, 8, 4, 3),
+        (1024, True): (64, 64, 128, 8, 4, 3),
+        (1024, False): (64, 128, 128, 8, 4, 3),
+    },
+    # Hopper (e.g. H800/H100): 227KB shared memory rewards deeper pipelines
+    # (5 stages at small M) and 8 warps on the (128, 128, 128) tile at large M.
+    (9, 0): {
+        (32, True): (64, 64, 256, 8, 4, 5),
+        (32, False): (64, 64, 128, 8, 4, 5),
+        (64, True): (64, 64, 256, 8, 4, 5),
+        (64, False): (64, 64, 128, 8, 4, 5),
+        (128, True): (64, 128, 256, 8, 8, 4),
+        (128, False): (128, 128, 128, 8, 8, 5),
+        (256, True): (64, 64, 128, 8, 4, 4),
+        (256, False): (128, 64, 128, 8, 4, 4),
+        (512, True): (64, 128, 128, 8, 8, 3),
+        (512, False): (128, 128, 128, 8, 8, 3),
+        (1024, True): (128, 128, 128, 8, 8, 3),
+        (1024, False): (128, 128, 128, 8, 8, 3),
+    },
+}
+
+
+@cache
+def _tuned_tiles_for_current_device() -> dict[tuple[int, bool], TileConfig] | None:
+    """Resolve the tuned table for this device once; None -> use the default
+    heuristic. Cached because get_device_capability is not free on all paths."""
+    if not current_platform.is_cuda():
+        return None
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return None
+    return _NVIDIA_TUNED_TILES.get((capability.major, capability.minor))
+
+
+def _get_tile_config(M: int, N: int, K: int) -> TileConfig:
+    tuned = _tuned_tiles_for_current_device()
+    if tuned is not None:
+        m_bucket = min(max(32, triton.next_power_of_2(M)), 1024)
+        return tuned[(m_bucket, N < 8192)]
+    # Default heuristic (introduced in #11698, tuned on AMD): keyed on M only.
+    is_small_N = N < 8192
+    next_power_of_2_M = max(32, triton.next_power_of_2(M))
+    if next_power_of_2_M <= 32:
+        tile_shape = (64, 64, 256) if is_small_N else (64, 128, 256)
+    elif next_power_of_2_M <= 64:
+        tile_shape = (64, 64, 256)
+    elif next_power_of_2_M <= 128:
+        tile_shape = (64, 128, 128)
+    else:
+        tile_shape = (128, 128, 128)
+    block_m, block_n, block_k = tile_shape
+    return (block_m, block_n, block_k, 1, None, None)
 
 
 @triton.jit
@@ -38,13 +122,21 @@ def scaled_mm_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_SCALE_A: tl.constexpr,
     BLOCK_SIZE_SCALE_B: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
-
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    # L2-cache-friendly grouped program ordering. NOTE: when GROUP_SIZE_M = 1,
+    # this reduces exactly to the original row-major order
+    # (pid_m = pid // num_pid_n, pid_n = pid % num_pid_n), so configs with
+    # GROUP_SIZE_M=1 behave identically to the pre-existing kernel.
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % num_pid_in_group) % group_size_m
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
     accumulator_dtype = ACCUMULATOR_DTYPE
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=accumulator_dtype)
@@ -177,18 +269,23 @@ def triton_scaled_mm(
     has_scalar = lambda x: x.shape[0] == 1 and x.shape[1] == 1
 
     if use_heuristic:
-        is_small_N = N < 8192
-        next_power_of_2_M = max(32, triton.next_power_of_2(M))
-        if next_power_of_2_M <= 32:
-            tile_shape = (64, 64, 256) if is_small_N else (64, 128, 256)
-        elif next_power_of_2_M <= 64:
-            tile_shape = (64, 64, 256)
-        elif next_power_of_2_M <= 128:
-            tile_shape = (64, 128, 128)
-        else:
-            tile_shape = (128, 128, 128)
-
-    block_size_m, block_size_n, block_size_k = tile_shape
+        (
+            block_size_m,
+            block_size_n,
+            block_size_k,
+            group_size_m,
+            num_warps,
+            num_stages,
+        ) = _get_tile_config(M, N, K)
+    else:
+        group_size_m = 1
+        num_warps = None
+        num_stages = None
+    kwargs = {}
+    if num_warps is not None:
+        kwargs["num_warps"] = num_warps
+    if num_stages is not None:
+        kwargs["num_stages"] = num_stages
 
     block_size_sa = 1 if has_scalar(scale_a) else block_size_m
     block_size_sb = 1 if has_scalar(scale_b) else block_size_n
@@ -219,6 +316,8 @@ def triton_scaled_mm(
         BLOCK_SIZE_K=block_size_k,
         BLOCK_SIZE_SCALE_A=block_size_sa,
         BLOCK_SIZE_SCALE_B=block_size_sb,
+        GROUP_SIZE_M=group_size_m,
+        **kwargs,
     )
 
     return result.to(out_dtype)
