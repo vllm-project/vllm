@@ -19,6 +19,7 @@ from vllm.v1.kv_offload.cpu.gpu_worker import (
     _build_copy_plan,
     _canonical_block_sizes,
     _canonical_page_ids,
+    pin_mmap_region,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
@@ -237,6 +238,9 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
             cpu_page_size=row_stride // world_size,
         )
         regions.append(region)
+        # The Triton load path dereferences CPU pointers on the GPU, which is
+        # only legal on pinned memory; production pins via CPUOffloadingWorker
+        pin_mmap_region(region)
         return region.create_next_canonical_view(_CANONICAL_PAGE)
 
     try:
