@@ -148,6 +148,15 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
+    # Member-major routing is supported only by NixlPushConnector for HMA KV
+    # caches under PP.
+    _supports_member_identity = False
+    # Local member-major layout, set by ``_set_region_members`` only when this
+    # worker must route by layer name. Empty means region-index routing.
+    _member_names: tuple[str, ...] = ()
+    _member_local_regions: tuple[int, ...] = ()
+    _member_group_ids: tuple[int, ...] = ()
+
     def _compute_desc_ids(
         self,
         block_ids: BlockIds,
@@ -337,6 +346,41 @@ class NixlBaseConnectorWorker:
         block_len_per_layer without register_kv_caches).
         """
         return region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
+
+    def _set_region_members(self, region_members: list[list[str]]) -> None:
+        members = [member for region in region_members for member in region]
+        assert len(members) == len(set(members)), (
+            "A KV cache layer spans multiple NIXL regions"
+        )
+        self.region_members: list[list[str]] = region_members
+        if not self._requires_member_identity():
+            return
+        ungrouped = [m for m in members if m not in self._layer_name_to_kv_group_index]
+        assert not ungrouped, f"KV cache layers outside any local group: {ungrouped}"
+        self._member_names = tuple(members)
+        self._member_local_regions = tuple(
+            region_idx
+            for region_idx, region in enumerate(region_members)
+            for _ in region
+        )
+        self._member_group_ids = tuple(
+            self._layer_name_to_kv_group_index[member] for member in members
+        )
+
+    def _requires_member_identity(self) -> bool:
+        """Whether this worker's local layout must be routed by layer name.
+
+        True for a PP-sharded push producer whose local KV layout is hybrid
+        (HMA): region indices are not a stable identity across the P/D layer
+        split, so transfers must be keyed by member name. Independent of the
+        remote peer.
+        """
+        return (
+            self._supports_member_identity
+            and self.pp_size > 1
+            and self._is_hma_required
+            and not self._has_mamba
+        )
 
     def __init__(
         self,
@@ -687,6 +731,11 @@ class NixlBaseConnectorWorker:
         # within a block (BLHNC/BHLNC), where stride > block_len.
         self.block_stride_per_layer = list[int]()
 
+        # Member metadata is populated for HMA layouts.
+        self.region_members = []
+        self._layer_name_to_kv_group_index = (
+            self.kv_cache_config.transfer_group_index_by_layer
+        )
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
 
@@ -1216,6 +1265,13 @@ class NixlBaseConnectorWorker:
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
 
+        track_region_members = (
+            self._supports_member_identity
+            and self._is_hma_required
+            and not self._has_mamba
+        )
+        region_members: list[list[str]] = []
+
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
@@ -1374,6 +1430,12 @@ class NixlBaseConnectorWorker:
                     self.block_stride_per_layer.append(block_stride)
                     self._region_is_mla.append(is_mla_region)
 
+                if track_region_members:
+                    if region_index == len(region_members):
+                        region_members.append([layer_name])
+                    else:
+                        region_members[region_index].append(layer_name)
+
                 if isinstance(layer_spec, MambaSpec):
                     if layer_spec.tp_replicated:
                         assert self._is_csa_linear
@@ -1420,6 +1482,8 @@ class NixlBaseConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
+
+        self._set_region_members(region_members)
 
         if self.pp_size > 1:
             start_layer, end_layer = self.model_config.get_layers_start_end_indices(
@@ -1481,6 +1545,7 @@ class NixlBaseConnectorWorker:
             ),
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
+            region_members=self.region_members,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
