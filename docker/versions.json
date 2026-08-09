@@ -8,7 +8,7 @@
       "default": "3.12"
     },
     "UBUNTU_VERSION": {
-      "default": "22.04"
+      "default": "24.04"
     },
     "NCCL_VERSION": {
       "default": "2.30.7"
@@ -17,7 +17,7 @@
       "default": "pytorch/manylinux2_28-builder:cuda13.0"
     },
     "FINAL_BASE_IMAGE": {
-      "default": "nvidia/cuda:13.0.3-base-ubuntu22.04"
+      "default": "nvidia/cuda:13.0.3-base-ubuntu24.04"
     },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
@@ -68,19 +68,13 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.16"
+      "default": "0.6.16.post3"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
     },
     "GDRCOPY_OS_VERSION": {
-      "default": "Ubuntu22_04"
-    },
-    "BITSANDBYTES_VERSION_X86": {
-      "default": "0.46.1"
-    },
-    "BITSANDBYTES_VERSION_ARM64": {
-      "default": "0.42.0"
+      "default": "Ubuntu24_04"
     },
     "TIMM_VERSION": {
       "default": ">=1.0.17"
