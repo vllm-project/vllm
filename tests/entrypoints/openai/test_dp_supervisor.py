@@ -483,19 +483,32 @@ async def _await_supervisor_health(
 
 
 async def _poll_until_api_server_running(
-    port: int, retries: int = 30, use_ssl: bool = False
+    port: int, timeout_s: float = 30.0, use_ssl: bool = False
 ) -> None:
+    """Return once the child accepts a request; it reports 503 until healthy."""
     scheme = "https" if use_ssl else "http"
     url = f"{scheme}://127.0.0.1:{port}/health"
+    deadline = time.monotonic() + timeout_s
+    last_exc: Exception | None = None
     async with aiohttp.ClientSession() as session:
-        for _ in range(retries):
+        while (remaining_s := deadline - time.monotonic()) > 0:
             try:
-                async with session.get(url, ssl=False if use_ssl else None):
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(
+                    url,
+                    ssl=False if use_ssl else None,
+                    timeout=request_timeout,
+                ):
                     return
-            except aiohttp.ClientError:
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                last_exc = exc
                 print("Test detected not started yet, sleeping for 1s")
-                await asyncio.sleep(1.0)
-    raise TimeoutError(f"API server on port {port} did not start")
+                remaining_s = deadline - time.monotonic()
+                if remaining_s > 0:
+                    await asyncio.sleep(min(1.0, remaining_s))
+    raise TimeoutError(
+        f"API server on port {port} did not start within {timeout_s}s"
+    ) from last_exc
 
 
 async def _set_healthy(port: int, use_ssl: bool = False) -> None:
