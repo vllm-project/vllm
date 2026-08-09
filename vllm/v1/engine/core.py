@@ -173,7 +173,7 @@ class EngineCore:
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
         if self.scheduler.ec_connector is not None:  # type: ignore
-            self.model_executor.init_ec_output_aggregator(self.scheduler.ec_connector)  # type: ignore
+            self.model_executor.init_ec_output_aggregator()
 
         mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(

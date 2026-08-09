@@ -398,6 +398,9 @@ class MultiprocExecutor(Executor):
             output_rank = None
 
             def _aggregate(outputs: Any) -> Any:
+                # Each aggregator merges its own connector's output onto
+                # outputs[output_rank] in place and returns it, so chaining
+                # them and keeping the last result is safe.
                 result = None
                 for agg in aggregators:
                     result = agg.aggregate(outputs, output_rank=unique_reply_rank or 0)

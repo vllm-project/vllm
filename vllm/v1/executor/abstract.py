@@ -26,7 +26,6 @@ from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
-    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 logger = init_logger(__name__)
@@ -286,11 +285,9 @@ class Executor(ABC):
             connector, self.parallel_config.world_size
         )
 
-    def init_ec_output_aggregator(self, connector: "ECConnectorBase") -> None:
+    def init_ec_output_aggregator(self) -> None:
         """Init ECOutputAggregator"""
-        self.ec_output_aggregator = ECOutputAggregator.from_connector(
-            connector, self.parallel_config.world_size
-        )
+        self.ec_output_aggregator = ECOutputAggregator()
 
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
