@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -1488,13 +1489,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         w13_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            data=torch.full(
+                (num_experts, w13_num_shards), float("nan"), dtype=torch.float32
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
 
         w2_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(num_experts, dtype=torch.float32),
+            data=torch.full((num_experts,), float("nan"), dtype=torch.float32),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
@@ -1507,9 +1510,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             global_num_experts if self.use_global_sf else num_experts
         )
         w13_input_scale = PerTensorScaleParameter(
-            data=torch.empty(
-                global_sf_num_experts,
-                w13_num_shards,
+            data=torch.full(
+                (global_sf_num_experts, w13_num_shards),
+                float("nan"),
                 dtype=torch.float32,
             ),
             weight_loader=weight_loader,
@@ -1517,15 +1520,43 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
-            data=torch.empty(global_sf_num_experts, dtype=torch.float32),
+            data=torch.full(
+                (global_sf_num_experts,), float("nan"), dtype=torch.float32
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
+
+    def _validate_loaded_expert_scales(self, layer: RoutedExperts) -> None:
+        """Reject NVFP4 MoE checkpoints with missing expert scales."""
+        names = ["w13_weight_scale_2", "w2_weight_scale_2"]
+        if self.nvfp4_backend not in (
+            NvFp4MoeBackend.HUMMING,
+            NvFp4MoeBackend.MARLIN,
+        ):
+            names.append("w13_input_scale")
+            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_B12X:
+                names.append("w2_input_scale")
+
+        for name in names:
+            scale = getattr(layer, name, None)
+            if scale is None:
+                continue
+            per_expert = scale.detach().float().reshape(scale.shape[0], -1)
+            bad = ((per_expert == 0) | ~per_expert.isfinite()).any(dim=-1)
+            if bad.any():
+                bad_experts = bad.nonzero(as_tuple=True)[0].tolist()
+                raise ValueError(
+                    f"NVFP4 MoE checkpoint has incomplete ModelOpt calibration "
+                    f"or load: '{name}' has zero or non-finite values for "
+                    f"expert ids {bad_experts}."
+                )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        self._validate_loaded_expert_scales(layer)
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(

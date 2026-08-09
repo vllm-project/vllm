@@ -595,6 +595,141 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is kNvfp4Dynamic
 
 
+def _make_nvfp4_moe(quant_method="NVFP4", backend=None):
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+    )
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+    )
+
+    if backend is None:
+        backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        group_size=16,
+    )
+    moe_config = MagicMock()
+    moe_config.is_act_and_mul = True
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            return_value=(backend, MagicMock()),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "is_global_sf_supported_for_nvfp4_backend",
+            return_value=False,
+        ),
+    ):
+        return ModelOptNvFp4FusedMoE(config, moe_config)
+
+
+def _create_nvfp4_moe_layer(moe, num_experts=8):
+    layer = torch.nn.Module()
+    with (
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+    ):
+        moe.create_weights(
+            layer=layer,
+            num_experts=num_experts,
+            hidden_size=16,
+            intermediate_size_per_partition=32,
+            params_dtype=torch.float16,
+        )
+    return layer
+
+
+NVFP4_MOE_SCALE_NAMES = (
+    "w13_weight_scale_2",
+    "w2_weight_scale_2",
+    "w13_input_scale",
+    "w2_input_scale",
+)
+
+
+class TestModelOptNvFp4MoEScaleValidation:
+    def test_create_weights_initializes_checkpoint_scales_to_nan(self):
+        layer = _create_nvfp4_moe_layer(_make_nvfp4_moe())
+
+        for name in NVFP4_MOE_SCALE_NAMES:
+            scale = getattr(layer, name)
+            assert scale.dtype == torch.float32
+            assert torch.isnan(scale).all()
+
+    def test_finite_scales_pass(self):
+        moe = _make_nvfp4_moe()
+        layer = _create_nvfp4_moe_layer(moe)
+        for name in NVFP4_MOE_SCALE_NAMES:
+            getattr(layer, name).data.fill_(0.01)
+
+        moe._validate_loaded_expert_scales(layer)
+
+    @pytest.mark.parametrize("param_name", NVFP4_MOE_SCALE_NAMES)
+    @pytest.mark.parametrize("bad_value", [0.0, float("nan"), float("inf")])
+    def test_invalid_scales_name_parameter_and_expert_ids(self, param_name, bad_value):
+        moe = _make_nvfp4_moe()
+        layer = _create_nvfp4_moe_layer(moe)
+        for name in NVFP4_MOE_SCALE_NAMES:
+            getattr(layer, name).data.fill_(0.01)
+        getattr(layer, param_name).data[2] = bad_value
+
+        with pytest.raises(ValueError, match=rf"'{param_name}'.*\[2\]"):
+            moe._validate_loaded_expert_scales(layer)
+
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            "HUMMING",
+            "MARLIN",
+        ],
+    )
+    def test_non_consuming_backends_skip_activation_scales_but_validate_weights(
+        self, backend
+    ):
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            NvFp4MoeBackend,
+        )
+
+        moe = _make_nvfp4_moe(backend=getattr(NvFp4MoeBackend, backend))
+        layer = _create_nvfp4_moe_layer(moe)
+        layer.w13_weight_scale_2.data.fill_(0.01)
+        layer.w2_weight_scale_2.data.fill_(0.01)
+
+        moe._validate_loaded_expert_scales(layer)
+
+        layer.w2_weight_scale_2.data[2] = 0.0
+        with pytest.raises(ValueError, match=r"'w2_weight_scale_2'.*\[2\]"):
+            moe._validate_loaded_expert_scales(layer)
+
+    def test_flashinfer_b12x_skips_w2_but_validates_w13_input_scale(self):
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            NvFp4MoeBackend,
+        )
+
+        moe = _make_nvfp4_moe(backend=NvFp4MoeBackend.FLASHINFER_B12X)
+        layer = _create_nvfp4_moe_layer(moe)
+        layer.w13_weight_scale_2.data.fill_(0.01)
+        layer.w2_weight_scale_2.data.fill_(0.01)
+        layer.w13_input_scale.data.fill_(0.01)
+
+        moe._validate_loaded_expert_scales(layer)
+
+        layer.w13_input_scale.data[2] = float("nan")
+        with pytest.raises(ValueError, match=r"'w13_input_scale'.*\[2\]"):
+            moe._validate_loaded_expert_scales(layer)
+
+
 @pytest.mark.parametrize(
     "per_layer_algo, expected_linear_cls_name",
     [
