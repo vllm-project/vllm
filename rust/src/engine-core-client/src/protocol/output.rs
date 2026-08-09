@@ -74,9 +74,7 @@ pub struct EngineCoreEvent {
 }
 
 /// Engine-core output for a single request.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/engine/__init__.py>
+/// Mirrors Python `EngineCoreOutput` in `vllm/v1/engine/__init__.py`.
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutput {
     pub request_id: String,
@@ -109,8 +107,6 @@ pub struct EngineCoreOutput {
     pub prefill_stats: Option<PrefillStats>,
     #[serde(default)]
     pub routed_experts: Option<OpaqueValue>,
-    /// Per-token indexer topk indices (sparse-attention selected KV slots).
-    /// `None` when `enable_return_indexer_topk` is off.
     #[serde(default)]
     pub indexer_topk: Option<OpaqueValue>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
