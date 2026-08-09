@@ -114,6 +114,10 @@ RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
             rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}; \
     done
 
+# Remove gfx90a xnack kpacks (ASAN artifacts that cause hipErrorInvalidImage on MI250)
+RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \
+         "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack-.kpack"
+
 RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
 ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
 
