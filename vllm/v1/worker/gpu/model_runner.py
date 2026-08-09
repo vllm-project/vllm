@@ -1262,8 +1262,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             and self.encoder_cache is not None
         ):
             return output
-        ec_connector_output = self.ec_connector_no_forward(
-            scheduler_output, self.vllm_config, self.encoder_cache.encoder_outputs
+        ec_connector_output = self.ec_connector.no_forward(
+            scheduler_output
         ).ec_connector_output
         if ec_connector_output is None or ec_connector_output.is_empty():
             return output

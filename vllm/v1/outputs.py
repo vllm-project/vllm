@@ -373,7 +373,10 @@ def make_empty_encoder_model_runner_output(
     per-request bookkeeping but no generated data yet.
     """
     if not scheduler_output.num_scheduled_tokens:
-        return EMPTY_MODEL_RUNNER_OUTPUT
+        # We don't want conusumers of this output to mutate shared
+        # module-level empty output object.
+        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        return output
 
     # Convert to list so we get a deterministic, indexable sequence
     req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())

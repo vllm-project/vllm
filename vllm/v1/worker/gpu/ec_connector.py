@@ -9,7 +9,11 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
-from vllm.v1.outputs import ECConnectorOutput
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    ECConnectorOutput,
+    ModelRunnerOutput,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -24,6 +28,12 @@ class ECConnector:
         self, scheduler_output: "SchedulerOutput"
     ) -> Generator[ECConnectorOutput | None, None, None]:
         yield None
+
+    def no_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput:
+        return EMPTY_MODEL_RUNNER_OUTPUT
 
 
 class ActiveECConnector(ECConnector):
@@ -69,6 +79,20 @@ class ActiveECConnector(ECConnector):
             )
             output.ec_connector_worker_meta = ec_connector.build_connector_worker_meta()
             ec_connector.clear_connector_metadata()
+
+    def no_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput:
+        if scheduler_output.ec_connector_metadata is None:
+            # Nothing for the EC connector to do this step.
+            return ModelRunnerOutput.with_ec_conn_output_only(None)
+
+        # EC send/recv even if no work to do.
+        with self.maybe_get_output(scheduler_output) as ec_connector_output:
+            pass
+
+        return ModelRunnerOutput.with_ec_conn_output_only(ec_connector_output)
 
 
 NO_OP_EC_CONNECTOR = ECConnector()
