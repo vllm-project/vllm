@@ -321,6 +321,8 @@ You can add any other [engine-args](https://docs.vllm.ai/en/latest/configuration
 
 vLLM's Docker image comes with [CUDA compatibility libraries](https://docs.nvidia.com/deploy/cuda-compatibility/index.html) pre-installed. This allows you to run vLLM on systems with NVIDIA drivers that are older than the CUDA Toolkit version used in the image, but only supports select professional and datacenter NVIDIA GPUs.
 
+For CUDA 13 images, the minimum host kernel is Linux 4.15 when running normally because CUDA 13 requires an R580 or newer driver. Compatibility mode supports R535 and R570 host drivers; R535 lowers the minimum host kernel to Linux 3.10, while R570 still requires Linux 4.15. Upgrading the container userland to Ubuntu 24.04 does not raise these driver-defined kernel requirements. See NVIDIA's [forward compatibility matrix](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html#use-the-right-cuda-forward-compatibility-package), [R535 requirements](https://download.nvidia.com/XFree86/Linux-x86_64/535.104.05/README/minimumrequirements.html), and [R580 requirements](https://download.nvidia.com/XFree86/Linux-x86_64/580.76.05/README/minimumrequirements.html).
+
 To enable this feature, set the `VLLM_ENABLE_CUDA_COMPATIBILITY` environment variable to `1` or `true` when running the container:
 
 ```bash
