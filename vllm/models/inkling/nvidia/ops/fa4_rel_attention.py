@@ -27,10 +27,43 @@ def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
     return 1 << max(0, max_seqlen_q - 1).bit_length()
 
 
+# What the vendored FA4 relative-attention forward supports, by compute
+# capability major. Kept together because all three describe the same external
+# kernel and move as one when cmake/external_projects/tml_fa4.cmake is bumped.
+_PAGED_KV_MAJORS = (9, 10, 11)
+_SHEARED_BIAS_MAJORS = (10, 11)
+_SPLIT_KV_MAJORS = (10, 11)
+
+
 @cache
 def _use_sheared_bias() -> bool:
     capability = current_platform.get_device_capability()
-    return capability is not None and capability.major in (10, 11)
+    return capability is not None and capability.major in _SHEARED_BIAS_MAJORS
+
+
+def check_inkling_fa4_support() -> None:
+    """Reject GPUs whose FA4 relative-attention kernel lacks paged KV.
+
+    vLLM always attends over the paged KV cache, so on an architecture without
+    a paged-KV forward the kernel asserts during the first forward pass -- long
+    after the weights are loaded and the KV cache is sized. Fail while the model
+    is still being constructed instead.
+
+    Raises:
+        ValueError: If the device has no paged-KV relative-attention kernel.
+    """
+    capability = current_platform.get_device_capability()
+    # None means the capability could not be queried (non-CUDA, or NVML
+    # unavailable); assume supported rather than blocking startup.
+    if capability is None or capability.major in _PAGED_KV_MAJORS:
+        return
+    raise ValueError(
+        f"Inkling is not supported on {current_platform.get_device_name()} "
+        f"(compute capability {capability.major}.{capability.minor}): the FA4 "
+        f"relative-attention kernel has no paged-KV forward on SM"
+        f"{capability.major}x. Inkling requires compute capability 9.x, 10.x "
+        f"or 11.x. See vllm-project/vllm#51405."
+    )
 
 
 @cache
@@ -79,7 +112,7 @@ def inkling_fa4_num_splits(
 ) -> int:
     """Return the split-KV cap for Inkling relative attention."""
     capability = current_platform.get_device_capability()
-    if capability is not None and capability.major == 9:
+    if capability is not None and capability.major not in _SPLIT_KV_MAJORS:
         return 1
     if is_local:
         return 1

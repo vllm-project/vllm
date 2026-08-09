@@ -205,6 +205,24 @@ def _get_wsl_kernel_version() -> tuple[int, ...] | None:
         return None
 
 
+# Model architectures whose kernels exist only for some compute capability
+# families, keyed to the majors they support. Checked during architecture
+# resolution so an unsupported GPU is rejected in the front end instead of
+# inside a worker.
+#
+# Inkling: the FA4 relative-attention forward vendored by
+# cmake/external_projects/tml_fa4.cmake implements paged KV on SM90/SM100/SM110
+# only, and vLLM always attends over the paged KV cache (vllm-project/vllm#51405).
+# Must stay in sync with `_PAGED_KV_MAJORS` in
+# vllm/models/inkling/nvidia/ops/fa4_rel_attention.py, which cannot be imported
+# here without pulling a model module into platform import.
+_CAPABILITY_RESTRICTED_MODELS: dict[str, tuple[int, ...]] = {
+    "InklingForCausalLM": (9, 10, 11),
+    "InklingForConditionalGeneration": (9, 10, 11),
+    "InklingMTPModel": (9, 10, 11),
+}
+
+
 class CudaPlatformBase(Platform):
     _enum = PlatformEnum.CUDA
     device_name: str = "cuda"
@@ -281,6 +299,28 @@ class CudaPlatformBase(Platform):
     @classmethod
     def is_fully_connected(cls, device_ids: list[int]) -> bool:
         raise NotImplementedError
+
+    @classmethod
+    def verify_model_arch(cls, model_arch: str) -> None:
+        supported_majors = _CAPABILITY_RESTRICTED_MODELS.get(model_arch)
+        if supported_majors is None:
+            return
+        try:
+            capability = cls.get_device_capability()
+        except RuntimeError:
+            # Without NVML this queries torch, which initializes CUDA -- not
+            # always possible in the process that resolves architectures.
+            return
+        # A None capability means the device could not be queried; defer to the
+        # model's own check, which runs once the device is really in use.
+        if capability is None or capability.major in supported_majors:
+            return
+        families = " / ".join(f"{major}.x" for major in supported_majors)
+        raise ValueError(
+            f"Model architecture '{model_arch}' requires an NVIDIA GPU with "
+            f"compute capability {families}, but this device is "
+            f"{capability.major}.{capability.minor}."
+        )
 
     @classmethod
     def log_warnings(cls):

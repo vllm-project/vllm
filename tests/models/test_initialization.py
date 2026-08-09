@@ -21,7 +21,7 @@ from .registry import (
     HF_EXAMPLE_MODELS,
     HfExampleModels,
 )
-from .utils import dummy_hf_overrides
+from .utils import dummy_hf_overrides, skip_if_capability_restricted
 
 # This minimal list of model architectures is smaller than the total list of
 # supported models. The intention is that in the "typical" regression testing
@@ -114,9 +114,9 @@ def can_initialize(
                 "(see #41376)"
             )
 
-    if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
-        from vllm.platforms import current_platform
+    from vllm.platforms import current_platform
 
+    if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
         capability = current_platform.get_device_capability()
         if capability and capability.major < 9:
             pytest.skip(
@@ -124,6 +124,8 @@ def can_initialize(
                 f"for FLASHMLA_SPARSE backend. Current device has compute "
                 f"capability {capability.major}.{capability.minor}"
             )
+
+    skip_if_capability_restricted(model_arch)
 
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
