@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multimodal preprocessing for Dots3 NOTE Omni checkpoints."""
+"""Multimodal preprocessing for Dots3Note checkpoints."""
 
 import math
 from collections.abc import Mapping, Sequence
@@ -36,7 +36,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
-from .video import preprocess_dots_note_video
+from .video import preprocess_dots3note_video
 
 IMAGE_START = "<|img|>"
 IMAGE_PAD = "<|imgpad|>"
@@ -60,7 +60,7 @@ def load_note_config_section(
     return value if isinstance(value, dict) else None
 
 
-class DotsNoteImageProcessor:
+class Dots3NoteImageProcessor:
     """CPU image preprocessing matching the native Cybertron ViT."""
 
     def __init__(
@@ -217,13 +217,13 @@ class DotsNoteImageProcessor:
         return pixel_values, grid_thw
 
 
-class DotsNoteOmniProcessor:
+class Dots3NoteProcessor:
     """Small HF-like processor used by vLLM's multimodal frontend."""
 
     def __init__(
         self,
         tokenizer,
-        image_processor: DotsNoteImageProcessor | None,
+        image_processor: Dots3NoteImageProcessor | None,
         *,
         max_model_len: int,
         video_audio_enabled: bool,
@@ -261,7 +261,7 @@ class DotsNoteOmniProcessor:
             raise ValueError("This NOTE checkpoint has no vision encoder")
         if not self.video_audio_enabled:
             audio_cap = 0.0
-        parts = preprocess_dots_note_video(
+        parts = preprocess_dots3note_video(
             video,
             tokenizer=self.tokenizer,
             question=question,
@@ -374,11 +374,11 @@ class DotsNoteOmniProcessor:
         )
         if videos and (images or audios):
             raise ValueError(
-                "Dots3 NOTE does not support mixing a native video with "
+                "Dots3Note does not support mixing a native video with "
                 "separate image/audio inputs"
             )
         if len(videos) > 1:
-            raise ValueError("Dots3 NOTE supports one video per request")
+            raise ValueError("Dots3Note supports one video per request")
         detail = kwargs.pop("image_detail", "auto")
         details = list(detail) if isinstance(detail, (list, tuple)) else None
         size_overrides: dict[str, int | None] = {}
@@ -457,7 +457,7 @@ class DotsNoteOmniProcessor:
         return BatchFeature(data=data)
 
 
-class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
+class Dots3NoteProcessingInfo(BaseProcessingInfo):
     @cached_property
     def vision_config(self) -> dict[str, Any] | None:
         model_config = self.ctx.model_config
@@ -477,7 +477,7 @@ class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
         )
 
     @cached_property
-    def image_processor(self) -> DotsNoteImageProcessor | None:
+    def image_processor(self) -> Dots3NoteImageProcessor | None:
         if self.vision_config is None:
             return None
         model_config = self.ctx.model_config
@@ -492,10 +492,10 @@ class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
                 "NOTE vision checkpoint is missing preprocessor_config.json"
             )
         image_details = preprocessor_config.get("image_details", {})
-        return DotsNoteImageProcessor(preprocessor_config, image_details)
+        return Dots3NoteImageProcessor(preprocessor_config, image_details)
 
     @cached_property
-    def processor(self) -> DotsNoteOmniProcessor:
+    def processor(self) -> Dots3NoteProcessor:
         mm_config = self.ctx.get_mm_config()
         audio_config = self.audio_config or {}
         audio_token_stride = (
@@ -503,7 +503,7 @@ class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
             * (8 if audio_config.get("use_conv2d_stem", True) else 2)
             * int(audio_config.get("merge_factor", 1))
         )
-        return DotsNoteOmniProcessor(
+        return Dots3NoteProcessor(
             self.get_tokenizer(),
             self.image_processor,
             max_model_len=self.ctx.model_config.max_model_len,
@@ -517,7 +517,7 @@ class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
             audio_token_stride=audio_token_stride,
         )
 
-    def get_hf_processor(self, **kwargs: object) -> DotsNoteOmniProcessor:
+    def get_hf_processor(self, **kwargs: object) -> Dots3NoteProcessor:
         return self.processor
 
     def get_data_parser(self) -> MultiModalDataParser:
@@ -571,9 +571,7 @@ class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
         return result
 
 
-class DotsNoteOmniDummyInputsBuilder(
-    BaseDummyInputsBuilder[DotsNoteOmniProcessingInfo]
-):
+class Dots3NoteDummyInputsBuilder(BaseDummyInputsBuilder[Dots3NoteProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return (
             f"{IMAGE_START}{IMAGE_PAD}{IMAGE_END}" * mm_counts.get("image", 0)
@@ -631,9 +629,7 @@ class DotsNoteOmniDummyInputsBuilder(
         return data
 
 
-class DotsNoteOmniMultiModalProcessor(
-    BaseMultiModalProcessor[DotsNoteOmniProcessingInfo]
-):
+class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingInfo]):
     def _get_hf_mm_data(
         self,
         mm_items: MultiModalDataItems,

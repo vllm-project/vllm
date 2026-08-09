@@ -8,7 +8,7 @@ Upstream ``WhisperEncoder`` is exposed as :class:`DotsSpeechEncoder`.
 """
 
 import math
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 from torch import nn
@@ -398,7 +398,7 @@ class WhisperEncoderLayer(nn.Module):
                 hidden_states, min=-clamp_value, max=clamp_value
             )
 
-        outputs = (hidden_states,)
+        outputs: tuple[Any, ...] = (hidden_states,)
 
         if output_attentions:
             outputs += (attn_weights,)
@@ -584,6 +584,7 @@ class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
 
     def _forward_conv1d_stem(self, input_features):
         """Standard Conv1d stem: conv1 + conv2(stride=2), 2x downsample. Returns [B, T/2, embed_dim]."""
+        assert self.conv1 is not None and self.conv2 is not None
         if self.use_causal:
             x = nn.functional.pad(input_features, (2, 0))
             x = nn.functional.gelu(self.conv1(x))
@@ -596,6 +597,7 @@ class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
 
     def _forward_latent_stem(self, input_features):
         """Latent input stem: conv1+GLU + conv2, stride=1, no downsample. Returns [B, T, embed_dim]."""
+        assert self.conv1 is not None and self.conv2 is not None
         if self.use_causal:
             x = nn.functional.pad(input_features, (2, 0))
             x = nn.functional.glu(self.conv1(x), dim=1)
@@ -648,11 +650,16 @@ class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
             )
             hidden_states = inputs_embeds
         else:
+            assert self.embed_positions is not None
             embed_pos = self.embed_positions.weight[: inputs_embeds.shape[1]]
             hidden_states = inputs_embeds + embed_pos
 
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
+        encoder_states: tuple[torch.Tensor, ...] | None = (
+            () if output_hidden_states else None
+        )
+        all_attentions: tuple[torch.Tensor, ...] | None = (
+            () if output_attentions else None
+        )
 
         if input_seq_lens is not None:
             # Build varlen metadata and pack valid tokens without per-sample cat loops.
@@ -684,6 +691,7 @@ class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
 
         for encoder_layer in self.layers:
             if output_hidden_states:
+                assert encoder_states is not None
                 encoder_states = encoder_states + (hidden_states,)
             layer_outputs = encoder_layer(
                 hidden_states,
@@ -697,6 +705,7 @@ class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
             )
             hidden_states = layer_outputs[0]
             if output_attentions:
+                assert all_attentions is not None
                 all_attentions = all_attentions + (layer_outputs[1],)
 
         if input_seq_lens is not None:
@@ -711,6 +720,7 @@ class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
 
         hidden_states = self.layer_norm(hidden_states)
         if output_hidden_states:
+            assert encoder_states is not None
             encoder_states = encoder_states + (hidden_states,)
 
         if not return_dict:

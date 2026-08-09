@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multi-token predictor for Dots3 NOTE."""
+"""NVIDIA multi-token predictor for Dots3Note."""
 
 from collections.abc import Iterable, Iterator
 
@@ -25,10 +25,10 @@ from vllm.models.deepseek_v32.nvidia.mtp import (
     DeepseekV32MultiTokenPredictor,
 )
 
-from .model import Dot3NoteDecoderLayer
+from .model import Dots3NoteDecoderLayer
 
 
-class DotsNote3MultiTokenPredictorLayer(nn.Module):
+class Dots3NoteMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -47,7 +47,7 @@ class DotsNote3MultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
-        self.mtp_block = Dot3NoteDecoderLayer(
+        self.mtp_block = Dots3NoteDecoderLayer(
             vllm_config=vllm_config,
             config=config,
             prefix=prefix,
@@ -85,7 +85,7 @@ class DotsNote3MultiTokenPredictorLayer(nn.Module):
         return hidden_states
 
 
-class DotsNote3MultiTokenPredictor(DeepseekV32MultiTokenPredictor):
+class Dots3NoteMultiTokenPredictor(DeepseekV32MultiTokenPredictor):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         assert vllm_config.speculative_config is not None
@@ -94,7 +94,7 @@ class DotsNote3MultiTokenPredictor(DeepseekV32MultiTokenPredictor):
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = nn.ModuleDict(
             {
-                str(idx): DotsNote3MultiTokenPredictorLayer(
+                str(idx): Dots3NoteMultiTokenPredictorLayer(
                     vllm_config, f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
@@ -138,7 +138,7 @@ class DotsNote3MultiTokenPredictor(DeepseekV32MultiTokenPredictor):
         )
 
 
-class DotsNote3MTP(DeepseekV32MTP):
+class Dots3NoteMTP(DeepseekV32MTP):
     has_own_embed_tokens = True
     has_own_lm_head = False
 
@@ -146,7 +146,7 @@ class DotsNote3MTP(DeepseekV32MTP):
         nn.Module.__init__(self)
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.model = DotsNote3MultiTokenPredictor(
+        self.model = Dots3NoteMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()

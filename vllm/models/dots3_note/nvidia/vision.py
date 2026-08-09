@@ -54,11 +54,13 @@ class DotsMoEVitConfig(PretrainedConfig):
         adapter_in_dim: int = 1536,
         adapter_out_dim: int = 2048,
         adapter_merge_size: int = 2,
-        # ``pixel_shuffle_mlp`` (legacy, e.g. dotsvlm2.lite.omni_fp8) reshapes 2x2 spatial neighbours via NHWC pixel-shuffle then runs LN+2-layer MLP.
+        # ``pixel_shuffle_mlp`` reshapes 2x2 spatial neighbours via NHWC
+        # pixel-shuffle, then runs layer norm and a two-layer MLP.
         # ``patch_merger`` (cybertron PatchMerger, e.g. fireall_iter02275) skips the pixel-shuffle permutation and instead views every 4 consecutive 2x2-grouped tokens as one row.
         adapter_type: str = "pixel_shuffle_mlp",
         # If True the preprocessor already emits patches in 2x2-grouped order (qwen ``merge_size=2`` flatten path), so RoPE positions must also be regrouped
-        # to match the in-block layout. Old checkpoints (e.g. omni_fp8) were trained with ``pre_pixel_shuffle=False`` even though the data is grouped, so the legacy default keeps row-major RoPE.
+        # to match the in-block layout. Older checkpoints were trained with
+        # ``pre_pixel_shuffle=False``, so the default keeps row-major RoPE.
         pre_pixel_shuffle: bool = False,
         # Keep the native encoder's post-load compile behavior.  Compiling in
         # ``__init__`` would rename checkpoint keys through ``_orig_mod``.
@@ -494,7 +496,7 @@ class PatchMergerAdapter(nn.Module):
         return self.mlp(x)
 
 
-_ADAPTER_CLASSES = {
+_ADAPTER_CLASSES: dict[str, type[nn.Module]] = {
     "pixel_shuffle_mlp": PixelShuffleAdapter,
     "patch_merger": PatchMergerAdapter,
 }

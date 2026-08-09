@@ -23,7 +23,7 @@ STRIDE = HOP_LENGTH * DEFAULT_CONV_TEMPORAL_STRIDE * DEFAULT_MERGE_FACTOR
 ENCODER_SEQ_LEN = N_SAMPLES // HOP_LENGTH // 2
 
 
-class OmniAudioConfig:
+class Dots3NoteAudioConfig:
     def __init__(self, **kwargs):
         self.encoder_type = kwargs.get("encoder_type", "dots")
         self.whisper_config = kwargs.get("whisper_config", {})
@@ -148,7 +148,7 @@ def compute_audio_token_length(
 
 
 class DotsEncoderWithMask(nn.Module):
-    def __init__(self, config: OmniAudioConfig):
+    def __init__(self, config: Dots3NoteAudioConfig):
         super().__init__()
         whisper_config = WhisperConfig(**config.whisper_config)
         whisper_config.use_rope = config.use_rope
@@ -248,12 +248,12 @@ class AudioAdapter(nn.Module):
         return self.proj(x)
 
 
-class OmniAudioModel(nn.Module):
-    def __init__(self, config: OmniAudioConfig):
+class Dots3NoteAudioModel(nn.Module):
+    def __init__(self, config: Dots3NoteAudioConfig):
         super().__init__()
         self.config = config
         if config.encoder_type != "dots":
-            raise ValueError("Dots omni only supports encoder_type='dots'")
+            raise ValueError("Dots3Note only supports encoder_type='dots'")
         self.merge_factor = config.merge_factor
         self.audio_adapter = AudioAdapter(
             config.whisper_adapter_in_dim,

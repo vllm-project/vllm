@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM composition layer for Dots3 NOTE image and audio encoders."""
+"""vLLM composition layer for Dots3Note image and audio encoders."""
 
 from collections.abc import Iterable
 
@@ -23,9 +23,7 @@ from vllm.model_executor.models.utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
-from .audio import OmniAudioConfig, OmniAudioModel
-from .model import Dot3NoteForCausalLM as Dot3NoteLanguageModelForCausalLM
-from .processor import (
+from ..common.processor import (
     AUDIO_END,
     AUDIO_PAD,
     AUDIO_START,
@@ -33,21 +31,23 @@ from .processor import (
     IMAGE_PAD,
     IMAGE_START,
     VIDEO_PLACEHOLDER,
-    DotsNoteOmniDummyInputsBuilder,
-    DotsNoteOmniMultiModalProcessor,
-    DotsNoteOmniProcessingInfo,
+    Dots3NoteDummyInputsBuilder,
+    Dots3NoteMultiModalProcessor,
+    Dots3NoteProcessingInfo,
     load_note_config_section,
 )
+from .audio import Dots3NoteAudioConfig, Dots3NoteAudioModel
+from .model import Dots3NoteLanguageModelForCausalLM
 from .vision import DotsMoEVitConfig, DotsMoEVitModel
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    DotsNoteOmniMultiModalProcessor,
-    info=DotsNoteOmniProcessingInfo,
-    dummy_inputs=DotsNoteOmniDummyInputsBuilder,
+    Dots3NoteMultiModalProcessor,
+    info=Dots3NoteProcessingInfo,
+    dummy_inputs=Dots3NoteDummyInputsBuilder,
 )
-class DotsNoteOmni3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    """Dots3 NOTE Omni model with optional image and audio towers."""
+class Dots3NoteForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+    """Dots3Note model with optional image and audio towers."""
 
     supports_encoder_tp_data = True
 
@@ -116,10 +116,12 @@ class DotsNoteOmni3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 self.visual = DotsMoEVitModel(DotsMoEVitConfig(**vision_config_dict))
             else:
                 self.visual = None
-            self.audio_tower: OmniAudioModel | None
+            self.audio_tower: Dots3NoteAudioModel | None
             if audio_enabled:
                 assert audio_config_dict is not None
-                self.audio_tower = OmniAudioModel(OmniAudioConfig(**audio_config_dict))
+                self.audio_tower = Dots3NoteAudioModel(
+                    Dots3NoteAudioConfig(**audio_config_dict)
+                )
             else:
                 self.audio_tower = None
             # The native encoder service casts each complete tower before
@@ -131,7 +133,7 @@ class DotsNoteOmni3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             if self.audio_tower is not None:
                 self.audio_tower.to(dtype=model_config.dtype)
         with self._mark_language_model(vllm_config):
-            self.language_model = Dot3NoteLanguageModelForCausalLM(
+            self.language_model = Dots3NoteLanguageModelForCausalLM(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )

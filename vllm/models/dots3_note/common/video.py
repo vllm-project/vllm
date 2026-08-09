@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Train-consistent video preprocessing for Dots3 NOTE Omni."""
+"""Train-consistent video preprocessing for Dots3Note."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ _AUDIO_CHUNK_SECONDS = 30
 
 
 @dataclass(frozen=True)
-class DotsNoteVideoPart:
+class Dots3NoteVideoPart:
     kind: Literal["text", "image", "audio"]
     value: str | Image.Image | np.ndarray
 
@@ -380,7 +380,7 @@ def _group_bounds(
     return [0, *cuts, num_frames]
 
 
-def preprocess_dots_note_video(
+def preprocess_dots3note_video(
     video,
     *,
     tokenizer,
@@ -391,7 +391,7 @@ def preprocess_dots_note_video(
     audio_sample_rate: int = _AUDIO_SAMPLE_RATE,
     k_mode: str = "eval_ek",
     max_new_tokens: int = 0,
-) -> list[DotsNoteVideoPart]:
+) -> list[Dots3NoteVideoPart]:
     """Expand one video into timestamped, interleaved image/audio parts."""
     if seq <= 0:
         raise ValueError(f"seq must be positive, got {seq}")
@@ -460,10 +460,12 @@ def preprocess_dots_note_video(
         )
 
     if pcm is None:
-        parts: list[DotsNoteVideoPart] = []
+        parts: list[Dots3NoteVideoPart] = []
         for timestamp, image in frames:
-            parts.append(DotsNoteVideoPart("text", f"<{_format_timestamp(timestamp)}>"))
-            parts.append(DotsNoteVideoPart("image", image))
+            parts.append(
+                Dots3NoteVideoPart("text", f"<{_format_timestamp(timestamp)}>")
+            )
+            parts.append(Dots3NoteVideoPart("image", image))
         return parts
 
     video_id = hashlib.sha1(video).hexdigest()
@@ -481,13 +483,15 @@ def preprocess_dots_note_video(
         if end_time <= start_time:
             end_time = start_time + audio_duration / max(1, len(bounds) - 1)
         for timestamp, image in frames[start:end]:
-            parts.append(DotsNoteVideoPart("text", f"<{_format_timestamp(timestamp)}>"))
-            parts.append(DotsNoteVideoPart("image", image))
+            parts.append(
+                Dots3NoteVideoPart("text", f"<{_format_timestamp(timestamp)}>")
+            )
+            parts.append(Dots3NoteVideoPart("image", image))
         sample_start = max(0, int(round(start_time * audio_sample_rate)))
         sample_end = min(len(pcm), int(round(end_time * audio_sample_rate)))
         if sample_end > sample_start:
             segment = np.ascontiguousarray(
                 pcm[sample_start:sample_end].astype(np.float32) / 32768.0
             )
-            parts.append(DotsNoteVideoPart("audio", segment))
+            parts.append(Dots3NoteVideoPart("audio", segment))
     return parts

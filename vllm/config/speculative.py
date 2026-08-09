@@ -36,7 +36,7 @@ logger = init_logger(__name__)
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
-    "dots3_note_mtp",
+    "dots3note_mtp",
     "mimo_mtp",
     "mimo_v2_mtp",
     "glm4_moe_mtp",
@@ -337,7 +337,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type == "dots_note_omni_3":
+        if hf_config.model_type == "dots3note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
             if mtp_layer_types is None:
@@ -348,9 +348,9 @@ class SpeculativeConfig:
                     f"got {len(mtp_layer_types)} for {n_predict} layers"
                 )
             hf_config.layer_types = [*hf_config.layer_types, *mtp_layer_types]
-            hf_config.model_type = "dots3_note_mtp"
+            hf_config.model_type = "dots3note_mtp"
             hf_config.update(
-                {"n_predict": n_predict, "architectures": ["DotsNote3MTPModel"]}
+                {"n_predict": n_predict, "architectures": ["Dots3NoteMTPModel"]}
             )
         if hf_config.model_type in (
             "deepseek_v3",

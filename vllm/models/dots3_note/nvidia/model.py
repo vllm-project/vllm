@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inference-only Dots3 NOTE hybrid DSA/SWA model."""
+"""NVIDIA implementation of the Dots3Note language model."""
 
 import copy
 from collections.abc import Iterable, Iterator
@@ -72,7 +72,7 @@ def _padded_mlp_size(
     return ((blocks + tp_size - 1) // tp_size) * block_size[0] * tp_size
 
 
-class Dot3NoteMoE(DeepseekV2MoE):
+class Dots3NoteMoE(DeepseekV2MoE):
     """DeepSeek MoE with NOTE's block-padded shared expert."""
 
     def __init__(
@@ -215,7 +215,7 @@ class Dots3NotePaddedMLAAttention(MLAAttention):
         return replace(spec, head_size=self.physical_head_size)
 
 
-class Dot3NoteFullAttention(DeepseekV2MLAAttention):
+class Dots3NoteFullAttention(DeepseekV2MLAAttention):
     """NOTE DSA on the existing DeepSeek sparse MLA attention."""
 
     def __init__(
@@ -325,7 +325,7 @@ class Dot3NoteFullAttention(DeepseekV2MLAAttention):
         )
 
 
-class Dot3NoteSlidingAttention(nn.Module):
+class Dots3NoteSlidingAttention(nn.Module):
     """NOTE SWA constructed directly as dense sliding-window MLA."""
 
     def __init__(
@@ -477,7 +477,7 @@ class Dot3NoteSlidingAttention(nn.Module):
         )
 
 
-class Dot3NoteDecoderLayer(DeepseekV32DecoderLayer):
+class Dots3NoteDecoderLayer(DeepseekV32DecoderLayer):
     """DeepSeek-V3.2 decoder orchestration with NOTE-local modules."""
 
     def __init__(
@@ -497,9 +497,9 @@ class Dot3NoteDecoderLayer(DeepseekV32DecoderLayer):
         self.layer_idx = layer_idx
         self.use_mha = False
         attention_cls = (
-            Dot3NoteSlidingAttention
+            Dots3NoteSlidingAttention
             if config.layer_types[layer_idx] == "sliding_attention"
-            else Dot3NoteFullAttention
+            else Dots3NoteFullAttention
         )
         self.self_attn = attention_cls(
             vllm_config=vllm_config,
@@ -516,7 +516,7 @@ class Dot3NoteDecoderLayer(DeepseekV32DecoderLayer):
             and layer_idx % moe_layer_freq == 0
         )
         if is_moe:
-            self.mlp = Dot3NoteMoE(
+            self.mlp = Dots3NoteMoE(
                 config=config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
@@ -548,7 +548,7 @@ class Dot3NoteDecoderLayer(DeepseekV32DecoderLayer):
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
 
-class Dot3NoteModel(DeepseekV32Model):
+class Dots3NoteModel(DeepseekV32Model):
     """DeepSeek-V3.2 runtime shell with NOTE-local decoder layers."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -577,7 +577,7 @@ class Dot3NoteModel(DeepseekV32Model):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Dot3NoteDecoderLayer(
+            lambda prefix: Dots3NoteDecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
@@ -679,5 +679,5 @@ class Dot3NoteModel(DeepseekV32Model):
         return super().load_weights(self._adapt_weights(weights))
 
 
-class Dot3NoteForCausalLM(DeepseekV32ForCausalLM):
-    model_cls = Dot3NoteModel
+class Dots3NoteLanguageModelForCausalLM(DeepseekV32ForCausalLM):
+    model_cls = Dots3NoteModel

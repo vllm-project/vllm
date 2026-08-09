@@ -67,6 +67,7 @@ class VisionRotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._cache_seq_len = cache_seq_len
+        self.freqs_cache: torch.Tensor
         if cache_seq_len is not None:
             self.register_buffer(
                 "freqs_cache",
