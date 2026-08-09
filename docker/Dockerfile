@@ -24,7 +24,7 @@
 
 ARG CUDA_VERSION=13.0.3
 ARG PYTHON_VERSION=3.12
-ARG UBUNTU_VERSION=22.04
+ARG UBUNTU_VERSION=24.04
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
@@ -765,7 +765,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install gdrcopy (saves ~6s per build)
 # TODO (huydhn): There is no prebuilt gdrcopy package on 12.9 at the moment
 ARG GDRCOPY_CUDA_VERSION=12.8
-ARG GDRCOPY_OS_VERSION=Ubuntu22_04
+ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
 RUN set -eux; \
