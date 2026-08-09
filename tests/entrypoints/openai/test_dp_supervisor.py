@@ -483,20 +483,19 @@ async def _await_supervisor_health(
 
 
 async def _poll_until_api_server_running(
-    port: int, retries: int = 10, use_ssl: bool = False
+    port: int, retries: int = 30, use_ssl: bool = False
 ) -> None:
     scheme = "https" if use_ssl else "http"
     url = f"{scheme}://127.0.0.1:{port}/health"
     async with aiohttp.ClientSession() as session:
         for _ in range(retries):
             try:
-                async with session.get(url, ssl=False if use_ssl else None) as resp:
-                    if resp.status != 200:
-                        return
-                await asyncio.sleep(1.0)
+                async with session.get(url, ssl=False if use_ssl else None):
+                    return
             except aiohttp.ClientError:
                 print("Test detected not started yet, sleeping for 1s")
                 await asyncio.sleep(1.0)
+    raise TimeoutError(f"API server on port {port} did not start")
 
 
 async def _set_healthy(port: int, use_ssl: bool = False) -> None:
@@ -528,8 +527,8 @@ async def _kill_server(port: int, use_ssl: bool = False) -> None:
             session.get(url, ssl=False if use_ssl else None) as resp,
         ):
             assert resp.status != 200
-    except Exception as e:
-        assert isinstance(e, aiohttp.ClientConnectorError)
+    except aiohttp.ClientConnectionError:
+        return
 
 
 @contextlib.asynccontextmanager
