@@ -854,7 +854,6 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        requested_method = self.method
         if self.method is None and SpeculativeConfig._is_custom_proposer_path(
             self.model
         ):
@@ -870,6 +869,8 @@ class SpeculativeConfig:
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
             self.method = "mtp"
+
+        requested_method = self.method
 
         if self.model is None and self.num_speculative_tokens is not None:
             if self.method == "mtp":

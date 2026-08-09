@@ -6,7 +6,7 @@ import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pydantic
 import pytest
@@ -2017,6 +2017,33 @@ def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
         model=model,
         architectures=list(architectures),
     )
+
+
+def test_deprecated_mtp_method_is_normalized_before_resolution():
+    draft_model_config = _draft_config(
+        "draft", model_type="deepseek_mtp", architectures=["DeepSeekMTPModel"]
+    )
+
+    with (
+        patch(
+            "vllm.config.speculative.ModelConfig",
+            return_value=draft_model_config,
+        ),
+        patch.object(
+            SpeculativeConfig,
+            "_resolve_method_and_parallel",
+            side_effect=RuntimeError("stop after resolution"),
+        ) as resolve,
+        pytest.raises(RuntimeError, match="stop after resolution"),
+    ):
+        SpeculativeConfig(
+            method="deepseek_mtp",
+            model="draft",
+            num_speculative_tokens=1,
+            target_model_config=MagicMock(),
+        )
+
+    resolve.assert_called_once_with("mtp", draft_model_config)
 
 
 @pytest.mark.parametrize(
