@@ -962,9 +962,7 @@ class MooncakeConnectorWorker:
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
-        dp_rank = parallel_config.data_parallel_index
-        dp_local_rank = parallel_config.data_parallel_rank_local
-        self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
+        self.dp_rank = parallel_config.data_parallel_index
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
 
@@ -2152,6 +2150,14 @@ def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
     # In hybrid or external LB mode,
     # each instance should have its own bootstrap server.
     if parallel_config.local_engines_only:
+        # Supervised multi-port external LB: the supervisor sets
+        # data_parallel_size_local=1 per child, so rank_local is always 0.
+        # Use data_parallel_start_rank to elect one owner per node.
+        if parallel_config.data_parallel_start_rank is not None:
+            return (
+                parallel_config.data_parallel_index
+                == parallel_config.data_parallel_start_rank
+            )
         return parallel_config.data_parallel_rank_local == 0
 
     # In internal LB mode,

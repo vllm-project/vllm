@@ -523,11 +523,73 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert "Engine ID mismatch" in response.text
 
 
+@pytest.mark.asyncio
+async def test_bootstrap_external_dp_lb_no_rank_collision(
+    bootstrap_server: MooncakeBootstrapServer,
+):
+    """Regression: external DP LB engines must register with globally unique
+    dp_rank (data_parallel_index), not the node-local rank which can collide
+    across independently managed engines."""
+
+    import httpx
+
+    base_url = f"http://127.0.0.1:{bootstrap_server.port}"
+
+    # Simulate two nodes with 8 local DP engines each (dp_local_rank 0..7).
+    # Global dp indices are 0..7 on node 0 and 8..15 on node 1.
+    # With the bug, both node-0-dp0 and node-1-dp0 would register as
+    # dp_rank=0 causing an engine-ID mismatch.
+    engines = [
+        {"engine_id": "engine_dp0", "global_dp": 0},
+        {"engine_id": "engine_dp1", "global_dp": 1},
+        {"engine_id": "engine_dp8", "global_dp": 8},
+        {"engine_id": "engine_dp9", "global_dp": 9},
+    ]
+
+    async with httpx.AsyncClient() as client:
+        for eng in engines:
+            payload = {
+                "engine_id": eng["engine_id"],
+                "dp_rank": eng["global_dp"],
+                "tp_rank": 0,
+                "pp_rank": 0,
+                "addr": f"tcp://10.0.0.{eng['global_dp']}:5000",
+            }
+            response = await client.post(f"{base_url}/register", json=payload)
+            assert response.status_code == 200, (
+                f"Registration failed for {eng['engine_id']}: {response.text}"
+            )
+
+        response = await client.get(f"{base_url}/query")
+        assert response.status_code == 200
+        data = response.json()
+
+    for eng in engines:
+        key = str(eng["global_dp"])
+        assert key in data, f"dp_rank={eng['global_dp']} missing from registry"
+        assert data[key]["engine_id"] == eng["engine_id"]
+
+    # Verify that the buggy scenario (two different engine IDs on the
+    # same dp_rank) is still correctly rejected.
+    async with httpx.AsyncClient() as client:
+        collision_payload = {
+            "engine_id": "engine_dp8",
+            "dp_rank": 0,
+            "tp_rank": 0,
+            "pp_rank": 1,
+            "addr": "tcp://10.0.0.99:5000",
+        }
+        response = await client.post(f"{base_url}/register", json=collision_payload)
+        assert response.status_code == 400
+        assert "Engine ID mismatch" in response.text
+
+
 def _make_bootstrap_vllm_config(
     *,
     local_engines_only: bool = False,
     data_parallel_rank_local: int = 0,
     data_parallel_index: int = 0,
+    data_parallel_start_rank: int | None = None,
     nnodes_within_dp: int = 1,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -535,6 +597,7 @@ def _make_bootstrap_vllm_config(
             local_engines_only=local_engines_only,
             data_parallel_rank_local=data_parallel_rank_local,
             data_parallel_index=data_parallel_index,
+            data_parallel_start_rank=data_parallel_start_rank,
             nnodes_within_dp=nnodes_within_dp,
             master_addr="model-parallel-master",
             data_parallel_master_ip="data-parallel-master",
@@ -593,6 +656,54 @@ def test_should_launch_bootstrap_server_selects_single_owner(
         ) as mock_pp_group,
     ):
         mock_pp_group.return_value.rank_in_group = pp_rank
+        assert should_launch_bootstrap_server(vllm_config) is expected
+
+
+@pytest.mark.parametrize(
+    ("data_parallel_index", "data_parallel_start_rank", "expected"),
+    [
+        (0, 0, True),
+        (1, 0, False),
+        (7, 0, False),
+        (8, 8, True),
+        (9, 8, False),
+        (15, 8, False),
+    ],
+    ids=[
+        "node0_first_child_launches",
+        "node0_second_child_skips",
+        "node0_last_child_skips",
+        "node1_first_child_launches",
+        "node1_second_child_skips",
+        "node1_last_child_skips",
+    ],
+)
+def test_should_launch_bootstrap_server_supervised_external_lb(
+    data_parallel_index: int,
+    data_parallel_start_rank: int,
+    expected: bool,
+):
+    """Supervised external-LB sets data_parallel_size_local=1 for each child,
+    so data_parallel_rank_local is always 0. The bootstrap server must be
+    elected using data_parallel_start_rank instead."""
+    vllm_config = _make_bootstrap_vllm_config(
+        local_engines_only=True,
+        data_parallel_rank_local=0,
+        data_parallel_index=data_parallel_index,
+        data_parallel_start_rank=data_parallel_start_rank,
+    )
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_pp_group"
+        ) as mock_pp_group,
+    ):
+        mock_pp_group.return_value.rank_in_group = 0
         assert should_launch_bootstrap_server(vllm_config) is expected
 
 

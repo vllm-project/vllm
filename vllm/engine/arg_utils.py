@@ -2228,6 +2228,7 @@ class EngineArgs:
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
+            data_parallel_start_rank=self.data_parallel_start_rank,
             data_parallel_size_local=data_parallel_size_local,
             master_addr=self.master_addr,
             master_port=self.master_port,
