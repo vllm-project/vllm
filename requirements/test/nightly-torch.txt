@@ -33,7 +33,6 @@ transformers==5.14.1
 tokenizers==0.22.2
 schemathesis>=4.0.0 # Required for openai schema test.
 # quantization
-bitsandbytes>=0.49.2
 buildkite-test-collector==0.1.9
 
 

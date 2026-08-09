@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests whether bitsandbytes computation is enabled correctly.
-
-Run `pytest tests/quantization/test_bitsandbytes.py`.
-"""
+"""End-to-end tests for the out-of-tree bitsandbytes plugin."""
 
 import types
 from unittest.mock import MagicMock, patch
@@ -12,13 +9,12 @@ import pytest
 from packaging.version import Version
 from transformers import BitsAndBytesConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
+from vllm_bnb_plugin import bitsandbytes_loader as bnb
 
-from tests.quantization.utils import is_quant_method_supported
-from vllm.model_executor.model_loader import bitsandbytes_loader as bnb
 from vllm.platforms import current_platform
 
-from ...utils import compare_two_settings, multi_gpu_test
-from ..utils import check_embeddings_close, check_logprobs_close
+from ...models.utils import check_embeddings_close, check_logprobs_close
+from ...utils import multi_gpu_test
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_cdna
@@ -44,7 +40,7 @@ models_4bit_to_moe_test = [
     ("allenai/OLMoE-1B-7B-0125-Instruct", "quantize moe model inflight"),
 ]
 
-models_pre_qaunt_4bit_to_test = [
+models_pre_quant_4bit_to_test = [
     (
         "PrunaAI/Einstein-v6.1-Llama3-8B-bnb-4bit-smashed",
         "read pre-quantized 4-bit FP4 model",
@@ -58,10 +54,64 @@ models_pre_quant_8bit_to_test = [
 ]
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("bitsandbytes"),
-    reason="bitsandbytes is not supported on this GPU type.",
-)
+def log_generated_texts(prompts, outputs, runner_name):
+    logged_texts = []
+    for i, (_, generated_text) in enumerate(outputs):
+        logged_texts.append(
+            {
+                "prompt": prompts[i],
+                "runner_name": runner_name,
+                "generated_text": generated_text,
+            }
+        )
+    return logged_texts
+
+
+def validate_generated_texts(
+    hf_runner,
+    vllm_runner,
+    prompts,
+    model_name,
+    pre_quant=False,
+    hf_model_kwargs=None,
+    vllm_tp_size=1,
+    max_tokens=8,
+):
+    with vllm_runner(
+        model_name,
+        quantization=None if pre_quant else "bitsandbytes",
+        tensor_parallel_size=vllm_tp_size,
+        enforce_eager=False,
+        default_torch_num_threads=1,
+        tokenizer_mode="hf",
+        load_format="hf",
+        config_format="hf",
+    ) as llm:
+        vllm_outputs = llm.generate_greedy(prompts, max_tokens)
+        vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
+
+    if hf_model_kwargs is None:
+        hf_model_kwargs = {}
+
+    with hf_runner(
+        model_name, model_kwargs=hf_model_kwargs, default_torch_num_threads=1
+    ) as llm:
+        hf_outputs = llm.generate_greedy(prompts, max_tokens)
+        hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
+
+    for hf_log, vllm_log in zip(hf_logs, vllm_logs):
+        hf_str = hf_log["generated_text"]
+        vllm_str = vllm_log["generated_text"]
+        prompt = hf_log["prompt"]
+        assert hf_str == vllm_str, (
+            f"Model: {model_name}"
+            f"Mismatch between HF and vLLM outputs:\n"
+            f"Prompt: {prompt}\n"
+            f"HF Output: '{hf_str}'\n"
+            f"vLLM Output: '{vllm_str}'"
+        )
+
+
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 def test_load_4bit_bnb_model(
     hf_runner, vllm_runner, example_prompts, model_name, description
@@ -72,11 +122,7 @@ def test_load_4bit_bnb_model(
     )
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("bitsandbytes"),
-    reason="bitsandbytes is not supported on this GPU type.",
-)
-@pytest.mark.parametrize("model_name, description", models_pre_qaunt_4bit_to_test)
+@pytest.mark.parametrize("model_name, description", models_pre_quant_4bit_to_test)
 def test_load_pre_quant_4bit_bnb_model(
     hf_runner, vllm_runner, example_prompts, model_name, description
 ) -> None:
@@ -85,10 +131,6 @@ def test_load_pre_quant_4bit_bnb_model(
     )
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("bitsandbytes"),
-    reason="bitsandbytes is not supported on this GPU type.",
-)
 @pytest.mark.parametrize("model_name, description", models_pre_quant_8bit_to_test)
 def test_load_8bit_bnb_model(
     hf_runner, vllm_runner, example_prompts, model_name, description
@@ -98,10 +140,6 @@ def test_load_8bit_bnb_model(
     )
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("bitsandbytes"),
-    reason="bitsandbytes is not supported on this GPU type.",
-)
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 @multi_gpu_test(num_gpus=2)
 def test_load_tp_4bit_bnb_model(
@@ -119,44 +157,28 @@ def test_load_tp_4bit_bnb_model(
     )
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("bitsandbytes"),
-    reason="bitsandbytes is not supported on this GPU type.",
-)
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 @multi_gpu_test(num_gpus=2)
-def test_load_pp_4bit_bnb_model(model_name, description) -> None:
-    common_args = [
-        "--disable-log-stats",
-        "--dtype",
-        "bfloat16",
-        "--enable-prefix-caching",
-        "--quantization",
-        "bitsandbytes",
-        "--gpu-memory-utilization",
-        "0.7",
-    ]
-    pp_args = [
-        *common_args,
-        "--pipeline-parallel-size",
-        "2",
-    ]
-    compare_two_settings(
+def test_load_pp_4bit_bnb_model(
+    hf_runner, vllm_runner, example_prompts, model_name, description
+) -> None:
+    hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(load_in_4bit=True))
+    validate_generated_texts(
+        hf_runner,
+        vllm_runner,
+        example_prompts[:1],
         model_name,
-        common_args,
-        pp_args,
+        False,
+        hf_model_kwargs,
+        vllm_tp_size=2,
     )
 
 
 @pytest.mark.skipif(
     Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
-    reason="Need to add support for quantizing MoE experts with bnb"
-    " in transformers v5. See"
-    " https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1849",
-)
-@pytest.mark.skipif(
-    not is_quant_method_supported("bitsandbytes"),
-    reason="bitsandbytes is not supported on this GPU type.",
+    reason="Need to add support for quantizing MoE experts with bnb in "
+    "transformers v5. See https://github.com/bitsandbytes-foundation/"
+    "bitsandbytes/issues/1849",
 )
 @pytest.mark.parametrize("model_name, description", models_4bit_to_moe_test)
 def test_4bit_bnb_moe_model(
@@ -193,10 +215,6 @@ def test_4bit_bnb_moe_model(
     )
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("bitsandbytes"),
-    reason="bitsandbytes is not supported on this GPU type.",
-)
 @pytest.mark.parametrize("model_name, description", models_4bit_to_embedding_test)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_4bit_bnb_embedding_model(
@@ -207,15 +225,8 @@ def test_4bit_bnb_embedding_model(
     example_prompts,
     dtype: str,
 ) -> None:
-    # The example_prompts has ending "\n", for example:
-    # "Write a short story about a robot that dreams for the first time.\n"
-    # sentence_transformers will strip the input texts, see:
-    # https://github.com/UKPLab/sentence-transformers/blob/v3.1.1/sentence_transformers/models/Transformer.py#L159
-    # This makes the input_ids different between hf_model and vllm_model.
-    # So we need to strip the input texts to avoid test failing.
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    # Inflight 4bit quantization
     with vllm_runner(
         model_name,
         runner="pooling",
@@ -245,70 +256,7 @@ def test_4bit_bnb_embedding_model(
     )
 
 
-def log_generated_texts(prompts, outputs, runner_name):
-    logged_texts = []
-    for i, (_, generated_text) in enumerate(outputs):
-        log_entry = {
-            "prompt": prompts[i],
-            "runner_name": runner_name,
-            "generated_text": generated_text,
-        }
-        logged_texts.append(log_entry)
-    return logged_texts
-
-
-def validate_generated_texts(
-    hf_runner,
-    vllm_runner,
-    prompts,
-    model_name,
-    pre_quant=False,
-    hf_model_kwargs=None,
-    vllm_tp_size=1,
-    max_tokens=8,
-):
-    # NOTE: run vLLM first, as it requires a clean process
-    # when using distributed inference
-    with vllm_runner(
-        model_name,
-        quantization=None if pre_quant else "bitsandbytes",
-        tensor_parallel_size=vllm_tp_size,
-        enforce_eager=False,
-        default_torch_num_threads=1,
-        tokenizer_mode="hf",
-        load_format="hf",
-        config_format="hf",
-    ) as llm:
-        vllm_outputs = llm.generate_greedy(prompts, max_tokens)
-        vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
-
-    if hf_model_kwargs is None:
-        hf_model_kwargs = {}
-
-    # Run with HF runner
-    with hf_runner(
-        model_name, model_kwargs=hf_model_kwargs, default_torch_num_threads=1
-    ) as llm:
-        hf_outputs = llm.generate_greedy(prompts, max_tokens)
-        hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
-
-    # Compare the generated strings
-    for hf_log, vllm_log in zip(hf_logs, vllm_logs):
-        hf_str = hf_log["generated_text"]
-        vllm_str = vllm_log["generated_text"]
-        prompt = hf_log["prompt"]
-        assert hf_str == vllm_str, (
-            f"Model: {model_name}"
-            f"Mismatch between HF and vLLM outputs:\n"
-            f"Prompt: {prompt}\n"
-            f"HF Output: '{hf_str}'\n"
-            f"vLLM Output: '{vllm_str}'"
-        )
-
-
 def test_bitsandbytes_passes_revision_by_name():
-    # revision must reach download_safetensors_index_file_from_hf as the
-    # ``revision`` keyword, not a positional slot.
     fake_self = types.SimpleNamespace(
         load_config=types.SimpleNamespace(download_dir="/cache"),
         _get_weight_files=MagicMock(
