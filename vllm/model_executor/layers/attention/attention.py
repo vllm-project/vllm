@@ -40,6 +40,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
@@ -631,7 +632,7 @@ class Attention(nn.Module, AttentionLayerBase):
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend, sw_per_token, shared_page, block_size
             )
-            return SlidingWindowSpec(
+            spec: AttentionSpec = SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
@@ -642,7 +643,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 page_size_padded=shared_page,
             )
         else:
-            return FullAttentionSpec(
+            spec = FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
@@ -650,6 +651,11 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
             )
+        # Backend-specific spec adjustment (e.g. TurboQuant slot sizing). Done
+        # here rather than in the runner loop: kv_cache_dtype is an
+        # Attention-layer concept, and auxiliary AttentionLayerBase caches
+        # (indexer/conv-state/hidden-state layers) do not have one.
+        return self.get_attn_backend().customize_spec(spec, self.kv_cache_dtype)
 
 
 def get_attention_context(

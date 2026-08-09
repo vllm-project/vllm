@@ -281,6 +281,9 @@ class TestTurboQuantKVCacheSpec:
     @pytest.mark.parametrize("preset", ALL_PRESETS)
     def test_kv_cache_spec_sets_kv_quant_mode(self, preset):
         from vllm.model_executor.layers.attention.attention import Attention
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
         from vllm.v1.kv_cache_interface import KVQuantMode, TQFullAttentionSpec
 
         layer = SimpleNamespace(
@@ -291,17 +294,13 @@ class TestTurboQuantKVCacheSpec:
             head_size_v=128,
             num_kv_heads=4,
             sliding_window=None,
+            get_attn_backend=lambda: TurboQuantAttentionBackend,
         )
         vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=32))
 
-        from vllm.v1.attention.backends.turboquant_attn import (
-            TurboQuantAttentionBackend,
-        )
-
-        # The layer builds a generic spec; the backend re-specs it for TQ via
-        # customize_spec (AttentionBackend.customize_spec contract).
+        # get_kv_cache_spec builds a generic spec and re-specs it for TQ via
+        # the backend's customize_spec hook.
         spec = Attention.get_kv_cache_spec(layer, vllm_config)
-        spec = TurboQuantAttentionBackend.customize_spec(spec, preset)
 
         assert isinstance(spec, TQFullAttentionSpec)
         assert spec.kv_quant_mode == KVQuantMode.TURBOQUANT
