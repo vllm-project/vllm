@@ -983,10 +983,8 @@ class ModelConfig:
         """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
         cls = "Transformers"
-        # A distinct text config means the top-level config is nested, i.e.
-        # multimodal. Use identity here: heterogeneous Transformers configs
-        # intentionally reject global field access during value equality.
-        cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
+        # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
+        cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
         cls += "MoE" if self.is_moe else ""
         # Check if the architecture we're wrapping has defaults
         runner = None

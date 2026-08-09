@@ -95,51 +95,6 @@ def _remap_gemma4_expert_weight_name(name: str) -> str:
     return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
 
 
-def _get_gemma4_per_layer_value(config, layer_idx: int, attr: str) -> int | None:
-    per_layer_config = getattr(config, "per_layer_config", None)
-    if per_layer_config is None:
-        return None
-
-    per_layer_attributes = getattr(config, "per_layer_attributes", None)
-    if per_layer_attributes is not None and attr not in per_layer_attributes:
-        return None
-    return getattr(per_layer_config[layer_idx], attr, None)
-
-
-def _get_gemma4_head_dim(config, layer_idx: int) -> int:
-    if head_dim := _get_gemma4_per_layer_value(config, layer_idx, "head_dim"):
-        return head_dim
-
-    layer_type = config.layer_types[layer_idx]
-    if layer_type == "full_attention":
-        if global_head_dim := _get_gemma4_per_layer_value(
-            config, layer_idx, "global_head_dim"
-        ):
-            return global_head_dim
-        global_head_dim = getattr(config, "global_head_dim", None)
-        if global_head_dim is not None:
-            return global_head_dim
-    return config.head_dim
-
-
-def _get_gemma4_num_kv_heads(config, layer_idx: int) -> int:
-    if num_kv_heads := _get_gemma4_per_layer_value(
-        config, layer_idx, "num_key_value_heads"
-    ):
-        return num_kv_heads
-
-    is_full_attention = config.layer_types[layer_idx] == "full_attention"
-    if is_full_attention and getattr(config, "attention_k_eq_v", False):
-        if global_num_kv_heads := _get_gemma4_per_layer_value(
-            config, layer_idx, "num_global_key_value_heads"
-        ):
-            return global_num_kv_heads
-        global_num_kv_heads = getattr(config, "num_global_key_value_heads", None)
-        if global_num_kv_heads is not None:
-            return global_num_kv_heads
-    return config.num_key_value_heads
-
-
 @triton.jit
 def _gemma4_routing_kernel(
     gating_ptr,
@@ -617,7 +572,10 @@ class Gemma4DecoderLayer(nn.Module):
         # Gemma4 uses different head dimensions for sliding vs full attention
         layer_type = config.layer_types[layer_idx]
         self.is_full_attention = layer_type == "full_attention"
-        head_dim = _get_gemma4_head_dim(config, layer_idx)
+        if self.is_full_attention:
+            head_dim = getattr(config, "global_head_dim", config.head_dim)
+        else:
+            head_dim = config.head_dim
 
         # Determine if this full-attention layer uses k_eq_v
         # (laptop variant: no v_proj, K reused as V on full attention layers)
@@ -625,7 +583,14 @@ class Gemma4DecoderLayer(nn.Module):
             config, "attention_k_eq_v", False
         )
 
-        num_kv_heads = _get_gemma4_num_kv_heads(config, layer_idx)
+        # For k_eq_v full-attention layers, use num_global_key_value_heads
+        # as the KV head count when k_eq_v is enabled.
+        if use_k_eq_v:
+            num_kv_heads = getattr(
+                config, "num_global_key_value_heads", config.num_key_value_heads
+            )
+        else:
+            num_kv_heads = config.num_key_value_heads
 
         self.self_attn = Gemma4Attention(
             config=config,
