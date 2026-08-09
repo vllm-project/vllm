@@ -478,9 +478,8 @@ RUN cd /opt/nixl && \
 # LMCache ships no ROCm wheel on PyPI, so build the HIP extension from source.
 FROM base AS build_lmcache
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
-ARG LMCACHE_REF="v0.5.3rc4"
-# Defaults to this image's arch set.
-ARG LMCACHE_ROCM_ARCH=""
+ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b" # v0.5.3
+ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
 ARG COMMON_WORKDIR
 RUN git clone ${LMCACHE_REPO} ${COMMON_WORKDIR}/lmcache \
     && cd ${COMMON_WORKDIR}/lmcache \
