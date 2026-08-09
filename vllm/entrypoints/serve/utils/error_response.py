@@ -34,6 +34,7 @@ def create_error_response(
             VLLMUnprocessableEntityError,
             VLLMValidationError,
         )
+        from vllm.v1.engine.exceptions import EnginePausedError
 
         if isinstance(exc, VLLMValidationError):
             err_type = "BadRequestError"
@@ -55,6 +56,11 @@ def create_error_response(
         elif isinstance(exc, GenerationError):
             err_type = "InternalServerError"
             status_code = exc.status_code
+            param = None
+        elif isinstance(exc, EnginePausedError):
+            # Generation is paused, not broken: the caller should retry.
+            err_type = "ServiceUnavailableError"
+            status_code = HTTPStatus.SERVICE_UNAVAILABLE
             param = None
         elif isinstance(exc, VLLMServerError):
             # Any other server-caused error defaults to 500.

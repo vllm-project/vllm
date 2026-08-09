@@ -829,11 +829,20 @@ class AsyncLLM(EngineClient):
                 stacklevel=2,
             )
             mode = "wait"
-        if mode != "keep":
-            self._reject_while_paused = mode
+        # Closed before the pause is requested so nothing slips through, and
+        # restored if the pause does not take, which would otherwise leave
+        # admission shut with the engine still running.
+        previous_reject = self._reject_while_paused
+        self._reject_while_paused = mode if mode != "keep" else None
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        try:
+            await self.engine_core.pause_scheduler_async(
+                mode=mode, clear_cache=clear_cache
+            )
+        except BaseException:
+            self._reject_while_paused = previous_reject
+            raise
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
         # prior to the wait-for-idle completion event, but involve additional async
@@ -845,7 +854,10 @@ class AsyncLLM(EngineClient):
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
         await self.engine_core.resume_scheduler_async()
-        self._reject_while_paused = None
+        # Resuming the scheduler does not make a sleeping executor's memory
+        # resident, so admission stays closed until wake_up.
+        if not await self.engine_core.is_sleeping_async():
+            self._reject_while_paused = None
 
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
@@ -984,11 +996,15 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        if mode != "keep":
-            self._reject_while_paused = mode
+        previous_reject = self._reject_while_paused
+        self._reject_while_paused = mode if mode != "keep" else None
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.sleep_async(level, mode)
+        try:
+            await self.engine_core.sleep_async(level, mode)
+        except BaseException:
+            self._reject_while_paused = previous_reject
+            raise
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
