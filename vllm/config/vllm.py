@@ -1510,6 +1510,20 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        if self.parallel_config.data_parallel_pp_first:
+            if not self.use_v2_model_runner:
+                raise ValueError(
+                    "PP-first data parallel placement requires Model Runner V2."
+                )
+            if self.model_config is None or not self.model_config.is_moe:
+                raise ValueError(
+                    "PP-first data parallel placement requires a MoE model."
+                )
+            if not self.parallel_config.enable_expert_parallel:
+                raise ValueError(
+                    "PP-first data parallel placement requires expert parallelism."
+                )
+
         self._resolve_mm_embeds_from_ec_connector()
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()

@@ -22,6 +22,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
+from vllm.v1.executor.headless_mp_manager import HeadlessMultiprocExecutorManager
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import (
@@ -220,8 +221,15 @@ def run_headless(args: argparse.Namespace):
             head_node_address,
         )
 
-        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
-        executor.start_worker_monitor(inline=True)
+        if parallel_config.data_parallel_pp_first:
+            executor_manager = HeadlessMultiprocExecutorManager(vllm_config)
+            try:
+                executor_manager.monitor_liveness()
+            finally:
+                executor_manager.shutdown()
+        else:
+            executor = MultiprocExecutor(vllm_config, monitor_workers=False)
+            executor.start_worker_monitor(inline=True)
         return
 
     host = parallel_config.data_parallel_master_ip

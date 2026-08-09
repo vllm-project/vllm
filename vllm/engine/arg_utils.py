@@ -486,6 +486,7 @@ class EngineArgs:
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
     data_parallel_size_local: int | None = None
+    data_parallel_pp_first: bool = ParallelConfig.data_parallel_pp_first
     data_parallel_address: str | None = None
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
@@ -1089,6 +1090,10 @@ class EngineArgs:
             "-dpl",
             type=int,
             help="Number of data parallel replicas to run on this node.",
+        )
+        parallel_group.add_argument(
+            "--data-parallel-pp-first",
+            **parallel_kwargs["data_parallel_pp_first"],
         )
         parallel_group.add_argument(
             "--data-parallel-address",
@@ -2063,6 +2068,26 @@ class EngineArgs:
                 f"`--data-parallel-backend {self.data_parallel_backend}`. "
                 "Use the MP backend or set `--nnodes 1`."
             )
+        if self.data_parallel_pp_first:
+            if self.data_parallel_rank is not None:
+                raise ValueError(
+                    "PP-first placement cannot be combined with --data-parallel-rank."
+                )
+            if self.data_parallel_start_rank is not None:
+                raise ValueError(
+                    "PP-first placement cannot be combined with "
+                    "--data-parallel-start-rank."
+                )
+            if self.data_parallel_external_lb or self.data_parallel_hybrid_lb:
+                raise ValueError(
+                    "PP-first placement supports internal DP load balancing only."
+                )
+            if self.data_parallel_size_local not in (None, self.data_parallel_size):
+                raise ValueError(
+                    "PP-first placement requires --data-parallel-size-local "
+                    "to equal --data-parallel-size when specified."
+                )
+            self.data_parallel_size_local = self.data_parallel_size
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
             world_size = (
@@ -2165,14 +2190,22 @@ class EngineArgs:
                 self.data_parallel_hybrid_lb = False
 
             self.data_parallel_rank = (
-                self.data_parallel_start_rank or inferred_data_parallel_rank
+                0
+                if self.data_parallel_pp_first
+                else self.data_parallel_start_rank or inferred_data_parallel_rank
             )
             if self.nnodes > 1:
-                logger.info(
-                    "Inferred data_parallel_rank %d from node_rank %d",
-                    self.data_parallel_rank,
-                    self.node_rank,
-                )
+                if self.data_parallel_pp_first:
+                    logger.info(
+                        "PP-first placement assigns all DP ranks to node %d",
+                        self.node_rank,
+                    )
+                else:
+                    logger.info(
+                        "Inferred data_parallel_rank %d from node_rank %d",
+                        self.data_parallel_rank,
+                        self.node_rank,
+                    )
         else:
             if self.data_parallel_hybrid_lb:
                 raise ValueError(
@@ -2232,6 +2265,7 @@ class EngineArgs:
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
+            data_parallel_pp_first=self.data_parallel_pp_first,
             master_addr=self.master_addr,
             master_port=self.master_port,
             nnodes=self.nnodes,
