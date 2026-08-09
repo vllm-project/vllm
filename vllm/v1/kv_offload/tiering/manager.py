@@ -255,6 +255,19 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = True
         self._process_finished_jobs()
 
+    def _maybe_pin_promotion(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        """Runs synchronously so nothing else can see `keys` as evictable
+        before the policy has had a chance to pin them."""
+        req_id = req_context.req_id
+        state = self._req_state.get(req_id)
+        request_finished = state is not None and state.is_finished
+        if self._promotion_policy.on_promotion_landed(
+            keys, req_context, request_finished
+        ):
+            self.primary_tier.prepare_load(keys, req_context)
+
     def _complete_promotion(
         self, job_metadata: JobMetadata, completed_job: JobResult
     ) -> None:
@@ -281,17 +294,7 @@ class TieringOffloadingManager(OffloadingManager):
                 job_metadata.req_context,
                 True,
             )
-            # Must ask now, before returning, so nothing else can see the
-            # block as evictable before the policy has pinned it.
-            req_id = job_metadata.req_context.req_id
-            state = self._req_state.get(req_id)
-            request_finished = state is not None and state.is_finished
-            if self._promotion_policy.on_promotion_landed(
-                successful_keys, job_metadata.req_context, request_finished
-            ):
-                self.primary_tier.prepare_load(
-                    successful_keys, job_metadata.req_context
-                )
+            self._maybe_pin_promotion(successful_keys, job_metadata.req_context)
         if failed_keys:
             self.primary_tier.complete_write(
                 failed_keys,
@@ -321,7 +324,7 @@ class TieringOffloadingManager(OffloadingManager):
 
                 if job_metadata.is_promotion:
                     # secondary→primary transfer (promotion) completed.
-                    # Make blocks available in primary tier.
+                    # May land evictable or pinned - see _maybe_pin_promotion.
                     self._complete_promotion(job_metadata, completed_job)
                 else:
                     # primary→secondary transfer completed.

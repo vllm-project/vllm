@@ -1100,6 +1100,7 @@ class TestPromotionContentionProtection:
         self.manager = TieringOffloadingManager(
             primary_tier=self.primary_tier,
             secondary_tiers=[self.secondary_tier],
+            promotion_policy=PinUnreadPromotionsPolicy(),
         )
 
     def _simulate_on_schedule_end(self):
@@ -1112,33 +1113,6 @@ class TestPromotionContentionProtection:
         assert self.manager.lookup(block, ctx) is LookupResult.RETRY
         self._simulate_on_schedule_end()
         self._simulate_on_schedule_end()
-
-    def test_no_throttling_under_mere_concurrency(self, manager_setup):
-        block_a, block_b = to_keys([0, 1])
-        self.secondary_tier.blocks[block_a] = True
-        self.secondary_tier.blocks[block_b] = True
-        ctx_a = ReqContext(req_id="req_a")
-        ctx_b = ReqContext(req_id="req_b")
-
-        # Capacity 2 fits both blocks without evicting anything: two
-        # concurrent requests alone must not trigger a refusal.
-        self._land_promotion(block_a, ctx_a)
-        assert self.manager.lookup(block_b, ctx_b) is LookupResult.RETRY
-
-    def test_refusal_only_on_real_contention(self, manager_setup):
-        block_a, block_b, block_c = to_keys([0, 1, 2])
-        for block in (block_a, block_b, block_c):
-            self.secondary_tier.blocks[block] = True
-        ctx_a = ReqContext(req_id="req_a")
-        ctx_b = ReqContext(req_id="req_b")
-        ctx_c = ReqContext(req_id="req_c")
-
-        self._land_promotion(block_a, ctx_a)
-        self._land_promotion(block_b, ctx_b)
-
-        # Primary tier is full (2/2), both landed blocks unconsumed. A third
-        # promotion would have to evict one of them: refused.
-        assert self.manager.lookup(block_c, ctx_c) is LookupResult.MISS
 
     def test_consumption_lifts_protection(self, manager_setup):
         block_a, block_b, block_c = to_keys([0, 1, 2])
@@ -1177,7 +1151,7 @@ class TestPromotionContentionProtection:
 
         assert self.manager.lookup(block_c, ctx_c) is LookupResult.RETRY
 
-    def test_pinned_promotion_blocks_real_store_until_released(self, manager_setup):
+    def test_pinned_promotion_unevictable_by_store(self, manager_setup):
         """A pinned (unread) promotion is not evictable by anyone, including
         a real store - the store-starvation trade-off of pinning via
         ref_cnt. Releasing the pin (consumption or abandonment) unblocks
@@ -1205,9 +1179,10 @@ class TestPromotionContentionProtection:
 
 
 def test_pinned_promotion_count_is_capped():
-    """Once a policy's pin cap is reached, further promotions land as
-    normal evictable blocks instead of being pinned - bounds how much of
-    the pool speculative pins can make unavailable to real stores."""
+    """Cap counts distinct pinned requests, not blocks: a request already
+    holding a pin is admitted on a later, separate promotion even after
+    the cap is full - it is never left partially pinned. Only a brand-new
+    request is subject to the cap."""
     mock_region = _mock_mmap_region(10)
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_blocks=10, mmap_region=mock_region
@@ -1220,32 +1195,42 @@ def test_pinned_promotion_count_is_capped():
     manager = TieringOffloadingManager(
         primary_tier=primary_tier,
         secondary_tiers=[secondary_tier],
-        promotion_policy=PinUnreadPromotionsPolicy(max_pinned=3),
+        promotion_policy=PinUnreadPromotionsPolicy(max_pinned=2),
     )
 
-    blocks = to_keys(range(5))
-    for block in blocks:
+    block_a, block_b, block_c, block_d = to_keys([0, 1, 2, 3])
+    for block in (block_a, block_b, block_c, block_d):
         secondary_tier.blocks[block] = True
-
     end_ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
-    for i, block in enumerate(blocks):
-        assert (
-            manager.lookup(block, ReqContext(req_id=f"req_{i}")) is LookupResult.RETRY
-        )
+
+    def land(block, ctx):
+        assert manager.lookup(block, ctx) is LookupResult.RETRY
         manager.on_schedule_end(end_ctx)
         manager.on_schedule_end(end_ctx)
 
-    # 5 promotions landed, cap is 3: only the first 3 were pinned.
-    pinned = manager._promotion_policy._owner
-    assert len(pinned) == 3
-    assert set(pinned) == set(blocks[:3])
+    ctx_0 = ReqContext(req_id="req_0")
+    ctx_1 = ReqContext(req_id="req_1")
+    ctx_2 = ReqContext(req_id="req_2")
 
-    # First 3 hold the pin (ref_cnt 1, not evictable); the rest landed as
-    # normal evictable blocks (ref_cnt 0).
-    for block in blocks[:3]:
+    land(block_a, ctx_0)  # req_0's first promotion: admitted, cap at 1/2.
+    land(block_b, ctx_1)  # req_1's first promotion: admitted, cap full 2/2.
+
+    # req_0 gets a second, separate promotion after the cap is full. It must
+    # still be admitted - req_0 is already pinned, so this isn't a new
+    # request competing for a cap slot.
+    land(block_c, ctx_0)
+
+    # A brand-new request hitting the full cap is refused, though.
+    land(block_d, ctx_2)
+
+    policy = manager._promotion_policy
+    assert policy._by_req["req_0"] == {block_a, block_c}
+    assert policy._by_req["req_1"] == {block_b}
+    assert "req_2" not in policy._by_req
+
+    for block in (block_a, block_b, block_c):
         assert primary_tier._policy.get(block).ref_cnt == 1
-    for block in blocks[3:]:
-        assert primary_tier._policy.get(block).ref_cnt == 0
+    assert primary_tier._policy.get(block_d).ref_cnt == 0
 
 
 def test_consuming_one_pinned_block_does_not_release_a_sibling():
@@ -1290,9 +1275,9 @@ def test_consuming_one_pinned_block_does_not_release_a_sibling():
 def test_always_promote_policy_never_pins():
     """The no-op policy reproduces pre-fix behavior: nothing is pinned, so
     a landed promotion is immediately evictable like any other block."""
-    mock_region = _mock_mmap_region(2)
+    mock_region = _mock_mmap_region(1)
     primary_tier = CPUPrimaryTierOffloadingManager(
-        num_blocks=2, mmap_region=mock_region
+        num_blocks=1, mmap_region=mock_region
     )
     secondary_tier = ExampleSecondaryTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
@@ -1317,7 +1302,8 @@ def test_always_promote_policy_never_pins():
     # Landed but never pinned: ref_cnt is 0, a normal evictable block.
     assert primary_tier._policy.get(block_a).ref_cnt == 0
 
-    # A second promotion can evict it freely, unlike PinUnreadPromotionsPolicy.
+    # Capacity is 1, already full: admitting block_b requires evicting
+    # block_a. Unlike PinUnreadPromotionsPolicy, that eviction succeeds.
     ctx_b = ReqContext(req_id="req_b")
     secondary_tier.blocks[block_b] = True
     assert manager.lookup(block_b, ctx_b) is LookupResult.RETRY

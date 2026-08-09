@@ -64,18 +64,12 @@ class AlwaysPromotePolicy(PromotionPolicy):
 
 
 class PinUnreadPromotionsPolicy(PromotionPolicy):
-    """Pins landed-but-unread promotions so a promotion can't evict another
-    promotion nobody has read yet. Bounded by a cap on total pins, since
-    pinned blocks are also not evictable by real GPU-driven stores while
-    held.
-    """
+    """Pins landed-but-unread promotions, capped by number of distinct
+    pinned requests (not blocks, so a request's batch is never pinned
+    partially). Unbounded by default."""
 
-    def __init__(self, max_pinned: int = 512):
+    def __init__(self, max_pinned: int | None = None):
         self._max_pinned = max_pinned
-        # Dual index, kept in sync, so both release paths are cheap:
-        # on_consumed is keyed by block (a request may only consume some
-        # of what it has pinned in one call), on_request_finished by
-        # request (releasing everything a finished request never read).
         self._owner: dict[OffloadKey, str] = {}
         self._by_req: dict[str, set[OffloadKey]] = {}
 
@@ -87,9 +81,13 @@ class PinUnreadPromotionsPolicy(PromotionPolicy):
     ) -> bool:
         if request_finished:
             return False
-        if len(self._owner) + len(keys) > self._max_pinned:
-            return False
         req_id = req_context.req_id
+        if (
+            self._max_pinned is not None
+            and req_id not in self._by_req
+            and len(self._by_req) >= self._max_pinned
+        ):
+            return False
         for key in keys:
             self._owner[key] = req_id
         self._by_req.setdefault(req_id, set()).update(keys)
