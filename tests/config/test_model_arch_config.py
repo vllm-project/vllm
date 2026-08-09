@@ -199,6 +199,7 @@ def _layer(**overrides) -> ModelArchitectureConfig:
         vocab_size=32,
         total_num_kv_heads=4,
         num_experts=0,
+        num_experts_per_token=0,
         quantization_config=None,
         is_deepseek_mla=False,
         is_mm_prefix_lm=False,
