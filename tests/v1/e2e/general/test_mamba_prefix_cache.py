@@ -81,8 +81,8 @@ def get_fake_sample_fn() -> SamplerOutput:
             return SamplerOutput(
                 sampled_token_ids=async_tensor_h2d(
                     [[prompt_token_ids[first_token_id_index]]],
-                    dtype=torch.int32,
                     device=DEVICE_TYPE,
+                    dtype=torch.int32,
                 ),
                 logprobs_tensors=None,
             )
@@ -94,8 +94,8 @@ def get_fake_sample_fn() -> SamplerOutput:
         return SamplerOutput(
             sampled_token_ids=async_tensor_h2d(
                 [sampled_token_ids],
-                dtype=torch.int32,
                 device=DEVICE_TYPE,
+                dtype=torch.int32,
             ),
             logprobs_tensors=None,
         )
@@ -140,22 +140,22 @@ def get_fake_propose_draft_token_ids_fn():
                 - 1
                 + num_accepted_tokens
             ],
-            dtype=torch.int32,
             device=DEVICE_TYPE,
+            dtype=torch.int32,
         )
 
         valid_sampled_tokens_count = async_tensor_h2d(
             [num_accepted_tokens],
-            dtype=torch.int32,
             device=DEVICE_TYPE,
+            dtype=torch.int32,
         )
 
         self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
         return async_tensor_h2d(
             proposed_draft_token_ids,
-            dtype=torch.int32,
             device=DEVICE_TYPE,
+            dtype=torch.int32,
         )
 
     return fake_propose_draft_token_ids_fn
