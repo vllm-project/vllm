@@ -199,7 +199,7 @@ class CudaGraphManager:
             and speculative_config.uses_dynamic_speculative_decoding()
         ):
             num_spec_per_batch_size = (
-                speculative_config.num_speculative_tokens_per_batch_size
+                speculative_config.speculative_token_schedule
             )
             # uses_dynamic_speculative_decoding() guarantees this is set.
             assert num_spec_per_batch_size is not None

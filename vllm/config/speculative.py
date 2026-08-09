@@ -3,10 +3,17 @@
 
 import copy
 import functools
+import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import Field, SkipValidation, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    SkipValidation,
+    field_validator,
+    model_validator,
+)
 from typing_extensions import Self
 
 from vllm.config import LoadConfig
@@ -178,13 +185,22 @@ class SpeculativeConfig:
     """The parallel configuration for the target model."""
 
     # dynamic speculative decoding control
-    num_speculative_tokens_per_batch_size: (
+    speculative_token_schedule: (
         list[tuple[int, int, int]] | list[tuple[int, int, int, int, int]] | None
-    ) = None
+    ) = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "speculative_token_schedule",
+            "num_speculative_tokens_per_batch_size",
+        ),
+    )
     """Schedule used to dynamically choose speculative-token count. Entries are
     ``(bs_lo, bs_hi, K)`` for context-independent schedules or
     ``(bs_lo, bs_hi, ctx_lo, ctx_hi, K)`` for schedules forming a rectangular
     ``(batch_size x context)`` grid. Forms cannot be mixed in one schedule.
+
+    The previous name ``num_speculative_tokens_per_batch_size`` is accepted
+    as a deprecated alias and emits a ``DeprecationWarning``.
     """
 
     ctx_agg: Literal["median", "mean", "max"] = "mean"
@@ -1347,6 +1363,19 @@ class SpeculativeConfig:
             return AttentionBackendEnum[value.upper()]
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_deprecated_dynamic_sd_field_name(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "num_speculative_tokens_per_batch_size" in data:
+            warnings.warn(
+                "`num_speculative_tokens_per_batch_size` has been renamed to "
+                "`speculative_token_schedule`. The old name is still accepted "
+                "as an alias but may be removed in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return data
+
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
         if self.tensor_parallel_size is not None:
@@ -1493,7 +1522,7 @@ class SpeculativeConfig:
         return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
-        return self.num_speculative_tokens_per_batch_size is not None
+        return self.speculative_token_schedule is not None
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

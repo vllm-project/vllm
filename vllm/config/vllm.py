@@ -922,11 +922,11 @@ class VllmConfig:
             "Dynamic speculative decoding is not supported with data "
             "parallelism because data-parallel ranks can select different "
             "speculative-token counts, causing DP divergence and deadlocks. "
-            "Disabling num_speculative_tokens_per_batch_size and falling back "
+            "Disabling speculative_token_schedule and falling back "
             "to static num_speculative_tokens=%d.",
             speculative_config.num_speculative_tokens,
         )
-        speculative_config.num_speculative_tokens_per_batch_size = None
+        speculative_config.speculative_token_schedule = None
 
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.

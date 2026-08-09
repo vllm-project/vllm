@@ -24,7 +24,7 @@ class DynamicSDLookup(NamedTuple):
 
 
 def validate_and_normalize_dynamic_sd_schedule(
-    num_speculative_tokens_per_batch_size: object,
+    speculative_token_schedule: object,
 ) -> DynamicSDSchedule:
     """Validate and normalize a Dynamic SD schedule.
 
@@ -33,25 +33,25 @@ def validate_and_normalize_dynamic_sd_schedule(
     rectangular ``(batch_size x context)`` grid. The two forms cannot be
     mixed in a single schedule.
     """
-    if num_speculative_tokens_per_batch_size is None:
+    if speculative_token_schedule is None:
         raise ValueError(
-            "num_speculative_tokens_per_batch_size is required for "
+            "speculative_token_schedule is required for "
             "dynamic speculative decoding."
         )
-    if not isinstance(num_speculative_tokens_per_batch_size, list):
+    if not isinstance(speculative_token_schedule, list):
         raise ValueError(
-            "num_speculative_tokens_per_batch_size must be a non-empty list "
+            "speculative_token_schedule must be a non-empty list "
             "of 3-item or 5-item entries."
         )
-    if not num_speculative_tokens_per_batch_size:
-        raise ValueError("num_speculative_tokens_per_batch_size must not be empty.")
+    if not speculative_token_schedule:
+        raise ValueError("speculative_token_schedule must not be empty.")
 
     arities: set[int] = set()
     parsed: list[DynamicSDEntry] = []
-    for entry in num_speculative_tokens_per_batch_size:
+    for entry in speculative_token_schedule:
         if not isinstance(entry, list | tuple) or len(entry) not in (3, 5):
             raise ValueError(
-                "Each num_speculative_tokens_per_batch_size entry must be a "
+                "Each speculative_token_schedule entry must be a "
                 "3-item sequence (bs_lo, bs_hi, num_speculative_tokens) or a "
                 "5-item sequence "
                 "(bs_lo, bs_hi, ctx_lo, ctx_hi, num_speculative_tokens)."
@@ -89,14 +89,14 @@ def validate_and_normalize_dynamic_sd_schedule(
             )
         if k < 0:
             raise ValueError(
-                "num_speculative_tokens_per_batch_size values must be >= 0."
+                "speculative_token_schedule K values must be >= 0."
             )
 
         parsed.append((bs_lo, bs_hi, ctx_lo, ctx_hi, k))
 
     if len(arities) > 1:
         raise ValueError(
-            "num_speculative_tokens_per_batch_size entries must all be "
+            "speculative_token_schedule entries must all be "
             "3-item or all 5-item; mixing the two forms is not supported."
         )
 
@@ -119,7 +119,7 @@ def validate_and_normalize_dynamic_sd_schedule(
     expected_cells = len(bs_ranges) * len(ctx_ranges)
     if len(parsed) != expected_cells:
         raise ValueError(
-            "num_speculative_tokens_per_batch_size must form a rectangular "
+            "speculative_token_schedule must form a rectangular "
             f"(batch_size x context) grid: got {len(parsed)} entries but "
             f"expected {expected_cells} = {len(bs_ranges)} bs ranges x "
             f"{len(ctx_ranges)} context ranges. Every batch-size range must "
@@ -159,7 +159,7 @@ def validate_and_normalize_dynamic_sd_schedule(
 
 
 def build_dynamic_sd_schedule_lookup(
-    num_speculative_tokens_per_batch_size: object,
+    speculative_token_schedule: object,
     vllm_max_batch_size: int,
     vllm_num_speculative_tokens: int,
 ) -> DynamicSDLookup:
@@ -175,7 +175,7 @@ def build_dynamic_sd_schedule_lookup(
         raise ValueError("vllm_num_speculative_tokens must be > 0.")
 
     normalized = validate_and_normalize_dynamic_sd_schedule(
-        num_speculative_tokens_per_batch_size
+        speculative_token_schedule
     )
 
     ctx_boundaries = sorted(

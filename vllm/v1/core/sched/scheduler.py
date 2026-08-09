@@ -262,9 +262,9 @@ class Scheduler(SchedulerInterface):
         if speculative_config is not None:
             if getattr(speculative_config, "ctx_agg", None):
                 self.dynamic_sd_ctx_agg = speculative_config.ctx_agg
-            if speculative_config.num_speculative_tokens_per_batch_size:
+            if speculative_config.speculative_token_schedule:
                 self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
-                    speculative_config.num_speculative_tokens_per_batch_size,
+                    speculative_config.speculative_token_schedule,
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
