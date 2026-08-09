@@ -45,7 +45,8 @@ def _get_index_topk(hf_config) -> int:
     DeepSeek-V32 and V4 store the sparse-attention topk under
     ``index_topk``. Returns 0 when the model has no indexer.
     """
-    return getattr(hf_config, "index_topk", 0)
+    index_topk = getattr(hf_config, "index_topk", 0)
+    return index_topk if isinstance(index_topk, int) else 0
 
 
 def _get_num_indexer_layers(hf_config) -> int:
@@ -66,6 +67,10 @@ def _get_num_indexer_layers(hf_config) -> int:
     pattern = getattr(hf_config, "index_topk_pattern", None)
     skip_offset = getattr(hf_config, "index_skip_topk_offset", 2)
 
+    if not isinstance(freq, int) or freq <= 0:
+        return 0
+    if pattern is not None and not isinstance(pattern, str):
+        return 0
     if pattern is not None:
         # The model only applies the pattern where it has an entry. Layers
         # beyond a short pattern still build an indexer.
@@ -79,6 +84,18 @@ def _get_num_indexer_layers(hf_config) -> int:
         if max(layer_id - skip_offset + 1, 0) % freq == 0:
             count += 1
     return count
+
+
+def get_indexer_shape(hf_config) -> tuple[int, int]:
+    """Return the canonical ``(num_indexer_layers, index_topk)`` shape."""
+    num_indexer_layers = _get_num_indexer_layers(hf_config)
+    index_topk = _get_index_topk(hf_config)
+    if num_indexer_layers <= 0 or index_topk <= 0:
+        raise ValueError(
+            "Indexer top-k capture requires positive indexer layer and top-k "
+            f"counts, got {num_indexer_layers=}, {index_topk=}."
+        )
+    return num_indexer_layers, index_topk
 
 
 def get_sparse_attn_indexers(
@@ -120,8 +137,9 @@ class IndexerTopkCapturer:
     Invariants:
         - One instance per worker; shape is fixed at init and covers the
           worst-case step (``max_num_batched_tokens`` tokens).
-        - :meth:`clear_buffer` is called at the start of every step, so
-          unused slots stay zero.
+        - Every configured indexer layer overwrites the current step's token
+          rows before the buffer is consumed. Rows beyond the current step
+          are never read.
         - ``device_buffer.dtype`` is ``torch.int32``.
     """
 
@@ -143,6 +161,11 @@ class IndexerTopkCapturer:
             dtype=torch.int32,
             device=device,
         )
+        self._captured_layers = [False] * num_indexer_layers
+
+    def begin_step(self) -> None:
+        """Reset the small per-step callback completeness tracker."""
+        self._captured_layers[:] = [False] * self.num_indexer_layers
 
     def capture(self, compact_layer_id: int, topk_indices: torch.Tensor) -> None:
         """Capture topk indices for a specific indexer layer.
@@ -152,17 +175,37 @@ class IndexerTopkCapturer:
                 assigned at bind time, NOT the model layer_id.
             topk_indices: Tensor of shape (batch_size, index_topk).
         """
-        batch_size = topk_indices.shape[0]
-        if compact_layer_id >= self.device_buffer.shape[1]:
+        if compact_layer_id < 0 or compact_layer_id >= self.device_buffer.shape[1]:
             raise IndexError(
                 f"indexer capture layer {compact_layer_id} exceeds buffer "
                 f"layer dim {self.device_buffer.shape[1]}"
             )
+        if topk_indices.ndim != 2 or topk_indices.shape[1] != self.index_topk:
+            raise ValueError(
+                "Indexer capture tensor must have shape "
+                f"(batch, {self.index_topk}), got {tuple(topk_indices.shape)}."
+            )
+        batch_size = topk_indices.shape[0]
+        if batch_size > self.device_buffer.shape[0]:
+            raise ValueError(
+                f"Indexer capture batch {batch_size} exceeds buffer capacity "
+                f"{self.device_buffer.shape[0]}."
+            )
         self.device_buffer[:batch_size, compact_layer_id, :] = topk_indices
+        self._captured_layers[compact_layer_id] = True
 
-    def clear_buffer(self) -> None:
-        """Zero the device buffer. Called at the start of every step."""
-        self.device_buffer.zero_()
+    def validate_step(self) -> None:
+        """Fail closed when a model path skipped an indexer callback."""
+        missing = [
+            layer_id
+            for layer_id, captured in enumerate(self._captured_layers)
+            if not captured
+        ]
+        if missing:
+            raise RuntimeError(
+                "Indexer top-k capture missed indexer layers "
+                f"{missing}; refusing to return stale device-buffer data."
+            )
 
     def get_device_buffer(self) -> torch.Tensor:
         """Return the underlying device buffer for D2H copy."""
@@ -196,8 +239,7 @@ class IndexerTopkManager:
         self.block_size = attn_group.kv_cache_spec.block_size
 
         hf_config = vllm_config.model_config.hf_text_config
-        self.num_indexer_layers = _get_num_indexer_layers(hf_config)
-        self.index_topk = _get_index_topk(hf_config)
+        self.num_indexer_layers, self.index_topk = get_indexer_shape(hf_config)
         max_num_slots = kv_cache_config.num_blocks * self.block_size
         self.indexer_topk_by_slot = np.zeros(
             (
@@ -221,6 +263,25 @@ class IndexerTopkManager:
 
         Equivalent to ``slot_buffer[slot_mapping] = data``.
         """
+        if data.ndim != 3 or data.shape[1:] != (
+            self.num_indexer_layers,
+            self.index_topk,
+        ):
+            raise ValueError(
+                "Indexer top-k data shape does not match the configured shape: "
+                f"got {data.shape}, expected (*, {self.num_indexer_layers}, "
+                f"{self.index_topk})."
+            )
+        if slot_mapping.ndim != 1 or data.shape[0] != slot_mapping.shape[0]:
+            raise ValueError(
+                "Indexer top-k data and slot mapping must have matching leading "
+                f"dimensions, got {data.shape[0]} and {slot_mapping.shape}."
+            )
+        if slot_mapping.size and (
+            np.any(slot_mapping < 0)
+            or np.any(slot_mapping >= self.indexer_topk_by_slot.shape[0])
+        ):
+            raise ValueError("Indexer top-k slot mapping contains an invalid slot.")
         self.indexer_topk_by_slot[slot_mapping] = data
 
     def get(

@@ -860,6 +860,7 @@ class DeepseekV4Indexer(nn.Module):
                         PADDED_TOP_K=triton.next_power_of_2(self.topk_tokens),
                         num_warps=8,
                     )
+                self.indexer_op.dispatch_capture(num_tokens)
                 return self.topk_indices_buffer
 
         def wq_b_and_q_quant():

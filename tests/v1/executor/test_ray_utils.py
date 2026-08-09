@@ -5,6 +5,7 @@ import numpy as np
 
 from vllm.v1.executor.ray_utils import detach_zero_copy_from_model_runner_output
 from vllm.v1.outputs import (
+    IndexerTopkLists,
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
@@ -81,4 +82,29 @@ def test_detach_zero_copy_routed_experts_without_logprobs():
     assert detached.routing_data.flags.writeable
     assert detached.slot_mapping.flags.writeable
     np.testing.assert_array_equal(detached.routing_data, original.routing_data)
+    np.testing.assert_array_equal(detached.slot_mapping, original.slot_mapping)
+
+
+def test_detach_zero_copy_indexer_topk_without_logprobs():
+    output = ModelRunnerOutput(
+        req_ids=["req-0"],
+        req_id_to_index={"req-0": 0},
+        indexer_topk=IndexerTopkLists(
+            topk_data=_make_readonly(np.arange(12, dtype=np.int32).reshape(2, 2, 3)),
+            slot_mapping=_make_readonly(np.array([7, 8], dtype=np.int64)),
+        ),
+    )
+    original = output.indexer_topk
+    assert output.logprobs is None
+
+    detach_zero_copy_from_model_runner_output(output)
+
+    detached = output.indexer_topk
+    assert detached is not None
+    assert detached is not original
+    assert detached.topk_data is not original.topk_data
+    assert detached.slot_mapping is not original.slot_mapping
+    assert detached.topk_data.flags.writeable
+    assert detached.slot_mapping.flags.writeable
+    np.testing.assert_array_equal(detached.topk_data, original.topk_data)
     np.testing.assert_array_equal(detached.slot_mapping, original.slot_mapping)

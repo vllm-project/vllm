@@ -489,6 +489,7 @@ class DeepseekV32Attention(MLAAttention):
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
             )
+            self.indexer.indexer_op.dispatch_capture(q_c.shape[0])
 
         attn_metadata_raw = get_forward_context().attn_metadata
         if isinstance(attn_metadata_raw, dict):

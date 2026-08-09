@@ -778,6 +778,15 @@ class SparseAttnIndexer(CustomOp):
                 "the current vLLM environment."
             )
 
+    def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None]) -> None:
+        """Set the callback used to export top-k indices after each forward."""
+        self.capture_fn = capture_fn
+
+    def dispatch_capture(self, num_tokens: int) -> None:
+        """Dispatch a capture for paths that call the kernel directly."""
+        if self.capture_fn is not None:
+            self.capture_fn(self.topk_indices_buffer[:num_tokens, : self.topk_tokens])
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -834,9 +843,7 @@ class SparseAttnIndexer(CustomOp):
         # Capture topk indices for return_indexer_topk if enabled.
         # The op writes into ``topk_indices_buffer[:num_tokens, :topk_tokens]``;
         # we slice to the actual token count and forward to the capturer.
-        if self.capture_fn is not None:
-            num_tokens = hidden_states.shape[0]
-            self.capture_fn(self.topk_indices_buffer[:num_tokens, : self.topk_tokens])
+        self.dispatch_capture(hidden_states.shape[0])
         return result
 
     def forward_xpu(
@@ -876,11 +883,7 @@ class SparseAttnIndexer(CustomOp):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
             )
-            if self.capture_fn is not None:
-                num_tokens = hidden_states.shape[0]
-                self.capture_fn(
-                    self.topk_indices_buffer[:num_tokens, : self.topk_tokens]
-                )
+            self.dispatch_capture(hidden_states.shape[0])
             return result
         raise RuntimeError(
             "Sparse attention indexer ROCm path is only supported on AITER. "

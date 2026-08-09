@@ -246,6 +246,13 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
                 routing_data_c, slot_mapping_c
             )
 
+    if output.indexer_topk is not None:
+        topk_data, slot_mapping = output.indexer_topk
+        topk_data_c = _copy_if_readonly(topk_data)
+        slot_mapping_c = _copy_if_readonly(slot_mapping)
+        if topk_data_c is not topk_data or slot_mapping_c is not slot_mapping:
+            output.indexer_topk = type(output.indexer_topk)(topk_data_c, slot_mapping_c)
+
 
 class FutureWrapper(Future):
     """A wrapper around Ray output reference to meet the interface

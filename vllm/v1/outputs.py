@@ -219,9 +219,15 @@ class IndexerTopkTensors(NamedTuple):
     def to_cpu_nonblocking(self) -> "IndexerTopkTensors":
         if self.topk_data.device.type == "cpu":
             return self
+        topk_data = torch.empty_like(self.topk_data, device="cpu", pin_memory=True)
+        slot_mapping = torch.empty_like(
+            self.slot_mapping, device="cpu", pin_memory=True
+        )
+        topk_data.copy_(self.topk_data, non_blocking=True)
+        slot_mapping.copy_(self.slot_mapping, non_blocking=True)
         return IndexerTopkTensors(
-            self.topk_data.to("cpu", non_blocking=True),
-            self.slot_mapping.to("cpu", non_blocking=True),
+            topk_data,
+            slot_mapping,
         )
 
     def tolists(self) -> "IndexerTopkLists":
