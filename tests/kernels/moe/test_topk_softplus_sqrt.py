@@ -259,6 +259,8 @@ def test_fused_topk_softplus_sqrt_padding(
     indices_dtype = torch.int32
 
     gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+    # Exercise top-k cutoff ties without relying on random low-precision collisions.
+    gating_output[0] = 0
 
     padding_rows = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
     padding_rows[1::2] = True
@@ -325,26 +327,41 @@ def test_fused_topk_softplus_sqrt_padding(
             f"got {nan_pad_weights.tolist()}"
         )
 
-    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
-        gating_output=gating_output,
-        topk=topk,
-        renormalize=True,
-        routed_scaling_factor=1.0,
-        e_score_correction_bias=e_score_correction_bias,
-        input_ids=input_ids,
-        hash_indices_table=hash_indices_table,
-    )
-
     rows_to_compare = torch.ones(num_tokens, dtype=torch.bool, device="cuda")
     if use_padding_mask or pad_with_nan:
         rows_to_compare = ~padding_rows
 
-    sorted_ref_ids, idx_ref = topk_ids_ref[rows_to_compare].sort(dim=-1)
-    sorted_ids, idx_ops = topk_ids[rows_to_compare].sort(dim=-1)
-    torch.testing.assert_close(
-        sorted_ref_ids, sorted_ids.to(sorted_ref_ids.dtype), atol=0, rtol=0
-    )
+    selected_ids = topk_ids[rows_to_compare]
+    assert ((selected_ids >= 0) & (selected_ids < num_experts)).all()
+    sorted_ids = selected_ids.sort(dim=-1).values
+    assert (sorted_ids.diff(dim=-1) != 0).all()
 
-    sorted_w_ref = topk_weights_ref[rows_to_compare].gather(1, idx_ref)
-    sorted_w = topk_weights[rows_to_compare].gather(1, idx_ops)
-    torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+    if use_hash:
+        assert input_ids is not None
+        assert hash_indices_table is not None
+        expected_ids = hash_indices_table[input_ids.long()][rows_to_compare]
+        torch.testing.assert_close(
+            expected_ids.sort(dim=-1).values, sorted_ids, atol=0, rtol=0
+        )
+
+    original_scores = F.softplus(gating_output[rows_to_compare].float()).sqrt()
+    if not use_hash:
+        scores_for_choice = original_scores
+        if e_score_correction_bias is not None:
+            scores_for_choice = scores_for_choice + e_score_correction_bias.unsqueeze(0)
+        expected_choice_scores = torch.topk(
+            scores_for_choice, k=topk, dim=-1, sorted=True
+        ).values
+        selected_choice_scores = scores_for_choice.gather(1, selected_ids.long())
+        torch.testing.assert_close(
+            expected_choice_scores,
+            selected_choice_scores.sort(dim=-1, descending=True).values,
+            atol=0,
+            rtol=0,
+        )
+
+    expected_weights = original_scores.gather(1, selected_ids.long())
+    expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
+    torch.testing.assert_close(
+        expected_weights, topk_weights[rows_to_compare], atol=2e-2, rtol=1e-2
+    )
