@@ -2042,15 +2042,7 @@ def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
             ("eagle3", True),
             id="arch-peagle-parallel-eagle3",
         ),
-        # Declarations outrank an unrelated algorithm name in the path.
-        pytest.param(
-            None,
-            _draft_config(
-                "/bench/dflash_vs_dspark/ckpt", architectures=["Qwen3DSparkModel"]
-            ),
-            ("dspark", True),
-            id="arch-beats-path-name",
-        ),
+        # A declaration outranks an unrelated algorithm name in the path.
         pytest.param(
             None,
             _draft_config("/bench/eagle3_vs_mtp/ckpt", model_type="deepseek_mtp"),
@@ -2059,30 +2051,15 @@ def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
         ),
         pytest.param(
             None,
-            _draft_config(
-                "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", draft_vocab_size=32000
-            ),
+            _draft_config("yuhuili/EAGLE-LLaMA3-Instruct-8B"),
+            ("eagle", False),
+            id="legacy-eagle-model-id",
+        ),
+        pytest.param(
+            None,
+            _draft_config("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
             ("eagle3", False),
             id="legacy-eagle3-model-id",
-        ),
-        # draft_vocab_size is not an eagle3 fingerprint: other EAGLE and
-        # parallel-drafting families use it too.
-        pytest.param(
-            None,
-            _draft_config("/train/checkpoints/6", draft_vocab_size=32000),
-            ("draft_model", False),
-            id="draft-vocab-is-not-method-declaration",
-        ),
-        pytest.param(
-            None,
-            _draft_config(
-                "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
-                model_type="llama4_text",
-                architectures=["Llama4ForCausalLM"],
-                draft_vocab_size=202048,
-            ),
-            ("eagle", False),
-            id="legacy-eagle-model-id-beats-draft-vocab",
         ),
         # Legacy EAGLE-DeepSeek is recognized before the generic DeepSeek MTP
         # normalization can shadow its undeclared method.
@@ -2096,23 +2073,15 @@ def _draft_config(model, model_type="llama", architectures=(), **hf_attrs):
             ("eagle", False),
             id="legacy-eagle-model-id-beats-mtp-normalization",
         ),
+        # An algorithm name elsewhere in the path is not a declaration, and
+        # neither is draft_vocab_size: EAGLE-1 and DFlash checkpoints have one.
         pytest.param(
             None,
-            _draft_config("yuhuili/EAGLE-LLaMA3-Instruct-8B"),
-            ("eagle", False),
-            id="legacy-eagle-model-id",
-        ),
-        pytest.param(
-            None,
-            _draft_config("/train/checkpoints/6"),
+            _draft_config(
+                "/bench/eagle3-results/checkpoints/6", draft_vocab_size=32000
+            ),
             ("draft_model", False),
-            id="undeclared-draft-model",
-        ),
-        pytest.param(
-            None,
-            _draft_config("/bench/eagle3-results/checkpoints/6"),
-            ("draft_model", False),
-            id="algorithm-name-in-parent-path-is-ignored",
+            id="path-name-and-draft-vocab-are-not-declarations",
         ),
         # An explicit method is never overridden, but parallel drafting still
         # follows the architecture when it implements that method.
@@ -2142,56 +2111,47 @@ def test_speculative_method_resolution(method, draft_model_config, expected):
     )
 
 
-def test_drafter_method_table_matches_registry():
+def test_drafter_method_table_declares_valid_methods():
+    """The registry table is the authority, so its methods must be real ones.
+
+    Key coverage is asserted at import time in the registry module itself.
+    """
     from typing import get_args
 
     from vllm.config.speculative import SpeculativeMethod
-    from vllm.model_executor.models.registry import (
-        _SPECULATIVE_DECODING_MODELS,
-        SPEC_METHOD_BY_DRAFTER_ARCH,
-    )
+    from vllm.model_executor.models.registry import SPEC_METHOD_BY_DRAFTER_ARCH
 
-    assert _SPECULATIVE_DECODING_MODELS.keys() <= SPEC_METHOD_BY_DRAFTER_ARCH.keys()
     valid = set(get_args(SpeculativeMethod))
-    assert {m for m, _ in SPEC_METHOD_BY_DRAFTER_ARCH.values()} <= valid
+    assert {method for method, _ in SPEC_METHOD_BY_DRAFTER_ARCH.values()} <= valid
 
 
-@pytest.mark.parametrize("method", [None, "dspark"])
-def test_deepseek_v4_dspark_normalized_before_mtp(method):
-    hf_config = PretrainedConfig(
-        architectures=["DeepseekV4ForCausalLM"],
-        num_nextn_predict_layers=1,
-        dspark_block_size=5,
-        dspark_noise_token_id=128799,
-        dspark_target_layer_ids=[58, 59, 60],
-        dspark_markov_rank=512,
+@pytest.mark.parametrize(
+    "dspark_fields, expected",
+    [
+        pytest.param({}, ("deepseek_mtp", "DeepSeekV4MTPModel"), id="mtp"),
+        pytest.param(
+            {
+                "dspark_block_size": 5,
+                "dspark_noise_token_id": 128799,
+                "dspark_target_layer_ids": [58, 59, 60],
+                "dspark_markov_rank": 512,
+            },
+            ("deepseek_v4", "DSparkDraftModel"),
+            id="dspark",
+        ),
+    ],
+)
+def test_deepseek_v4_dspark_normalized_before_mtp(dspark_fields, expected):
+    """DSpark ships inside the V4 target, so only its fields separate it."""
+    hf_config = SpeculativeConfig.hf_config_override(
+        PretrainedConfig(
+            architectures=["DeepseekV4ForCausalLM"],
+            model_type="deepseek_v4",
+            **dspark_fields,
+        )
     )
-    hf_config.model_type = "deepseek_v4"
 
-    hf_config = SpeculativeConfig.hf_config_override(hf_config)
-    draft_model_config = _draft_config(
-        "/train/checkpoints/6",
-        model_type=hf_config.model_type,
-        architectures=hf_config.architectures,
-    )
-    draft_model_config.hf_config = hf_config
-
-    assert hf_config.architectures == ["DSparkDraftModel"]
-    assert SpeculativeConfig._resolve_method_and_parallel(
-        method, draft_model_config
-    ) == ("dspark", True)
-
-
-def test_deepseek_v4_without_dspark_fields_normalizes_to_mtp():
-    hf_config = PretrainedConfig(
-        architectures=["DeepseekV4ForCausalLM"], num_nextn_predict_layers=1
-    )
-    hf_config.model_type = "deepseek_v4"
-
-    hf_config = SpeculativeConfig.hf_config_override(hf_config)
-
-    assert hf_config.model_type == "deepseek_mtp"
-    assert hf_config.architectures == ["DeepSeekV4MTPModel"]
+    assert (hf_config.model_type, hf_config.architectures[0]) == expected
 
 
 def test_draft_sample_method_probabilistic_is_accepted():

@@ -4,7 +4,7 @@
 import copy
 import functools
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
 from typing_extensions import Self
@@ -91,6 +91,13 @@ _LEGACY_EAGLE_METHOD_BY_MODEL_ID: dict[str, SpeculativeMethod] = {
     "eagle618/eagle-deepseek-v3-random": "eagle",
     "morgendave/eagle-llama-4-scout-17b-16e-instruct": "eagle",
 }
+
+
+def _is_deepseek_v4_dspark_config(hf_config: PretrainedConfig) -> bool:
+    return hf_config.model_type == "deepseek_v4" and all(
+        getattr(hf_config, field, None) is not None
+        for field in _DEEPSEEK_V4_DSPARK_FIELDS
+    )
 
 
 def _legacy_eagle_method(model: str) -> SpeculativeMethod | None:
@@ -366,13 +373,6 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
-    def _is_deepseek_v4_dspark_config(hf_config: PretrainedConfig) -> bool:
-        return hf_config.model_type == "deepseek_v4" and all(
-            getattr(hf_config, field, None) is not None
-            for field in _DEEPSEEK_V4_DSPARK_FIELDS
-        )
-
-    @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
@@ -395,7 +395,7 @@ class SpeculativeConfig:
         # DeepSeek-V4 DSpark reuses the target architecture and stores its
         # weights under mtp.*, but its required dspark_* fields distinguish it
         # from an MTP checkpoint. Normalize it before the generic V4 MTP rule.
-        if SpeculativeConfig._is_deepseek_v4_dspark_config(hf_config):
+        if _is_deepseek_v4_dspark_config(hf_config):
             hf_config.update({"architectures": ["DSparkDraftModel"]})
             return hf_config
 
@@ -792,22 +792,19 @@ class SpeculativeConfig:
         `SPEC_METHOD_BY_DRAFTER_ARCH` declares the method each one implements
         and whether it drafts all speculative tokens in one forward pass. An
         explicit `method` always wins, with a warning if the checkpoint
-        declares a different one. Known legacy checkpoints that declare
-        nothing are recognized only by their scoped Hugging Face model ID.
+        declares a different one. Legacy checkpoints are recognized by their
+        scoped Hugging Face model ID ahead of the architecture, because
+        vLLM's own MTP normalization overwrites what they declare.
         """
         from vllm.model_executor.models.registry import SPEC_METHOD_BY_DRAFTER_ARCH
 
-        # Table methods are literal-validated in tests/test_config.py.
-        declared = cast(
-            tuple[SpeculativeMethod, bool] | None,
-            next(
-                (
-                    SPEC_METHOD_BY_DRAFTER_ARCH[arch]
-                    for arch in draft_model_config.architectures
-                    if arch in SPEC_METHOD_BY_DRAFTER_ARCH
-                ),
-                None,
+        declared = next(
+            (
+                SPEC_METHOD_BY_DRAFTER_ARCH[arch]
+                for arch in draft_model_config.architectures
+                if arch in SPEC_METHOD_BY_DRAFTER_ARCH
             ),
+            None,
         )
 
         if method is not None:
@@ -819,7 +816,7 @@ class SpeculativeConfig:
                     draft_model_config.architectures,
                     declared[0],
                 )
-                declared = None
+                return method, False
             return method, declared is not None and declared[1]
 
         legacy_method = _legacy_eagle_method(draft_model_config.model)
@@ -857,7 +854,7 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        method_was_unset = self.method is None
+        requested_method = self.method
         if self.method is None and SpeculativeConfig._is_custom_proposer_path(
             self.model
         ):
@@ -1048,11 +1045,10 @@ class SpeculativeConfig:
 
                 detected_method, parallel_drafting = (
                     SpeculativeConfig._resolve_method_and_parallel(
-                        None if method_was_unset else self.method,
-                        self.draft_model_config,
+                        requested_method, self.draft_model_config
                     )
                 )
-                if method_was_unset:
+                if requested_method is None:
                     logger.info(
                         "Auto-detected speculative method '%s' for draft model "
                         "'%s'. Pass `method` in --speculative-config to override.",
@@ -1060,8 +1056,7 @@ class SpeculativeConfig:
                         self.draft_model_config.model,
                     )
                 self.method = detected_method
-                if parallel_drafting:
-                    self.parallel_drafting = True
+                self.parallel_drafting |= parallel_drafting
 
                 if self.method in ("eagle", "eagle3"):
                     # EAGLE drafts share the target's positional space; a
@@ -1102,13 +1097,19 @@ class SpeculativeConfig:
                         "Qwen3DSparkModel"
                     ]
                     self.update_arch_()
-                elif self.method == "dspark" and (
-                    "Qwen3DSparkModel" not in self.draft_model_config.architectures
-                    and "Gemma4DSparkModel" not in self.draft_model_config.architectures
-                    and "K3DSparkModel" not in self.draft_model_config.architectures
+                elif self.method == "dspark" and not any(
+                    arch in self.draft_model_config.architectures
+                    for arch in (
+                        "DSparkDraftModel",
+                        "Gemma4DSparkModel",
+                        "K3DSparkModel",
+                        "Qwen3DSparkModel",
+                    )
                 ):
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
-                    # and its weights ship in the target checkpoint.
+                    # and its weights ship in the target checkpoint. Reached
+                    # only when `method` was requested explicitly, since
+                    # hf_config_override already normalizes declared configs.
                     self.draft_model_config.hf_config.model_type = "deepseek_v4"
                     self.draft_model_config.hf_config.architectures = [
                         "DSparkDraftModel"

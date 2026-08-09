@@ -38,10 +38,12 @@ from vllm.utils.hashing import safe_hash
 if TYPE_CHECKING:
     from vllm.config.model import AttnTypeStr
     from vllm.config.pooler import SequencePoolingType, TokenPoolingType
+    from vllm.config.speculative import SpeculativeMethod
 else:
     AttnTypeStr = Any
     SequencePoolingType = Any
     TokenPoolingType = Any
+    SpeculativeMethod = Any
 
 
 from .interfaces import (
@@ -700,7 +702,7 @@ _SPECULATIVE_DECODING_MODELS = {
 # whether it drafts all speculative tokens in one forward pass. Config parsing
 # normalizes self-describing draft checkpoints to one of these architectures,
 # so `SpeculativeConfig` resolves an unset `method` from this table.
-SPEC_METHOD_BY_DRAFTER_ARCH: dict[str, tuple[str, bool]] = {
+SPEC_METHOD_BY_DRAFTER_ARCH: dict[str, tuple["SpeculativeMethod", bool]] = {
     **dict.fromkeys(
         (
             "EagleCohereForCausalLM",
