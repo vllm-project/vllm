@@ -8,9 +8,11 @@ from collections.abc import Callable
 from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
+from vllm.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -18,6 +20,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.transformers_utils.processor import get_processor, get_processor_config
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -580,3 +583,154 @@ def run_dp_sharded_mrope_vision_model(
         "Found unassigned embeddings"
     )
     return out_embeddings
+
+
+class FusedInputNorm(nn.Module):
+    """
+    Module that applies rescaling and normalization to input images.
+    Equivalent to: output = (input * rescale_factor - mean) / std
+    """
+
+    def __init__(
+        self,
+        image_mean: list[float],
+        image_std: list[float],
+        rescale_factor: float,
+        channel: int = 3,
+        dtype: torch.dtype = torch.float32,
+    ):
+        super().__init__()
+
+        self.channel = channel
+
+        # Model construction can set the accelerator as PyTorch's default
+        # device. Determine whether the normalization is an identity on CPU
+        # so torch.allclose does not introduce a device synchronization while
+        # the model is being initialized. The actual buffers below still use
+        # the caller's default device.
+        image_mean_cpu = torch.tensor(image_mean, dtype=dtype, device="cpu") * (
+            1.0 / rescale_factor
+        )
+        image_std_cpu = torch.tensor(image_std, dtype=dtype, device="cpu") * (
+            1.0 / rescale_factor
+        )
+        weight_cpu = 1.0 / image_std_cpu
+        bias_cpu = -image_mean_cpu / image_std_cpu
+        self.is_identity = bool(
+            torch.allclose(weight_cpu, torch.ones_like(weight_cpu))
+            and torch.allclose(bias_cpu, torch.zeros_like(bias_cpu))
+        )
+
+        if not self.is_identity:
+            image_mean_tensor = torch.tensor(image_mean, dtype=dtype) * (
+                1.0 / rescale_factor
+            )
+            image_std_tensor = torch.tensor(image_std, dtype=dtype) * (
+                1.0 / rescale_factor
+            )
+            weight = 1.0 / image_std_tensor
+            bias = -image_mean_tensor / image_std_tensor
+            self.register_buffer("weight", weight)
+            self.register_buffer("bias", bias)
+            self.register_buffer("running_mean", torch.zeros_like(image_mean_tensor))
+            self.register_buffer("running_var", torch.ones_like(image_mean_tensor))
+        else:
+            self.register_buffer("weight", None)
+            self.register_buffer("bias", None)
+            self.register_buffer("running_mean", None)
+            self.register_buffer("running_var", None)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.weight.dtype
+
+    @classmethod
+    def identity(
+        cls, channel: int = 3, dtype: torch.dtype = torch.float32
+    ) -> "FusedInputNorm":
+        return cls(
+            image_mean=[0.0, 0.0, 0.0],
+            image_std=[1.0, 1.0, 1.0],
+            rescale_factor=1.0,
+            channel=channel,
+            dtype=dtype,
+        )
+
+    @classmethod
+    def from_model_config(cls, model_config: "ModelConfig") -> nn.Module:
+        if not model_config.multimodal_config.mm_device_do_normalize:
+            return cls.identity()
+
+        model = model_config.model
+        revision = model_config.revision
+
+        # Try to read parameters from the processor config
+        config = get_processor_config(model, revision=revision)
+        do_rescale = config.get("do_rescale", None)
+        do_normalize = config.get("do_normalize", None)
+        image_mean = config.get("image_mean", None)
+        image_std = config.get("image_std", None)
+        rescale_factor = config.get("rescale_factor", None)
+
+        # Fallback to the image_processor object if any parameter is missing
+        if None in [do_rescale, do_normalize, image_mean, image_std, rescale_factor]:
+            image_processor = get_processor(model, revision=revision).image_processor
+
+            if do_rescale is None:
+                do_rescale = getattr(image_processor, "do_rescale", None)
+            if do_normalize is None:
+                do_normalize = getattr(image_processor, "do_normalize", None)
+            if image_mean is None:
+                image_mean = getattr(image_processor, "image_mean", None)
+            if image_std is None:
+                image_std = getattr(image_processor, "image_std", None)
+            if rescale_factor is None:
+                rescale_factor = getattr(image_processor, "rescale_factor", None)
+
+        # Apply defaults based on flags
+        if not do_rescale:
+            rescale_factor = 1.0
+        if not do_normalize:
+            image_mean = [0.0, 0.0, 0.0]
+            image_std = [1.0, 1.0, 1.0]
+
+        # Ensure all required parameters are resolved
+        assert None not in [
+            do_rescale,
+            do_normalize,
+            image_mean,
+            image_std,
+            rescale_factor,
+        ], "Some normalization parameters are still None after resolution."
+
+        # If no processing is needed, return an identity module
+        if not do_rescale and not do_normalize:
+            return cls.identity()
+
+        return cls(
+            image_mean=image_mean, image_std=image_std, rescale_factor=rescale_factor
+        )
+
+    def forward(
+        self,
+        grid_thw: torch.Tensor,
+        visual_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if self.is_identity:
+            return grid_thw.to(visual_dtype)
+
+        assert grid_thw.ndim == 2
+        patches, size = grid_thw.shape
+        patch_size = size // self.channel
+
+        grid_thw = grid_thw.view(patches, self.channel, patch_size)
+        grid_thw = F.batch_norm(
+            grid_thw.to(self.dtype),
+            running_mean=self.running_mean,
+            running_var=self.running_var,
+            weight=self.weight,
+            bias=self.bias,
+            training=False,
+            eps=0.0,
+        )
+        return grid_thw.view(patches, size).to(visual_dtype)
