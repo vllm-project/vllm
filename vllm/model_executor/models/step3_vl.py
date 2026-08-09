@@ -683,21 +683,22 @@ class Step3VLForConditionalGeneration(
 
         merged_image_features = []
         cur_patch_idx = 0
-        # `num_patches` is a device tensor, so the per-image branch and slice
-        # bounds below read it back to the host.
+        # The per-image branch and slice bounds below need Python ints; read
+        # them back in one go rather than once per image.
         with gpu_sync_allowed():
-            for i, num_patch in enumerate(num_patches):
-                cur_feature = []
-                if num_patch > 0:
-                    patch_slice = patch_image_features[
-                        cur_patch_idx : cur_patch_idx + num_patch
-                    ]
-                    cur_feature.append(patch_slice.view(-1, patch_slice.shape[-1]))
-                cur_feature.append(image_features[i].view(-1, image_features.shape[-1]))
-                cur_patch_idx += num_patch
-                merged_image_features.append(
-                    torch.cat(cur_feature) if len(cur_feature) > 1 else cur_feature[0]
-                )
+            num_patches_list = num_patches.tolist()
+        for i, num_patch in enumerate(num_patches_list):
+            cur_feature = []
+            if num_patch > 0:
+                patch_slice = patch_image_features[
+                    cur_patch_idx : cur_patch_idx + num_patch
+                ]
+                cur_feature.append(patch_slice.view(-1, patch_slice.shape[-1]))
+            cur_feature.append(image_features[i].view(-1, image_features.shape[-1]))
+            cur_patch_idx += num_patch
+            merged_image_features.append(
+                torch.cat(cur_feature) if len(cur_feature) > 1 else cur_feature[0]
+            )
         return merged_image_features
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
