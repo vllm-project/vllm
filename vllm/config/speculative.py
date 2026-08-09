@@ -80,6 +80,33 @@ SpeculativeMethod = Literal[
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
+_DEEPSEEK_V4_DSPARK_FIELDS = (
+    "dspark_block_size",
+    "dspark_noise_token_id",
+    "dspark_target_layer_ids",
+    "dspark_markov_rank",
+)
+
+_LEGACY_EAGLE_METHOD_BY_MODEL_ID: dict[str, SpeculativeMethod] = {
+    "eagle618/eagle-deepseek-v3-random": "eagle",
+    "morgendave/eagle-llama-4-scout-17b-16e-instruct": "eagle",
+}
+
+
+def _legacy_eagle_method(model: str) -> SpeculativeMethod | None:
+    """Resolve known EAGLE checkpoints that do not declare their method."""
+    model_id = model.lower()
+    if model_id.count("/") != 1:
+        return None
+
+    owner, repo = model_id.split("/", 1)
+    if owner == "yuhuili":
+        if repo.startswith("eagle3-"):
+            return "eagle3"
+        if repo.startswith("eagle-"):
+            return "eagle"
+    return _LEGACY_EAGLE_METHOD_BY_MODEL_ID.get(model_id)
+
 
 @config
 class SpeculativeConfig:
@@ -339,6 +366,13 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
+    def _is_deepseek_v4_dspark_config(hf_config: PretrainedConfig) -> bool:
+        return hf_config.model_type == "deepseek_v4" and all(
+            getattr(hf_config, field, None) is not None
+            for field in _DEEPSEEK_V4_DSPARK_FIELDS
+        )
+
+    @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
@@ -357,6 +391,14 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Dots3NoteMTPModel"]}
             )
+
+        # DeepSeek-V4 DSpark reuses the target architecture and stores its
+        # weights under mtp.*, but its required dspark_* fields distinguish it
+        # from an MTP checkpoint. Normalize it before the generic V4 MTP rule.
+        if SpeculativeConfig._is_deepseek_v4_dspark_config(hf_config):
+            hf_config.update({"architectures": ["DSparkDraftModel"]})
+            return hf_config
+
         if hf_config.model_type in (
             "deepseek_v3",
             "deepseek_v32",
@@ -750,8 +792,8 @@ class SpeculativeConfig:
         `SPEC_METHOD_BY_DRAFTER_ARCH` declares the method each one implements
         and whether it drafts all speculative tokens in one forward pass. An
         explicit `method` always wins, with a warning if the checkpoint
-        declares a different one. Checkpoints that declare nothing fall back
-        to an eagle3 fingerprint, then to deprecated path-name matching.
+        declares a different one. Known legacy checkpoints that declare
+        nothing are recognized only by their scoped Hugging Face model ID.
         """
         from vllm.model_executor.models.registry import SPEC_METHOD_BY_DRAFTER_ARCH
 
@@ -779,6 +821,19 @@ class SpeculativeConfig:
                 )
                 declared = None
             return method, declared is not None and declared[1]
+
+        legacy_method = _legacy_eagle_method(draft_model_config.model)
+        if legacy_method is not None:
+            logger.warning(
+                "Detected speculative method '%s' from legacy checkpoint ID "
+                "'%s'. Automatic detection for checkpoints without a method "
+                "declaration is deprecated; pass `method` in "
+                "--speculative-config instead.",
+                legacy_method,
+                draft_model_config.model,
+            )
+            return legacy_method, False
+
         if declared is not None:
             return declared
 
@@ -789,29 +844,6 @@ class SpeculativeConfig:
             return "mlp_speculator", False
         if hf_config.model_type in get_args(MTPModelTypes):
             return "mtp", False
-
-        # A draft vocabulary is particular to the eagle3 family: yuhuili-style
-        # eagle3 checkpoints declare one while keeping a plain llama config.
-        if getattr(hf_config, "draft_vocab_size", None) is not None:
-            return "eagle3", False
-
-        # Deprecated: EAGLE research checkpoints (yuhuili/EAGLE-*) declare
-        # nothing at all and are recognizable only by name.
-        name_hints: tuple[tuple[str, SpeculativeMethod], ...] = (
-            ("eagle-", "eagle"),
-            ("eagle3", "eagle3"),
-        )
-        model = draft_model_config.model.lower()
-        for hint, hinted_method in name_hints:
-            if hint in model:
-                logger.warning(
-                    "Detected speculative method '%s' from the checkpoint "
-                    "path '%s'. Path-name detection is deprecated; pass "
-                    "`method` in --speculative-config instead.",
-                    hinted_method,
-                    draft_model_config.model,
-                )
-                return hinted_method, False
 
         return "draft_model", False
 
