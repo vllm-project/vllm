@@ -117,7 +117,6 @@ class KVBlockZeroer:
         device: torch.device,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
-        cache_dtype: str,
         static_forward_context: dict[str, Any],
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
@@ -154,12 +153,6 @@ class KVBlockZeroer:
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             assert spec.block_size % kernel_bs == 0
             ratio = spec.block_size // kernel_bs
-            block_dim = group.backend.get_kv_cache_block_dim(
-                kernel_bs,
-                spec.num_kv_heads,
-                spec.head_size,
-                cache_dtype_str=cache_dtype,
-            )
 
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
@@ -173,21 +166,23 @@ class KVBlockZeroer:
                 seen_ptrs.add(dp)
 
                 el = kv.element_size()
-                block_stride_bytes = kv.stride(block_dim) * el
+                # The block dim is always outermost in the standardized
+                # per-layer [B, H, N, C] view.
+                block_stride_bytes = kv.stride(0) * el
                 assert block_stride_bytes % 4 == 0
-                assert kv.shape[block_dim] % ratio == 0
-                outer_dims = [
-                    d
-                    for d in range(block_dim)
-                    if kv.stride(d) * el > block_stride_bytes
-                ]
+                assert kv.shape[0] % ratio == 0
+                # Absorb densely-packed trailing dims into one contiguous
+                # run; every non-dense dim (head-group planes under LHBNC,
+                # the head dim under BHLNC where L interleaves) splits the
+                # block into independent segment planes.
+                kernel_page_bytes = el
+                outer_dims = []
+                for d in range(kv.ndim - 1, 0, -1):
+                    if kv.stride(d) * el == kernel_page_bytes:
+                        kernel_page_bytes *= kv.shape[d]
+                    elif kv.shape[d] > 1:
+                        outer_dims.append(d)
                 outer_strides = [kv.stride(d) * el for d in outer_dims]
-                inner_dims = [
-                    d for d in range(kv.ndim) if d != block_dim and d not in outer_dims
-                ]
-                kernel_page_bytes = el + sum(
-                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
-                )
                 assert kernel_page_bytes % 4 == 0
                 logical_block_stride_bytes = block_stride_bytes * ratio
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
@@ -563,42 +558,38 @@ def bind_kv_cache(
 
 
 def copy_kv_cache_blocks_inplace(
-    kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
+    kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
 ) -> None:
     if not kv_cache_block_copies:
         return
 
-    storage_tensors: list[torch.Tensor] = []
-    seen_storage: set[int] = set()
-    for entry in kv_caches:
-        # Mamba layers hold a list of state tensors; attention layers a single
-        # tensor. Both alias the shared block-major backing storage.
-        tensors = entry if isinstance(entry, (list, tuple)) else (entry,)
-        for tensor in tensors:
-            ptr = tensor.untyped_storage().data_ptr()
-            if ptr in seen_storage:
-                continue
-            seen_storage.add(ptr)
-            storage_tensors.append(tensor)
-
-    if not storage_tensors:
-        return
-    device = storage_tensors[0].device
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices = async_tensor_h2d(indices_np, device=device)
-    src_indices, dst_indices = indices.unbind(dim=1)
+    indices: torch.Tensor | None = None
+    seen: set[tuple[torch.device, int]] = set()
+    for cache in kv_caches:
+        # Layers sharing KV (cross-layer sharing) alias the same view; copy it
+        # once. data_ptr distinguishes per-layer views of a shared allocation.
+        key = (cache.device, cache.data_ptr())
+        if key in seen:
+            continue
+        seen.add(key)
 
-    for tensor in storage_tensors:
-        assert tensor.device == device
-        blocks = torch.empty(0, dtype=torch.uint8, device=device)
-        blocks.set_(tensor.untyped_storage())
-        # Block-major backing storage: block i owns the contiguous byte range
-        # [i * page_size, (i + 1) * page_size).
-        assert blocks.numel() % num_blocks == 0
-        blocks = blocks.view(num_blocks, -1)
-        blocks[dst_indices] = blocks[src_indices]
+        if indices is None:
+            indices = async_tensor_h2d(indices_np, device=cache.device)
+        assert cache.device == indices.device
+        src, dst = indices.unbind(dim=1)
+
+        kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
+        assert remainder == 0, (
+            f"{cache.shape[0]} kernel blocks not divisible by "
+            f"{num_blocks} scheduler blocks"
+        )
+        # Fold virtual block splitting into the shape so that dim 0 counts
+        # scheduler blocks; unflatten of dim 0 is always a view.
+        blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+        blocks[dst] = blocks[src]
 
 
 def is_residual_scattered_for_sp(

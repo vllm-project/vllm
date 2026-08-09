@@ -30,7 +30,9 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     MambaSpec,
+    reshape_kv_cache,
 )
 
 from .test_mooncake_connector import patch_worker_dependencies
@@ -138,14 +140,22 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         )
         worker = connector.connector_worker
 
-        fa_cache = torch.empty((2, 2, 11), dtype=torch.float16)
-        gdn_conv_state = torch.empty((2, 22), dtype=torch.float16)
-        gdn_ssm_state = torch.empty((2, 4), dtype=torch.float16)
+        num_blocks = kv_cache_config.num_blocks
+        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        fa_raw = torch.empty(num_blocks * fa_spec.page_size_bytes, dtype=torch.int8)
+        gdn_raw = torch.empty(num_blocks * gdn_spec.page_size_bytes, dtype=torch.int8)
+        (fa_cache,) = reshape_kv_cache(
+            fa_raw, fa_spec, num_blocks, 1, KVCacheLayout.LBHNC
+        )
+        (gdn_cache,) = reshape_kv_cache(
+            gdn_raw, gdn_spec, num_blocks, 1, KVCacheLayout.LBHNC
+        )
 
         worker.register_kv_caches(
             {
                 "model.layers.0.self_attn": fa_cache,
-                "model.layers.1.linear_attn": (gdn_conv_state, gdn_ssm_state),
+                "model.layers.1.linear_attn": gdn_cache,
             }
         )
 
@@ -154,10 +164,14 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
             "model.layers.0.self_attn",
             "model.layers.1.linear_attn",
         ]
+        assert worker.block_len_per_layer == [
+            fa_spec.page_size_bytes,
+            gdn_spec.page_size_bytes,
+        ]
         assert worker.registered_group_indices == [0, 1]
         assert worker.kv_caches_base_addr == [
             fa_cache.data_ptr(),
-            gdn_conv_state.data_ptr(),
+            gdn_cache.data_ptr(),
         ]
 
         worker.shutdown()
@@ -185,8 +199,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
 
         backing = torch.empty((4, 64), dtype=torch.float16)
         fa_cache = backing[:2, :16]
-        gdn_conv_state = backing[:3]
-        gdn_ssm_state = torch.empty((3, 4), dtype=torch.float16)
+        gdn_cache = backing[:3]
 
         with patch.object(
             worker.engine, "batch_register_memory", return_value=0
@@ -194,13 +207,13 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             worker.register_kv_caches(
                 {
                     "model.layers.0.self_attn": fa_cache,
-                    "model.layers.1.linear_attn": (gdn_conv_state, gdn_ssm_state),
+                    "model.layers.1.linear_attn": gdn_cache,
                 }
             )
 
         assert worker.kv_caches_base_addr == [
             fa_cache.data_ptr(),
-            gdn_conv_state.data_ptr(),
+            gdn_cache.data_ptr(),
         ]
         batch_register_memory.assert_called_once()
         registered_ptrs, registered_lens = batch_register_memory.call_args[0]
@@ -339,7 +352,7 @@ def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     assert kernel_block_ids == [list(range(34, 51)), [2]]
 
 
-def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
+def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
     monkeypatch,
 ):
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
@@ -359,7 +372,7 @@ def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
         )
         worker = connector.connector_worker
 
-        worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=True)
+        worker.transfer_topo = SimpleNamespace(is_kv_layout_blocks_first=False)
         regions = worker._get_transfer_regions(
             base_addrs=[0x1000, 0x2000],
             block_lens=[0x100, 0x100],
@@ -377,7 +390,6 @@ def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
             for region in regions
         ] == [
             (0, 0x1000, 0x40),
-            (0, 0x1040, 0x40),
             (1, 0x2000, 0x100),
         ]
 

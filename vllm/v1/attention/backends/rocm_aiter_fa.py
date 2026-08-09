@@ -761,19 +761,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["AiterFlashAttentionMetadataBuilder"]:
         return AiterFlashAttentionMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         from vllm.platforms.rocm import get_cdna_version
@@ -1453,50 +1440,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # Only fuse when shuffle layout is off; the shuffle write path uses a
-        # dedicated cache update, mirroring fused_rope_kvcache_supported.
-        return (
-            rocm_aiter_ops.is_enabled()
-            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-        )
-
-    def do_qk_norm_rope_kvcache_update(
-        self,
-        layer: AttentionLayer,
-        qkv: torch.Tensor,
-        q_out: torch.Tensor,
-        k_out: torch.Tensor,
-        positions: torch.Tensor,
-        q_weight: torch.Tensor,
-        k_weight: torch.Tensor,
-        rms_norm_eps: float,
-        cos_sin_cache: torch.Tensor,
-        is_neox: bool,
-        kv_cache: torch.Tensor,
-        layer_slot_mapping: torch.Tensor,
-    ):
-        key_cache, value_cache = self._split_kv_cache(kv_cache)
-        rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
-            qkv=qkv,
-            q_weight=q_weight,
-            k_weight=k_weight,
-            cos_sin_cache=cos_sin_cache,
-            positions=positions,
-            num_heads_q=self.num_heads,
-            num_heads_k=self.num_kv_heads,
-            head_dim=self.head_size,
-            is_neox=is_neox,
-            rms_norm_eps=rms_norm_eps,
-            q_out=q_out,
-            k_out=k_out,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            slot_mapping=layer_slot_mapping,
-            k_scale=layer._k_scale_cpu,
-            v_scale=layer._v_scale_cpu,
-            kv_cache_dtype=self.kv_cache_dtype,
-            use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
-        )
+        # AITER's fused kernel needs K and V as separate block-contiguous
+        # caches, but standardized caches pack K/V in the content dimension.
+        # Re-enabling via a separate-K/V-groups allocation is follow-up work.
+        return False
 
     def do_rope_and_kv_cache_update(
         self,
