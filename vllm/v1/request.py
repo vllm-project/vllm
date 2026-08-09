@@ -334,18 +334,19 @@ class Request:
         self.prefill_stats = None
         return prefill_stats
 
+    @property
+    def sort_key(self) -> tuple[int, int, float, str, int]:
+        return (
+            self.priority,
+            -min(self.num_preemptions, 3),
+            self.arrival_time,
+            self.request_id,
+            id(self),
+        )
+
     def __lt__(self, other: "Request") -> bool:
-        """
-        Compare two requests based on priority, arrival time, and request ID.
-        Used in priority scheduling.
-        """
-        if self.priority != other.priority:
-            return self.priority < other.priority
-        if self.arrival_time != other.arrival_time:
-            return self.arrival_time < other.arrival_time
-        if self.request_id != other.request_id:
-            return self.request_id < other.request_id
-        return id(self) < id(other)
+        """Compare requests based on priority, preemptions, and arrival."""
+        return self.sort_key < other.sort_key
 
 
 class RequestStatus(enum.IntEnum):
