@@ -7,7 +7,10 @@ import huggingface_hub.constants
 import pytest
 from huggingface_hub.utils import LocalEntryNotFoundError
 
+from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
+    _node_available_bytes,
+    _warn_if_checkpoint_exceeds_numa_binding,
     download_weights_from_hf,
     maybe_remap_kv_scale_name,
 )
@@ -279,6 +282,65 @@ class TestKvCacheScaleMapper:
             combined._map_name("model.layers.0.self_attn.k_scale")
             == "model.layers.0.self_attn.attn.k_scale"
         )
+
+
+def test_node_available_bytes_reads_sysfs(tmp_path, monkeypatch):
+    """The per-node estimate, since sysfs publishes no per-node MemAvailable."""
+    node = tmp_path / "node7"
+    node.mkdir()
+    (node / "meminfo").write_text(
+        "Node 7 MemTotal:       1048576 kB\n"
+        "Node 7 MemFree:         262144 kB\n"
+        "Node 7 FilePages:       524288 kB\n"
+        "Node 7 Shmem:            65536 kB\n"
+        "Node 7 SReclaimable:     32768 kB\n"
+    )
+    monkeypatch.setattr(
+        weight_utils, "_node_available_bytes", weight_utils._node_available_bytes
+    )
+    real_open = open
+
+    def fake_open(path, *a, **kw):
+        if str(path).startswith("/sys/devices/system/node/node7/"):
+            return real_open(node / "meminfo", *a, **kw)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    # free + filepages + sreclaimable - shmem = 262144 + 524288 + 32768 - 65536
+    assert _node_available_bytes([7]) == 753664 * 1024
+
+
+def test_node_available_bytes_missing_fields(monkeypatch):
+    """An unexpected sysfs layout must disable the check, not guess."""
+    monkeypatch.setattr(
+        "builtins.open", lambda *a, **kw: pytest.fail("should not be reached")
+    )
+    assert _node_available_bytes([]) == 0
+
+
+@pytest.mark.parametrize(
+    "nodes,available,size,expected",
+    [
+        (None, None, 10 << 30, False),  # unbound: never warns
+        ([0], 20 << 30, 10 << 30, False),  # bound but it fits
+        ([0], 10 << 30, 20 << 30, True),  # bound and it does not
+        ([0], None, 20 << 30, False),  # sysfs unreadable: stay quiet
+    ],
+)
+def test_warn_only_when_bound_and_too_big(
+    monkeypatch, nodes, available, size, expected
+):
+    """MPOL_BIND does not spill, so this is the last message before SIGKILL."""
+    monkeypatch.setattr(weight_utils, "_get_numa_membind_nodes", lambda: nodes)
+    monkeypatch.setattr(weight_utils, "_node_available_bytes", lambda n: available)
+    # Records the call rather than reading the log: warning_once dedupes, and a
+    # parametrized test would only ever see the first case fire.
+    calls = []
+    monkeypatch.setattr(
+        weight_utils.logger, "warning_once", lambda *a, **kw: calls.append(a)
+    )
+    _warn_if_checkpoint_exceeds_numa_binding(size)
+    assert bool(calls) is expected
 
 
 if __name__ == "__main__":

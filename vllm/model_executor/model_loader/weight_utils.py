@@ -693,13 +693,107 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
     return sum(os.path.getsize(f) for f in files)
 
 
+def _get_numa_membind_nodes() -> list[int] | None:
+    """NUMA nodes this process may allocate from, or None if unrestricted.
+
+    Reads the *memory policy*, which is not the same thing as the cpuset:
+    ``/proc/self/status``'s ``Mems_allowed_list`` still reports every node under
+    ``numactl --membind`` or ``set_mempolicy(MPOL_BIND)``, because those are
+    mempolicies rather than cpuset restrictions. libnuma's ``numa_get_membind``
+    is the thing that answers the question.
+
+    Returns None whenever libnuma is missing or NUMA is unavailable, in which
+    case callers fall back to host-wide accounting as before.
+    """
+    import ctypes
+
+    try:
+        libnuma = ctypes.CDLL("libnuma.so.1", use_errno=True)
+    except OSError:
+        return None
+
+    class _Bitmask(ctypes.Structure):
+        _fields_ = [("size", ctypes.c_ulong), ("maskp", ctypes.POINTER(ctypes.c_ulong))]
+
+    try:
+        if libnuma.numa_available() < 0:
+            return None
+        libnuma.numa_get_membind.restype = ctypes.POINTER(_Bitmask)
+        libnuma.numa_num_configured_nodes.restype = ctypes.c_int
+        mask = libnuma.numa_get_membind()
+        if not mask:
+            return None
+        total = libnuma.numa_num_configured_nodes()
+        nodes = [
+            n
+            for n in range(min(int(mask.contents.size), max(total, 0)))
+            if (mask.contents.maskp[n // 64] >> (n % 64)) & 1
+        ]
+    except (AttributeError, OSError, ValueError):
+        return None
+
+    # Every node allowed is the same as no restriction, and is the common case.
+    return nodes if 0 < len(nodes) < total else None
+
+
+#: Per-node fields that approximate ``MemAvailable``, which sysfs only publishes
+#: machine-wide. Free pages, plus the page cache and reclaimable slab, minus the
+#: shared memory inside the page cache, which is not reclaimable.
+_NODE_AVAILABLE_FIELDS = {
+    "MemFree:": 1,
+    "FilePages:": 1,
+    "SReclaimable:": 1,
+    "Shmem:": -1,
+}
+
+
+def _node_available_bytes(nodes: list[int]) -> int | None:
+    """Approximate reclaimable + free memory on *nodes*, or None if unknown.
+
+    ``/sys/devices/system/node/nodeN/meminfo`` has no ``MemAvailable`` line --
+    that one only exists machine-wide in ``/proc/meminfo`` -- so it is
+    reconstructed from the fields that do exist. The estimate is deliberately
+    generous: page cache counts as available because MPOL_BIND reclaims it
+    rather than spilling, which is exactly the behaviour being warned about.
+    """
+    total = 0
+    for node in nodes:
+        path = f"/sys/devices/system/node/node{node}/meminfo"
+        seen = 0
+        try:
+            with open(path) as f:
+                for line in f:
+                    # "Node 0 MemFree:  123456 kB"
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    sign = _NODE_AVAILABLE_FIELDS.get(parts[2])
+                    if sign is not None:
+                        total += sign * int(parts[3]) * 1024
+                        seen += 1
+        except (OSError, ValueError, IndexError):
+            return None
+        if seen != len(_NODE_AVAILABLE_FIELDS):
+            return None
+    return max(0, total)
+
+
 def _get_available_ram_bytes() -> int:
-    """Return available RAM, honoring cgroup limits."""
+    """Return available RAM, honoring cgroup limits and the NUMA memory policy."""
     import psutil
 
     host_available = psutil.virtual_memory().available
 
     from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
+
+    # A bound process cannot use the rest of the machine's RAM: MPOL_BIND does
+    # not spill to another node, it reclaims or the allocation fails. Host-wide
+    # numbers overstate what is reachable, sometimes by the node count.
+    nodes = _get_numa_membind_nodes()
+    if nodes is not None:
+        node_available = _node_available_bytes(nodes)
+        if node_available is not None:
+            host_available = min(host_available, node_available)
 
     cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
     if cgroup_limit is None:
@@ -708,6 +802,40 @@ def _get_available_ram_bytes() -> int:
         cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
     )
     return min(host_available, cgroup_available)
+
+
+def _warn_if_checkpoint_exceeds_numa_binding(total_bytes: int) -> None:
+    """Say so *before* the OOM killer does.
+
+    When the process has an MPOL_BIND memory policy covering fewer nodes than
+    the machine has, allocations cannot spill to the remaining nodes: the kernel
+    reclaims within the bound set and, when that is not enough, the allocation
+    fails and the OOM killer takes the process. A model whose weights stay in
+    RAM and do not fit in the bound nodes therefore dies with SIGKILL and no
+    diagnostic, which is a hard failure to attribute to a memory policy.
+
+    This is only a warning because the loader cannot know whether the weights
+    will stay in RAM: on an accelerator they are read transiently and the
+    checkpoint may legitimately exceed the bound nodes.
+    """
+    nodes = _get_numa_membind_nodes()
+    if nodes is None:
+        return
+    available = _node_available_bytes(nodes)
+    if available is None or total_bytes <= available:
+        return
+    logger.warning_once(
+        "Checkpoint size (%.2f GiB) exceeds the memory available on the NUMA "
+        "node(s) this process is bound to (%s: %.2f GiB). MPOL_BIND does not "
+        "fall back to other nodes, so if these weights are held in RAM the "
+        "allocation will not spill -- it will be OOM-killed with no further "
+        "message. To resolve: bind to more nodes (`numactl --membind=...` or "
+        "`--interleave=all`), or set VLLM_CPU_OMP_THREADS_BIND to CPUs on a "
+        "single node so that memory and threads agree.",
+        total_bytes / 1024**3,
+        ",".join(str(n) for n in nodes),
+        available / 1024**3,
+    )
 
 
 def _get_fs_type(files: list[str]) -> str:
@@ -871,6 +999,7 @@ def safetensors_weights_iterator(
         total_bytes / 1024**3,
         avail_bytes / 1024**3,
     )
+    _warn_if_checkpoint_exceeds_numa_binding(total_bytes)
 
     should_prefetch = safetensors_load_strategy == "prefetch"
     if safetensors_load_strategy is None:
