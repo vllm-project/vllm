@@ -510,23 +510,19 @@ class Worker(WorkerBase):
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
         # XPU stays excluded (see #39977).
-        cudagraph_memory_estimate = 0
-        if (
+        will_capture_cudagraphs = (
             current_platform.is_cuda_alike()
             and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
-
-        # Respect the opt-in flag as originally designed.
-        cudagraph_memory_estimate_applied = (
-            cudagraph_memory_estimate
-            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-            else 0
         )
+        # Profiling captures every graph, so it is not free. Skip it entirely
+        # when the estimate would only be discarded.
+        cudagraph_memory_estimate = 0
+        if will_capture_cudagraphs and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         self.total_consumed = profile_result.total_consumed
         self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
+            profile_result.transient_peak_headroom + cudagraph_memory_estimate
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
@@ -545,7 +541,7 @@ class Worker(WorkerBase):
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
-            - cudagraph_memory_estimate_applied
+            - cudagraph_memory_estimate
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -566,44 +562,41 @@ class Worker(WorkerBase):
             format_gib(self.available_kv_cache_memory_bytes),
         )
 
-        if cudagraph_memory_estimate > 0:
+        if (
+            will_capture_cudagraphs
+            and not envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+        ):
+            # No estimate to quote a utilization against, because profiling was
+            # skipped rather than measured and thrown away.
+            logger.warning_once(
+                "CUDA graph memory profiling is disabled "
+                "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
+                "Without it, CUDA graph memory is not accounted for "
+                "during KV cache allocation, which may require lowering "
+                "--gpu-memory-utilization to avoid OOM. Consider "
+                "re-enabling it (the default as of v0.21.0)."
+            )
+        elif cudagraph_memory_estimate > 0:
             total_mem = self.init_snapshot.total_memory
             current_util = self.cache_config.gpu_memory_utilization
             cg_util_delta = cudagraph_memory_estimate / total_mem
-            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
-                equiv_util = round(current_util - cg_util_delta, 4)
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
-                logger.info(
-                    "CUDA graph memory profiling is enabled (default since "
-                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
-                    "equivalent to --gpu-memory-utilization=%.4f without "
-                    "CUDA graph memory profiling. To maintain the same "
-                    "effective KV cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f. To disable, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
-                    current_util,
-                    equiv_util,
-                    suggested_util,
-                )
-            else:
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
-                logger.warning(
-                    "CUDA graph memory profiling is disabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
-                    "Without it, CUDA graph memory is not accounted for "
-                    "during KV cache allocation, which may require lowering "
-                    "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default as of v0.21.0) and increasing "
-                    "--gpu-memory-utilization from %.4f to %.4f.",
-                    current_util,
-                    suggested_util,
-                )
+            equiv_util = round(current_util - cg_util_delta, 4)
+            suggested_util = min(
+                round(current_util + cg_util_delta, 4),
+                1.0,
+            )
+            logger.info(
+                "CUDA graph memory profiling is enabled (default since "
+                "v0.21.0). The current --gpu-memory-utilization=%.4f is "
+                "equivalent to --gpu-memory-utilization=%.4f without "
+                "CUDA graph memory profiling. To maintain the same "
+                "effective KV cache size as before, increase "
+                "--gpu-memory-utilization to %.4f. To disable, set "
+                "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
+                current_util,
+                equiv_util,
+                suggested_util,
+            )
 
         return reserve_mm_ipc_gpu_memory(
             int(self.available_kv_cache_memory_bytes),
@@ -717,20 +710,29 @@ class Worker(WorkerBase):
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
 
-        # Compare actual vs estimated CUDA graph memory (if we did profiling)
+        # Compare actual vs estimated CUDA graph memory (if we did profiling).
+        # Profiling captures the same graphs first and keeps the scratch they
+        # allocate, so the capture above only pays for what profiling did not
+        # already leave behind. Comparing the estimate against the capture
+        # alone would report a large miss for an estimate that was correct.
         if (
             hasattr(self, "cudagraph_memory_estimate")
             and self.cudagraph_memory_estimate > 0
         ):
             GiB = lambda b: round(b / GiB_bytes, 2)
-            diff = abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
+            retained = self.model_runner.cudagraph_profiling_retained_memory
+            actual = cuda_graph_memory_bytes + retained
+            diff = abs(actual - self.cudagraph_memory_estimate)
             logger.info(
-                "CUDA graph pool memory: %s GiB (actual), %s GiB (estimated), "
+                "CUDA graph pool memory: %s GiB (actual: %s GiB captured + "
+                "%s GiB retained by profiling), %s GiB (estimated), "
                 "difference: %s GiB (%.1f%%).",
+                GiB(actual),
                 GiB(cuda_graph_memory_bytes),
+                GiB(retained),
                 GiB(self.cudagraph_memory_estimate),
                 GiB(diff),
-                100 * diff / max(cuda_graph_memory_bytes, 1),
+                100 * diff / max(actual, 1),
             )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
