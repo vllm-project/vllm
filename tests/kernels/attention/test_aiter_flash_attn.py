@@ -256,3 +256,120 @@ def test_varlen_with_paged_kv(
     print(f"Max abs diff: {torch.max(torch.abs(output - ref_output))}")
     print(f"Mean diff: {torch.mean(torch.abs(output - ref_output))}")
     print(f"Min diff: {torch.std(torch.abs(output - ref_output))}")
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Only ROCm is supported")
+@torch.inference_mode()
+def test_aiter_fa_swa_decode_unified_faster_than_paged_v1() -> None:
+    """Regression test for long-context SWA decode perf.
+
+    AITER paged_attention_v1 cost grows ~linearly with seq_len while
+    Triton unified_attention's SWA path stays flat (only reads inside
+    the window).
+    """
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("aiter package required for this test.")
+
+    import aiter  # noqa: F401  # registers torch.ops.aiter
+    from aiter.ops.triton.unified_attention import unified_attention
+
+    from vllm.triton_utils import triton
+    from vllm.v1.attention.backends.rocm_aiter_fa import _PARTITION_SIZE_ROCM
+
+    num_seqs, seq_len = 4, 100_000
+    num_q_heads, num_kv_heads = 32, 8
+    head_size, block_size, sliding_window = 128, 32, 4096
+    dtype = torch.bfloat16
+
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    max_blocks_per_seq = (seq_len + block_size - 1) // block_size
+    num_blocks = max(2 * num_seqs * max_blocks_per_seq, 1024)
+    query = torch.randn(num_seqs, num_q_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    output = torch.empty_like(query)
+    block_table = torch.randint(
+        0, num_blocks, (num_seqs, max_blocks_per_seq), dtype=torch.int32
+    )
+    seq_lens = torch.full((num_seqs,), seq_len, dtype=torch.int32)
+    cu_seqlens_q = torch.arange(num_seqs + 1, dtype=torch.int32)
+    scale = head_size**-0.5
+    descale = torch.ones((num_seqs, num_kv_heads), dtype=torch.float32)
+    kv_scalar = torch.ones((1,), dtype=torch.float32)
+
+    nbytes = torch.finfo(dtype).bits // 8
+    max_partitions = (seq_len + _PARTITION_SIZE_ROCM - 1) // _PARTITION_SIZE_ROCM
+    workspace = torch.empty(
+        num_seqs * num_q_heads * max_partitions * (head_size * nbytes + 8),
+        dtype=torch.uint8,
+    )
+
+    def run_unified():
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=1,
+            seqused_k=seq_lens,
+            max_seqlen_k=seq_len,
+            softmax_scale=scale,
+            causal=True,
+            alibi_slopes=None,
+            window_size=(sliding_window - 1, 0),
+            block_table=block_table,
+            softcap=0.0,
+            q_descale=None,
+            k_descale=descale,
+            v_descale=descale,
+        )
+
+    def run_paged_v1():
+        torch.ops.aiter.paged_attention_v1(
+            output,
+            workspace,
+            query,
+            key_cache,
+            value_cache,
+            scale,
+            block_table,
+            cu_seqlens_q[:num_seqs],
+            seq_lens,
+            seq_len,
+            None,
+            "auto",
+            "NHD",
+            0.0,
+            kv_scalar,
+            kv_scalar,
+            None,
+            _PARTITION_SIZE_ROCM,
+            1,
+            sliding_window,
+        )
+
+    # Warm up + JIT compile both kernels before timing.
+    for _ in range(3):
+        run_unified()
+        run_paged_v1()
+    torch.accelerator.synchronize()
+
+    t_unified = triton.testing.do_bench(run_unified, warmup=25, rep=100)
+    t_paged = triton.testing.do_bench(run_paged_v1, warmup=25, rep=100)
+    ratio = t_paged / t_unified
+    print(
+        f"[aiter SWA decode @ seq_len={seq_len}] "
+        f"unified={t_unified * 1000:.1f}us, "
+        f"paged_v1={t_paged * 1000:.1f}us, ratio={ratio:.2f}x"
+    )
+    assert ratio >= 2, (
+        f"SWA long-context decode regression: paged_v1/unified={ratio:.2f}x "
+        "(< 2x); revisit decode dispatch in rocm_aiter_fa.py."
+    )
