@@ -68,19 +68,13 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.15.post1"
+      "default": "0.6.16.post3"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
     },
     "GDRCOPY_OS_VERSION": {
       "default": "Ubuntu24_04"
-    },
-    "BITSANDBYTES_VERSION_X86": {
-      "default": "0.46.1"
-    },
-    "BITSANDBYTES_VERSION_ARM64": {
-      "default": "0.42.0"
     },
     "TIMM_VERSION": {
       "default": ">=1.0.17"
