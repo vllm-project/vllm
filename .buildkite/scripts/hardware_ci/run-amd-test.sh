@@ -36,6 +36,19 @@ set -o pipefail
 : "${ROCM_DOCKER_TTY:=1}"
 : "${PYTHONFAULTHANDLER:=1}"
 : "${PYTEST_TIMEOUT:=2400}"
+
+# Preserve runner-only values before clear_ci_orchestration_env removes them
+# from the environment inherited by the test process.
+amd_diagnostics_expected_gpu_count="${VLLM_CI_EXPECTED_GPU_COUNT:-1}"
+amd_diagnostics_dir="${VLLM_CI_DIAGNOSTICS_DIR:-artifacts/amd-gpu-diagnostics}"
+amd_diagnostics_checkout_root="${BUILDKITE_BUILD_CHECKOUT_PATH:-$(pwd -P)}"
+amd_diagnostics_execution_mode="${VLLM_CI_EXECUTION_MODE:-single-node}"
+amd_diagnostics_test_group="${VLLM_TEST_GROUP_NAME:-${BUILDKITE_STEP_KEY:-unknown}}"
+amd_diagnostics_k8s_node_name="${VLLM_CI_K8S_NODE_NAME:-}"
+amd_diagnostics_collected=0
+amd_diagnostics_probe_budget_seconds=25
+amd_diagnostics_command_timeout_seconds=5
+amd_diagnostics_upload_timeout_seconds=20
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
 fi
@@ -84,9 +97,11 @@ clear_ci_orchestration_env() {
     VLLM_CI_BASE_IMAGE \
     VLLM_CI_FALLBACK_IMAGE \
     VLLM_CI_DOCKER_DISABLED \
+    VLLM_CI_DIAGNOSTICS_DIR \
     VLLM_CI_ARTIFACT_GLOB \
     VLLM_CI_ARTIFACT_CHECKSUM_GLOB \
     VLLM_CI_EXPECTED_GPU_COUNT \
+    VLLM_CI_K8S_NODE_NAME \
     VLLM_CI_USE_ARTIFACTS \
     VLLM_CI_RESULTS_ROOT \
     VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
@@ -500,11 +515,219 @@ is_multi_node() {
   return 1
 }
 
+run_amd_diagnostic() {
+  local log_file=$1
+  local probe_deadline=$2
+  shift 2
+  local command_status=0
+  local command_timeout_seconds=${amd_diagnostics_command_timeout_seconds}
+  local remaining_seconds=$((probe_deadline - SECONDS))
+
+  {
+    printf '\n$'
+    printf ' %q' "$@"
+    printf '\n'
+  } | tee -a "${log_file}"
+
+  if [[ "${remaining_seconds}" -le 0 ]]; then
+    echo "[diagnostic probe budget exhausted; command skipped]" \
+      | tee -a "${log_file}"
+    return 0
+  fi
+  if [[ "${remaining_seconds}" -lt "${command_timeout_seconds}" ]]; then
+    command_timeout_seconds=${remaining_seconds}
+  fi
+
+  timeout --kill-after=1s "${command_timeout_seconds}s" "$@" 2>&1 \
+    | tee -a "${log_file}"
+  command_status=${PIPESTATUS[0]}
+  if [[ "${command_status}" -ne 0 ]]; then
+    echo "[diagnostic command exited with status ${command_status}]" \
+      | tee -a "${log_file}"
+  fi
+  return 0
+}
+
+collect_rocm_failure_diagnostics() {
+  local exit_code=$1
+  local job_id="${BUILDKITE_JOB_ID:-local}"
+  local retry_count="${BUILDKITE_RETRY_COUNT:-0}"
+  local parallel_job="${BUILDKITE_PARALLEL_JOB:-0}"
+  local diagnostics_relative_path=""
+  local diagnostics_path=""
+  local upload_root="${amd_diagnostics_checkout_root}"
+  local upload_path=""
+  local exit_signal=""
+  local probe_deadline=0
+
+  if [[ "${amd_diagnostics_collected}" == "1" ]]; then
+    return 0
+  fi
+  amd_diagnostics_collected=1
+
+  if [[ "${amd_diagnostics_expected_gpu_count}" == "0" ]]; then
+    echo "Skipping AMD GPU diagnostics for a CPU-only job."
+    return 0
+  fi
+
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "WARNING: timeout is unavailable; skipping failure diagnostics rather than risking a hung job."
+    return 0
+  fi
+
+  job_id="${job_id//[^A-Za-z0-9_.-]/_}"
+  retry_count="${retry_count//[^A-Za-z0-9_.-]/_}"
+  parallel_job="${parallel_job//[^A-Za-z0-9_.-]/_}"
+
+  # Buildkite keeps the supplied artifact path. Restrict the configurable
+  # directory to a checkout-relative path so the UI shows a clean artifact key.
+  if [[ -z "${amd_diagnostics_dir}" \
+    || "${amd_diagnostics_dir}" == /* \
+    || "${amd_diagnostics_dir}" == *".."* ]]; then
+    echo "WARNING: ignoring unsafe VLLM_CI_DIAGNOSTICS_DIR"
+    amd_diagnostics_dir="artifacts/amd-gpu-diagnostics"
+  fi
+  diagnostics_relative_path="${amd_diagnostics_dir}/${job_id}/amd-gpu-diagnostics.log"
+  diagnostics_path="${amd_diagnostics_checkout_root}/${diagnostics_relative_path}"
+  upload_path="${diagnostics_relative_path}"
+
+  if ! mkdir -p "$(dirname "${diagnostics_path}")" \
+    || ! : > "${diagnostics_path}"; then
+    diagnostics_path=$(mktemp -t amd-gpu-diagnostics.XXXXXX.log) || {
+      echo "WARNING: unable to create an AMD GPU diagnostics log."
+      return 0
+    }
+    upload_root=$(dirname "${diagnostics_path}")
+    upload_path=$(basename "${diagnostics_path}")
+  fi
+
+  if [[ "${exit_code}" -gt 128 && "${exit_code}" -le 192 ]]; then
+    exit_signal=$(kill -l "$((exit_code - 128))" 2>/dev/null || true)
+  fi
+
+  {
+    echo "AMD GPU failure diagnostics"
+    echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "exit_code=${exit_code}"
+    echo "exit_signal=${exit_signal:-none}"
+    echo "build_url=${BUILDKITE_BUILD_URL:-unknown}"
+    echo "job_id=${BUILDKITE_JOB_ID:-unknown}"
+    echo "step_key=${BUILDKITE_STEP_KEY:-unknown}"
+    echo "step_label=${BUILDKITE_LABEL:-unknown}"
+    echo "test_group=${amd_diagnostics_test_group}"
+    echo "retry_count=${retry_count}"
+    echo "parallel_job=${parallel_job}"
+    echo "execution_mode=${amd_diagnostics_execution_mode}"
+    echo "expected_gpu_count=${amd_diagnostics_expected_gpu_count}"
+    echo "probe_budget_seconds=${amd_diagnostics_probe_budget_seconds}"
+    echo "command_timeout_seconds=${amd_diagnostics_command_timeout_seconds}"
+    echo "upload_timeout_seconds=${amd_diagnostics_upload_timeout_seconds}"
+    echo "agent_name=${BUILDKITE_AGENT_NAME:-unknown}"
+    echo "k8s_node=${amd_diagnostics_k8s_node_name:-unknown}"
+    echo "kernel=$(uname -srmo 2>/dev/null || echo unknown)"
+  } > "${diagnostics_path}"
+
+  echo "--- :rotating_light: AMD GPU failure diagnostics"
+  cat "${diagnostics_path}"
+
+  probe_deadline=$((SECONDS + amd_diagnostics_probe_budget_seconds))
+
+  # Collect the most useful evidence first so auxiliary probes cannot consume
+  # the shared deadline before GPU health is captured.
+  echo "AMD GPU diagnostics" | tee -a "${diagnostics_path}"
+  if command -v amd-smi >/dev/null 2>&1; then
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi version
+    # Bus data identifies a card within the public node without publishing its
+    # persistent UUID, serial number, or process list.
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi static -b -g all
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi metric -e -k -P -x -g all
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi bad-pages -p -r -u -g all
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi metric -p -t -u -m -v -g all
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" amd-smi xgmi -l -g all
+  elif command -v rocm-smi >/dev/null 2>&1; then
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" rocm-smi \
+      --showbus --showreplaycount --showrasinfo --showpagesinfo
+  else
+    echo "Neither amd-smi nor rocm-smi is available." \
+      | tee -a "${diagnostics_path}"
+  fi
+
+  echo "Node resource diagnostics (runner-visible scope)" \
+    | tee -a "${diagnostics_path}"
+  if command -v df >/dev/null 2>&1; then
+    echo "checkout_filesystem:" | tee -a "${diagnostics_path}"
+    if [[ -d "${amd_diagnostics_checkout_root}" ]]; then
+      (
+        cd "${amd_diagnostics_checkout_root}" || exit 0
+        run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" df -h \
+          --output=fstype,size,used,avail,pcent,itotal,iused,iavail,ipcent \
+          -- .
+      )
+    else
+      echo "[checkout directory unavailable]" | tee -a "${diagnostics_path}"
+    fi
+    echo "tmp_filesystem:" | tee -a "${diagnostics_path}"
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" df -h \
+      --output=fstype,size,used,avail,pcent,itotal,iused,iavail,ipcent \
+      -- /tmp
+  fi
+  if command -v free >/dev/null 2>&1; then
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" free -h
+  fi
+  if [[ -r /sys/fs/cgroup/memory.events ]]; then
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" cat \
+      /sys/fs/cgroup/memory.events
+  fi
+
+  echo "Unauthenticated outer-runner network reachability diagnostics" \
+    | tee -a "${diagnostics_path}"
+  if command -v curl >/dev/null 2>&1; then
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
+      --silent --location --proto '=https' --proto-redir '=https' \
+      --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
+      --write-out 'target=huggingface http_code=%{http_code} dns_done_s=%{time_namelookup} connect_done_s=%{time_connect} tls_done_s=%{time_appconnect} first_byte_s=%{time_starttransfer} total_s=%{time_total}\n' \
+      https://huggingface.co/api/models/gpt2
+    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
+      --silent --location --proto '=https' --proto-redir '=https' \
+      --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
+      --write-out 'target=github_git_smart_http http_code=%{http_code} dns_done_s=%{time_namelookup} connect_done_s=%{time_connect} tls_done_s=%{time_appconnect} first_byte_s=%{time_starttransfer} total_s=%{time_total}\n' \
+      'https://github.com/vllm-project/ci-infra.git/info/refs?service=git-upload-pack'
+  else
+    echo "curl unavailable; reachability probes skipped." \
+      | tee -a "${diagnostics_path}"
+  fi
+
+  if command -v buildkite-agent >/dev/null 2>&1 \
+    && [[ -n "${BUILDKITE_JOB_ID:-}" ]]; then
+    if (
+      cd "${upload_root}" \
+        && BUILDKITE_AGENT_DEBUG=false \
+          BUILDKITE_AGENT_DEBUG_HTTP=false \
+          BUILDKITE_AGENT_TRACE_HTTP=false \
+          BUILDKITE_AGENT_LOG_LEVEL=error \
+          timeout --kill-after=2s "${amd_diagnostics_upload_timeout_seconds}s" \
+          buildkite-agent artifact upload "${upload_path}" \
+          >/dev/null 2>&1
+    ); then
+      echo "Uploaded AMD GPU diagnostics artifact: ${upload_path}"
+    else
+      echo "WARNING: failed to upload AMD GPU diagnostics artifact: ${upload_path}"
+    fi
+  else
+    echo "Buildkite agent unavailable; diagnostics artifact was not uploaded."
+  fi
+
+  return 0
+}
+
 handle_pytest_exit() {
   local exit_code=$1
   if [ "$exit_code" -eq 5 ]; then
     echo "Pytest exit code 5 (no tests collected) - treating as success."
     exit 0
+  fi
+  if [[ "${exit_code}" -ne 0 ]]; then
+    collect_rocm_failure_diagnostics "${exit_code}"
   fi
   exit "$exit_code"
 }
@@ -664,6 +887,19 @@ re_quote_pytest_markers() {
   echo "${output% }"
 }
 
+# shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
+handle_amd_runner_exit() {
+  local exit_code=${1:-$?}
+  if [[ "${exit_code}" -ne 0 ]]; then
+    collect_rocm_failure_diagnostics "${exit_code}"
+  fi
+  return 0
+}
+
+# Catch both test failures and wrapper/setup failures. Runtime-specific cleanup
+# traps below replace this trap but call the same handler before cleaning up.
+trap handle_amd_runner_exit EXIT
+
 ###############################################################################
 # Main
 ###############################################################################
@@ -672,7 +908,10 @@ if is_native_runtime; then
   echo "--- Native in-pod ROCm CI (AMD_CI_RUNTIME=${AMD_CI_RUNTIME:-unset}, NATIVE_CI=${NATIVE_CI:-unset})"
   artifact_work_dir=""
 
+  # shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
   cleanup_native_workspace() {
+    local exit_code=$?
+    handle_amd_runner_exit "${exit_code}"
     if [[ -n "${artifact_work_dir}" ]]; then
       rm -rf "${artifact_work_dir}"
     fi
@@ -732,7 +971,10 @@ image_name="${VLLM_CI_FALLBACK_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-local}}"
 artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
+# shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
 remove_docker_container() {
+  local exit_code=$?
+  handle_amd_runner_exit "${exit_code}"
   if docker container inspect "${container_name}" >/dev/null 2>&1; then
     docker rm -f "${container_name}" || true
   fi
