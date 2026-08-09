@@ -19,6 +19,10 @@ from tests.parser.engine.streaming_helpers import (
     collect_function_name,
     collect_tool_arguments,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+    FunctionDefinition,
+)
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.inkling import InklingParser, _inkling_arg_converter
 from vllm.parser.parser_manager import ParserManager
@@ -140,6 +144,62 @@ def _collect_reasoning(results) -> str:
     return "".join(d.reasoning for d, _ in results if d and d.reasoning)
 
 
+def _function_tool(name: str = "get_weather") -> ChatCompletionToolsParam:
+    """A real function-tool definition, as a request would carry it."""
+    return ChatCompletionToolsParam(
+        function=FunctionDefinition(
+            name=name,
+            parameters={"type": "object", "properties": {}},
+        ),
+    )
+
+
+def _delegating(mock_tokenizer, tools=None):
+    """Build the served reasoning+tool DelegatingParser for Inkling."""
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="inkling",
+        reasoning_parser_name="inkling",
+        enable_auto_tools=True,
+    )
+    return parser_cls(mock_tokenizer, tools or [])
+
+
+def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
+    """Stream ``text`` through ``DelegatingParser.parse_delta``, ``chunk_size``
+    tokens per delta; return ``(content, reasoning, ordered tool names,
+    ordered tool arguments)``. Arguments arrive in fragments, so they are
+    concatenated per tool index."""
+    tokens = _tokenize(text)
+    content, reasoning = "", ""
+    tools: dict[int, str] = {}
+    args: dict[int, str] = {}
+    for start in range(0, len(tokens), chunk_size):
+        batch = tokens[start : start + chunk_size]
+        delta = parser.parse_delta(
+            "".join(t for _, t in batch),
+            [tid for tid, _ in batch],
+            request,
+            prompt_token_ids=prompt_token_ids if start == 0 else None,
+            finished=(start + chunk_size >= len(tokens)),
+        )
+        if delta and delta.content:
+            content += delta.content
+        if delta and delta.reasoning:
+            reasoning += delta.reasoning
+        if delta and delta.tool_calls:
+            for tc in delta.tool_calls:
+                if tc.function and tc.function.name:
+                    tools[tc.index] = tc.function.name
+                if tc.function and tc.function.arguments:
+                    args[tc.index] = args.get(tc.index, "") + tc.function.arguments
+    return (
+        content,
+        reasoning,
+        [tools[k] for k in sorted(tools)],
+        [args.get(k, "") for k in sorted(tools)],
+    )
+
+
 class TestArgConverter:
     def test_complete_wrapper(self):
         raw = '{"name":"get_weather","args":{"city":"SF"}}'
@@ -178,6 +238,13 @@ class TestArgConverter:
 
 
 class TestNonStreaming:
+    @pytest.mark.parametrize("suffix", ["", END_MESSAGE, END_SAMPLING])
+    def test_bare_text_after_model_opener(self, parser, mock_request, suffix):
+        reasoning, content, tools = parser.parse(f"hello world{suffix}", mock_request)
+        assert reasoning is None
+        assert content == "hello world"
+        assert tools is None
+
     def test_plain_text(self, parser, mock_request):
         reasoning, content, tools = parser.parse(
             f"{TEXT_START}hello world{END_MESSAGE}", mock_request
@@ -426,6 +493,28 @@ class TestPromptSeededState:
         assert delta.content is None
         assert delta.tool_calls[0].function.name == "get_weather"
 
+    def test_generation_prompt_header_flushes_bare_text_at_finish(
+        self, parser, mock_request
+    ):
+        prompt_token_ids = [_TML_VOCAB[END_MESSAGE], _TML_VOCAB[MSG_MODEL]]
+        first = parser.parse_delta(
+            "plain ",
+            [ord(char) for char in "plain "],
+            mock_request,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
+        )
+        assert first is None
+
+        second = parser.parse_delta(
+            "answer",
+            [ord(char) for char in "answer"],
+            mock_request,
+            finished=True,
+        )
+        assert second is not None
+        assert second.content == "plain answer"
+
 
 class TestToolCallFiltering:
     """Inkling equivalents of the generic tool-call-filtering replay tests
@@ -504,3 +593,196 @@ class TestRegisteredAdapters:
         assert result.tools_called
         assert result.tool_calls[0].function.name == "f"
         assert json.loads(result.tool_calls[0].function.arguments) == {"a": 1}
+
+
+class TestDelegatingTwoPass:
+    """Served reasoning+tool ``DelegatingParser`` path (issue #51387).
+
+    Unlike ``TestStreaming`` above (single engine, ``skip_tool_parsing=False``),
+    these drive the real two-pass parser, where the reasoning pass runs with
+    ``skip_tool_parsing=True`` — the path where the trailing-marker leak lived.
+
+    The bug is specific to the *tools-enabled* plain-text/reasoning path, so the
+    content-only cases (which emit no tool call and would still pass in a
+    no-tools mode) offer a real function tool on both the request and the
+    parser, keeping ``tool_choice="auto"``.
+    """
+
+    GEN_PROMPT = [_TML_VOCAB[MSG_MODEL]]
+
+    def test_plain_text_non_streaming(self, mock_tokenizer, mock_request):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        _, content, calls = _delegating(mock_tokenizer, tools).parse(
+            f"{TEXT_START}The answer is 42.{END_MESSAGE}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "The answer is 42."
+        assert END_MESSAGE not in content
+        assert not calls
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 7, 64])
+    def test_plain_text_streaming(self, mock_tokenizer, mock_request, chunk_size):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        content, _, calls, _ = _stream_delegating(
+            _delegating(mock_tokenizer, tools),
+            mock_request,
+            f"{TEXT_START}The answer is 42.{END_MESSAGE}",
+            chunk_size,
+            self.GEN_PROMPT,
+        )
+        assert content == "The answer is 42."
+        assert END_MESSAGE not in content
+        assert not calls
+
+    def test_reasoning_then_text(self, mock_tokenizer, mock_request):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        reasoning, content, _ = _delegating(mock_tokenizer, tools).parse(
+            f"{THINK_START}plan{END_MESSAGE}"
+            f"{MSG_MODEL}{TEXT_START}Let me look.{END_MESSAGE}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert reasoning == "plan"
+        assert content == "Let me look."
+        assert END_MESSAGE not in content
+
+    def test_multi_tool_round_trip(self, mock_tokenizer, mock_request):
+        _, _, tools = _delegating(mock_tokenizer).parse(
+            _tool_block("f", '{"a":1}') + MSG_MODEL + _tool_block("g", '{"b":2}'),
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert [t.name for t in tools] == ["f", "g"]
+
+    def test_text_then_tool(self, mock_tokenizer, mock_request):
+        _, content, tools = _delegating(mock_tokenizer).parse(
+            f"{TEXT_START}intro{END_MESSAGE}{MSG_MODEL}" + _tool_block("f", "{}"),
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "intro"
+        assert [t.name for t in tools] == ["f"]
+
+    def test_tool_then_text(self, mock_tokenizer, mock_request):
+        _, content, tools = _delegating(mock_tokenizer).parse(
+            _tool_block("f", "{}") + MSG_MODEL + f"{TEXT_START}done{END_MESSAGE}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "done"
+        assert [t.name for t in tools] == ["f"]
+
+    def test_two_tools_then_text(self, mock_tokenizer, mock_request):
+        _, content, tools = _delegating(mock_tokenizer).parse(
+            _tool_block("f", "{}")
+            + MSG_MODEL
+            + _tool_block("g", "{}")
+            + MSG_MODEL
+            + f"{TEXT_START}after{END_MESSAGE}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "after"
+        assert [t.name for t in tools] == ["f", "g"]
+
+    def test_reasoning_then_tool_non_streaming(self, mock_tokenizer, mock_request):
+        reasoning, _, tools = _delegating(mock_tokenizer).parse(
+            f"{THINK_START}think{END_MESSAGE}{MSG_MODEL}" + _tool_block("f", '{"x":1}'),
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert reasoning == "think"
+        assert [t.name for t in tools] == ["f"]
+
+    def test_end_sampling_text_closer_consumed(self, mock_tokenizer, mock_request):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        _, content, calls = _delegating(mock_tokenizer, tools).parse(
+            f"{TEXT_START}hi{END_SAMPLING}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "hi"
+        assert END_SAMPLING not in content
+        assert not calls
+
+    def test_end_sampling_tool_closer_round_trips(self, mock_tokenizer, mock_request):
+        _, _, tools = _delegating(mock_tokenizer).parse(
+            f'{TOOL_JSON}{{"name":"f","args":{{}}}}{END_SAMPLING}',
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert [t.name for t in tools] == ["f"]
+
+    def test_incomplete_tool_at_eos(self, mock_tokenizer, mock_request):
+        _, _, tools = _delegating(mock_tokenizer).parse(
+            f'{TOOL_JSON}{{"name":"d","args":{{"k":"v"',
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert [t.name for t in tools] == ["d"]
+
+    def test_reset_reuse_after_incomplete_span(self, mock_tokenizer, mock_request):
+        parser = _delegating(mock_tokenizer)
+        parser.parse(
+            f'{TOOL_JSON}{{"name":"d","args":{{"k":"v"',
+            mock_request,
+            enable_auto_tools=True,
+        )
+        _, content, _ = parser.parse(
+            f"{TEXT_START}fresh{END_MESSAGE}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "fresh"
+        assert END_MESSAGE not in content
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 64])
+    def test_reasoning_then_tool_streaming(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        content, _, tools, _ = _stream_delegating(
+            _delegating(mock_tokenizer),
+            mock_request,
+            f"{THINK_START}plan{END_MESSAGE}{MSG_MODEL}"
+            + _tool_block("get_weather", '{"city":"SF"}'),
+            chunk_size,
+            self.GEN_PROMPT,
+        )
+        assert tools == ["get_weather"]
+        assert TOOL_JSON not in content
+        assert END_MESSAGE not in content
+
+    @pytest.mark.parametrize("opener", [TEXT_START, TOOL_TEXT, TOOL_ERROR])
+    @pytest.mark.parametrize("chunk_size", [1, 3, 64])
+    def test_visible_text_then_tool_streaming(
+        self, mock_tokenizer, mock_request, chunk_size, opener
+    ):
+        """Visible content before a tool call, with no thinking block.
+
+        The reasoning pass leaves its reasoning phase only on an explicit
+        reasoning-end event. A response that opens with visible content never
+        emitted one, so the tool pass never ran: the entire tool block came
+        back as assistant content and no tool call was parsed. Every opener
+        that starts a visible block has to confirm the boundary, which is why
+        ``TOOL_TEXT`` and ``TOOL_ERROR`` are covered alongside ``TEXT_START``.
+        """
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        content, _, names, args = _stream_delegating(
+            _delegating(mock_tokenizer, tools),
+            mock_request,
+            f"{opener}let me check{END_MESSAGE}{MSG_MODEL}"
+            + _tool_block("get_weather", '{"city":"SF"}'),
+            chunk_size,
+            self.GEN_PROMPT,
+        )
+        assert content == "let me check"
+        assert names == ["get_weather"]
+        assert json.loads(args[0]) == {"city": "SF"}
+        assert TOOL_JSON not in content
+        assert END_MESSAGE not in content

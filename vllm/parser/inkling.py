@@ -189,9 +189,14 @@ def inkling_config() -> ParserEngineConfig:
             ParserState.MESSAGE_HEADER,
             (),
         ),
+        # Opening a block that renders as visible content proves no reasoning
+        # is still open. Confirming that here is what lets DelegatingParser
+        # hand the following blocks to the tool pass: the reasoning pass only
+        # leaves its reasoning phase on an explicit reasoning-end event, and a
+        # response with no thinking block never emits one otherwise.
         (ParserState.CONTENT, "TEXT_START"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.CONTENT, "THINK_START"): Transition(
             ParserState.REASONING,
@@ -204,11 +209,11 @@ def inkling_config() -> ParserEngineConfig:
         # Raw / error tool blocks render as visible text.
         (ParserState.CONTENT, "TOOL_TEXT"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.CONTENT, "TOOL_ERROR"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         # The optional function name between the model-role and content-kind
         # markers is metadata, not visible assistant content.
@@ -218,7 +223,7 @@ def inkling_config() -> ParserEngineConfig:
         ),
         (ParserState.MESSAGE_HEADER, "TEXT_START"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.MESSAGE_HEADER, "THINK_START"): Transition(
             ParserState.REASONING,
@@ -230,11 +235,11 @@ def inkling_config() -> ParserEngineConfig:
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_TEXT"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         (ParserState.MESSAGE_HEADER, "TOOL_ERROR"): Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.REASONING_END,),
         ),
         # ── Inside a thinking block ───────────────────────────────────
         (ParserState.REASONING, "THINK_START"): Transition(
@@ -268,7 +273,7 @@ def inkling_config() -> ParserEngineConfig:
         )
         transitions[(ParserState.MESSAGE_HEADER, end)] = Transition(
             ParserState.CONTENT,
-            (),
+            (EventType.TEXT_CHUNK,),
         )
 
     return ParserEngineConfig(

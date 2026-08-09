@@ -5,6 +5,8 @@
 import json
 from copy import copy
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from transformers import PretrainedConfig
@@ -134,6 +136,38 @@ def test_head_size_falls_back_when_head_dim_is_zero():
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_head_size() == 128
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "num_experts_per_tok",
+        "num_experts_per_token",
+        "top_k_experts",
+        "moe_topk",
+        "moe_top_k",
+    ],
+)
+def test_num_experts_per_tok_aliases(attribute: str):
+    hf_config = PretrainedConfig(**{attribute: 4})
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            model_arch_config=SimpleNamespace(
+                num_experts_per_token=convertor.get_num_experts_per_token()
+            )
+        ),
+    )
+
+    assert ModelConfig.get_num_experts_per_tok(model_config) == 4
+
+
+def test_num_experts_per_tok_none_is_normalized():
+    hf_config = PretrainedConfig(top_k_experts=None)
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    assert convertor.get_num_experts_per_token() == 0
 
 
 def test_legacy_modelopt_config_without_producer_is_normalized():

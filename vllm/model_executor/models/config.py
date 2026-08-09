@@ -338,6 +338,39 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
                 )
 
 
+class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
+
+    Kimi-K3 ships its routed experts as compressed-tensors
+    ``mxfp4-pack-quantized`` (``quant_method="compressed-tensors"``), which
+    lands them on ``CompressedTensorsW4A4Mxfp4MoEMethod`` and its narrow kernel
+    selection. Rewriting ``quant_method`` to ``"mxfp4"`` selects ``Mxfp4Config``
+    (hence ``Mxfp4MoEMethod``) with its full backend set, while any non-MXFP4
+    checkpoint is left untouched. Covers both the main model and the MTP draft.
+
+    ``model_arch_config.quantization_config`` is a separate dict, snapshotted in
+    ``ModelConfig.__init__`` before this hook runs, and it is what
+    ``_verify_quantization`` reads when resolving the quant method. Patch it
+    alongside the hf configs so the rewrite lands before resolution; otherwise
+    the main model still resolves to compressed-tensors.
+    """
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        for cfg in (
+            model_config.hf_config,
+            model_config.hf_text_config,
+            model_config.model_arch_config,
+        ):
+            quant_config = getattr(cfg, "quantization_config", None)
+            if (
+                isinstance(quant_config, dict)
+                and quant_config.get("quant_method") == "compressed-tensors"
+                and quant_config.get("format") == "mxfp4-pack-quantized"
+            ):
+                quant_config["quant_method"] = "mxfp4"
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -411,23 +444,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-        cache_config = vllm_config.cache_config
-
-        # Disable calculate_kv_scales for hybrid models: uninitialized
-        # recurrent state corrupts scales during the calibration pass.
-        # See issue: https://github.com/vllm-project/vllm/issues/37554
-
-        if cache_config.calculate_kv_scales:
-            logger.warning(
-                "Disabling calculate_kv_scales for hybrid model '%s'. "
-                "Hybrid models with recurrent layers (GDN, Mamba, SSM) "
-                "produce unreliable KV cache scales during the "
-                "calibration pass because recurrent state is "
-                "uninitialized. Using default scale of 1.0 instead.",
-                vllm_config.model_config.model,
-            )
-            cache_config.calculate_kv_scales = False
-
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -438,6 +454,28 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
         pooler_config = model_config.pooler_config
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
+
+
+class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
+    """Config handler for Jina Embeddings V5 embedding models."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Enable the bidirectional encoder backbone for -nano checkpoints.
+
+        The V5 family ships more than one backbone under a single
+        `architectures` entry: the `-small` variants are Qwen3 decoders, while
+        `-nano` is a bidirectional EuroBERT encoder. Upstream ships a separate
+        `configuration_*.py` per repository, so the config carries no backbone
+        field and the encoder variants are only identifiable by
+        `is_decoder=False`. For encoder checkpoints, set `is_causal=False` so the
+        Llama backbone uses EncoderOnlyAttention; `JinaEmbeddingsV5Model` then
+        dispatches to its encoder implementation.
+        """
+        if getattr(model_config.hf_config, "is_decoder", True):
+            return
+
+        model_config.hf_config.is_causal = False
 
 
 class JinaForRankingConfig(VerifyAndUpdateConfig):
@@ -556,10 +594,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = (
-                    "all" if model_config.supports_mamba_prefix_caching else "align"
-                )
-                logger.warning(
+                cache_config.mamba_cache_mode = "align"
+                logger.info(
                     "Mamba cache mode is set to '%s' for %s by default "
                     "when prefix caching is enabled",
                     cache_config.mamba_cache_mode,
@@ -579,13 +615,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
-            logger.info(
-                "Warning: Prefix caching in Mamba cache '%s' "
-                "mode is currently enabled. "
-                "Its support for Mamba layers is experimental. "
-                "Please report any issues you may observe.",
-                cache_config.mamba_cache_mode,
-            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -767,6 +796,20 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             )
 
 
+class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+
+        # Text-only Qwen3.5 models use one-dimensional positions. Remove the
+        # M-RoPE fields inherited from the multimodal configuration.
+        hf_text_config = vllm_config.model_config.hf_text_config
+        rope_parameters = getattr(hf_text_config, "rope_parameters", None)
+        if rope_parameters is not None:
+            rope_parameters.pop("mrope_section", None)
+            rope_parameters.pop("mrope_interleaved", None)
+
+
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
     """Apply the attention contract declared by a ColQwen3.5 checkpoint."""
 
@@ -867,8 +910,11 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
+    "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
@@ -883,7 +929,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
+    "Qwen3_5ForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,

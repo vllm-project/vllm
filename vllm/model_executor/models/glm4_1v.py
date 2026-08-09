@@ -99,6 +99,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import get_processor_cls_name_from_config
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -535,7 +536,8 @@ class Glm4vVisionEmbeddings(nn.Module):
         total_seq = h_coords.shape[0]
         device = pos_embed_weight.device
 
-        # Move coordinates to correct device
+        # Move coordinates to correct device. The only caller already hands
+        # these over pinned + non-blocking, so this is normally a no-op.
         h_coords, w_coords = h_coords.to(device), w_coords.to(device)
 
         # Handle empty sequence case
@@ -816,10 +818,15 @@ class Glm4vVisionTransformer(nn.Module):
             )
 
             lengths = [h * w] * t
-            image_shapes = torch.tensor([[t, h, w]], device=device)
+            image_shapes = async_tensor_h2d(
+                [[t, h, w]], dtype=torch.long, device=device
+            )
 
-            h_coords_repeated = h_coords.repeat(t)
-            w_coords_repeated = w_coords.repeat(t)
+            # Build the coordinates on the host (cheap integer math) but move
+            # them across pinned + non-blocking, so the consumer's
+            # `.to(device)` below is a no-op rather than a blocking H2D.
+            h_coords_repeated = async_tensor_h2d(h_coords.repeat(t), device=device)
+            w_coords_repeated = async_tensor_h2d(w_coords.repeat(t), device=device)
 
             embeds = self.embeddings(
                 embeddings=torch.zeros(
@@ -1082,8 +1089,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
         # NOTE: Frames are padded to be divisible by `temporal_patch_size`
-        # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
-        padded_num_frames = num_frames + num_frames % temporal_patch_size
+        # https://github.com/huggingface/transformers/blob/v5.13.0/src/transformers/models/qwen2_vl/video_processing_qwen2_vl.py#L249-L252
+        padded_num_frames = num_frames + (-num_frames % temporal_patch_size)
 
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
