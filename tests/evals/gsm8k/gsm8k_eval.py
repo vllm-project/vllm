@@ -84,6 +84,7 @@ async def call_vllm_api(
     stop: list[str] | None = None,
     url: str | None = None,
     seed: int | None = None,
+    indexer_topk_prompt_start: int | None = None,
 ) -> tuple[str, int]:
     """Call vLLM's OpenAI-compatible completions endpoint.
 
@@ -98,6 +99,8 @@ async def call_vllm_api(
     }
     if seed is not None:
         data["seed"] = seed
+    if indexer_topk_prompt_start is not None:
+        data["indexer_topk_prompt_start"] = indexer_topk_prompt_start
 
     try:
         async with session.post(f"{url}/v1/completions", json=data) as response:
@@ -120,6 +123,7 @@ async def call_vllm_chat_api(
     stop: list[str] | None = None,
     url: str | None = None,
     seed: int | None = None,
+    indexer_topk_prompt_start: int | None = None,
 ) -> tuple[str, int]:
     """Call vLLM's OpenAI-compatible chat completions endpoint."""
     data = {
@@ -131,6 +135,8 @@ async def call_vllm_chat_api(
     }
     if seed is not None:
         data["seed"] = seed
+    if indexer_topk_prompt_start is not None:
+        data["indexer_topk_prompt_start"] = indexer_topk_prompt_start
 
     try:
         async with session.post(f"{url}/v1/chat/completions", json=data) as response:
@@ -218,6 +224,7 @@ def evaluate_gsm8k(
     request_timeout_seconds: float = 600,
     gen_prefix: str = "",
     max_concurrency: int | None = None,
+    indexer_topk_prompt_start: int | None = None,
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -246,6 +253,7 @@ def evaluate_gsm8k(
                     stop=stop,
                     url=base_url,
                     seed=seed,
+                    indexer_topk_prompt_start=indexer_topk_prompt_start,
                 )
             else:
                 answer, tokens = await call_vllm_api(
@@ -256,6 +264,7 @@ def evaluate_gsm8k(
                     stop=stop,
                     url=base_url,
                     seed=seed,
+                    indexer_topk_prompt_start=indexer_topk_prompt_start,
                 )
             states[i] = answer
             output_tokens[i] = tokens
@@ -362,6 +371,15 @@ def main() -> None:
         type=int,
         help="Maximum number of concurrent requests",
     )
+    parser.add_argument(
+        "--indexer-topk-prompt-start",
+        type=int,
+        default=None,
+        help=(
+            "Optional indexer_topk_prompt_start sent in each request; "
+            "-1 skips prompt data."
+        ),
+    )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
@@ -375,6 +393,7 @@ def main() -> None:
         temperature=args.temperature,
         seed=args.seed,
         max_concurrency=args.max_concurrency,
+        indexer_topk_prompt_start=args.indexer_topk_prompt_start,
     )
 
     # Print results to terminal
