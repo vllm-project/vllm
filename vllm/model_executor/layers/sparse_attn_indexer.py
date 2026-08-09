@@ -759,9 +759,6 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
-        # Optional capture callback set by GPUModelRunner when
-        # ``enable_return_indexer_topk`` is active. Called with the
-        # topk-indices slice after each forward.
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
@@ -779,11 +776,9 @@ class SparseAttnIndexer(CustomOp):
             )
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None]) -> None:
-        """Set the callback used to export top-k indices after each forward."""
         self.capture_fn = capture_fn
 
     def dispatch_capture(self, num_tokens: int) -> None:
-        """Dispatch a capture for paths that call the kernel directly."""
         if self.capture_fn is not None:
             self.capture_fn(self.topk_indices_buffer[:num_tokens, : self.topk_tokens])
 
@@ -840,9 +835,6 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
         )
-        # Capture topk indices for return_indexer_topk if enabled.
-        # The op writes into ``topk_indices_buffer[:num_tokens, :topk_tokens]``;
-        # we slice to the actual token count and forward to the capturer.
         self.dispatch_capture(hidden_states.shape[0])
         return result
 

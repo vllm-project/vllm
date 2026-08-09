@@ -205,13 +205,7 @@ class RoutedExpertsLists(NamedTuple):
 
 
 class IndexerTopkTensors(NamedTuple):
-    """Device-side snapshot of indexer topk indices, pending async D2H.
-
-    Mirrors :class:`RoutedExpertsTensors` but for sparse-attention topk
-    indices. Shape:
-      - ``topk_data``: (num_scheduled_tokens, num_indexer_layers, index_topk)
-      - ``slot_mapping``: (num_scheduled_tokens,)
-    """
+    """Device-side indexer topk indices, mirrors :class:`RoutedExpertsTensors`."""
 
     topk_data: torch.Tensor
     slot_mapping: torch.Tensor
@@ -238,13 +232,9 @@ class IndexerTopkTensors(NamedTuple):
 
 
 class IndexerTopkLists(NamedTuple):
-    """CPU-side indexer topk, the form :meth:`IndexerTopkManager.store_batch`
-    consumes.
-    """
+    """CPU-side indexer topk, consumed by :meth:`IndexerTopkManager.store_batch`."""
 
-    # (num_scheduled_tokens, num_indexer_layers, index_topk)
     topk_data: np.ndarray
-    # (num_scheduled_tokens,)
     slot_mapping: np.ndarray
 
 
@@ -351,8 +341,6 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
-    # Per-token indexer topk indices (sparse-attention selected KV slots).
-    # ``None`` when ``enable_return_indexer_topk`` is off.
     indexer_topk: IndexerTopkLists | None = None
 
     @staticmethod

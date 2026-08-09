@@ -43,7 +43,6 @@ class CompletionOutput:
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
     routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
-    # [seq_len, num_indexer_layers, index_topk]
     indexer_topk: np.ndarray | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
