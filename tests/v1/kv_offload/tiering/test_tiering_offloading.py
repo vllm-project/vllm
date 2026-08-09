@@ -251,6 +251,55 @@ class TestTieringOffloadingManager:
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
 
+    def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
+        """A failed promotion still finalizes the primary slots with
+        success=False; the tier corrects its own verdict."""
+        from unittest.mock import patch
+
+        from vllm.v1.kv_offload.tiering.base import JobResult
+
+        self._start_request()
+        # Register an in-flight promotion job for tier1 by hand.
+        job_id = self.manager._next_job_id()
+        self.manager._transfer_jobs[job_id] = JobMetadata(
+            job_id=job_id,
+            keys=to_keys([1, 2]),
+            block_ids=[0, 1],
+            is_promotion=True,
+            req_context=_CTX,
+        )
+        failed = JobResult(job_id=job_id, success=False)
+        with (
+            patch.object(
+                self.secondary_tier1, "get_finished_jobs", return_value=[failed]
+            ),
+            patch.object(self.primary_tier, "complete_write") as completed,
+        ):
+            self.manager._process_finished_jobs()
+        completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
+
+    def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
+        from unittest.mock import patch
+
+        from vllm.v1.kv_offload.tiering.base import JobResult
+
+        self._start_request()
+        job_id = self.manager._next_job_id()
+        self.manager._transfer_jobs[job_id] = JobMetadata(
+            job_id=job_id,
+            keys=to_keys([1]),
+            block_ids=[0],
+            is_promotion=True,
+            req_context=_CTX,
+        )
+        ok = JobResult(job_id=job_id, success=True)
+        with (
+            patch.object(self.secondary_tier1, "get_finished_jobs", return_value=[ok]),
+            patch.object(self.primary_tier, "complete_write") as completed,
+        ):
+            self.manager._process_finished_jobs()
+        completed.assert_called_once_with(to_keys([1]), _CTX, True)
+
     def test_take_events_aggregates_tier_owned_events(self, manager_setup):
         primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
         secondary_event1 = OffloadingEvent(to_keys([2]), Medium.STORAGE, removed=False)
@@ -402,6 +451,53 @@ class TestTieringOffloadingManager:
 
         # Next lookup should succeed
         assert count_hits(self.manager, blocks) == 3
+
+    @pytest.mark.parametrize(
+        ("successful_indices", "expected_results"),
+        [
+            (
+                (0, 2),
+                [LookupResult.HIT, LookupResult.MISS, LookupResult.HIT],
+            ),
+            (
+                None,
+                [LookupResult.MISS, LookupResult.MISS, LookupResult.MISS],
+            ),
+        ],
+        ids=["partial", "legacy-full-failure"],
+    )
+    def test_failed_promotion_keeps_only_successful_blocks(
+        self, manager_setup, successful_indices, expected_results
+    ):
+        blocks = to_keys(range(3))
+        for block in blocks:
+            self.secondary_tier1.blocks[block] = True
+
+        def submit_partial(job_metadata: JobMetadata) -> None:
+            successful_keys = (
+                None
+                if successful_indices is None
+                else tuple(blocks[i] for i in successful_indices)
+            )
+            self.secondary_tier1.completed_jobs.append(
+                JobResult(
+                    job_id=job_metadata.job_id,
+                    success=False,
+                    successful_keys=successful_keys,
+                )
+            )
+
+        self.secondary_tier1.submit_load = submit_partial
+
+        for block in blocks:
+            assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        assert [
+            self.primary_tier.lookup(block, _CTX) for block in blocks
+        ] == expected_results
 
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample on allocation."""

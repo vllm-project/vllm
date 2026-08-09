@@ -3,11 +3,14 @@
 """Unit tests for SharedOffloadRegion."""
 
 import contextlib
+import ctypes
+import errno
 import mmap
 import os
 import threading
 import time
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -54,6 +57,29 @@ def _cleanup_file(path: str) -> None:
     """Best-effort file removal for test teardown."""
     with contextlib.suppress(FileNotFoundError):
         os.unlink(path)
+
+
+def _page_residency(mmap_obj: mmap.mmap, length: int) -> list[bool]:
+    """Return Linux page-residency bits for a writable mmap."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        mincore = libc.mincore
+    except AttributeError:
+        pytest.skip("mincore is unavailable")
+
+    page_count = (length + PAGE_SIZE - 1) // PAGE_SIZE
+    mincore.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_ubyte),
+    ]
+    mincore.restype = ctypes.c_int
+    vector = (ctypes.c_ubyte * page_count)()
+    address = ctypes.addressof(ctypes.c_ubyte.from_buffer(mmap_obj))
+    result = mincore(ctypes.c_void_p(address), length, vector)
+    if result != 0:
+        raise OSError(ctypes.get_errno())
+    return [bool(value & 1) for value in vector]
 
 
 @contextlib.contextmanager
@@ -406,6 +432,139 @@ def test_file_has_correct_size(iid):
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
 
 
+def test_madvise_success_selects_madvise_population(iid, monkeypatch):
+    """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
+    helper must never be invoked on a kernel that accepts the advice.
+
+    Spies on both helpers so we can verify call counts: 1 probe call +
+    N populate calls, fallback 0 times.
+    """
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    madvise_calls: list[tuple[int, int, int]] = []
+    fallback_calls: list[tuple[int, int]] = []
+
+    def _spy_madvise(mm, off, ln):
+        madvise_calls.append((off, ln, id(mm)))
+
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
+
+    monkeypatch.setattr(sor, "_madvise_populate_write", _spy_madvise)
+    monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
+
+    num_blocks = 3
+    num_workers = 2
+    with _region(iid, num_blocks=num_blocks, num_workers=num_workers, rank=1):
+        # 1 probe (PAGESIZE) + N populate calls (one per block per worker column).
+        expected_populate = num_blocks  # ranked path: one call per block
+        mmap_id = madvise_calls[0][2]
+        assert madvise_calls == [
+            (0, mmap.PAGESIZE, mmap_id),
+            (mmap.PAGESIZE, mmap.PAGESIZE, mmap_id),
+            (3 * mmap.PAGESIZE, mmap.PAGESIZE, mmap_id),
+            (5 * mmap.PAGESIZE, mmap.PAGESIZE, mmap_id),
+        ]
+        assert len(madvise_calls) == 1 + expected_populate
+        assert fallback_calls == [], (
+            "native-path constructor must not invoke the fallback helper"
+        )
+
+
+def test_madvise_einval_selects_fallback_for_ranked_region(iid, monkeypatch):
+    """An EINVAL probe must select fallback for every ranked block."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    fallback_calls: list[tuple[int, int]] = []
+    real_fallback = sor._fallback_populate_write
+
+    def _raise_einval(mm, off, ln):
+        raise OSError(errno.EINVAL, "simulated unsupported kernel")
+
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
+        return real_fallback(mm, off, ln)
+
+    monkeypatch.setattr(sor, "_madvise_populate_write", _raise_einval)
+    monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
+
+    with _region(iid, num_blocks=3, num_workers=2, rank=1):
+        assert fallback_calls == [
+            (mmap.PAGESIZE, mmap.PAGESIZE),
+            (3 * mmap.PAGESIZE, mmap.PAGESIZE),
+            (5 * mmap.PAGESIZE, mmap.PAGESIZE),
+        ]
+
+
+def test_madvise_einval_selects_fallback_for_unranked_region(iid, monkeypatch):
+    """An EINVAL probe must select fallback for the whole unranked region."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    fallback_calls: list[tuple[int, int]] = []
+    real_fallback = sor._fallback_populate_write
+
+    def _raise_einval(mm, off, ln):
+        raise OSError(errno.EINVAL, "simulated unsupported kernel")
+
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
+        return real_fallback(mm, off, ln)
+
+    monkeypatch.setattr(sor, "_madvise_populate_write", _raise_einval)
+    monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
+
+    with _region(iid, num_blocks=3, num_workers=2, rank=None):
+        assert fallback_calls == [(0, 6 * mmap.PAGESIZE)]
+
+
+def test_fallback_populate_write_preserves_bytes_and_faults_pages():
+    """Fallback preserves existing bytes and touches every target page."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    size = 3 * mmap.PAGESIZE
+    if not hasattr(mmap, "MADV_DONTNEED"):
+        pytest.skip("MADV_DONTNEED is unavailable")
+
+    mmap_obj = mmap.mmap(
+        -1,
+        size,
+        flags=mmap.MAP_SHARED,
+        prot=mmap.PROT_READ | mmap.PROT_WRITE,
+    )
+    try:
+        mmap_obj.madvise(mmap.MADV_DONTNEED, 0, size)
+        if any(_page_residency(mmap_obj, size)):
+            pytest.skip("kernel did not discard anonymous mmap pages")
+
+        mmap_obj[0] = 0xAB
+        assert _page_residency(mmap_obj, size) == [True, False, False]
+
+        sor._fallback_populate_write(mmap_obj, 0, size)
+
+        assert _page_residency(mmap_obj, size) == [True, True, True]
+        assert mmap_obj[0] == 0xAB
+    finally:
+        mmap_obj.close()
+
+
+def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
+    """Only EINVAL triggers the fallback.  Other OSErrors (e.g. EIO) must
+    propagate out of __init__, not be silently masked by the fallback branch.
+    """
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(
+        sor,
+        "_madvise_populate_write",
+        lambda mm, off, ln: (_ for _ in ()).throw(
+            OSError(errno.EIO, "simulated I/O failure")
+        ),
+    )
+    with pytest.raises(OSError) as exc_info:
+        _make_region(iid)
+    assert exc_info.value.errno == errno.EIO
+
+
 # ---------------------------------------------------------------------------
 # Multi-worker race — concurrent construction
 # ---------------------------------------------------------------------------
@@ -612,3 +771,72 @@ def test_wait_for_file_size_timeout(tmp_path):
             _wait_for_file_size(fd, PAGE_SIZE, timeout=0.1)
     finally:
         os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Constructor — capacity validation
+# ---------------------------------------------------------------------------
+
+
+def test_insufficient_space_raises_clear_error(monkeypatch):
+    """A failed creator capacity check must clean up and give a clear error."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_open = MagicMock(return_value=9999)
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", mock_open)
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=4,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_unlink.assert_called_once_with(mmap_path)
+    mock_close.assert_called_once_with(9999)
+
+
+def test_ftruncate_failure_cleans_up_creator(monkeypatch):
+    """A failed creator ftruncate must close and unlink before re-raising."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+    monkeypatch.setattr(
+        region.os,
+        "ftruncate",
+        MagicMock(side_effect=OSError("ftruncate failed")),
+    )
+
+    with pytest.raises(OSError, match="ftruncate failed"):
+        SharedOffloadRegion(
+            engine_id=engine_id,
+            num_blocks=4,
+            rank=0,
+            kv_bytes_per_block=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_unlink.assert_called_once_with(mmap_path)
+    mock_close.assert_called_once_with(9999)
