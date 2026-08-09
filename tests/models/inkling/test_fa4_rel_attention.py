@@ -14,9 +14,9 @@ with causal (and optionally sliding-window) masking handled by the backend.
 """
 
 import importlib
-import re
 
 import pytest
+import regex as re
 import torch
 
 from vllm.models.inkling.nvidia.attention import (

@@ -539,7 +539,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
-| `InklingForConditionalGeneration` | Inkling | T + I<sup>*+</sup> + A<sup>*+</sup> | `thinkingmachines/Inkling-NVFP4`, `thinkingmachines/Inkling-Small-NVFP4`, etc. | | ✅︎ |
+| `InklingForConditionalGeneration` | Inkling | T + I<sup>+</sup> + A<sup>*+</sup> | `thinkingmachines/Inkling-NVFP4`, `thinkingmachines/Inkling-Small-NVFP4`, etc. | | ✅︎ |
 | `InternS1ForConditionalGeneration` | Intern-S1 | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1`, `internlm/Intern-S1-mini`, etc. | ✅︎ | ✅︎ |
 | `InternS1ProForConditionalGeneration` | Intern-S1-Pro | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1-Pro`, etc. | ✅︎ | ✅︎ |
 | `InternS2MobiusForConditionalGeneration` | Intern-S2-Mobius | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S2-Mobius` | ✅︎ | ✅︎ |

@@ -25,8 +25,8 @@ from vllm.model_executor.models.registry import (
 from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
-from .utils import skip_if_capability_restricted
 from .registry import HF_EXAMPLE_MODELS
+from .utils import skip_if_capability_restricted
 
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
