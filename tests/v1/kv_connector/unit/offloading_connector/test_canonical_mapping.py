@@ -381,7 +381,9 @@ def test_fail_closed_cases():
     quant_spec = _full_spec(kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD)
     assert _try_mapping(quant_spec, _split_nhd_cache(quant_spec), _ctx(0, tp=4)) is None
     # Compressed MLA slots are not 1:1 with tokens
-    assert _try_mapping(_mla_spec(tokens_per_state=2), None, _ctx(0, tp=2, dcp=2)) is None
+    assert (
+        _try_mapping(_mla_spec(tokens_per_state=2), None, _ctx(0, tp=2, dcp=2)) is None
+    )
     # Unrecognized physical layouts
     swapped = torch.zeros(
         NUM_BLOCKS,

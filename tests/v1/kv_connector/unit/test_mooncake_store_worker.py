@@ -1952,8 +1952,8 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = lambda keys, addrs, sizes, *_args: (
-        [256] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, *_args: [256] * len(keys)
     )
 
     full_spec = FullAttentionSpec(

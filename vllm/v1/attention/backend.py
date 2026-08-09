@@ -162,12 +162,20 @@ class AttentionBackend(ABC):
     ) -> "AttentionSpec":
         """Adjust the layer's KV cache spec for this backend's kernels.
 
-        The layer builds a spec from the model config; a backend overrides this
-        to apply what only it knows: fields it owns (e.g.
-        ``separate_kv_head_groups`` when its kernels need K and V as distinct
-        block-contiguous caches) or a backend-specific spec subclass for its
-        cache dtypes. Return an ``AttentionSpec``; changing the concrete
-        subclass is allowed, changing model-derived fields is not.
+        NOTE: temporary compatibility API. Today the Attention layer builds
+        the spec from the model config and the backend only gets to adjust it
+        post-hoc; the end state is for the backend to build and return the
+        spec directly (it owns the kernel-facing fields), at which point this
+        hook goes away.
+
+        A backend overrides this to apply what only it knows: fields it owns
+        (e.g. ``separate_kv_head_groups`` when its kernels need K and V as
+        distinct block-contiguous caches) or a backend-specific spec subclass
+        for its cache dtypes. ``kv_cache_dtype`` is passed separately because
+        ``spec.kv_quant_mode`` is a lossy projection of it (all TurboQuant
+        presets collapse to one enum value). Return an ``AttentionSpec``;
+        changing the concrete subclass is allowed, changing model-derived
+        fields is not.
         """
         return spec
 
