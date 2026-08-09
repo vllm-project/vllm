@@ -514,6 +514,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        member_groups = self._member_group_ids or None
 
         # Expand D's logical IDs using the ratio learned during the
         # NIXL handshake. ``meta`` is freshly built by
@@ -591,6 +592,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                region_group_ids=member_groups,
             )
             if handle is not None:
                 handles.append(handle)
@@ -610,6 +612,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        region_group_ids: tuple[int, ...] | None = None,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
