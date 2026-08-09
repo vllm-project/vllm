@@ -2931,3 +2931,64 @@ class TestMarkersAbsentFromTheVocabStayAsText:
 
         assert [tc.function.name for tc in result.tool_calls] == ["f"]
         assert "<|python_" not in (result.content or "")
+
+
+class TestKeyScanResumesExactly:
+    """The resumable envelope-key scan must equal the one-shot function.
+
+    ``_try_extract_name`` runs on every delta, and until the top-level
+    ``"name"`` arrives it rescanned the whole accumulated envelope each
+    time -- quadratic for ordinary prose containing a stray ``{`` (12.4 s
+    for 32 KB, against the legacy parser's linear scan).  ``_KeyScan``
+    carries the scan across feeds instead.  Resuming is only sound because
+    the scan is a left-to-right fold with no lookahead, so the property to
+    pin is that feeding a string in *any* number of pieces gives what a
+    single pass over the whole string gives.
+    """
+
+    CORPUS = [
+        '{"name": "f", "parameters": {"a": 1}}',
+        '{"parameters": {"a": 1}, "name": "f"}',
+        '{"a": {"name": "nested"}, "name": "outer"}',
+        '{"name": "f"',
+        '{"name"',
+        '{"name":',
+        '{"name":    ',
+        '{"na\\u006de": "escaped key"}',
+        '{"name": "has \\"quote\\" inside"}',
+        '{"name": "brace } inside"}',
+        'prose before {"name": "f", "parameters": {}}',
+        "here is some text: {aaaaaaaaaaaaaaaaaaaa",
+        '{"other": 1, "name": "f"}',
+        "",
+        "{",
+        '[{"name": "f"}]',
+    ]
+
+    @pytest.mark.parametrize("text", CORPUS)
+    @pytest.mark.parametrize("chunk", [1, 2, 3, 7, 10_000])
+    def test_incremental_equals_one_shot(self, text, chunk):
+        from vllm.parser.llama_json import _KeyScan, _scan_top_level_start
+
+        keys = ("name",)
+        scan = _KeyScan()
+        for end in range(0, len(text) + 1, chunk) if chunk < len(text) else [len(text)]:
+            scan.start(text[:end], keys)
+        got = scan.start(text, keys)
+
+        assert got == _scan_top_level_start(text, keys)
+
+    @pytest.mark.parametrize("text", CORPUS)
+    def test_every_prefix_agrees(self, text):
+        """Feed one character at a time and check *each* intermediate answer.
+
+        A scan that only agreed at the end could still report a wrong
+        offset mid-stream, which is what the caller acts on.
+        """
+        from vllm.parser.llama_json import _KeyScan, _scan_top_level_start
+
+        keys = ("name",)
+        scan = _KeyScan()
+        for end in range(len(text) + 1):
+            prefix = text[:end]
+            assert scan.start(prefix, keys) == _scan_top_level_start(prefix, keys)
