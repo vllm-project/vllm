@@ -162,8 +162,7 @@ vllm-bench \
   --hf-subset narrativeqa --hf-split test --hf-output-len 512 --num-prompts 200
 
 # Gated HuggingFace dataset (auth via HF_TOKEN or the `hf auth login` token file).
-# Private datasets work too when the repo stores native parquet files
-# (pass both --hf-subset and --hf-split for private repos).
+# Private datasets work too when the repo stores native parquet/json/jsonl files.
 HF_TOKEN=hf_xxx vllm-bench \
   --backend openai-chat --base-url http://127.0.0.1:8000 --model <model-name> \
   --dataset-name hf --dataset-path lmsys/lmsys-chat-1m \

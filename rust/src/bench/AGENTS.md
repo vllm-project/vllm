@@ -48,7 +48,7 @@ cargo test -p vllm-bench -- --ignored
 - `src/datasets/sharegpt.rs` — ShareGPT JSON loader + HuggingFace Hub auto-download with caching
 - `src/datasets/sonnet.rs` and `src/datasets/sonnet.txt` — Sonnet dataset (built-in Shakespeare sonnets via `include_str!("sonnet.txt")`; controllable token length + shared prefix; mirrors Python `SonnetDataset`)
 - `src/datasets/speed_bench.rs` — NVIDIA SPEED-Bench loader (HF datasets-server API, 6 configs, 11 categories, local cache)
-- `src/datasets/hf_dataset.rs` — Generic HuggingFace dataset loader (parquet shards via hf-hub into the standard HF hub cache; datasets-server for config/split discovery; native main-branch parquet fallback for private datasets; column auto-detection)
+- `src/datasets/hf_dataset.rs` — Generic HuggingFace dataset loader (parquet shards via hf-hub into the standard HF hub cache; datasets-server for config/split discovery; native main-branch parquet/JSON fallback for private datasets; column auto-detection)
 - `src/datasets/custom.rs` — Custom JSONL dataset (`{"prompt": ..., "output_tokens": ...}` per line; `--custom-output-len -1` uses per-line output_tokens; prompts always sent raw — no client-side chat template)
 - `src/datasets/prefix_repetition.rs` — Prefix repetition dataset (N shared prefixes × fresh random suffixes, standard prefix-cache stress; mirrors Python `PrefixRepetitionRandomDataset`)
 - `src/datasets/random_rerank.rs` — Random rerank dataset (one query + batched documents per request for `vllm-rerank`; `--no-reranker` for embedding-based scoring; mirrors Python `RandomDatasetForReranking`)

@@ -86,12 +86,13 @@ async fn get_with_retry(
 /// Returns `(rows, resolved_config, resolved_split)`.
 ///
 /// If both `subset` and `split` are provided, the `/info` call is skipped as an optimization.
-/// Rows come from parquet shards downloaded via hf-hub into the standard HF hub cache:
-/// the dataset-viewer's `refs/convert/parquet` export when available, otherwise native
-/// `*.parquet` files on the main branch (e.g. private datasets the viewer does not
-/// process). Shard order is shuffled with `seed` (unless `disable_shuffle`) so samples
-/// are not always drawn from the start of the split, and up to twice `num_rows_needed`
-/// rows are read so downstream validity filtering can backfill from real rows.
+/// Rows come from data files downloaded via hf-hub into the standard HF hub cache: the
+/// dataset-viewer's `refs/convert/parquet` export when available, otherwise native
+/// parquet/JSON/JSONL files on the main branch (e.g. private datasets the viewer does
+/// not process). Shard order is shuffled with `seed` (unless `disable_shuffle`) so
+/// samples are not always drawn from the start of the split, and up to twice
+/// `num_rows_needed` rows are read so downstream validity filtering can backfill from
+/// real rows.
 pub async fn download_hf_dataset(
     dataset: &str,
     subset: Option<&str>,
@@ -127,12 +128,24 @@ pub async fn download_hf_dataset(
     let (resolved_config, resolved_split) = if let (Some(cfg), Some(spl)) = (subset, split) {
         // Both provided — skip /info call
         (cfg.to_string(), spl.to_string())
-    } else {
-        // Call /info to discover available configs and splits
+    } else if let Some(info) = {
+        // Call /info to discover available configs and splits. Private datasets are not
+        // processed by the dataset viewer; fall back to datasets-library defaults.
         let info_url =
             format!("https://datasets-server.huggingface.co/info?dataset={encoded_dataset}");
-        let info = get_with_retry(&client, &info_url, "HF dataset /info").await?;
-
+        match get_with_retry(&client, &info_url, "HF dataset /info").await {
+            Ok(info) => Some(info),
+            Err(e) => {
+                tracing::warn!(
+                    dataset,
+                    error = %e,
+                    "datasets-server /info unavailable (private dataset?); \
+                     assuming config 'default' and split 'train'"
+                );
+                None
+            }
+        }
+    } {
         let dataset_info =
             info.get("dataset_info").and_then(|d| d.as_object()).ok_or_else(|| {
                 BenchError::Config(format!(
@@ -192,6 +205,11 @@ pub async fn download_hf_dataset(
         };
 
         (resolved_config, resolved_split)
+    } else {
+        (
+            subset.unwrap_or("default").to_string(),
+            split.unwrap_or("train").to_string(),
+        )
     };
 
     tracing::info!(
@@ -212,7 +230,7 @@ pub async fn download_hf_dataset(
                 );
                 (
                     "main",
-                    native_parquet_shards(dataset, &resolved_config, &resolved_split).await?,
+                    native_data_files(dataset, &resolved_config, &resolved_split).await?,
                 )
             }
         };
@@ -281,11 +299,14 @@ async fn convert_parquet_shards(
     Ok(shard_paths)
 }
 
-/// Discover native `*.parquet` files on the main branch matching a config/split,
-/// following the datasets library's default layout conventions (config directories,
-/// split-named files). Used when the dataset viewer has no parquet export, e.g. for
-/// private datasets.
-async fn native_parquet_shards(dataset: &str, config: &str, split: &str) -> Result<Vec<String>> {
+/// File extensions the native main-branch fallback can decode.
+const NATIVE_DATA_EXTENSIONS: &[&str] = &[".parquet", ".json", ".jsonl", ".ndjson"];
+
+/// Discover native data files on the main branch matching a config/split, following
+/// the datasets library's default layout conventions (config directories, split-named
+/// files, unlabeled data files = train). Used when the dataset viewer has no parquet
+/// export, e.g. for private datasets.
+async fn native_data_files(dataset: &str, config: &str, split: &str) -> Result<Vec<String>> {
     let repo = crate::hub::HubRepo::dataset(dataset.to_string()).map_err(BenchError::Config)?;
     let files = repo.list_files().await.map_err(|e| {
         BenchError::Config(format!(
@@ -293,36 +314,61 @@ async fn native_parquet_shards(dataset: &str, config: &str, split: &str) -> Resu
         ))
     })?;
 
-    let parquet: Vec<String> = files.into_iter().filter(|f| f.ends_with(".parquet")).collect();
-
-    // Multi-config layout scopes files under a config directory (e.g. "main/test-*.parquet")
-    let config_prefix = format!("{config}/");
-    let scoped: Vec<String> = if parquet.iter().any(|f| f.starts_with(&config_prefix)) {
-        parquet.into_iter().filter(|f| f.starts_with(&config_prefix)).collect()
-    } else {
-        parquet
-    };
-
-    let matched: Vec<String> =
-        scoped.into_iter().filter(|f| path_matches_split(f, split)).collect();
-
+    let matched = select_native_files(files, config, split);
     if matched.is_empty() {
         return Err(BenchError::Config(format!(
-            "HF dataset '{dataset}' has no usable parquet data for config '{config}' split \
-             '{split}': no dataset-viewer export and no native *.parquet files matching the \
-             split on the main branch. Check the dataset page or the --hf-subset/--hf-split \
-             values; non-parquet private datasets are not supported."
+            "HF dataset '{dataset}' has no usable data for config '{config}' split \
+             '{split}': no dataset-viewer parquet export and no native data files matching \
+             the split on the main branch. Check the dataset page or the \
+             --hf-subset/--hf-split values; private datasets must store parquet, json, or \
+             jsonl files."
         )));
     }
     Ok(matched)
 }
 
+/// Pure selection logic for [`native_data_files`].
+///
+/// Mirrors the datasets library's defaults: files may be scoped under a config
+/// directory; split-named files are preferred; a repo whose data files carry no split
+/// names at all maps everything to the "train" split.
+fn select_native_files(files: Vec<String>, config: &str, split: &str) -> Vec<String> {
+    let data: Vec<String> = files
+        .into_iter()
+        .filter(|f| NATIVE_DATA_EXTENSIONS.iter().any(|ext| f.ends_with(ext)))
+        .collect();
+
+    // Multi-config layout scopes files under a config directory (e.g. "main/test-*.parquet")
+    let config_prefix = format!("{config}/");
+    let scoped: Vec<String> = if data.iter().any(|f| f.starts_with(&config_prefix)) {
+        data.into_iter().filter(|f| f.starts_with(&config_prefix)).collect()
+    } else {
+        data
+    };
+
+    let matched: Vec<String> =
+        scoped.iter().filter(|f| path_matches_split(f, split)).cloned().collect();
+    if !matched.is_empty() {
+        return matched;
+    }
+
+    // No file carries the requested split name. If no file carries any split name,
+    // the datasets library maps them all to "train".
+    let split_keywords = ["train", "test", "validation", "valid", "dev"];
+    let any_labeled =
+        scoped.iter().any(|f| split_keywords.iter().any(|s| path_matches_split(f, s)));
+    if split == "train" && !any_labeled {
+        return scoped;
+    }
+    Vec::new()
+}
+
 /// Split match on a repo file path: a split-named file ("{split}-00000-of-00001.parquet",
-/// "{split}.parquet", "{split}_0.parquet") or a "{split}/" directory segment.
+/// "{split}.jsonl", "{split}_0.parquet") or a "{split}/" directory segment.
 fn path_matches_split(path: &str, split: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     base.strip_prefix(split)
-        .is_some_and(|rest| rest == ".parquet" || rest.starts_with('-') || rest.starts_with('_'))
+        .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('-') || rest.starts_with('_'))
         || path.starts_with(&format!("{split}/"))
         || path.contains(&format!("/{split}/"))
 }
@@ -346,25 +392,32 @@ async fn read_shards(
             shard = i + 1,
             total_shards,
             path = %shard_path,
-            "fetching parquet shard"
+            "fetching dataset shard"
         );
         let local_path = repo.get(&shard_path).await.map_err(BenchError::Config)?;
         let limit = target_rows - rows.len();
-        let shard_rows = tokio::task::spawn_blocking(move || read_parquet_rows(&local_path, limit))
-            .await
-            .map_err(|e| BenchError::Config(format!("parquet read task failed: {e}")))??;
+        let is_parquet = shard_path.ends_with(".parquet");
+        let shard_rows = tokio::task::spawn_blocking(move || {
+            if is_parquet {
+                read_parquet_rows(&local_path, limit)
+            } else {
+                read_json_rows(&local_path, limit)
+            }
+        })
+        .await
+        .map_err(|e| BenchError::Config(format!("shard read task failed: {e}")))??;
         rows.extend(shard_rows);
     }
 
     if rows.is_empty() {
         return Err(BenchError::Config(format!(
-            "HF dataset '{dataset}' parquet shards contained no rows"
+            "HF dataset '{dataset}' data files contained no rows"
         )));
     }
     tracing::info!(
         dataset,
         rows = rows.len(),
-        "loaded HF dataset from parquet shards"
+        "loaded HF dataset from data files"
     );
     Ok(rows)
 }
@@ -386,6 +439,50 @@ fn read_parquet_rows(path: &Path, limit: usize) -> Result<Vec<serde_json::Value>
             row.map_err(|e| BenchError::Config(format!("failed to decode parquet row: {e}")))?;
         rows.push(row.to_json_value());
     }
+    Ok(rows)
+}
+
+/// Read up to `limit` rows from a native JSON data file: a JSON array of objects, an
+/// object wrapping a single array field, or JSON Lines.
+fn read_json_rows(path: &Path, limit: usize) -> Result<Vec<serde_json::Value>> {
+    let content = std::fs::read_to_string(path)?;
+
+    let doc: Option<serde_json::Value> = serde_json::from_str(&content).ok();
+    let mut rows = match doc {
+        Some(serde_json::Value::Array(rows)) => rows,
+        // e.g. {"data": [...]} — a single array-of-objects field wrapping the rows
+        Some(serde_json::Value::Object(mut obj)) => {
+            let mut arrays: Vec<serde_json::Value> = obj
+                .iter_mut()
+                .filter(|(_, v)| {
+                    v.as_array().is_some_and(|a| !a.is_empty() && a.iter().all(|e| e.is_object()))
+                })
+                .map(|(_, v)| v.take())
+                .collect();
+            match (arrays.len(), arrays.pop()) {
+                (1, Some(serde_json::Value::Array(rows))) => rows,
+                _ => {
+                    return Err(BenchError::Config(
+                        "unsupported JSON data file layout: expected an array of rows, \
+                         an object with a single array-of-objects field, or JSON Lines"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        // Not a single JSON document — try JSON Lines
+        _ => content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(limit)
+            .map(|l| {
+                serde_json::from_str(l)
+                    .map_err(|e| BenchError::Config(format!("invalid JSON line in data file: {e}")))
+            })
+            .collect::<Result<Vec<serde_json::Value>>>()?,
+    };
+
+    rows.truncate(limit);
     Ok(rows)
 }
 
@@ -1402,12 +1499,18 @@ mod tests {
     // must find GSM8k's config-dir layout (run with --ignored).
     #[tokio::test]
     #[ignore]
-    async fn test_native_parquet_shards_main_branch() {
-        let shards = native_parquet_shards("openai/gsm8k", "main", "test").await.unwrap();
+    async fn test_native_data_files_main_branch() {
+        let shards = native_data_files("openai/gsm8k", "main", "test").await.unwrap();
         assert_eq!(shards, vec!["main/test-00000-of-00001.parquet".to_string()]);
+
+        // Single unlabeled JSON file maps to the train split (private-dataset layout)
+        let shards = native_data_files("Inferact/codex_swebenchpro_traces", "default", "train")
+            .await
+            .unwrap();
+        assert_eq!(shards, vec!["codex_swebenchpro.json".to_string()]);
     }
 
-    // --- native parquet split matching ---
+    // --- native data file selection ---
 
     #[test]
     fn test_path_matches_split() {
@@ -1420,6 +1523,7 @@ mod tests {
             "test"
         ));
         assert!(path_matches_split("test.parquet", "test"));
+        assert!(path_matches_split("test.jsonl", "test"));
         assert!(path_matches_split("test_0.parquet", "test"));
         assert!(path_matches_split("data/test/0000.parquet", "test"));
         assert!(path_matches_split("test/0000.parquet", "test"));
@@ -1431,5 +1535,90 @@ mod tests {
         assert!(!path_matches_split("testing-00000.parquet", "test"));
         assert!(!path_matches_split("contest/0000.parquet", "test"));
         assert!(!path_matches_split("data/latest/0000.parquet", "test"));
+    }
+
+    #[test]
+    fn test_select_native_files_split_labeled() {
+        let files = vec![
+            ".gitattributes".to_string(),
+            "README.md".to_string(),
+            "data/train-00000-of-00002.parquet".to_string(),
+            "data/train-00001-of-00002.parquet".to_string(),
+            "data/test-00000-of-00001.parquet".to_string(),
+        ];
+        let selected = select_native_files(files, "default", "test");
+        assert_eq!(
+            selected,
+            vec!["data/test-00000-of-00001.parquet".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_select_native_files_unlabeled_maps_to_train() {
+        let files = vec![
+            "README.md".to_string(),
+            "codex_swebenchpro.json".to_string(),
+        ];
+        let selected = select_native_files(files.clone(), "default", "train");
+        assert_eq!(selected, vec!["codex_swebenchpro.json".to_string()]);
+        // ...but only for the train split
+        assert!(select_native_files(files, "default", "test").is_empty());
+    }
+
+    #[test]
+    fn test_select_native_files_labeled_files_do_not_leak_to_train() {
+        // A repo with only test-labeled files has no train split
+        let files = vec!["data/test-00000-of-00001.parquet".to_string()];
+        assert!(select_native_files(files, "default", "train").is_empty());
+    }
+
+    #[test]
+    fn test_select_native_files_config_dir_scoping() {
+        let files = vec![
+            "main/test-00000-of-00001.parquet".to_string(),
+            "socratic/test-00000-of-00001.parquet".to_string(),
+        ];
+        let selected = select_native_files(files, "socratic", "test");
+        assert_eq!(
+            selected,
+            vec!["socratic/test-00000-of-00001.parquet".to_string()]
+        );
+    }
+
+    // --- native JSON data file reading ---
+
+    fn write_temp_file(name: &str, content: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("vllm-bench-test-json-{name}"));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_read_json_rows_array() {
+        let path = write_temp_file("array.json", r#"[{"a": 1}, {"a": 2}, {"a": 3}]"#);
+        let rows = read_json_rows(&path, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["a"], 1);
+    }
+
+    #[test]
+    fn test_read_json_rows_wrapped_object() {
+        let path = write_temp_file("wrapped.json", r#"{"data": [{"a": 1}, {"a": 2}]}"#);
+        let rows = read_json_rows(&path, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_read_json_rows_jsonl() {
+        let path = write_temp_file("rows.jsonl", "{\"a\": 1}\n{\"a\": 2}\n\n{\"a\": 3}\n");
+        let rows = read_json_rows(&path, 10).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2]["a"], 3);
+    }
+
+    #[test]
+    fn test_read_json_rows_unsupported_layout() {
+        let path = write_temp_file("scalar.json", r#"{"a": 1, "b": 2}"#);
+        assert!(read_json_rows(&path, 10).is_err());
     }
 }
