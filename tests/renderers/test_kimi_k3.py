@@ -351,3 +351,110 @@ async def test_render_messages_async_returns_token_prompt():
 
     assert prompt == {"prompt_token_ids": [4, 5]}
     assert conversation[0]["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# generation_prefix_len — issue #51465
+# ---------------------------------------------------------------------------
+
+class _PrefixAwareStubTokenizer(StubTokenizer):
+    """Returns full_ids when add_generation_prompt=True, base_ids otherwise.
+
+    Simulates the K3 chat template appending a channel-open stub of
+    ``len(full_ids) - len(base_ids)`` tokens when add_generation_prompt is on.
+    """
+
+    def __init__(self, base_ids: list[int], stub_ids: list[int]) -> None:
+        super().__init__(base_ids + stub_ids)
+        self._base_ids = base_ids
+        self._stub_ids = stub_ids
+
+    def apply_chat_template(self, conversation, **kwargs) -> list[int]:
+        self.conversations.append(conversation)
+        self.calls.append(kwargs)
+        if kwargs.get("add_generation_prompt", True):
+            return list(self._base_ids + self._stub_ids)
+        return list(self._base_ids)
+
+
+def test_generation_prefix_len_set_on_prompt():
+    """render_messages sets generation_prefix_len equal to the stub length."""
+    stub = _PrefixAwareStubTokenizer(
+        base_ids=list(range(99)),
+        stub_ids=[200, 201, 202],  # 3-token channel-open stub
+    )
+    renderer = _make_renderer(stub)
+
+    _, prompt = renderer.render_messages(
+        [{"role": "user", "content": "Hello"}], ChatParams()
+    )
+
+    assert prompt["prompt_token_ids"] == list(range(99)) + [200, 201, 202]
+    assert prompt["generation_prefix_len"] == 3
+
+
+def test_generation_prefix_len_absent_when_no_prefix():
+    """When the stub length is 0 the field is absent (not set to 0)."""
+    stub = _PrefixAwareStubTokenizer(
+        base_ids=list(range(10)),
+        stub_ids=[],  # no stub
+    )
+    renderer = _make_renderer(stub)
+
+    _, prompt = renderer.render_messages(
+        [{"role": "user", "content": "hi"}], ChatParams()
+    )
+
+    assert "generation_prefix_len" not in prompt
+
+
+def test_generation_prefix_len_absent_when_add_generation_prompt_false():
+    """With add_generation_prompt=False no stub is appended → field absent."""
+    stub = _PrefixAwareStubTokenizer(
+        base_ids=list(range(10)),
+        stub_ids=[200, 201, 202],
+    )
+    renderer = _make_renderer(stub)
+    params = ChatParams(chat_template_kwargs={"add_generation_prompt": False})
+
+    _, prompt = renderer.render_messages(
+        [{"role": "user", "content": "hi"}], params
+    )
+
+    assert "generation_prefix_len" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_generation_prefix_len_set_async():
+    """render_messages_async also sets generation_prefix_len."""
+    stub = _PrefixAwareStubTokenizer(
+        base_ids=list(range(5)),
+        stub_ids=[100, 101, 102],
+    )
+    renderer = _make_renderer(stub)
+
+    _, prompt = await renderer.render_messages_async(
+        [{"role": "user", "content": "hi"}], ChatParams()
+    )
+
+    assert prompt["generation_prefix_len"] == 3
+
+
+def test_generation_prefix_len_propagated_to_engine_input():
+    """generation_prefix_len on the DictPrompt flows into the TokensInput."""
+    from vllm.renderers.inputs.preprocess import parse_dec_only_prompt
+
+    stub = _PrefixAwareStubTokenizer(
+        base_ids=list(range(99)),
+        stub_ids=[200, 201, 202],
+    )
+    renderer = _make_renderer(stub)
+    _, prompt = renderer.render_messages(
+        [{"role": "user", "content": "Hello"}], ChatParams()
+    )
+
+    # Simulate what BaseRenderer._process_tokens does: propagate into engine input.
+    engine_input = parse_dec_only_prompt(prompt["prompt_token_ids"])
+    engine_input["generation_prefix_len"] = prompt.get("generation_prefix_len", 0)
+
+    assert engine_input.get("generation_prefix_len") == 3

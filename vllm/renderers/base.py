@@ -794,11 +794,12 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
-        # Narrow the union — `prompt_token_offsets` is only on TokensInput.
-        if engine_input["type"] == "token" and (
-            (offsets := prompt.get("prompt_token_offsets")) is not None
-        ):
-            engine_input["prompt_token_offsets"] = offsets
+        # Narrow the union — these fields are only on TokensInput.
+        if engine_input["type"] == "token":
+            if (offsets := prompt.get("prompt_token_offsets")) is not None:
+                engine_input["prompt_token_offsets"] = offsets
+            if gen_prefix_len := prompt.get("generation_prefix_len"):
+                engine_input["generation_prefix_len"] = gen_prefix_len
 
         return engine_input
 
@@ -857,11 +858,12 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
-        # Narrow the union — `prompt_token_offsets` is only on TokensInput.
-        if engine_input["type"] == "token" and (
-            (offsets := prompt.get("prompt_token_offsets")) is not None
-        ):
-            engine_input["prompt_token_offsets"] = offsets
+        # Narrow the union — these fields are only on TokensInput.
+        if engine_input["type"] == "token":
+            if (offsets := prompt.get("prompt_token_offsets")) is not None:
+                engine_input["prompt_token_offsets"] = offsets
+            if gen_prefix_len := prompt.get("generation_prefix_len"):
+                engine_input["generation_prefix_len"] = gen_prefix_len
 
         return engine_input
 

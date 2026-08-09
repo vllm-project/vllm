@@ -364,6 +364,10 @@ class OpenAIServingChat(GenerateBaseServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
+        generation_prefix_len: int = engine_input.get(  # type: ignore[union-attr]
+            "generation_prefix_len", 0
+        )
+
         if request.stream:
             return self.chat_completion_stream_generator(
                 request,
@@ -375,6 +379,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 request_metadata,
                 chat_template_kwargs=chat_template_kwargs,
                 mm_token_counts=mm_token_counts,
+                generation_prefix_len=generation_prefix_len,
             )
 
         return await self.chat_completion_full_generator(
@@ -387,6 +392,7 @@ class OpenAIServingChat(GenerateBaseServing):
             request_metadata,
             parser=parser,
             mm_token_counts=mm_token_counts,
+            generation_prefix_len=generation_prefix_len,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -433,6 +439,7 @@ class OpenAIServingChat(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_token_counts: dict[str, int] | None = None,
+        generation_prefix_len: int = 0,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -488,7 +495,9 @@ class OpenAIServingChat(GenerateBaseServing):
             async for res in result_generator:
                 last_res = res
                 if res.prompt_token_ids is not None:
-                    num_prompt_tokens = len(res.prompt_token_ids)
+                    num_prompt_tokens = (
+                        len(res.prompt_token_ids) - generation_prefix_len
+                    )
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
 
@@ -855,6 +864,7 @@ class OpenAIServingChat(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
         parser: Parser | None = None,
         mm_token_counts: dict[str, int] | None = None,
+        generation_prefix_len: int = 0,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -1054,7 +1064,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 choice.message.content = full_message
 
         assert final_res.prompt_token_ids is not None
-        num_prompt_tokens = len(final_res.prompt_token_ids)
+        num_prompt_tokens = len(final_res.prompt_token_ids) - generation_prefix_len
         if final_res.encoder_prompt_token_ids is not None:
             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
