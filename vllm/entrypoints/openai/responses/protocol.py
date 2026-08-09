@@ -46,7 +46,31 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai.types.responses.tool import Tool
-from openai.types.shared import Metadata, Reasoning
+from openai.types.shared import Metadata, Reasoning as OpenAIReasoning
+
+
+class Reasoning(OpenAIReasoning):
+    """`Reasoning`, widened to accept DeepSeek's `max` effort tier.
+
+    The OpenAI SDK types `ReasoningEffort` as
+    ``Literal["none", "minimal", "low", "medium", "high", "xhigh"]``, so a
+    request carrying DeepSeek's documented top tier, ``max``, was rejected by
+    schema validation before reaching the model -- even though the DeepSeek V4
+    encoding ships a prompt for exactly that tier and
+    `/v1/chat/completions` has always accepted it (see
+    ``ChatCompletionRequest.reasoning_effort``). The two endpoints disagreed
+    about the same model.
+
+    The model itself has three tiers -- ``low``, ``high``, ``max`` -- and
+    ``DeepSeekV4Tokenizer.apply_chat_template`` already folds every other
+    spelling onto one of them (``none`` disables thinking, ``minimal``/``medium``
+    become ``low``, anything else becomes ``high``). Widening the schema is all
+    that was missing for ``max`` to reach it.
+    """
+
+    effort: (  # type: ignore[assignment]
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = None
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
