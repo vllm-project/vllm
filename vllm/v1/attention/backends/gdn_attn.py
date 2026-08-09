@@ -230,14 +230,22 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     treat_short_extends_as_decodes=False,
                 )
             )
+            if num_prefills > 0:
+                num_padding_reqs = (query_lens_cpu[num_decodes:] == 0).sum().item()
+                num_prefills -= num_padding_reqs
+                num_prefill_tokens = (
+                    query_start_loc_cpu[num_decodes + num_prefills].item()
+                    - num_decode_tokens
+                )
             num_spec_decode_tokens = 0
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = block_table_tensor[:, 0]
+            num_non_spec_reqs = num_decodes + num_prefills
+            non_spec_state_indices_tensor = block_table_tensor[:num_non_spec_reqs, 0]
             spec_query_start_loc = None
-            non_spec_query_start_loc = query_start_loc
-            non_spec_query_start_loc_cpu = query_start_loc_cpu
+            non_spec_query_start_loc = query_start_loc[: num_non_spec_reqs + 1]
+            non_spec_query_start_loc_cpu = query_start_loc_cpu[: num_non_spec_reqs + 1]
             num_accepted_tokens = None
         else:
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
@@ -411,6 +419,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
                 assert non_spec_query_start_loc_cpu is not None
+            else:
+                has_initial_state = has_initial_state[: num_decodes + num_prefills]
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu,
@@ -490,14 +500,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and batch_size <= self.decode_cudagraph_max_bs
         ):
             self.non_spec_state_indices_tensor[:batch_size].copy_(
-                non_spec_state_indices_tensor, non_blocking=True
+                block_table_tensor[:, 0], non_blocking=True
             )
             non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
                 :batch_size
             ]
 
             self.non_spec_query_start_loc[: batch_size + 1].copy_(
-                non_spec_query_start_loc, non_blocking=True
+                query_start_loc, non_blocking=True
             )
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
 

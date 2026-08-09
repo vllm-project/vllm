@@ -278,6 +278,37 @@ def test_one_token_prefill_batch_stages_cudagraph_metadata(
     torch.testing.assert_close(meta.non_spec_query_start_loc, common.query_start_loc)
 
 
+def test_one_token_prefill_excludes_cudagraph_padding():
+    """Padding rows must not enter the prefill chunk metadata."""
+    builder = _create_gdn_builder(full_cuda_graph=True)
+    batch = BatchSpec(seq_lens=[100, 50, 1, 0], query_lens=[1, 1, 1, 0])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+        is_prefilling=torch.tensor([False, False, True, False]),
+        num_actual_tokens=4,
+    )
+    meta = builder.build(0, common)
+
+    assert meta.num_decodes == 2
+    assert meta.num_decode_tokens == 2
+    assert meta.num_prefills == 1
+    assert meta.num_prefill_tokens == 1
+    assert meta.has_initial_state is not None
+    assert meta.has_initial_state.tolist() == [True, True, False]
+    assert meta.prefill_query_start_loc is not None
+    assert meta.prefill_query_start_loc.tolist() == [0, 1]
+    assert meta.prefill_state_indices is not None
+    assert meta.prefill_state_indices.shape == (1,)
+    assert meta.prefill_has_initial_state is not None
+    assert meta.prefill_has_initial_state.tolist() == [False]
+    assert meta.non_spec_state_indices_tensor is not None
+    assert meta.non_spec_state_indices_tensor.shape == (4,)
+    torch.testing.assert_close(
+        meta.non_spec_state_indices_tensor, common.block_table_tensor[:, 0]
+    )
+    assert meta.non_spec_query_start_loc is not None
+    torch.testing.assert_close(meta.non_spec_query_start_loc, common.query_start_loc)
+
+
 def test_multi_token_prefill_batch_does_not_stage_cudagraph_metadata():
     """A non-uniform batch cannot replay the captured uniform-decode graph."""
     builder = _create_gdn_builder(full_cuda_graph=True)
