@@ -11,22 +11,26 @@ threaded execution of the microbatches.
 
 import threading
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import CUDAGraphMode, ModelConfig, ParallelConfig, VllmConfig
 from vllm.forward_context import create_forward_context
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.dp_utils import _maybe_ubatch_descriptor
+from vllm.v1.worker.gpu import dp_utils
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
+    create_ubatch_slices,
     slice_input_batch,
     slice_model_inputs,
 )
@@ -201,17 +205,7 @@ def test_microbatches_do_not_share_buffers():
 def test_trailing_microbatch_absorbs_cudagraph_padding():
     """The padded microbatch keeps padded rows empty and query_start_loc flat."""
     query_lens, seq_lens = [1] * 6, [64] * 6
-    num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
     num_tokens_padded = 8
-
-    _, ubatch_slices_padded = maybe_create_ubatch_slices(
-        True,
-        num_scheduled_tokens,
-        num_tokens_padded,
-        num_reqs_padded=num_tokens_padded,
-        num_ubatches=2,
-    )
-    assert ubatch_slices_padded is not None
 
     buffers = _make_buffers()
     input_batch = _make_input_batch(
@@ -221,6 +215,7 @@ def test_trailing_microbatch_absorbs_cudagraph_padding():
         num_reqs_padded=num_tokens_padded,
         num_tokens_padded=num_tokens_padded,
     )
+    ubatch_slices_padded = create_ubatch_slices(input_batch, num_ubatches=2)
 
     last = slice_input_batch(
         input_batch, ubatch_slices_padded[-1], *_make_ubatch_buffers()[1]
@@ -239,45 +234,112 @@ def test_trailing_microbatch_absorbs_cudagraph_padding():
     )
 
 
-def _ubatch_descriptor(
+def _sync_dp(
     num_tokens_per_rank: list[int], wants_ubatch: list[int], num_ubatches: int = 2
-):
-    # `_maybe_ubatch_descriptor` is the decision the DP all-reduce feeds; it is
-    # tested directly so the cases below don't need a process group.
-    return _maybe_ubatch_descriptor(
-        torch.tensor(num_tokens_per_rank, dtype=torch.int32),
-        torch.tensor(wants_ubatch, dtype=torch.int32),
-        num_reqs=8,
-        num_ubatches=num_ubatches,
-    )
+) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
+    """Run the DP handshake with the all-reduce stubbed out.
+
+    The microbatching decision lives inside `sync_cudagraph_and_dp_padding`, so
+    the cases below stand in for the collective rather than for the decision,
+    and need no process group. Every rank asks for eager, which keeps the
+    non-microbatched path off the cudagraph manager.
+    """
+    dp_size = len(num_tokens_per_rank)
+    reduced = torch.zeros(4, dp_size, dtype=torch.int32)
+    reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
+    reduced[1] = CUDAGraphMode.NONE.value
+    reduced[3] = torch.tensor(wants_ubatch, dtype=torch.int32)
+
+    with (
+        patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
+        patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
+    ):
+        return dp_utils.sync_cudagraph_and_dp_padding(
+            cudagraph_manager=None,
+            desired_batch_desc=BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens_per_rank[0],
+                num_reqs=8,
+            ),
+            num_tokens=num_tokens_per_rank[0],
+            num_reqs=8,
+            uniform_token_count=None,
+            dp_size=dp_size,
+            dp_rank=0,
+            wants_ubatch=bool(wants_ubatch[0]),
+            num_ubatches=num_ubatches,
+        )
 
 
 def test_every_dp_rank_must_agree_to_microbatch():
     """One rank declining is enough to keep the whole group on one batch."""
-    assert _ubatch_descriptor([256, 256], [1, 0]) is None
-    assert _ubatch_descriptor([256, 256], [0, 0]) is None
-
-    desc = _ubatch_descriptor([256, 256], [1, 1])
-    assert desc is not None
-    assert desc.num_ubatches == 2
+    assert _sync_dp([256, 256], [1, 0])[0].num_ubatches == 1
+    assert _sync_dp([256, 256], [0, 0])[0].num_ubatches == 1
+    assert _sync_dp([256, 256], [1, 1])[0].num_ubatches == 2
 
 
 def test_microbatching_pads_all_ranks_to_the_largest():
     """Ranks must run the same token count so microbatch sizes line up."""
-    desc = _ubatch_descriptor([200, 256], [1, 1])
-    assert desc is not None
+    desc, num_tokens_across_dp = _sync_dp([200, 256], [1, 1])
     assert desc.num_tokens == 256
+    assert num_tokens_across_dp is not None
+    assert num_tokens_across_dp.tolist() == [256, 256]
 
 
-def test_microbatching_skipped_when_a_rank_cannot_fill_it():
-    """A rank whose real tokens all land in the first microbatch aborts it."""
-    # Rank 0 has 100 real tokens but the split point is at 256 // 2 = 128, so
-    # its second microbatch would be pure padding.
-    assert _ubatch_descriptor([100, 256], [1, 1]) is None
+def test_microbatching_survives_a_rank_that_cannot_fill_it():
+    """A rank whose real tokens all land in the first microbatch still splits.
+
+    Rank 0 has 100 real tokens but the split point is at 256 // 2 = 128, so its
+    second microbatch is pure padding. That microbatch does no work, which is
+    fine -- it still has to run so the expert all-to-all stays collective.
+    """
+    desc, _ = _sync_dp([100, 256], [1, 1])
+    assert desc.num_tokens == 256
+    assert desc.num_ubatches == 2
+
+
+def test_all_padding_microbatch_has_no_work_to_do():
+    """The microbatch past the last real token is well-formed and empty.
+
+    It carries the last request with none of its query tokens, so attention and
+    sampling see nothing to do while the microbatch still runs.
+    """
+    query_lens, seq_lens = [1] * 6, [64] * 6
+    num_tokens_padded = 16  # split at 8, past all 6 real tokens
+
+    buffers = _make_buffers()
+    input_batch = _make_input_batch(
+        query_lens, seq_lens, buffers, num_tokens_padded=num_tokens_padded
+    )
+    ubatch_slices_padded = create_ubatch_slices(input_batch, num_ubatches=2)
+    ubatch_buffers = _make_ubatch_buffers()
+
+    first = slice_input_batch(input_batch, ubatch_slices_padded[0], *ubatch_buffers[0])
+    last = slice_input_batch(input_batch, ubatch_slices_padded[1], *ubatch_buffers[1])
+
+    # The first microbatch keeps every real request; the second gets none.
+    assert first.num_reqs == 6
+    assert first.num_tokens == 6
+    assert last.num_tokens == 0
+    assert last.num_reqs == 1
+    assert last.num_reqs_after_padding == 1
+    assert last.num_tokens_after_padding == 8
+
+    # Zero query tokens for the one request it holds, so no attention work.
+    torch.testing.assert_close(
+        last.query_start_loc, torch.tensor([0, 0], dtype=torch.int32)
+    )
+    assert last.num_scheduled_tokens.tolist() == [0]
+    # ...and its sequence still ends where its tokens do: they all live in the
+    # first microbatch, which computes them before this one runs.
+    torch.testing.assert_close(last.seq_lens, torch.tensor([64], dtype=torch.int32))
+    torch.testing.assert_close(
+        last.seq_lens_cpu_upper_bound, torch.tensor([64], dtype=torch.int32)
+    )
 
 
 def test_microbatching_off_when_not_configured():
-    assert _ubatch_descriptor([256, 256], [1, 1], num_ubatches=1) is None
+    assert _sync_dp([256, 256], [1, 1], num_ubatches=1)[0].num_ubatches == 1
 
 
 def test_slice_model_inputs_handles_mrope_positions():
