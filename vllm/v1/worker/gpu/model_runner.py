@@ -1976,6 +1976,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
+            num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
         )
 
         if not self.is_last_pp_rank:
@@ -2005,6 +2006,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
+        num_spec_tokens_to_schedule = (
+            self.execute_model_state.num_spec_tokens_to_schedule
+        )
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2148,8 +2152,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler.sampling_states.seeds.gpu,
                     dp_sync=dp_sync,
                     mm_inputs=mm_inputs,
+                    num_speculative_tokens=num_spec_tokens_to_schedule,
                 )
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            self.req_states.draft_tokens[
+                input_batch.idx_mapping, : draft_tokens.shape[1]
+            ] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
@@ -2158,9 +2165,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
+            # When the speculator produced a narrow width (e.g. DSD K=0),
+            # only pass the active-width slice to the handler — stale columns
+            # in the persistent buffer would create phantom draft slots.
+            active_width = (
+                draft_tokens.shape[1]
+                if self.speculator is not None
+                else self.num_speculative_steps
+            )
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+                self.req_states.draft_tokens[input_batch.idx_mapping, :active_width],
             )
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(
@@ -2307,6 +2322,7 @@ class ExecuteModelState(NamedTuple):
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
+    num_spec_tokens_to_schedule: int | None = None
 
 
 class BatchReqState(NamedTuple):
