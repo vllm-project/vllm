@@ -112,10 +112,12 @@ def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
 
 
 class MiniMAXGemmaRMSNorm(nn.Module):
-    """Gemma-style RMS normalization backed by FlashInfer kernels.
+    """Gemma-style RMS normalization.
 
-    When ``residual`` is given, the fused add + norm runs in place and the
-    updated ``(x, residual)`` pair is returned.
+    Uses FlashInfer CUDA kernels when running on CUDA; falls back to a
+    portable Triton implementation on other platforms (CPU, Neuron, TPU, …).
+    When ``residual`` is given, the fused add + norm returns the updated
+    ``(x, residual)`` pair.
     """
 
     def __init__(
@@ -132,14 +134,23 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+        if x.is_cuda:
+            from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+
+            if residual is None:
+                return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
+            # gemma_fused_add_rmsnorm mutates x and residual in place.
+            gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
+            return x, residual
+
+        from vllm.models.minimax_m3.common.ops.gemma_rmsnorm import (
+            gemma_fused_add_rmsnorm as _fused,
+            gemma_rmsnorm as _norm,
+        )
 
         if residual is None:
-            return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
-
-        # gemma_fused_add_rmsnorm mutates x and residual in place.
-        gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
-        return x, residual
+            return _norm(x, self.weight, self.variance_epsilon)
+        return _fused(x, residual, self.weight, self.variance_epsilon)
 
 
 class MiniMaxM3MLP(nn.Module):
