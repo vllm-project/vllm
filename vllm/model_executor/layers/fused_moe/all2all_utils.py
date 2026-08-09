@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
@@ -230,6 +231,10 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
+            syncless_dispatch_max_tokens=min(
+                envs.VLLM_DEEPEP_V2_MAX_SYNCLESS_TOKENS,
+                moe.max_num_tokens,
+            ),
         )
 
     elif moe.use_mori_kernels:

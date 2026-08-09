@@ -109,6 +109,7 @@ def make_modular_kernel(
     use_fp8_dispatch: bool,
     quant_config: FusedMoEQuantConfig,
     use_cudagraph: bool = False,
+    syncless_dispatch_max_tokens: int = 0,
 ) -> FusedMoEKernel:
     v2_args = DeepEPV2Args(
         num_local_experts=num_local_experts,
@@ -125,6 +126,7 @@ def make_modular_kernel(
         dp_size=dp_size,
         v2_args=v2_args,
         use_cudagraph=use_cudagraph,
+        syncless_dispatch_max_tokens=syncless_dispatch_max_tokens,
     )
 
     moe_config = make_dummy_moe_config(
@@ -158,6 +160,7 @@ def deepep_v2_moe_impl(
     topk: int,
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
+    syncless_dispatch_max_tokens: int = 0,
 ) -> torch.Tensor:
     num_local_experts = w1.size(0)
 
@@ -194,6 +197,7 @@ def deepep_v2_moe_impl(
         q_dtype,
         use_fp8_dispatch,
         quant_config,
+        syncless_dispatch_max_tokens=syncless_dispatch_max_tokens,
     )
 
     out = mk.apply(
@@ -221,6 +225,7 @@ def _deep_ep_v2_moe(
     w2_scale: torch.Tensor | None,
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
+    syncless_dispatch_max_tokens: int = 0,
 ):
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
@@ -279,6 +284,7 @@ def _deep_ep_v2_moe(
             config.topk,
             use_fp8_dispatch,
             per_act_token_quant,
+            syncless_dispatch_max_tokens,
         )
 
     if is_quantized:
@@ -292,21 +298,24 @@ def _deep_ep_v2_moe(
         )
 
 
-MNKs = [
-    (1, 256, 256),
-    (2, 256, 512),
-    (3, 1024, 2048),
-    (32, 256, 1024),
-    (45, 512, 2048),
-    (64, 1024, 1024),
-    (222, 1024, 2048),
+PREFILL_CONFIGS = [
+    (1, 256, 256, 0),
+    (2, 256, 512, 0),
+    (3, 1024, 2048, 0),
+    (32, 256, 1024, 64),
+    (45, 512, 2048, 0),
+    (64, 1024, 1024, 0),
+    (222, 1024, 2048, 0),
 ]
 
 DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("m,n,k", MNKs)
+@pytest.mark.parametrize(
+    "m,n,k,syncless_dispatch_max_tokens",
+    PREFILL_CONFIGS,
+)
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
@@ -317,6 +326,7 @@ def test_deep_ep_v2_moe(
     m: int,
     n: int,
     k: int,
+    syncless_dispatch_max_tokens: int,
     num_experts: int,
     topk: int,
     world_dp_size: tuple[int, int],
@@ -349,6 +359,7 @@ def test_deep_ep_v2_moe(
         w2_scale,
         use_fp8_dispatch,
         per_act_token_quant,
+        syncless_dispatch_max_tokens,
     )
 
 

@@ -6,7 +6,11 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import (
+    DPMetadata,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -20,11 +24,21 @@ from vllm.v1.worker.ubatching import (
 )
 
 
+def _get_max_tokens_per_rank(
+    local_num_tokens: int, dp_metadata: DPMetadata | None
+) -> int:
+    if dp_metadata is None:
+        return local_num_tokens
+    if dp_metadata.local_sizes is not None:
+        return max(dp_metadata.local_sizes)
+    return int(dp_metadata.num_tokens_across_dp_cpu.max())
+
+
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
-    Supports two modes controlled by the `use_cudagraph` constructor arg:
+    Supports three dispatch modes:
 
     **Decode mode (use_cudagraph=True):**
       - do_expand=False, do_cpu_sync=False
@@ -34,7 +48,12 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
       - Fully cudagraph-capturable
       - Expert kernel sorts internally (expert_tokens_meta=None)
 
-    **Prefill mode (use_cudagraph=False):**
+    **Sync-less prefill mode (small eager prefills):**
+      - do_expand=True, do_cpu_sync=False
+      - Per-expert-contiguous, worst-case allocation
+      - Expert counts and IDs are reconstructed from GPU prefix sums
+
+    **Synchronized prefill mode (remaining eager prefills):**
       - do_expand=True, do_cpu_sync=True
       - Per-expert-contiguous layout; exact memory allocation
       - Saves GPU memory (no worst-case allocation)
@@ -42,7 +61,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use cudagraphs anyway
       - Provides expert_tokens_meta for efficient batched expert kernels
 
-    Both modes use async_with_compute_stream=False (synchronous from
+    All modes use async_with_compute_stream=False (synchronous from
     caller's perspective). The ElasticBuffer handles comm internally.
     """
 
@@ -66,6 +85,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_topk: int,
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
+        syncless_dispatch_max_tokens: int = 0,
     ):
         super().__init__()
         self.buffer = buffer
@@ -76,6 +96,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
+        self.syncless_dispatch_max_tokens = syncless_dispatch_max_tokens
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -113,32 +134,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if has_scales:
             token_data = (tokens, token_scales)
 
-        # Decode: do_expand=False + do_cpu_sync=False (cudagraph-safe)
-        # Prefill: do_expand=True + do_cpu_sync=True (memory-efficient)
+        dp_metadata = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        max_tokens_per_rank = _get_max_tokens_per_rank(tokens.shape[0], dp_metadata)
         do_expand = not self.use_cudagraph
         do_cpu_sync = not self.use_cudagraph
-
-        # In do_expand=False mode, the recv buffer is the worst case
-        # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
-        # (= max_num_batched_tokens) makes the experts process ~R*8192 rows even
-        # for a handful of decode tokens. Bound it to the actual DP-padded batch
-        # size (uniform across ranks): max(num_tokens_across_dp).
-        #
-        # DeepEP JIT-compiles a separate dispatch kernel per distinct
-        # num_max_tokens_per_rank, so feeding it the raw per-step size would make
-        # it recompile for every batch size (a cicc storm that starves the GPU at
-        # high concurrency). Round up to a power of 2 instead: this bounds the
-        # set to ~log2(max_num_batched_tokens) values (compiled once, then
-        # cached) while staying small for decode (e.g. 1 token -> 1) and capped
-        # at the buffer's init capacity for prefill.
         num_max_tokens_per_rank = None
-        if not do_expand:
-            dp_meta = get_forward_context().dp_metadata
-            if dp_meta is not None:
-                n = int(dp_meta.num_tokens_across_dp_cpu.max())
-            else:
-                n = tokens.shape[0]
-            num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+        if self.use_cudagraph:
+            num_max_tokens_per_rank = 1 << max(max_tokens_per_rank - 1, 0).bit_length()
+        elif (
+            self.syncless_dispatch_max_tokens > 0
+            and max_tokens_per_rank <= self.syncless_dispatch_max_tokens
+        ):
+            do_cpu_sync = False
+            num_max_tokens_per_rank = self.syncless_dispatch_max_tokens
 
         (
             recv_x,
@@ -165,10 +177,14 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             has_scales,
             recv_x,
             recv_topk_idx,
-            num_experts,
             handle.num_recv_tokens_per_expert_list,
+            handle.psum_num_recv_tokens_per_expert,
             recv_topk_weights,
             handle.psum_num_recv_tokens_per_scaleup_rank,
+            handle.expert_alignment,
+            handle.num_max_tokens_per_rank,
+            do_expand,
+            do_cpu_sync,
             a1_scale,
             quant_config,
             defer_input_quant=defer_input_quant,
@@ -180,10 +196,14 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         has_scales: bool,
         recv_x: tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
         recv_topk_idx: torch.Tensor | None,
-        num_experts: int,
         recv_expert_num_tokens: list[int],
+        psum_recv_per_expert: torch.Tensor,
         recv_topk_weights: torch.Tensor | None,
         psum_recv_per_rank: torch.Tensor,
+        expert_alignment: int,
+        num_max_tokens_per_rank: int,
+        do_expand: bool,
+        do_cpu_sync: bool,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
@@ -196,7 +216,20 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             expert_x, expert_x_scale = recv_x, None
 
-        if recv_topk_idx is None:
+        expert_tokens_meta = None
+        if recv_topk_idx is None and not do_cpu_sync:
+            recv_topk_idx, expert_num_tokens = _build_expanded_topk_idx(
+                expert_x.shape[0],
+                psum_recv_per_expert,
+                self.rank_expert_offset,
+                expert_alignment,
+                self.num_dispatchers_ * num_max_tokens_per_rank,
+            )
+            expert_tokens_meta = mk.ExpertTokensMetadata(
+                expert_num_tokens=expert_num_tokens,
+                expert_num_tokens_cpu=None,
+            )
+        elif recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
             total_tokens = sum(recv_expert_num_tokens)
@@ -239,18 +272,21 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 self.num_experts,
             )
 
+        if expert_tokens_meta is None:
+            expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+                recv_expert_num_tokens,
+                device=expert_x.device,
+            )
+
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            recv_expert_num_tokens,
-            device=expert_x.device,
-        )
-
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None
             if expert_x.numel() != 0:
+                if do_expand and not do_cpu_sync:
+                    expert_x.masked_fill_(recv_topk_idx < 0, 0)
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
                     a1_scale,
@@ -422,6 +458,80 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             False,
         )
+
+
+@triton.jit
+def _expanded_expert_counts_kernel(
+    psum_ptr,
+    expert_num_tokens_ptr,
+    expert_alignment: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    previous_psum = tl.load(psum_ptr + expert - 1, mask=expert > 0, other=0)
+    start = (previous_psum + expert_alignment - 1) // expert_alignment
+    start *= expert_alignment
+    end = tl.load(psum_ptr + expert)
+    tl.store(expert_num_tokens_ptr + expert, end - start)
+
+
+@triton.jit
+def _expanded_topk_idx_kernel(
+    topk_idx_ptr,
+    psum_ptr,
+    rank_expert_offset,
+    expert_alignment: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    block = tl.program_id(1)
+    previous_psum = tl.load(psum_ptr + expert - 1, mask=expert > 0, other=0)
+    start = (previous_psum + expert_alignment - 1) // expert_alignment
+    start *= expert_alignment
+    end = tl.load(psum_ptr + expert)
+    offsets = block * BLOCK + tl.arange(0, BLOCK)
+    mask = start + offsets < end
+    tl.store(
+        topk_idx_ptr + start + offsets,
+        expert + rank_expert_offset,
+        mask=mask,
+    )
+
+
+def _build_expanded_topk_idx(
+    num_allocated_tokens: int,
+    psum_recv_per_expert: torch.Tensor,
+    rank_expert_offset: int,
+    expert_alignment: int,
+    max_tokens_per_expert: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_local_experts = psum_recv_per_expert.shape[0]
+    expert_num_tokens = torch.empty(
+        num_local_experts,
+        dtype=torch.int32,
+        device=psum_recv_per_expert.device,
+    )
+    recv_topk_idx = torch.full(
+        (num_allocated_tokens, 1),
+        -1,
+        dtype=torch.int64,
+        device=psum_recv_per_expert.device,
+    )
+    _expanded_expert_counts_kernel[(num_local_experts,)](
+        psum_recv_per_expert,
+        expert_num_tokens,
+        expert_alignment=expert_alignment,
+    )
+    block = 256
+    _expanded_topk_idx_kernel[
+        (num_local_experts, triton.cdiv(max_tokens_per_expert, block))
+    ](
+        recv_topk_idx,
+        psum_recv_per_expert,
+        rank_expert_offset,
+        expert_alignment=expert_alignment,
+        BLOCK=block,
+    )
+    return recv_topk_idx, expert_num_tokens
 
 
 @triton.jit

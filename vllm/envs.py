@@ -264,6 +264,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
+    VLLM_DEEPEP_V2_MAX_SYNCLESS_TOKENS: int = 0
     VLLM_DBO_COMM_SMS: int = 20
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
@@ -1894,6 +1895,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DeepEP v2: trade precision for transfer size in combine
     "VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION", "0"))
+    ),
+    # DeepEP v2: use worst-case expanded allocation below this per-rank token
+    # count to avoid the dispatch CPU sync. Disabled by default.
+    "VLLM_DEEPEP_V2_MAX_SYNCLESS_TOKENS": lambda: int(
+        os.getenv("VLLM_DEEPEP_V2_MAX_SYNCLESS_TOKENS", "0")
     ),
     # The number of SMs/CUs to allocate for communication kernels when
     # running DBO; the rest will be allocated to compute.

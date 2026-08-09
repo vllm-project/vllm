@@ -246,6 +246,7 @@ def make_deepep_v2_a2a(
     dp_size: int,
     v2_args: DeepEPV2Args,
     use_cudagraph: bool = False,
+    syncless_dispatch_max_tokens: int = 0,
 ):
     import deep_ep
 
@@ -278,4 +279,5 @@ def make_deepep_v2_a2a(
         num_topk=v2_args.num_topk,
         use_fp8_dispatch=v2_args.use_fp8_dispatch,
         use_cudagraph=use_cudagraph,
+        syncless_dispatch_max_tokens=syncless_dispatch_max_tokens,
     )
