@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -1291,13 +1292,16 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
         image_grid_thw = image_input["image_grid_thw"]
         assert image_grid_thw.ndim == 2
 
-        for idx, thaw in enumerate(image_grid_thw):
-            thw_tuple = tuple(thaw.detach().cpu().numpy().tolist())
-            numel = np.prod(thw_tuple)
-            image_grid_hws.append(thw_tuple)
-            image_position_ids = torch.arange(numel) % np.prod(thw_tuple[1:])
-            siglip_position_ids.append(image_position_ids)
-            sample_indices.append(torch.full((numel,), idx, dtype=torch.int64))
+        # Each grid is read back to build the per-image position ids on the
+        # host, so the D2H is inherent here.
+        with gpu_sync_allowed():
+            for idx, thaw in enumerate(image_grid_thw):
+                thw_tuple = tuple(thaw.detach().cpu().numpy().tolist())
+                numel = np.prod(thw_tuple)
+                image_grid_hws.append(thw_tuple)
+                image_position_ids = torch.arange(numel) % np.prod(thw_tuple[1:])
+                siglip_position_ids.append(image_position_ids)
+                sample_indices.append(torch.full((numel,), idx, dtype=torch.int64))
             cu_seqlens.append(cu_seqlens[-1] + numel)
 
         if image_input["type"] == "image_embeds":

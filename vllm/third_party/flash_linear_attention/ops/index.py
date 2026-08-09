@@ -9,6 +9,7 @@
 # ruff: noqa: E501
 import torch
 
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.triton_utils import triton
 
 from .utils import tensor_cache
@@ -21,12 +22,11 @@ def prepare_lens(cu_seqlens: torch.Tensor) -> torch.Tensor:
 
 @tensor_cache
 def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
-    indices = torch.cat(
-        [
-            torch.arange(n)
-            for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
-        ]
-    )
+    # Per-sequence chunk counts are needed as Python ints to build the
+    # aranges below; cached by `@tensor_cache`, so this is not per-step.
+    with gpu_sync_allowed():
+        chunk_counts = triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
+    indices = torch.cat([torch.arange(n) for n in chunk_counts])
     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
 
 

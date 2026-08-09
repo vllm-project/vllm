@@ -589,9 +589,11 @@ class EplbState:
                 max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
 
                 # Just to make type checker happy
-                tokens_tensors: list[float] = torch.stack(
-                    [avg_tokens_tensor, max_tokens_tensor]
-                ).tolist()
+                # Metrics only; the values drive a Python-level ratio below.
+                with gpu_sync_allowed():
+                    tokens_tensors: list[float] = torch.stack(
+                        [avg_tokens_tensor, max_tokens_tensor]
+                    ).tolist()
                 avg_tokens, max_tokens = tokens_tensors
                 balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
 

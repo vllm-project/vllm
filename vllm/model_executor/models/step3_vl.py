@@ -44,6 +44,7 @@ from vllm.transformers_utils.processors.step3_vl import (
     Step3VLImageProcessor,
     Step3VLProcessor,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -682,18 +683,21 @@ class Step3VLForConditionalGeneration(
 
         merged_image_features = []
         cur_patch_idx = 0
-        for i, num_patch in enumerate(num_patches):
-            cur_feature = []
-            if num_patch > 0:
-                patch_slice = patch_image_features[
-                    cur_patch_idx : cur_patch_idx + num_patch
-                ]
-                cur_feature.append(patch_slice.view(-1, patch_slice.shape[-1]))
-            cur_feature.append(image_features[i].view(-1, image_features.shape[-1]))
-            cur_patch_idx += num_patch
-            merged_image_features.append(
-                torch.cat(cur_feature) if len(cur_feature) > 1 else cur_feature[0]
-            )
+        # `num_patches` is a device tensor, so the per-image branch and slice
+        # bounds below read it back to the host.
+        with gpu_sync_allowed():
+            for i, num_patch in enumerate(num_patches):
+                cur_feature = []
+                if num_patch > 0:
+                    patch_slice = patch_image_features[
+                        cur_patch_idx : cur_patch_idx + num_patch
+                    ]
+                    cur_feature.append(patch_slice.view(-1, patch_slice.shape[-1]))
+                cur_feature.append(image_features[i].view(-1, image_features.shape[-1]))
+                cur_patch_idx += num_patch
+                merged_image_features.append(
+                    torch.cat(cur_feature) if len(cur_feature) > 1 else cur_feature[0]
+                )
         return merged_image_features
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:

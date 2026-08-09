@@ -71,6 +71,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -1693,8 +1694,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
+        # The per-image grids are needed as Python ints to size the buffers.
+        with gpu_sync_allowed():
+            grid_thw_list = mm_kwargs["image_grid_thw"].tolist()
         metadata = self.vision_model.prepare_encoder_metadata(
-            mm_kwargs["image_grid_thw"].tolist(), max_batch_size=max_batch_size
+            grid_thw_list, max_batch_size=max_batch_size
         )
         values = metadata | {
             "pixel_values": mm_kwargs["pixel_values"],

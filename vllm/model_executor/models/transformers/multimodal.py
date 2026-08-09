@@ -666,7 +666,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             )
         audio_embeddings = audio_output.pooler_output
 
-        split_sizes = num_audio_tokens.flatten().tolist()
+        # Per-audio token counts are needed as Python ints to split.
+        with gpu_sync_allowed():
+            split_sizes = num_audio_tokens.flatten().tolist()
         return self._split_embeddings(audio_embeddings, split_sizes)
 
     def _embed_vision(self, **kwargs) -> list[torch.Tensor] | torch.Tensor | None:

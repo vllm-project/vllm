@@ -14,6 +14,7 @@ from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..layers.pooler import DispatchPooler
@@ -102,19 +103,24 @@ class JinaForRankingPool(StepPool):
         prompt_token_ids = pooling_metadata.get_prompt_token_ids()
 
         embeds_list = list[torch.Tensor | None]()
-        for data, token_ids in zip(pooled_data_lst, prompt_token_ids):
-            # for unfinished chunked prefill
-            if data is None:
-                embeds_list.append(None)
-            else:
-                docs_indexes = torch.where(torch.eq(token_ids, self.doc_token_id))[0]
-                query_indexes = torch.where(torch.eq(token_ids, self.query_token_id))[0]
+        # `torch.where` resolves the match count on the host.
+        with gpu_sync_allowed():
+            for data, token_ids in zip(pooled_data_lst, prompt_token_ids):
+                # for unfinished chunked prefill
+                if data is None:
+                    embeds_list.append(None)
+                else:
+                    doc_match = torch.eq(token_ids, self.doc_token_id)
+                    docs_indexes = torch.where(doc_match)[0]
+                    query_indexes = torch.where(
+                        torch.eq(token_ids, self.query_token_id)
+                    )[0]
 
-                # The JinaForRanking model concatenates docs first, then query.
-                # Let's stay consistent with this novel design.
-                indexes = torch.cat([docs_indexes, query_indexes])
-                embeds = self.projector(data[indexes])
-                embeds_list.append(embeds)
+                    # The JinaForRanking model concatenates docs first, then query.
+                    # Let's stay consistent with this novel design.
+                    indexes = torch.cat([docs_indexes, query_indexes])
+                    embeds = self.projector(data[indexes])
+                    embeds_list.append(embeds)
 
         return embeds_list
 

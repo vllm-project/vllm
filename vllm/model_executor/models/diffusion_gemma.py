@@ -48,6 +48,7 @@ from vllm.model_executor.models.transformers.utils import recursive_replace_line
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -740,15 +741,17 @@ class DiffusionGemmaRequestStates:
         )
 
     def add_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = True
-        self.init_canvas(torch.tensor([slot_idx], device=self.device))
-        self.step[slot_idx] = 0
-        self.accepted_canvas_history_len[slot_idx] = 0
+        # `t[i] = scalar` on a 1-D tensor copies the scalar H2D and blocks;
+        # `fill_` on the element launches a kernel instead.
+        self.is_encoder_phase[slot_idx].fill_(True)
+        self.init_canvas(async_tensor_h2d([slot_idx], device=self.device))
+        self.step[slot_idx].fill_(0)
+        self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
 
     def remove_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = False
-        self.accepted_canvas_history_len[slot_idx] = 0
+        self.is_encoder_phase[slot_idx].fill_(False)
+        self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
 
 

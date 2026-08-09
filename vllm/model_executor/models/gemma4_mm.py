@@ -70,6 +70,7 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -1437,11 +1438,13 @@ class Gemma4ForConditionalGeneration(
                 pp_chunk,
                 pad_chunk,
             ).to(self.model_dtype)
-            encoder_outputs = vt.encoder(
-                inputs_embeds=inputs_embeds,
-                attention_mask=~pad_chunk,
-                pixel_position_ids=pp_chunk,
-            )
+            # HuggingFace's mask builder probes `padding_mask.all()`.
+            with gpu_sync_allowed():
+                encoder_outputs = vt.encoder(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=~pad_chunk,
+                    pixel_position_ids=pp_chunk,
+                )
             last_hidden_states_list.append(encoder_outputs.last_hidden_state)
 
         last_hidden_states = torch.cat(last_hidden_states_list, dim=0)
@@ -1456,13 +1459,15 @@ class Gemma4ForConditionalGeneration(
             single_pos_ids = pixel_position_ids[i].unsqueeze(0)
             single_pad_pos = padding_positions[i].unsqueeze(0)
 
-            pooled_states, valid_mask = vt.pooler(
-                hidden_states=single_hidden,
-                pixel_position_ids=single_pos_ids,
-                padding_positions=single_pad_pos,
-                output_length=output_length,
-            )
-            valid_states = pooled_states[valid_mask]
+            # As above, plus mask indexing that needs the count on the host.
+            with gpu_sync_allowed():
+                pooled_states, valid_mask = vt.pooler(
+                    hidden_states=single_hidden,
+                    pixel_position_ids=single_pos_ids,
+                    padding_positions=single_pad_pos,
+                    output_length=output_length,
+                )
+                valid_states = pooled_states[valid_mask]
 
             if getattr(vt.config, "standardize", False):
                 valid_states = (valid_states - vt.std_bias) * vt.std_scale
@@ -2051,7 +2056,20 @@ class Gemma4ForConditionalGeneration(
     ) -> torch.Tensor | None:
         logits = self.language_model.compute_logits(hidden_states)
         if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+            # Cache a per-device index tensor for the (static) suppressed-token
+            # set and use `index_fill_`, so neither the Python-list indices nor
+            # the scalar fill value take a host roundtrip per call.
+            cache = getattr(self, "_suppress_token_ids_cache", None)
+            if cache is None:
+                cache = {}
+                self._suppress_token_ids_cache = cache
+            suppress_idx = cache.get(logits.device)
+            if suppress_idx is None:
+                suppress_idx = async_tensor_h2d(
+                    self._suppress_token_ids, dtype=torch.long, device=logits.device
+                )
+                cache[logits.device] = suppress_idx
+            logits.index_fill_(1, suppress_idx, -float("inf"))
         return logits
 
     # ------------------------------------------------------------------ #

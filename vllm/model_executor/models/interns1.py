@@ -48,6 +48,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_video_processor_from_config
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -633,7 +634,9 @@ class InternS1ForConditionalGeneration(
 
         image_token_id = kwargs["image_token_id"]
         if isinstance(image_token_id, torch.Tensor):
-            image_token_id = image_token_id.flatten().unique().item()
+            # The token id is needed as a Python int below.
+            with gpu_sync_allowed():
+                image_token_id = image_token_id.flatten().unique().item()
 
         assert isinstance(image_token_id, int)
         self.img_context_token_id = image_token_id

@@ -54,6 +54,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -593,7 +594,9 @@ class AudioFlamingo3ForConditionalGeneration(
         if chunk_counts is None:
             chunk_counts = [1] * input_features.shape[0]
         elif isinstance(chunk_counts, torch.Tensor):
-            chunk_counts = chunk_counts.tolist()
+            # Per-audio chunk counts drive the Python-level split below.
+            with gpu_sync_allowed():
+                chunk_counts = chunk_counts.tolist()
         elif (
             isinstance(chunk_counts, list)
             and chunk_counts

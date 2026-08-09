@@ -271,7 +271,9 @@ class Phi4MMImageEncoder(nn.Module):
 
         img_features = self.get_img_features(
             pixel_values,
-            image_attention_mask.type(torch.BoolTensor).flatten(0, 1).to(target_device),
+            # `.type(torch.BoolTensor)` lands on the host, so the original
+            # `.type(...).to(target_device)` was a D2H followed by an H2D.
+            image_attention_mask.bool().flatten(0, 1),
         )
 
         base_feat_height_target = self.base_feat_height_target

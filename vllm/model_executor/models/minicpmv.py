@@ -94,6 +94,7 @@ from vllm.transformers_utils.processor import (
 )
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.collection_utils import flatten_2d_lists
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -1532,7 +1533,9 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        # Needed as a Python int to size the mask below.
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1624,7 +1627,9 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        # Needed as a Python int to size the mask below.
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1721,7 +1726,9 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        # Needed as a Python int to size the mask below.
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
@@ -1823,7 +1830,9 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values[i, ..., :L_item] = pixel_values_item
 
         num_patches = tgt_sizes.prod(-1)
-        max_patches = num_patches.max().item()
+        # Needed as a Python int to size the mask below.
+        with gpu_sync_allowed():
+            max_patches = num_patches.max().item()
         assert isinstance(max_patches, int)
 
         patch_attn_mask = torch.zeros((B, max_patches), dtype=torch.bool, device=device)
