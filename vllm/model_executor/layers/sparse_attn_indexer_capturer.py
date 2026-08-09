@@ -38,20 +38,12 @@ from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
 logger = logging.getLogger(__name__)
 
 
-def _available_cpu_memory_bytes() -> int:
-    """Return the memory available to the scheduler process in bytes."""
-    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
-    if cgroup_limit is not None and cgroup_usage is not None:
-        return max(cgroup_limit - cgroup_usage, 0)
-    return psutil.virtual_memory().available
-
-
 def _check_indexer_topk_cpu_buffer_size(
     max_num_slots: int,
     num_indexer_layers: int,
     index_topk: int,
     available_bytes: int,
-) -> int:
+) -> None:
     """Fail before allocating an indexer top-k buffer that cannot fit."""
     required_bytes = (
         max_num_slots
@@ -67,7 +59,7 @@ def _check_indexer_topk_cpu_buffer_size(
             f"{available_bytes / 2**30:.2f} GiB is available. "
             "Reduce the KV-cache size or index top-k configuration."
         )
-    return required_bytes
+
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
@@ -275,11 +267,16 @@ class IndexerTopkManager:
         hf_config = vllm_config.model_config.hf_text_config
         self.num_indexer_layers, self.index_topk = get_indexer_shape(hf_config)
         max_num_slots = kv_cache_config.num_blocks * self.block_size
+        cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+        if cgroup_limit is not None and cgroup_usage is not None:
+            available_bytes = max(cgroup_limit - cgroup_usage, 0)
+        else:
+            available_bytes = psutil.virtual_memory().available
         _check_indexer_topk_cpu_buffer_size(
             max_num_slots,
             self.num_indexer_layers,
             self.index_topk,
-            _available_cpu_memory_bytes(),
+            available_bytes,
         )
         self.indexer_topk_by_slot = np.zeros(
             (
