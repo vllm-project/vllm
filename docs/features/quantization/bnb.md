@@ -7,7 +7,7 @@ Compared to other quantization methods, BitsAndBytes eliminates the need for cal
 Below are the steps to utilize BitsAndBytes with vLLM.
 
 ```bash
-pip install bitsandbytes>=0.49.2
+pip install bitsandbytes>=0.44.1
 ```
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
@@ -54,3 +54,7 @@ Append the following to your model arguments for 4bit inflight quantization:
 ```bash
 --quantization bitsandbytes
 ```
+
+## Note on Batch Size Dependency
+
+Weight-only quantization via bitsandbytes may reduce throughput at small batch sizes (e.g., batch=1) due to dequantization overhead. Each linear layer requires casting weights from INT8/INT4 back to float16 before matrix multiplication, adding a memory movement step that can dominate memory-bandwidth-bound workloads. This overhead is typically amortized at larger batch sizes (>= 8). For latency-sensitive single-request serving, it is recommended to benchmark bitsandbytes against FP16 on your target hardware before deployment.
