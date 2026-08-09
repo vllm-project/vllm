@@ -305,15 +305,8 @@ class XPUPlatform(Platform):
         else:
             fa_in_graph_ok = supports_xpu_fa_in_graph()
             logger.warning_once(
-                "XPU Graph support is experimental and has known limitations: "
-                "(1) only single-GPU execution is supported; "
-                "(2) capturing FlashAttention into a full graph requires an "
-                "oneAPI 2026.0+ runtime (work-group scratch memory in SYCL "
-                "Graph); on older runtimes use PIECEWISE or TRITON_ATTN for "
-                "FULL mode; "
-                "(3) XPU Graph may increase device memory usage, "
-                "potentially causing OOM errors or leaving less memory "
-                "for the KV cache and reducing performance."
+                "XPU Graph support is experimental and currently only supports "
+                "single-GPU execution."
             )
             mode = compilation_config.cudagraph_mode
             wants_full = mode is not None and mode.has_full_cudagraphs()
