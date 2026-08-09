@@ -1,21 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker-side capturer and scheduler-side manager for indexer topk indices.
+"""Capturer and scheduler manager for indexer topk indices.
 
-Mirrors the architecture of :mod:`routed_experts_capturer`: the worker
-captures per-layer sparse-attention topk indices into a device buffer
-during the forward pass, D2H-copies them into a pinned CPU buffer, and
-hands them to the scheduler via :class:`IndexerTopkLists`. The scheduler
-persists them into a slot-indexed CPU buffer keyed by the physical KV-cache
-block layout, and returns the per-request slice when the request finishes.
-
-Key differences from routed_experts:
-  - Capture source is :class:`SparseAttnIndexer` (not MoE router).
-  - Only indexer layers capture (compact layer dimension, not
-    ``num_hidden_layers``).
-  - ``topk_size`` is ``index_topk`` (typically 512+), much larger than
-    ``num_experts_per_tok`` (4-8).
-  - dtype is ``int32`` (KV slot indices can exceed 65535).
+Mirrors :mod:`routed_experts_capturer` but for sparse-attention topk.
 """
 
 from __future__ import annotations
@@ -28,12 +15,12 @@ import psutil
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpecKind,
     get_kv_cache_spec_kind,
 )
-from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +33,7 @@ def _check_indexer_topk_cpu_buffer_size(
 ) -> None:
     """Fail before allocating an indexer top-k buffer that cannot fit."""
     required_bytes = (
-        max_num_slots
-        * num_indexer_layers
-        * index_topk
-        * np.dtype(np.int32).itemsize
+        max_num_slots * num_indexer_layers * index_topk * np.dtype(np.int32).itemsize
     )
     if required_bytes > available_bytes:
         raise ValueError(
@@ -63,6 +47,7 @@ def _check_indexer_topk_cpu_buffer_size(
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+    from vllm.v1.outputs import IndexerTopkTensors
 
 
 def _get_index_topk(hf_config) -> int:
@@ -150,34 +135,77 @@ def get_indexer_attn_group_id(kv_cache_config: KVCacheConfig) -> int:
     )
 
 
+def create_indexer_topk_capturer(
+    model: torch.nn.Module,
+    hf_text_config,
+    max_num_batched_tokens: int,
+    kv_cache_config: KVCacheConfig,
+    device: str,
+) -> IndexerTopkCapturer:
+    """Create capturer, validate indexer layers, and attach callbacks."""
+    expected_layers, expected_topk = get_indexer_shape(hf_text_config)
+    attn_gid = get_indexer_attn_group_id(kv_cache_config)
+    indexers = get_sparse_attn_indexers(model)
+    if len(indexers) != expected_layers:
+        raise RuntimeError(
+            f"Indexer layer count mismatch: found {len(indexers)}, "
+            f"expected {expected_layers}."
+        )
+    topk_sizes = {indexer.topk_tokens for indexer in indexers}
+    if topk_sizes != {expected_topk}:
+        raise RuntimeError(
+            f"Indexer top-k mismatch: found {sorted(topk_sizes)}, "
+            f"expected {expected_topk}."
+        )
+    for indexer in indexers:
+        buf = indexer.topk_indices_buffer
+        if (
+            buf is None
+            or buf.dtype != torch.int32
+            or buf.ndim != 2
+            or buf.shape[0] < max_num_batched_tokens
+            or buf.shape[1] != expected_topk
+        ):
+            raise RuntimeError(
+                "Indexer top-k buffer incompatible with capture: "
+                f"got {None if buf is None else (buf.shape, buf.dtype)}, "
+                f"expected (* >= {max_num_batched_tokens}, {expected_topk}) "
+                "int32."
+            )
+
+    capturer = IndexerTopkCapturer(
+        max_num_batched_tokens=max_num_batched_tokens,
+        num_indexer_layers=expected_layers,
+        index_topk=expected_topk,
+        attn_gid=attn_gid,
+        device=device,
+    )
+    for layer_id, indexer in enumerate(indexers):
+
+        def capture_fn(
+            topk_indices: torch.Tensor,
+            compact_layer_id: int = layer_id,
+        ) -> None:
+            capturer.capture(compact_layer_id, topk_indices)
+
+        indexer.set_capture_fn(capture_fn)
+    return capturer
+
+
 class IndexerTopkCapturer:
-    """Worker-side capturer for indexer topk indices, lives on GPU.
-
-    :class:`SparseAttnIndexer` calls :meth:`capture` from inside its
-    forward pass with the per-layer topk-indices tensor. The tensor is
-    written into a preallocated device buffer indexed by a compact
-    layer id. At the end of the step, :class:`GPUModelRunner` reads the
-    device buffer, issues a D2H copy into a pinned CPU buffer, and hands
-    the result to the scheduler via :class:`IndexerTopkLists`.
-
-    Invariants:
-        - One instance per worker; shape is fixed at init and covers the
-          worst-case step (``max_num_batched_tokens`` tokens).
-        - Every configured indexer layer overwrites the current step's token
-          rows before the buffer is consumed. Rows beyond the current step
-          are never read.
-        - ``device_buffer.dtype`` is ``torch.int32``.
-    """
+    """Worker-side GPU capturer for per-layer indexer topk indices."""
 
     def __init__(
         self,
         max_num_batched_tokens: int,
         num_indexer_layers: int,
         index_topk: int,
+        attn_gid: int,
         device: str,
     ) -> None:
         self.num_indexer_layers = num_indexer_layers
         self.index_topk = index_topk
+        self.attn_gid = attn_gid
         self.device_buffer = torch.zeros(
             (
                 max_num_batched_tokens,
@@ -194,13 +222,6 @@ class IndexerTopkCapturer:
         self._captured_layers[:] = [False] * self.num_indexer_layers
 
     def capture(self, compact_layer_id: int, topk_indices: torch.Tensor) -> None:
-        """Capture topk indices for a specific indexer layer.
-
-        Args:
-            compact_layer_id: The compact index (0..num_indexer_layers-1)
-                assigned at bind time, NOT the model layer_id.
-            topk_indices: Tensor of shape (batch_size, index_topk).
-        """
         if compact_layer_id < 0 or compact_layer_id >= self.device_buffer.shape[1]:
             raise IndexError(
                 f"indexer capture layer {compact_layer_id} exceeds buffer "
@@ -237,22 +258,24 @@ class IndexerTopkCapturer:
         """Return the underlying device buffer for D2H copy."""
         return self.device_buffer
 
+    def get_indexer_topk(
+        self,
+        slot_mappings: torch.Tensor,
+        num_tokens: int,
+    ) -> IndexerTopkTensors:
+        from vllm.v1.outputs import IndexerTopkTensors
+
+        self.validate_step()
+        return IndexerTopkTensors(
+            topk_data=self.device_buffer[:num_tokens].clone(),
+            slot_mapping=slot_mappings[self.attn_gid, :num_tokens].clone(),
+        )
+
 
 class IndexerTopkManager:
-    """Scheduler-side slot-indexed buffer for indexer topk indices.
+    """Scheduler-side slot-indexed CPU buffer for indexer topk indices.
 
-    Lives on CPU in the scheduler process. Each slot corresponds to
-    ``block_id * block_size + offset_in_block``, tying topk data to
-    physical KV-cache blocks (same layout as :class:`RoutedExpertsManager`).
-
-    Data flow per step:
-      1. Worker D2Hs its device capture buffer into
-         :class:`IndexerTopkLists` and returns it via
-         :class:`ModelRunnerOutput`.
-      2. Scheduler calls :meth:`store_batch` with that step's
-         ``(topk_data, slot_mapping)``.
-      3. On request completion, the scheduler calls :meth:`get` with the
-         request's block IDs to recover the full per-token topk.
+    Same layout as :class:`RoutedExpertsManager`.
     """
 
     def __init__(
@@ -296,10 +319,6 @@ class IndexerTopkManager:
         )
 
     def store_batch(self, data: np.ndarray, slot_mapping: np.ndarray) -> None:
-        """Persist one step's indexer topk into the slot buffer.
-
-        Equivalent to ``slot_buffer[slot_mapping] = data``.
-        """
         if data.ndim != 3 or data.shape[1:] != (
             self.num_indexer_layers,
             self.index_topk,
@@ -327,18 +346,7 @@ class IndexerTopkManager:
         num_tokens: int,
         token_start: int = 0,
     ) -> np.ndarray:
-        """Read indexer topk for a completed / preempted request.
-
-        Args:
-            block_ids: Block IDs from the attention KV-cache group.
-            num_tokens: Number of tokens that have gone through a forward
-                pass (typically ``request.num_tokens - 1``).
-            token_start: Skip the first ``token_start`` tokens.
-
-        Returns:
-            Array of shape (num_tokens - token_start, num_indexer_layers,
-            index_topk).
-        """
+        """Read indexer topk for a completed request."""
         bs = self.block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)
         block_offsets = np.arange(bs)
