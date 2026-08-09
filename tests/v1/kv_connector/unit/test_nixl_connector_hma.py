@@ -3,7 +3,7 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -1162,6 +1162,43 @@ def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
     assert count == expected_count
     assert is_async is True
+
+
+@pytest.mark.cpu_test
+def test_pull_scheduler_propagates_prefix_token_window():
+    """The scheduler carries the block-aligned local hit and remote match
+    endpoint through connector metadata consumed by the pull worker."""
+
+    class FakeBlocks:
+        def get_unhashed_block_ids_all_groups(self):
+            return ([7, 8], [9])
+
+    sched = make_nixl_scheduler(
+        has_mamba=True,
+        is_hma_required=False,
+        heartbeat=True,
+    )
+    req = create_request(
+        num_tokens=65,
+        do_remote_prefill=True,
+        num_remote_blocks=4,
+    )
+    assert req.kv_transfer_params is not None
+    req.kv_transfer_params["remote_block_ids"] = ([1, 2], [3])
+
+    external_tokens, is_async = sched.get_num_new_matched_tokens(
+        req, num_computed_tokens=32
+    )
+    assert (external_tokens, is_async) == (32, True)
+
+    sched.update_state_after_alloc(req, FakeBlocks(), external_tokens)
+    metadata = sched.build_connector_meta(MagicMock())
+    req_meta = metadata.reqs_to_recv[req.request_id]
+
+    assert req_meta.num_local_computed_tokens == 32
+    assert req_meta.num_total_tokens == 64
+    assert req_meta.local_block_ids == ([7, 8], [9])
+    assert req.request_id not in sched._local_hit_tokens
 
 
 @pytest.mark.cpu_test
