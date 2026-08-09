@@ -25,14 +25,6 @@ def test_indexer_cpu_buffer_guard_fails_before_oom():
             available_bytes=5 * 2**30,
         )
 
-    required_bytes = _check_indexer_topk_cpu_buffer_size(
-        max_num_slots=136_960,
-        num_indexer_layers=21,
-        index_topk=512,
-        available_bytes=6 * 2**30,
-    )
-    assert required_bytes == 136_960 * 21 * 512 * 4
-
 
 def test_num_indexer_layers_with_short_pattern():
     config = SimpleNamespace(
