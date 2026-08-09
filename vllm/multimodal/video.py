@@ -637,7 +637,7 @@ class TorchCodecVideoBackendMixin:
         return batch.data.numpy(), list(frame_indices)
 
 
-def _pynvvc_frames_to_nhwc(frames):
+def _pynvvc_frames_to_nhwc(frames: torch.Tensor) -> torch.Tensor:
     """Return a stacked PyNvVideoCodec frame batch as contiguous NHWC.
 
     PyNvVideoCodec's per-frame layout has varied across versions (HWC vs CHW),
