@@ -13,7 +13,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 
 def _make_lookup(
-    num_speculative_tokens_per_batch_size,
+    speculative_token_schedule,
     *,
     max_batch_size: int = 256,
     runtime_num_speculative_tokens: int = 3,
@@ -25,7 +25,7 @@ def _make_lookup(
     directly to see the full 2D structure.
     """
     lookup = build_dynamic_sd_schedule_lookup(
-        num_speculative_tokens_per_batch_size=num_speculative_tokens_per_batch_size,
+        speculative_token_schedule=speculative_token_schedule,
         vllm_max_batch_size=max_batch_size,
         vllm_num_speculative_tokens=runtime_num_speculative_tokens,
     )
@@ -48,7 +48,7 @@ def _make_scheduler_with_dynamic_sd(
 
     speculative_config = base_scheduler.vllm_config.speculative_config
     assert speculative_config is not None
-    speculative_config.num_speculative_tokens_per_batch_size = schedule
+    speculative_config.speculative_token_schedule = schedule
 
     return Scheduler(
         vllm_config=base_scheduler.vllm_config,
@@ -125,7 +125,7 @@ def test_dynamic_sd_rejects_empty_schedule():
 
 def test_dynamic_sd_requires_schedule_config():
     with pytest.raises(
-        ValueError, match="num_speculative_tokens_per_batch_size is required"
+        ValueError, match="speculative_token_schedule is required"
     ):
         build_dynamic_sd_schedule_lookup(
             None,
@@ -144,7 +144,7 @@ def test_dynamic_sd_lookup_rejects_invalid_batch_size_queries():
 
 def test_dynamic_sd_5tuple_forms_2d_dense_lookup():
     lookup = build_dynamic_sd_schedule_lookup(
-        num_speculative_tokens_per_batch_size=[
+        speculative_token_schedule=[
             (1, 32, 1, 512, 3),
             (1, 32, 513, 4096, 2),
             (33, 128, 1, 512, 2),
@@ -165,7 +165,7 @@ def test_dynamic_sd_5tuple_forms_2d_dense_lookup():
 
 def test_dynamic_sd_5tuple_carry_forward_across_bs_gap():
     lookup = build_dynamic_sd_schedule_lookup(
-        num_speculative_tokens_per_batch_size=[
+        speculative_token_schedule=[
             (1, 8, 1, 100, 3),
             (1, 8, 101, 4096, 2),
             (32, 64, 1, 100, 1),
@@ -184,7 +184,7 @@ def test_dynamic_sd_5tuple_carry_forward_across_bs_gap():
 
 def test_dynamic_sd_bucket_of_maps_context_to_bucket_index():
     lookup = build_dynamic_sd_schedule_lookup(
-        num_speculative_tokens_per_batch_size=[
+        speculative_token_schedule=[
             (1, 16, 1, 100, 3),
             (1, 16, 101, 4096, 2),
         ],
@@ -201,7 +201,7 @@ def test_dynamic_sd_bucket_of_maps_context_to_bucket_index():
 
 def test_dynamic_sd_5tuple_extends_last_ctx_to_cover_any_value():
     lookup = build_dynamic_sd_schedule_lookup(
-        num_speculative_tokens_per_batch_size=[(1, 16, 1, 4096, 3)],
+        speculative_token_schedule=[(1, 16, 1, 4096, 3)],
         vllm_max_batch_size=16,
         vllm_num_speculative_tokens=3,
     )
@@ -220,7 +220,7 @@ def test_dynamic_sd_rejects_mixed_arity():
 def test_dynamic_sd_rejects_non_rectangular_grid():
     with pytest.raises(ValueError, match="rectangular"):
         build_dynamic_sd_schedule_lookup(
-            num_speculative_tokens_per_batch_size=[
+            speculative_token_schedule=[
                 (1, 64, 1, 4096, 3),
                 (65, 256, 1, 512, 2),
                 (65, 256, 513, 4096, 1),
@@ -233,7 +233,7 @@ def test_dynamic_sd_rejects_non_rectangular_grid():
 def test_dynamic_sd_rejects_ctx_gap():
     with pytest.raises(ValueError, match="contiguous"):
         build_dynamic_sd_schedule_lookup(
-            num_speculative_tokens_per_batch_size=[
+            speculative_token_schedule=[
                 (1, 16, 1, 100, 3),
                 (1, 16, 200, 4096, 2),
             ],
@@ -245,7 +245,7 @@ def test_dynamic_sd_rejects_ctx_gap():
 def test_dynamic_sd_rejects_ctx_not_starting_at_1():
     with pytest.raises(ValueError, match="first context range must start at 1"):
         build_dynamic_sd_schedule_lookup(
-            num_speculative_tokens_per_batch_size=[(1, 16, 2, 100, 3)],
+            speculative_token_schedule=[(1, 16, 2, 100, 3)],
             vllm_max_batch_size=16,
             vllm_num_speculative_tokens=3,
         )
@@ -254,7 +254,7 @@ def test_dynamic_sd_rejects_ctx_not_starting_at_1():
 def test_dynamic_sd_rejects_negative_ctx():
     with pytest.raises(ValueError, match="Context range .* must be positive"):
         build_dynamic_sd_schedule_lookup(
-            num_speculative_tokens_per_batch_size=[(1, 16, 0, 100, 3)],
+            speculative_token_schedule=[(1, 16, 0, 100, 3)],
             vllm_max_batch_size=16,
             vllm_num_speculative_tokens=3,
         )
@@ -321,7 +321,7 @@ def test_dynamic_sd_is_disabled_with_data_parallel(caplog_vllm):
             max_num_seqs=256,
             max_num_batched_tokens=2560,
             num_speculative_tokens=3,
-            num_speculative_tokens_per_batch_size=[
+            speculative_token_schedule=[
                 (1, 16, 3),
                 (64, 128, 2),
                 (256, 4096, 0),
@@ -331,7 +331,7 @@ def test_dynamic_sd_is_disabled_with_data_parallel(caplog_vllm):
 
     speculative_config = scheduler.vllm_config.speculative_config
     assert speculative_config is not None
-    assert speculative_config.num_speculative_tokens_per_batch_size is None
+    assert speculative_config.speculative_token_schedule is None
     assert scheduler.dynamic_sd_lookup is None
     assert "Dynamic speculative decoding is not supported with data parallelism" in (
         caplog_vllm.text

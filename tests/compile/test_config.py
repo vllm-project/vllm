@@ -506,7 +506,7 @@ def _mock_config_for_cudagraph_sizes(
     num_speculative_tokens: int,
     max_num_batched_tokens: int,
     compilation_config: CompilationConfig,
-    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
+    speculative_token_schedule: list[tuple[int, int, int]] | None = None,
 ) -> MagicMock:
     """Mock VllmConfig wired up enough to run `_set_cudagraph_sizes`.
 
@@ -526,11 +526,11 @@ def _mock_config_for_cudagraph_sizes(
     config.model_config.enforce_eager = False
     config.performance_mode = None
     config.diffusion_config = None
-    schedule = num_speculative_tokens_per_batch_size
+    schedule = speculative_token_schedule
     config.speculative_config = (
         SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
-            num_speculative_tokens_per_batch_size=schedule,
+            speculative_token_schedule=schedule,
             uses_dynamic_speculative_decoding=lambda: schedule is not None,
         )
         if num_speculative_tokens
@@ -857,7 +857,7 @@ def test_default_cudagraph_capture_sizes_cover_every_dynamic_decode_width():
         compilation_config=compilation_config,
         # 16 draft tokens up to a batch of 16, then 2 out to 128. Both
         # tier maxima fit under the 512-token default capture ceiling.
-        num_speculative_tokens_per_batch_size=[(1, 16, 16), (17, 128, 2)],
+        speculative_token_schedule=[(1, 16, 16), (17, 128, 2)],
     )
 
     VllmConfig._set_cudagraph_sizes(config)
@@ -877,7 +877,7 @@ def test_dynamic_decode_capture_clamps_configured_width():
         num_speculative_tokens=3,
         max_num_batched_tokens=32768,
         compilation_config=compilation_config,
-        num_speculative_tokens_per_batch_size=[(1, 16, 5)],
+        speculative_token_schedule=[(1, 16, 5)],
     )
 
     VllmConfig._set_cudagraph_sizes(config)
@@ -896,7 +896,7 @@ def test_dynamic_decode_capture_covers_schedule_gap_and_tail():
         num_speculative_tokens=4,
         max_num_batched_tokens=32768,
         compilation_config=compilation_config,
-        num_speculative_tokens_per_batch_size=[(1, 2, 4), (5, 5, 1)],
+        speculative_token_schedule=[(1, 2, 4), (5, 5, 1)],
     )
 
     VllmConfig._set_cudagraph_sizes(config)

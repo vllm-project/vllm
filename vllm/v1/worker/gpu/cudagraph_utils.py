@@ -217,7 +217,7 @@ class CudaGraphManager:
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
             schedule_lookup = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
+                speculative_config.speculative_token_schedule,
                 vllm_max_batch_size=self.max_num_reqs,
                 vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
             )
