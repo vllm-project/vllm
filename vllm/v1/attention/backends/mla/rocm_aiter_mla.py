@@ -123,13 +123,14 @@ def _aiter_mla_small_head_mode() -> str:
 
     - ``"auto"`` (default): let the arch decide -- divisor head counts keep the
       Gluon decode where a build exists (gfx950), everything else (non-divisor
-      counts and all counts on gfx942) uses the padded persistent-scheduling
-      ASM decode.
+      counts and unsupported gfx942 shapes) uses the padded
+      persistent-scheduling ASM decode. Validated gfx942 12-head multi-token
+      shapes use the graph-safe Gluon path.
     - ``"gluon"``: prefer the Gluon path wherever a build exists.
-    - ``"asm"``: force the padded persistent-scheduling ASM decode.
+    - ``"asm"``: force the padded persistent-scheduling ASM decode, including
+      shapes supported by the gfx942 graph path.
 
-    On gfx942 (no Gluon build) the ASM path is always used regardless of this
-    setting; ``"gluon"`` there falls back to ASM with a one-time warning.
+    On gfx942, single-token and unsupported multi-token shapes use ASM.
     """
     import vllm.envs as envs
 
@@ -137,8 +138,9 @@ def _aiter_mla_small_head_mode() -> str:
     if mode == "gluon" and not _gluon_mla_decode_supported():
         logger.warning_once(
             "VLLM_ROCM_AITER_MLA_ASM_PADDING=gluon requested, but this device "
-            "has no Gluon MLA decode build (Gluon requires gfx950); using the "
-            "padded persistent-scheduling ASM decode instead."
+            "has no single-token Gluon MLA decode build (Gluon requires "
+            "gfx950); unsupported shapes use the padded "
+            "persistent-scheduling ASM decode."
         )
     return mode
 
@@ -1262,6 +1264,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # owns only the validated gfx942 BF16 multi-token shapes.
         if (
             _on_gfx942()
+            and _aiter_mla_small_head_mode() != "asm"
             and decode.attn_out_dtype == torch.bfloat16
             and AiterMLAHelper.use_gluon_gfx942_graph(self.num_heads, qlen, num_reqs)
         ):

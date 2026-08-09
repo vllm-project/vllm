@@ -1294,9 +1294,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the Gluon small-head kernel or through the padded persistent-scheduling
     # (PS) ASM kernel. "auto" (default) keeps Gluon for head counts that divide
     # 16 where a Gluon build exists (gfx950/CDNA4) and otherwise uses the padded
-    # PS ASM decode; "gluon" forces the Gluon path wherever a build exists;
-    # "asm" forces the padded PS ASM decode. On gfx942/CDNA3 there is no Gluon
-    # build, so the ASM path is always used regardless of this setting.
+    # PS ASM decode, except for validated gfx942 12-head multi-token shapes that
+    # use the graph-safe Gluon path; "gluon" prefers available Gluon paths;
+    # "asm" forces the padded PS ASM decode for all shapes.
     "VLLM_ROCM_AITER_MLA_ASM_PADDING": env_with_choices(
         "VLLM_ROCM_AITER_MLA_ASM_PADDING",
         "auto",

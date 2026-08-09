@@ -177,6 +177,7 @@ def test_gfx942_gluon_graph_passes_ragged_metadata_directly(monkeypatch):
     graph = mock.Mock(side_effect=lambda *args: args[3].fill_(7))
 
     monkeypatch.setattr(rocm_aiter_mla, "_on_gfx942", lambda: True)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
     monkeypatch.setattr(
         rocm_aiter_mla,
         "_get_mla_gluon_gfx942_graph",
@@ -230,7 +231,7 @@ def test_gfx942_gluon_graph_passes_ragged_metadata_directly(monkeypatch):
 
 @pytest.mark.parametrize(
     "unsupported",
-    ["architecture", "symbol", "dtype", "shape"],
+    ["architecture", "symbol", "dtype", "shape", "force_asm"],
 )
 def test_gfx942_gluon_graph_unsupported_cases_fall_back(monkeypatch, unsupported):
     dtype = torch.float16 if unsupported == "dtype" else torch.bfloat16
@@ -244,6 +245,11 @@ def test_gfx942_gluon_graph_unsupported_cases_fall_back(monkeypatch, unsupported
         rocm_aiter_mla,
         "_on_gfx942",
         lambda: unsupported != "architecture",
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "_aiter_mla_small_head_mode",
+        lambda: "asm" if unsupported == "force_asm" else "auto",
     )
     monkeypatch.setattr(
         rocm_aiter_mla,
@@ -269,6 +275,7 @@ def test_gfx942_gluon_graph_runtime_errors_propagate(monkeypatch):
     asm = mock.Mock()
 
     monkeypatch.setattr(rocm_aiter_mla, "_on_gfx942", lambda: True)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
     monkeypatch.setattr(
         rocm_aiter_mla,
         "_get_mla_gluon_gfx942_graph",
