@@ -106,6 +106,37 @@ def reorder_w13_to_w31_for_flashinfer_cutedsl(
     )
 
 
+def _pad_non_gated_cutedsl_nvfp4_weights(
+    layer: "RoutedExperts",
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pad non-gated NVFP4 MoE weights to CuTeDSL's 128-row tile."""
+    assert not layer.activation.is_gated
+
+    pad_size = (-w13.shape[1]) % 128
+    if pad_size == 0:
+        return w13, w13_scale, w2, w2_scale
+    if pad_size % 16 != 0:
+        raise ValueError(f"Unsupported CuTeDSL NVFP4 padding size: {pad_size}")
+
+    w13 = torch.nn.functional.pad(w13, (0, 0, 0, pad_size))
+    w13_scale = torch.nn.functional.pad(w13_scale, (0, 0, 0, pad_size))
+    w2 = torch.nn.functional.pad(w2, (0, pad_size // 2, 0, 0))
+    w2_scale = torch.nn.functional.pad(w2_scale, (0, pad_size // 16))
+
+    layer.intermediate_size_per_partition = w13.shape[1]
+    moe_config = layer.moe_config
+    if moe_config.intermediate_size_per_partition_unpadded is None:
+        moe_config.intermediate_size_per_partition_unpadded = (
+            moe_config.intermediate_size_per_partition
+        )
+    moe_config.intermediate_size_per_partition = w13.shape[1]
+    return w13, w13_scale, w2, w2_scale
+
+
 def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     layer: "RoutedExperts",
     w13: torch.Tensor,
@@ -148,6 +179,10 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
         # Interleave up/gate rows for w13 weights and scales.
         w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
         w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
+    else:
+        w13, w13_scale, w2, w2_scale = _pad_non_gated_cutedsl_nvfp4_weights(
+            layer, w13, w13_scale, w2, w2_scale
+        )
 
     w13_scale = swizzle_blockscale(w13_scale)
     w2_scale = swizzle_blockscale(w2_scale)

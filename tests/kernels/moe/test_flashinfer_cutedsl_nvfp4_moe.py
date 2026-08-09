@@ -159,7 +159,10 @@ def _dequantize_nvfp4_linear(
     return (tensor_f32 * tensor_sf.unsqueeze(-1)).reshape(m, k).to(dtype)
 
 
-@pytest.mark.parametrize("m,n,k,e,topk", [(16, 128, 512, 4, 2)])
+@pytest.mark.parametrize(
+    "m,n,k,e,topk",
+    [(16, 128, 512, 4, 2), (16, 192, 512, 4, 2)],
+)
 @pytest.mark.parametrize("activation,alpha,beta,limit", _ACT_CASES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @torch.inference_mode()
@@ -231,6 +234,8 @@ def test_flashinfer_cutedsl_fp4_moe(
             w2_scale_2=(1.0 / w2_global_scale),
             a2_scale=a2_scale,
         )
+        assert w1_cutedsl.shape[1] % 128 == 0
+        assert w2_cutedsl.shape[2] * 2 == w1_cutedsl.shape[1]
         quant_config = nvfp4_moe_quant_config(
             g1_alphas=w1_alpha,
             g2_alphas=w2_alpha,
