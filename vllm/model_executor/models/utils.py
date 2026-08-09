@@ -783,6 +783,23 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
+def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
+    """Whether the last PP rank must instantiate the target's ``embed_tokens``.
+
+    A DSpark drafter runs on the last rank and aliases the target's input
+    embedding, which normally lives only on the first rank; instantiating it
+    here lets the regular weight loader populate it. EAGLE3 needs nothing: its
+    drafter keeps its own embedding under PP.
+    """
+    from vllm.distributed.parallel_state import get_pp_group
+
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or speculative_config.method != "dspark":
+        return False
+    pp = get_pp_group()
+    return pp.world_size > 1 and pp.is_last_rank
+
+
 def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
