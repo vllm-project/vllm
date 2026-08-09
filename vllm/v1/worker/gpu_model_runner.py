@@ -3069,7 +3069,7 @@ class GPUModelRunner(
 
                 self._cache_encoder_output(
                     mm_hashes[i],
-                    pe_tensor.to(self.device),
+                    async_tensor_h2d(pe_tensor, device=self.device),
                     scheduler_output.ec_manager_metadata,
                     scheduler_output.free_encoder_mm_hashes,
                 )
@@ -3977,6 +3977,51 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
+    def _allow_microbatching(
+        self, num_reqs: int, num_scheduled_tokens_np: np.ndarray
+    ) -> bool:
+        """Refuse to microbatch a step that splits a prefix from its writer.
+
+        A request can be admitted on a prefix cache hit against blocks another
+        request in the same batch is only computing now. Run whole, the step
+        issues every KV cache write before any attention read and the hit
+        holds; split, a reader in the first half would attend over blocks the
+        writer in the second half has not filled in yet. Vetoing on one rank
+        settles it for all, since ranks agree on microbatching collectively.
+        """
+        if not self.parallel_config.use_ubatching or num_reqs < 2:
+            return True
+        computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        query_lens = num_scheduled_tokens_np[:num_reqs]
+        # A decode reads nothing it was not already given in an earlier step.
+        readers = np.flatnonzero(
+            (query_lens > (self.reorder_batch_threshold or 1)) & (computed > 0)
+        )
+        if readers.size == 0:
+            return True
+
+        for block_table in self.input_batch.block_table.block_tables:
+            block_size = block_table.block_size
+            table = block_table.get_numpy_array()
+            start = computed // block_size
+            stop = (computed + query_lens + block_size - 1) // block_size
+            span = int((stop - start).max())
+            columns = start[:, None] + np.arange(span)[None, :]
+            written = np.unique(
+                np.take_along_axis(
+                    table[:num_reqs],
+                    np.minimum(columns, table.shape[1] - 1),
+                    axis=1,
+                )[columns < stop[:, None]]
+            )
+            for reader in readers:
+                # Whole blocks only: a reader ends inside a partly filled one,
+                # which is private to it and which it fills before reading.
+                whole = computed[reader] // block_size
+                if np.isin(table[reader, :whole], written).any():
+                    return False
+        return True
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -4320,6 +4365,9 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                allow_microbatching=self._allow_microbatching(
+                    num_reqs, num_scheduled_tokens_np
+                ),
             )
 
             logger.debug(
