@@ -23,8 +23,8 @@ use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
-    ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
-    DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
+    ChatRequestProcessor, ChatTextBackend, ChatToolChoice, DefaultChatOutputProcessor,
+    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
@@ -434,10 +434,13 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
     dealer.recv().await.expect("recv engine message").into_vec()
 }
 
+type ChatRequestCheck = Arc<dyn Fn(&ChatRequest) + Send + Sync>;
+
 #[derive(Clone)]
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    request_check: Option<ChatRequestCheck>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -462,6 +465,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            request_check: None,
         }
     }
 
@@ -469,6 +473,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            request_check: None,
         }
     }
 
@@ -478,7 +483,13 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            request_check: None,
         }
+    }
+
+    fn with_request_check(mut self, check: impl Fn(&ChatRequest) + Send + Sync + 'static) -> Self {
+        self.request_check = Some(Arc::new(check));
+        self
     }
 }
 
@@ -514,6 +525,9 @@ impl ChatBackend for FakeChatBackend {
         request: &mut ChatRequest,
         options: NewChatOutputProcessorOptions<'_>,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        if let Some(check) = &self.request_check {
+            check(request);
+        }
         Ok(Box::new(DefaultChatOutputProcessor::new(
             request,
             &self.model_id,
@@ -2453,6 +2467,273 @@ async fn non_stream_chat_returns_json_response() {
     }
     // ...except `tool_calls`, which Python pops from the payload when empty.
     assert!(!message.contains_key("tool_calls"), "{json}");
+}
+
+struct AllowedToolsHttpCase<'a> {
+    mode: &'a str,
+    allowed_names: &'a [&'a str],
+    expected_choice: ChatToolChoice,
+    expected_tools: &'a [&'a str],
+}
+
+async fn assert_allowed_tools_http(case: AllowedToolsHttpCase<'_>) {
+    let expected_tools =
+        case.expected_tools.iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
+    let expected_choice = case.expected_choice;
+    let backend =
+        FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B").with_request_check(move |request| {
+            let top_level_tools =
+                request.initial_tools().iter().map(|tool| tool.name.clone()).collect::<Vec<_>>();
+            let model_visible_tools =
+                request.tools().iter().map(|tool| tool.name.clone()).collect::<Vec<_>>();
+            let developer_tools = request.messages.iter().find_map(|message| match message {
+                ChatMessage::Developer { tools, .. } => tools
+                    .as_ref()
+                    .map(|tools| tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>()),
+                _ => None,
+            });
+
+            assert_eq!(
+                (
+                    top_level_tools,
+                    model_visible_tools,
+                    request.tool_choice().clone(),
+                    developer_tools
+                ),
+                (
+                    expected_tools.clone(),
+                    expected_tools.clone(),
+                    expected_choice.clone(),
+                    None,
+                )
+            );
+        });
+    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(backend),
+        default_stream_output_specs(),
+    )
+    .await;
+    let allowed_tools = case
+        .allowed_names
+        .iter()
+        .map(|name| json!({"type": "function", "function": {"name": name}}))
+        .collect::<Vec<_>>();
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [
+                            {
+                                "role": "developer",
+                                "content": "developer instructions",
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "developer_news",
+                                            "parameters": {"type": "object"},
+                                        },
+                                    },
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "developer_time",
+                                            "parameters": {"type": "object"},
+                                        },
+                                    },
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "developer_weather",
+                                            "parameters": {"type": "object"},
+                                        },
+                                    },
+                                ],
+                            },
+                            {"role": "user", "content": "hello"},
+                        ],
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "parameters": {"type": "object"},
+                                },
+                            },
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "get_news",
+                                    "parameters": {"type": "object"},
+                                },
+                            },
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "get_time",
+                                    "parameters": {"type": "object"},
+                                },
+                            },
+                        ],
+                        "tool_choice": {
+                            "type": "allowed_tools",
+                            "allowed_tools": {
+                                "mode": case.mode,
+                                "tools": allowed_tools,
+                            },
+                        },
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["choices"][0]["message"]["content"], "hi");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_auto_allowed_tools_filters_model_visible_tools() {
+    assert_allowed_tools_http(AllowedToolsHttpCase {
+        mode: "auto",
+        allowed_names: &["get_time", "get_weather"],
+        expected_choice: ChatToolChoice::Auto,
+        expected_tools: &["get_weather", "get_time"],
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_required_allowed_tools_reaches_model() {
+    assert_allowed_tools_http(AllowedToolsHttpCase {
+        mode: "required",
+        allowed_names: &["get_time"],
+        expected_choice: ChatToolChoice::Required,
+        expected_tools: &["get_time"],
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_empty_auto_allowed_tools_removes_all_tools() {
+    assert_allowed_tools_http(AllowedToolsHttpCase {
+        mode: "auto",
+        allowed_names: &[],
+        expected_choice: ChatToolChoice::None,
+        expected_tools: &[],
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_invalid_allowed_tools_semantics_return_specific_400_errors() {
+    let cases = [
+        (
+            "missing tool",
+            json!({
+                "type": "allowed_tools",
+                "allowed_tools": {
+                    "mode": "auto",
+                    "tools": [{
+                        "type": "function",
+                        "function": {"name": "get_time"},
+                    }],
+                },
+            }),
+            &["get_time", "not found in 'tools'"][..],
+        ),
+        (
+            "empty required list",
+            json!({
+                "type": "allowed_tools",
+                "allowed_tools": {"mode": "required", "tools": []},
+            }),
+            &["required", "at least one allowed function"][..],
+        ),
+    ];
+    let mut app = test_app().await;
+
+    for (case, tool_choice, expected_message_parts) in cases {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "stream": false,
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object"},
+                    },
+                }],
+                "tool_choice": tool_choice,
+            }),
+        )
+        .await;
+        let message = json["error"]["message"].as_str().unwrap_or_default();
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {json}");
+        assert_eq!(
+            json["error"]["type"].as_str(),
+            Some("invalid_request_error"),
+            "{case}: {json}"
+        );
+        assert!(
+            expected_message_parts.iter().all(|part| message.contains(part)),
+            "{case}: expected {expected_message_parts:?} in {message:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_malformed_allowed_tools_returns_openai_400() {
+    let mut app = test_app().await;
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object"},
+                },
+            }],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [{"type": "function", "name": "get_weather"}],
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["code"], "json_parse_error");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

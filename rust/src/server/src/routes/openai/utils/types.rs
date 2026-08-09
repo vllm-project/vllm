@@ -268,9 +268,8 @@ pub enum ToolChoice {
     },
     AllowedTools {
         #[serde(rename = "type")]
-        tool_type: String,
-        mode: String,
-        tools: Vec<ToolReference>,
+        tool_type: AllowedToolsChoiceType,
+        allowed_tools: AllowedTools,
     },
 }
 
@@ -281,56 +280,39 @@ impl Default for ToolChoice {
 }
 
 /// Function choice specification for `ToolChoice::Function`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FunctionChoice {
     pub name: String,
 }
 
-/// Tool reference for `ToolChoice::AllowedTools`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-pub enum ToolReference {
-    #[serde(rename = "function")]
-    Function { name: String },
-    #[serde(rename = "mcp")]
-    Mcp {
-        server_label: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    #[serde(rename = "file_search")]
-    FileSearch,
-    #[serde(rename = "web_search_preview")]
-    WebSearchPreview,
-    #[serde(rename = "computer_use_preview")]
-    ComputerUsePreview,
-    #[serde(rename = "code_interpreter")]
-    CodeInterpreter,
-    #[serde(rename = "image_generation")]
-    ImageGeneration,
+/// Discriminator for an allowed-tools choice.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub enum AllowedToolsChoiceType {
+    #[serde(rename = "allowed_tools")]
+    AllowedTools,
 }
 
-impl ToolReference {
-    /// Get a unique identifier for this tool reference.
-    pub fn identifier(&self) -> String {
-        match self {
-            ToolReference::Function { name } => format!("function:{name}"),
-            ToolReference::Mcp {
-                server_label,
-                name: Some(n),
-            } => format!("mcp:{server_label}:{n}"),
-            ToolReference::Mcp {
-                server_label,
-                name: _,
-            } => format!("mcp:{server_label}"),
-            ToolReference::FileSearch => "file_search".to_string(),
-            ToolReference::WebSearchPreview => "web_search_preview".to_string(),
-            ToolReference::ComputerUsePreview => "computer_use_preview".to_string(),
-            ToolReference::CodeInterpreter => "code_interpreter".to_string(),
-            ToolReference::ImageGeneration => "image_generation".to_string(),
-        }
-    }
+/// Allowed function tools and their invocation mode.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AllowedTools {
+    pub mode: AllowedToolsMode,
+    pub tools: Vec<ToolReference>,
+}
+
+/// Invocation mode for an allowed-tools choice.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowedToolsMode {
+    Auto,
+    Required,
+}
+
+/// Tool reference for `ToolChoice::AllowedTools`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum ToolReference {
+    #[serde(rename = "function")]
+    Function { function: FunctionChoice },
 }
 
 // ============================================================================
