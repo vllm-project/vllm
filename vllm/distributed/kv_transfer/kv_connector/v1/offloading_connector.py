@@ -12,7 +12,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    ConnectorInitState,
+    KVConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -37,6 +40,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
 from vllm.forward_context import ForwardContext
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -67,6 +71,15 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
         offloading_config = build_offloading_config(vllm_config, kv_cache_config)
         spec = OffloadingSpecFactory.create_spec(offloading_config)
+        async_init = offloading_config.extra_config.get("async_init", False)
+        if not isinstance(async_init, bool):
+            raise ValueError("async_init must be a boolean")
+        if async_init:
+            if not spec.supports_async_init:
+                raise ValueError(f"{type(spec).__name__} does not support async_init")
+            if not current_platform.is_cuda():
+                raise ValueError("async_init is only supported on CUDA")
+            self.enable_async_init()
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
@@ -76,8 +89,13 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             )
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = OffloadingConnectorWorker(
-                spec, vllm_config, kv_cache_config
+                spec, vllm_config, kv_cache_config, async_init=async_init
             )
+
+    def get_connector_init_state(self) -> ConnectorInitState | None:
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_init_state()
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:
