@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import NoneType
 from typing import Any
@@ -87,6 +88,50 @@ class ToolParserTestConfig:
     supports_typed_arguments: bool = True
 
 
+def pythonic_style_test_config(
+    parser_name: str,
+    render: Callable[[list[str]], str],
+    **overrides: Any,
+) -> ToolParserTestConfig:
+    """Build a config for parsers that emit Python-literal call syntax.
+
+    Args:
+        parser_name: Name used with ToolParserManager.
+        render: Turns a list of ``fn(args)`` strings into one model output,
+            applying whatever delimiters the parser expects.
+        **overrides: Passed through to ToolParserTestConfig.
+    """
+    escaped = (
+        "test_function(quoted='He said \"hello\"', "
+        "backslash='C:\\\\Users\\\\test', "
+        "newline='line1\\nline2')"
+    )
+    types = (
+        "test_function(string_field='hello', int_field=42, float_field=3.14, "
+        "bool_field=True, null_field=None, array_field=['a', 'b', 'c'], "
+        "object_field={'nested': 'value'}, empty_array=[], empty_object={})"
+    )
+    single = "get_weather(city='Tokyo')"
+    config_kwargs: dict[str, Any] = dict(
+        parser_name=parser_name,
+        no_tool_calls_output="How can I help you today?",
+        single_tool_call_output=render([single]),
+        parallel_tool_calls_output=render([single, "get_time(timezone='Asia/Tokyo')"]),
+        various_data_types_output=render([types]),
+        empty_arguments_output=render(["refresh()"]),
+        surrounding_text_output=f"Let me check.\n{render([single])}\nAll done.",
+        escaped_strings_output=render([escaped]),
+        malformed_input_outputs=[
+            render(["get_weather(city='Tokyo'"]),
+            render(["get_weather(city=)"]),
+            render(["1_not_an_identifier()"]),
+            "plain text that is not a call at all",
+        ],
+    )
+    config_kwargs.update(overrides)
+    return ToolParserTestConfig(**config_kwargs)
+
+
 class ToolParserTests:
     """Mixin class providing common test suite for tool parsers.
 
@@ -125,8 +170,20 @@ class ToolParserTests:
         return default_tokenizer
 
     @pytest.fixture
-    def tool_parser(self, test_config: ToolParserTestConfig, tokenizer: TokenizerLike):
-        return ToolParserManager.get_tool_parser(test_config.parser_name)(tokenizer)
+    def make_tool_parser(
+        self, test_config: ToolParserTestConfig, tokenizer: TokenizerLike
+    ):
+        """Factory for fresh parser instances.
+
+        vLLM builds a new parser per request, so tests that exercise more than
+        one extraction must not share a single (stateful) instance.
+        """
+        parser_cls = ToolParserManager.get_tool_parser(test_config.parser_name)
+        return lambda: parser_cls(tokenizer)
+
+    @pytest.fixture
+    def tool_parser(self, make_tool_parser):
+        return make_tool_parser()
 
     @pytest.fixture(params=[True, False])
     def streaming(self, request: pytest.FixtureRequest) -> bool:
@@ -341,7 +398,7 @@ class ToolParserTests:
     def test_streaming_reconstruction(
         self,
         request: pytest.FixtureRequest,
-        tool_parser: Any,
+        make_tool_parser: Any,
         test_config: ToolParserTestConfig,
     ):
         """Verify streaming produces same result as non-streaming."""
@@ -350,14 +407,13 @@ class ToolParserTests:
 
         test_output = test_config.single_tool_call_output
 
-        # Non-streaming result
+        # A fresh parser per mode, mirroring the per-request parser in serving.
         content_non, tools_non = run_tool_extraction(
-            tool_parser, test_output, streaming=False
+            make_tool_parser(), test_output, streaming=False
         )
 
-        # Streaming result
         content_stream, tools_stream = run_tool_extraction(
-            tool_parser, test_output, streaming=True
+            make_tool_parser(), test_output, streaming=True
         )
 
         # Compare results
