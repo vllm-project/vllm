@@ -47,9 +47,6 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
     IndexerTopkCapturer,
-    get_indexer_attn_group_id,
-    get_indexer_shape,
-    get_sparse_attn_indexers,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.offloader import (
@@ -304,7 +301,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.eplb = EPLBController(self.parallel_config, self.device)
         self.routed_experts_capturer: RoutedExpertsCapturer | None = None
         self.indexer_topk_capturer: IndexerTopkCapturer | None = None
-        self.indexer_topk_attn_group_id = -1
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
 
@@ -320,59 +316,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config=self.kv_cache_config,
         )
         bind_routed_experts_capturer(self.model, self.routed_experts_capturer)
-
-    def init_indexer_topk_capturer(self) -> None:
-        expected_layers, expected_topk = get_indexer_shape(
-            self.model_config.hf_text_config
-        )
-        indexers = get_sparse_attn_indexers(self.model)
-        if len(indexers) != expected_layers:
-            raise RuntimeError(
-                "Indexer layer count does not match the model config: "
-                f"discovered {len(indexers)}, expected {expected_layers}."
-            )
-        topk_sizes = {indexer.topk_tokens for indexer in indexers}
-        if topk_sizes != {expected_topk}:
-            raise RuntimeError(
-                "Indexer top-k size does not match the model config: "
-                f"discovered {sorted(topk_sizes)}, expected {expected_topk}."
-            )
-        max_tokens = self.scheduler_config.max_num_batched_tokens
-        for indexer in indexers:
-            buffer = indexer.topk_indices_buffer
-            if (
-                buffer is None
-                or buffer.dtype != torch.int32
-                or buffer.ndim != 2
-                or buffer.shape[0] < max_tokens
-                or buffer.shape[1] != expected_topk
-            ):
-                raise RuntimeError(
-                    "Indexer top-k buffer is incompatible with capture: "
-                    f"got {None if buffer is None else (buffer.shape, buffer.dtype)}, "
-                    f"expected (* >= {max_tokens}, {expected_topk}) int32."
-                )
-
-        capturer = IndexerTopkCapturer(
-            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
-            num_indexer_layers=expected_layers,
-            index_topk=expected_topk,
-            device=self.device,
-        )
-        for layer_id, indexer in enumerate(indexers):
-
-            def capture_fn(
-                topk_indices: torch.Tensor,
-                compact_layer_id: int = layer_id,
-            ) -> None:
-                capturer.capture(compact_layer_id, topk_indices)
-
-            indexer.set_capture_fn(capture_fn)
-
-        self.indexer_topk_capturer = capturer
-        self.indexer_topk_attn_group_id = get_indexer_attn_group_id(
-            self.kv_cache_config
-        )
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks: list[SupportedTask] = []
@@ -1564,15 +1507,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         indexer_topk = None
         if self.indexer_topk_capturer is not None and not dummy_run:
-            assert slot_mappings is not None
-            self.indexer_topk_capturer.validate_step()
-            indexer_topk = IndexerTopkTensors(
-                topk_data=self.indexer_topk_capturer.get_device_buffer()[
-                    :num_toks
-                ].clone(),
-                slot_mapping=slot_mappings[self.indexer_topk_attn_group_id][
-                    :num_toks
-                ].clone(),
+            indexer_topk = self.indexer_topk_capturer.get_indexer_topk(
+                slot_mappings, num_toks
             )
 
         finished_req_ids = scheduler_output.finished_req_ids

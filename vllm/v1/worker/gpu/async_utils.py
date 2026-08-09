@@ -99,7 +99,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         if self.indexer_topk_cpu is not None:
             self.model_runner_output.indexer_topk = self.indexer_topk_cpu.tolists()
-        self.indexer_topk = None
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()

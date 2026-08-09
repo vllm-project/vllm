@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import regex as re
@@ -90,7 +90,6 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -670,8 +669,19 @@ class Worker(WorkerBase):
             self.model_runner.init_routed_experts_capturer()
 
         if self.model_config.enable_return_indexer_topk:
-            assert self.use_v2_model_runner
-            cast("GPUModelRunnerV2", self.model_runner).init_indexer_topk_capturer()
+            from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
+                create_indexer_topk_capturer,
+            )
+
+            self.model_runner.indexer_topk_capturer = (  # type: ignore[attr-defined]
+                create_indexer_topk_capturer(
+                    self.model_runner.model,
+                    self.model_config.hf_text_config,
+                    self.model_runner.scheduler_config.max_num_batched_tokens,
+                    self.model_runner.kv_cache_config,
+                    self.model_runner.device,
+                )
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
