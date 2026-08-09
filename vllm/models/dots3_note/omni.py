@@ -46,7 +46,7 @@ from .vision import DotsMoEVitConfig, DotsMoEVitModel
     info=DotsNoteOmniProcessingInfo,
     dummy_inputs=DotsNoteOmniDummyInputsBuilder,
 )
-class Dots3NoteOmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class DotsNoteOmni3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     """Dots3 NOTE Omni model with optional image and audio towers."""
 
     supports_encoder_tp_data = True

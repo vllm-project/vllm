@@ -28,7 +28,7 @@ from vllm.models.deepseek_v32.nvidia.mtp import (
 from .model import Dot3NoteDecoderLayer
 
 
-class Dot3NoteMultiTokenPredictorLayer(nn.Module):
+class DotsNote3MultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -85,7 +85,7 @@ class Dot3NoteMultiTokenPredictorLayer(nn.Module):
         return hidden_states
 
 
-class Dot3NoteMultiTokenPredictor(DeepseekV32MultiTokenPredictor):
+class DotsNote3MultiTokenPredictor(DeepseekV32MultiTokenPredictor):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         assert vllm_config.speculative_config is not None
@@ -94,7 +94,7 @@ class Dot3NoteMultiTokenPredictor(DeepseekV32MultiTokenPredictor):
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = nn.ModuleDict(
             {
-                str(idx): Dot3NoteMultiTokenPredictorLayer(
+                str(idx): DotsNote3MultiTokenPredictorLayer(
                     vllm_config, f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
@@ -138,7 +138,7 @@ class Dot3NoteMultiTokenPredictor(DeepseekV32MultiTokenPredictor):
         )
 
 
-class Dot3NoteMTP(DeepseekV32MTP):
+class DotsNote3MTP(DeepseekV32MTP):
     has_own_embed_tokens = True
     has_own_lm_head = False
 
@@ -146,7 +146,7 @@ class Dot3NoteMTP(DeepseekV32MTP):
         nn.Module.__init__(self)
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.model = Dot3NoteMultiTokenPredictor(
+        self.model = DotsNote3MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()

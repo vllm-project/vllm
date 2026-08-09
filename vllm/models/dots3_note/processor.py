@@ -527,10 +527,10 @@ class DotsNoteOmniProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         limits: dict[str, int | None] = {}
         if self.vision_config is not None:
-            limits["image"] = None
+            limits["image"] = 512
             limits["video"] = 1
         if self.audio_config is not None:
-            limits["audio"] = None
+            limits["audio"] = 128
         return limits
 
     def get_max_image_size(self) -> tuple[int, int]:

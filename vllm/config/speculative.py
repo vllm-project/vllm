@@ -337,7 +337,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type == "dots3_note_omni":
+        if hf_config.model_type == "dots_note_omni_3":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
             if mtp_layer_types is None:
@@ -350,7 +350,7 @@ class SpeculativeConfig:
             hf_config.layer_types = [*hf_config.layer_types, *mtp_layer_types]
             hf_config.model_type = "dots3_note_mtp"
             hf_config.update(
-                {"n_predict": n_predict, "architectures": ["Dot3NoteMTPModel"]}
+                {"n_predict": n_predict, "architectures": ["DotsNote3MTPModel"]}
             )
         if hf_config.model_type in (
             "deepseek_v3",
