@@ -298,12 +298,15 @@ class TestTieringOffloadingManager:
         self._start_request()
         # Register an in-flight promotion job for tier1 by hand.
         job_id = self.manager._next_job_id()
-        self.manager._transfer_jobs[job_id] = JobMetadata(
-            job_id=job_id,
-            keys=to_keys([1, 2]),
-            block_ids=[0, 1],
-            is_promotion=True,
-            req_context=_CTX,
+        self.manager._register_job(
+            TransferJob(
+                job_id=job_id,
+                keys=to_keys([1, 2]),
+                block_ids=[0, 1],
+                is_promotion=True,
+                req_context=_CTX,
+            ),
+            0,
         )
         failed = JobResult(job_id=job_id, success=False)
         with (
@@ -322,12 +325,15 @@ class TestTieringOffloadingManager:
 
         self._start_request()
         job_id = self.manager._next_job_id()
-        self.manager._transfer_jobs[job_id] = JobMetadata(
-            job_id=job_id,
-            keys=to_keys([1]),
-            block_ids=[0],
-            is_promotion=True,
-            req_context=_CTX,
+        self.manager._register_job(
+            TransferJob(
+                job_id=job_id,
+                keys=to_keys([1]),
+                block_ids=[0],
+                is_promotion=True,
+                req_context=_CTX,
+            ),
+            0,
         )
         ok = JobResult(job_id=job_id, success=True)
         with (
