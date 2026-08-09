@@ -18,6 +18,7 @@ from vllm.config.multimodal import (
     MMCacheType,
     MMEncoderTPMode,
     MMHasherAlgorithm,
+    MMProcessorDevice,
     MMTensorIPC,
     MultiModalConfig,
 )
@@ -395,6 +396,8 @@ class ModelConfig:
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    mm_device_do_normalize: InitVar[bool | None] = None
+    mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -525,6 +528,8 @@ class ModelConfig:
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        mm_device_do_normalize: bool | None,
+        mm_processor_device: MMProcessorDevice | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -562,9 +567,11 @@ class ModelConfig:
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
         # to prevent resolving it multiple times downstream.
-        can_resolve_model_revision = (
-            self.hf_config_path is None or self.hf_config_path == self.model
-        )
+        # If the weights come from a different repo, we cannot eagerly resolve revision
+        weights_from_model = not self.model_weights or self.model_weights == self.model
+        # If the config comes from a different repo, we cannot eagerly resolve revision
+        config_from_model = not self.hf_config_path or self.hf_config_path == self.model
+        can_resolve_model_revision = config_from_model and weights_from_model
         if can_resolve_model_revision:
             self.revision = resolve_revision(
                 self.model,
@@ -763,6 +770,10 @@ class ModelConfig:
                 )
                 mm_encoder_tp_mode = "weights"
 
+            mm_processor_kwargs = MultiModalConfig.fold_mm_processor_device(
+                mm_processor_kwargs, mm_processor_device
+            )
+
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,
                 limit_per_prompt=limit_mm_per_prompt,
@@ -786,6 +797,9 @@ class ModelConfig:
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+                mm_device_do_normalize=self._resolve_mm_device_do_normalize(
+                    mm_device_do_normalize
+                ),
             )
 
             mm_config_kwargs = {
@@ -835,7 +849,6 @@ class ModelConfig:
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
-        self._verify_bnb_config()
 
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
@@ -919,6 +932,51 @@ class ModelConfig:
                 "Example: max_model_len=2048"
             )
         return self
+
+    def _resolve_mm_device_do_normalize(
+        self, mm_device_do_normalize: bool | None
+    ) -> bool:
+        if mm_device_do_normalize is None:
+            if envs.VLLM_USE_RUST_FRONTEND:
+                logger.debug(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+            else:
+                mm_device_do_normalize = (
+                    self._model_info.supports_mm_device_do_normalize
+                )
+                logger.debug(
+                    "mm_device_do_normalize is %s by default.",
+                    "enabled" if mm_device_do_normalize else "disabled",
+                )
+        else:
+            if mm_device_do_normalize and envs.VLLM_USE_RUST_FRONTEND:
+                logger.warning(
+                    "VLLM_USE_RUST_FRONTEND is set. "
+                    "Rust frontend does not currently support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+
+            if (
+                mm_device_do_normalize
+                and not self._model_info.supports_mm_device_do_normalize
+            ):
+                logger.warning(
+                    "Model does not support mm_device_do_normalize, "
+                    "forcing mm_device_do_normalize = False."
+                )
+                mm_device_do_normalize = False
+
+            logger.debug(
+                "mm_device_do_normalize is %s.",
+                "enabled" if mm_device_do_normalize else "disabled",
+            )
+
+        return mm_device_do_normalize
 
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if
@@ -1256,34 +1314,6 @@ class ModelConfig:
                 "to eager mode.",
                 self.model_arch_config.model_type,
             )
-            self.enforce_eager = True
-
-    def _verify_bnb_config(self) -> None:
-        """
-        The current version of bitsandbytes (0.46.1) with 8-bit models does not
-        yet support CUDA graph.
-        # TODO Remove this when bitsandbytes supports.
-        """
-        is_bitsandbytes = self.quantization == "bitsandbytes"
-        has_quantization_config = self.model_arch_config.quantization_config is not None
-        is_8bit = (
-            self.model_arch_config.quantization_config.get("load_in_8bit", False)  # type: ignore[union-attr]
-            if has_quantization_config
-            else False
-        )
-        if all(
-            [
-                is_bitsandbytes,
-                has_quantization_config,
-                is_8bit,
-                not self.enforce_eager,
-            ]
-        ):
-            logger.warning(
-                "CUDA graph is not supported on BitsAndBytes 8bit yet, "
-                "fallback to the eager mode."
-            )
-
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
