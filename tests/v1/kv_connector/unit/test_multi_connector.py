@@ -53,9 +53,14 @@ class MockConnectorStats(KVConnectorStats):
 class MockConnector(KVConnectorBase_V1):
     """Mock connector for testing."""
 
+    _supports_divergent_local_hybrid_hits = False
+
     def __new__(cls, *args, **kwargs):
         # mock all KVConnectorBase_V1 functions
         mock = MagicMock(spec_set=KVConnectorBase_V1)
+        mock.supports_divergent_local_hybrid_hits = (
+            cls._supports_divergent_local_hybrid_hits
+        )
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
         mock.get_kv_connector_stats.return_value = None
@@ -92,8 +97,13 @@ class MockConnector(KVConnectorBase_V1):
 class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
     """Mock connector that supports HMA for testing."""
 
+    _supports_divergent_local_hybrid_hits = False
+
     def __new__(cls, *args, **kwargs):
         mock = MagicMock(spec_set=cls)
+        mock.supports_divergent_local_hybrid_hits = (
+            cls._supports_divergent_local_hybrid_hits
+        )
         mock.get_kv_connector_stats.return_value = None
         return mock
 
@@ -122,10 +132,19 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
         return (False, None)
 
 
+class MockDivergentHMAConnector(MockHMAConnector):
+    _supports_divergent_local_hybrid_hits = True
+
+
 # Register mock connectors
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 KVConnectorFactory.register_connector(
     "MockHMAConnector", __name__, MockHMAConnector.__name__
+)
+KVConnectorFactory.register_connector(
+    "MockDivergentHMAConnector",
+    __name__,
+    MockDivergentHMAConnector.__name__,
 )
 
 
@@ -1057,6 +1076,16 @@ def test_multi_connector_hma_support_detection():
     assert not supports_hma(mc_mixed2._connectors[0])
     assert supports_hma(mc_mixed2._connectors[1])
     assert mc_mixed2._all_support_hma is False
+
+
+def test_divergent_local_hybrid_hit_capability_is_conservative():
+    all_supported = _make_multi_connector(
+        ["MockDivergentHMAConnector", "MockDivergentHMAConnector"]
+    )
+    assert all_supported.supports_divergent_local_hybrid_hits is True
+
+    mixed = _make_multi_connector(["MockDivergentHMAConnector", "MockHMAConnector"])
+    assert mixed.supports_divergent_local_hybrid_hits is False
 
 
 @pytest.mark.skipif(
