@@ -4,11 +4,15 @@
 import argparse
 import signal
 import time
+from multiprocessing import connection
+from multiprocessing.process import BaseProcess
+from typing import cast
 
 import uvloop
 
 import vllm
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
 from vllm.entrypoints.launchers.cli_args import (
@@ -21,13 +25,19 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
+from vllm.utils.system_utils import decorate_logs, get_mp_context, set_process_title
+from vllm.v1.engine.utils import (
+    CoreEngineProcManager,
+    launch_core_engines,
+    set_assigned_physical_gpu_ids_for_dp_rank,
+)
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import (
     APIServerProcessManager,
     RustFrontendProcessManager,
+    shutdown,
     wait_for_completion_or_failure,
 )
 
@@ -175,6 +185,79 @@ def cmd_init() -> list[CLISubcommand]:
     return [ServeSubcommand()]
 
 
+def _run_headless_executor(
+    vllm_config: VllmConfig,
+    dp_rank: int,
+    user_assigned_gpu_ids: list[int] | None,
+) -> None:
+    parallel_config = vllm_config.parallel_config
+    parallel_config.data_parallel_rank = dp_rank
+    parallel_config.data_parallel_index = dp_rank
+    parallel_config.data_parallel_rank_local = dp_rank
+    set_assigned_physical_gpu_ids_for_dp_rank(
+        vllm_config, dp_rank, user_assigned_gpu_ids
+    )
+    model_config = vllm_config.model_config
+    assert model_config is not None
+    if not model_config.is_moe:
+        parallel_config.reconfigure_for_independent_dp_rank()
+
+    set_process_title(f"HeadlessExecutor_DP{dp_rank}")
+    decorate_logs()
+
+    executor = MultiprocExecutor(vllm_config, monitor_workers=False)
+    try:
+        executor.start_worker_monitor(inline=True)
+        if executor.is_failed:
+            raise RuntimeError("Headless executor worker failed.")
+    finally:
+        executor.shutdown()
+
+
+def _run_headless_executors(vllm_config: VllmConfig) -> None:
+    parallel_config = vllm_config.parallel_config
+    if (
+        parallel_config.pipeline_parallel_size_local is None
+        or parallel_config.data_parallel_size == 1
+    ):
+        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
+        executor.start_worker_monitor(inline=True)
+        return
+
+    user_assigned_gpu_ids = parallel_config.assigned_physical_gpu_ids
+    context = get_mp_context()
+    processes: list[BaseProcess] = [
+        context.Process(
+            target=_run_headless_executor,
+            name=f"HeadlessExecutor_DP{dp_rank}",
+            args=(vllm_config, dp_rank, user_assigned_gpu_ids),
+        )
+        for dp_rank in range(parallel_config.data_parallel_size)
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+
+        sentinel_to_process = {
+            cast(int, process.sentinel): process for process in processes
+        }
+        while sentinel_to_process:
+            exited = connection.wait(sentinel_to_process, timeout=1)
+            if not exited:
+                continue
+            for sentinel in exited:
+                process = sentinel_to_process[cast(int, sentinel)]
+                if process.exitcode != 0:
+                    raise RuntimeError(
+                        f"Headless executor {process.name} exited with code "
+                        f"{process.exitcode}."
+                    )
+            return
+    finally:
+        shutdown(processes)
+
+
 def run_headless(args: argparse.Namespace):
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
@@ -221,8 +304,7 @@ def run_headless(args: argparse.Namespace):
             head_node_address,
         )
 
-        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
-        executor.start_worker_monitor(inline=True)
+        _run_headless_executors(vllm_config)
         return
 
     host = parallel_config.data_parallel_master_ip
