@@ -607,6 +607,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
+            ubatch_runner=self.ubatch_runner,
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -1656,7 +1657,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.step_timing.forward_start()
 
         # Run model.
-        if ubatch_state is not None:
+        if ubatch_state is not None and batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # Replay a captured DBO graph. `ubatch_runner.prepare()` above
+            # already wrote this step's real query_start_loc/seq_lens into the
+            # persistent per-microbatch buffers the graph reads from, so
+            # replay needs nothing further from `ubatch_state` -- same as the
+            # non-ubatched FULL branch below, just dispatched through a
+            # `num_ubatches > 1` descriptor.
+            assert self.cudagraph_manager is not None
+            self.kv_connector.pre_forward(scheduler_output)
+            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+        elif ubatch_state is not None:
             assert self.ubatch_runner is not None
             with self.ubatch_runner.forward_context(ubatch_state, num_tokens_across_dp):
                 self.kv_connector.pre_forward(scheduler_output)

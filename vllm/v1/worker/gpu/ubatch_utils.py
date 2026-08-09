@@ -3,8 +3,8 @@
 """Microbatching (DBO) helpers for the V2 GPU model runner."""
 
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from typing import Any, NamedTuple
 
@@ -353,8 +353,16 @@ class UBatchRunner:
         input_batch: InputBatch,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
+        for_capture: bool = False,
     ) -> UBatchState:
-        """Split the batch into the microbatches the step will run on."""
+        """Split the batch into the microbatches the step will run on.
+
+        `for_capture` is set when this is building the dummy split used to
+        capture a FULL cudagraph ahead of time (see `begin_capturable_run`)
+        rather than a real step; it is threaded down to attention metadata
+        construction the same way the non-ubatched capture path does (see
+        `prepare_inputs_to_capture` in `cudagraph_utils.py`).
+        """
         ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
 
         attn_metadata = []
@@ -380,6 +388,7 @@ class UBatchRunner:
                     self.attn_groups,
                     self.kv_cache_config,
                     ubatch_idx=i,
+                    for_capture=for_capture,
                 )
             )
             slot_mappings_by_layer.append(
@@ -457,6 +466,31 @@ class UBatchRunner:
         model_inputs: dict[str, Any],
         ubatch_state: UBatchState,
     ) -> Any:
+        finish = self.begin_capturable_run(model, model_inputs, ubatch_state)
+        return finish()
+
+    def begin_capturable_run(
+        self,
+        model: Any,
+        model_inputs: dict[str, Any],
+        ubatch_state: UBatchState,
+    ) -> Callable[[], Any]:
+        """Start the microbatch threads and return a callback that finishes them.
+
+        Split out of `run` so a FULL cudagraph capture can start the threads
+        (and wait for them to reach their contexts) *outside* the
+        `torch.cuda.graph(...)` block -- same as the eager path -- while only
+        the handoff-and-join, which is pure stream/event work with no Python
+        allocation, happens *inside* it. That is what `ModelCudaGraphManager`
+        wraps in `torch.cuda.graph(...)` for `desc.num_ubatches > 1`; see the
+        analogous split in V1's `gpu_ubatch_wrapper.py::_capture_ubatches`,
+        which is the only other place in the codebase that captures a graph
+        across two live microbatch threads.
+
+        The returned callback must be invoked exactly once, and the caller is
+        responsible for making sure both this call and the callback happen on
+        the same thread as any cudagraph capture/replay context they wrap.
+        """
         ubatch_slices = ubatch_state.slices
         assert len(ubatch_slices) == len(ubatch_state.forward_contexts)
         assert len(ubatch_slices) == self.num_ubatches
@@ -488,32 +522,47 @@ class UBatchRunner:
                 errors[ubatch_context.id] = e
 
         # The threads manage the forward context themselves; clear it here so
-        # it is restored correctly once they are done.
-        with override_forward_context(None), self.sm_control:
-            threads = []
-            for ubatch_context, ubatch_slice in zip(ubatch_contexts, ubatch_slices):
-                thread = threading.Thread(
-                    target=run_ubatch,
-                    args=(
-                        ubatch_context,
-                        slice_model_inputs(model_inputs, ubatch_slice.token_slice),
-                    ),
-                )
-                threads.append(thread)
-                thread.start()
+        # it is restored correctly once `finish` is done. Both context
+        # managers have to stay entered across the split, since threads keep
+        # running (and the SM partition stays reserved) until `finish` joins
+        # them -- so open them here and close them from inside `finish`.
+        stack = ExitStack()
+        stack.enter_context(override_forward_context(None))
+        stack.enter_context(self.sm_control)
 
-            # Wait for every thread to reach its context, then start the first.
-            self.ready_barrier.wait()
-            ubatch_contexts[0].cpu_wait_event.set()
-            for thread in threads:
-                thread.join()
+        threads = []
+        for ubatch_context, ubatch_slice in zip(ubatch_contexts, ubatch_slices):
+            thread = threading.Thread(
+                target=run_ubatch,
+                args=(
+                    ubatch_context,
+                    slice_model_inputs(model_inputs, ubatch_slice.token_slice),
+                ),
+            )
+            threads.append(thread)
+            thread.start()
 
-        if errors:
-            failed = min(errors)
-            raise RuntimeError(
-                f"Microbatch {failed} of {self.num_ubatches} failed"
-            ) from errors[failed]
-        return merge_ubatch_outputs([outputs[i] for i in range(self.num_ubatches)])
+        # Wait for every thread to reach its context before returning. This is
+        # pure CPU synchronization (no CUDA op), so it is safe to do outside
+        # any cudagraph capture the caller may be about to open.
+        self.ready_barrier.wait()
+
+        def finish() -> Any:
+            try:
+                ubatch_contexts[0].cpu_wait_event.set()
+                for thread in threads:
+                    thread.join()
+            finally:
+                stack.close()
+
+            if errors:
+                failed = min(errors)
+                raise RuntimeError(
+                    f"Microbatch {failed} of {self.num_ubatches} failed"
+                ) from errors[failed]
+            return merge_ubatch_outputs([outputs[i] for i in range(self.num_ubatches)])
+
+        return finish
 
 
 def maybe_build_ubatch_runner(

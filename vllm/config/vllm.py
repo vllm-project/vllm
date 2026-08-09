@@ -2492,8 +2492,14 @@ class VllmConfig:
             unsupported.append("dual batch overlap with multimodal models")
         if model_config is not None and model_config.is_hybrid:
             unsupported.append("dual batch overlap with hybrid models")
-        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            unsupported.append("dual batch overlap with CUDA graphs")
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        if cudagraph_mode.has_piecewise_cudagraphs() and not (
+            cudagraph_mode.has_full_cudagraphs()
+        ):
+            # Only FULL-mode graphs are captured for microbatched steps (see
+            # ModelCudaGraphManager); PIECEWISE+DBO stays unsupported, same as
+            # the V1 runner's DBO path.
+            unsupported.append("dual batch overlap with PIECEWISE CUDA graphs")
         if self.is_encoder_only:
             unsupported.append("dual batch overlap with encoder only models")
 

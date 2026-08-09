@@ -66,15 +66,31 @@ def sync_cudagraph_and_dp_padding(
         # number of tokens so each can assume the others' microbatches are the
         # same size. A rank with too few tokens to fill every microbatch pads
         # into them and does no work there, the same way a dummy run does.
-        # Microbatched steps run eager for now; no CUDA graphs are captured for
-        # them yet, so there is nothing to dispatch to.
         ubatch_num_tokens = int(num_tokens_across_dp.max().item())
-        return BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=ubatch_num_tokens,
-            num_reqs=num_reqs,
-            num_ubatches=ubatch_runner.num_ubatches,
-        ), torch.full_like(num_tokens_across_dp, ubatch_num_tokens)
+        num_ubatches = ubatch_runner.num_ubatches
+        if cudagraph_manager is not None:
+            # Try a captured FULL graph for this (num_tokens, num_ubatches)
+            # shape, the same dispatch the non-ubatched path below uses.
+            # `dispatch` falls back to a NONE descriptor when nothing matches
+            # (no graph captured for this shape, or eager-only mode), so
+            # microbatched steps run whether or not a graph exists.
+            ubatch_desc = cudagraph_manager.dispatch(
+                num_reqs,
+                ubatch_num_tokens,
+                uniform_token_count=None,
+                num_active_loras=num_active_loras,
+                num_ubatches=num_ubatches,
+            )
+        else:
+            # cudagraph_manager is only None during the profile run, where
+            # every rank runs eager.
+            ubatch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=ubatch_num_tokens,
+                num_reqs=num_reqs,
+                num_ubatches=num_ubatches,
+            )
+        return ubatch_desc, torch.full_like(num_tokens_across_dp, ubatch_num_tokens)
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
 
