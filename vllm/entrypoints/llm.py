@@ -141,9 +141,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
         enable_return_routed_experts: Whether to return routed experts.
-        enable_return_indexer_topk: Whether to return indexer topk indices
-            (sparse-attention selected KV slots) with responses. Only
-            applicable to models with sparse attention indexers.
+        enable_return_indexer_topk: Whether to return indexer topk indices.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
