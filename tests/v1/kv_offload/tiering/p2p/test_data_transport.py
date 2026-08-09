@@ -166,6 +166,50 @@ class TestNixlTransportWithMockedAgent:
         assert result.done == ()
         assert tid in result.failed
 
+    def test_poll_exception_removes_transfer_from_inflight(self):
+        """check_xfer_state exception → transfer in failed, removed from inflight.
+
+        Regression: when check_xfer_state() raised, the transfer stayed in
+        _inflight because the exception handler did continue without adding
+        it to failed_ids. The next poll() would retry and log another
+        WARNING, producing an infinite loop of warnings for a dead transfer.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid in transport._inflight
+
+        transport._agent.check_xfer_state.side_effect = RuntimeError("NIXL agent dead")
+
+        result = transport.poll()
+
+        assert tid in result.failed
+        assert tid not in transport._inflight
+        transport._agent.release_xfer_handle.assert_called_once()
+
+    def test_poll_does_not_retry_after_check_xfer_state_exception(self):
+        """Exception-failed transfer is not retried on subsequent polls.
+
+        Regression test for https://github.com/vllm-project/vllm/issues/49528.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        transport.write_blocks("peer:1", [0], [1])
+
+        transport._agent.check_xfer_state.side_effect = RuntimeError("NIXL boom")
+        transport.poll()
+
+        # Reset side_effect so a second check_xfer_state would succeed —
+        # but it should never be called because the transfer was drained.
+        transport._agent.check_xfer_state.side_effect = None
+        transport._agent.check_xfer_state.reset_mock()
+
+        result = transport.poll()
+        assert result == PollResult(done=(), failed=())
+        transport._agent.check_xfer_state.assert_not_called()
+
     def test_poll_ignores_in_progress(self):
         """Transfers in PROC/PEND state stay inflight."""
         transport = self._make_transport()

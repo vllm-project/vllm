@@ -215,7 +215,11 @@ class NixlTransport(DataTransport):
                     self._agent_name,
                     transfer_id,
                     exc,
+                    exc_info=True,
                 )
+                if failed_ids is None:
+                    failed_ids = []
+                failed_ids.append(transfer_id)
                 continue
             if state == "DONE":
                 if done_ids is None:
@@ -315,4 +319,5 @@ class NixlTransport(DataTransport):
                     "NixlTransport %s: release_xfer_handle failed: %s",
                     self._agent_name,
                     exc,
+                    exc_info=True,
                 )
