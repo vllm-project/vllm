@@ -623,7 +623,8 @@ def test_canonical_layout_widens_parallelism_agnostic_to_mla():
     assert offloading_config.parallel.is_parallelism_agnostic
     assert offloading_config.canonical_layout
 
-    # canonical_layout widens only the MLA case; a hybrid grouping stays out
+    # hybrid groupings stay out: their non-full-attention layers can only
+    # derive opaque (exact-topology) mappings
     hybrid_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -634,6 +635,29 @@ def test_canonical_layout_widens_parallelism_agnostic_to_mla():
     )
     assert not build_offloading_config(
         config, hybrid_config
+    ).parallel.is_parallelism_agnostic
+
+
+def test_canonical_layout_certifies_v2_model_runner():
+    """Canonical bytes are certified per layer against live tensor strides at
+    registration, so the static gate must not depend on the model-runner
+    version — the v2 runner is the case the canonical layout exists for."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["l0"], _full_attention_spec())],
+    )
+
+    config = _make_vllm_config()
+    config.use_v2_model_runner = True
+    assert not build_offloading_config(
+        config, kv_cache_config
+    ).parallel.is_parallelism_agnostic
+
+    config = _make_vllm_config(extra_config={"canonical_layout": True})
+    config.use_v2_model_runner = True
+    assert build_offloading_config(
+        config, kv_cache_config
     ).parallel.is_parallelism_agnostic
 
 

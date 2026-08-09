@@ -152,24 +152,35 @@ def build_offloading_config(
         and parallel_config.decode_context_parallel_size == 1
         and parallel_config.prefill_context_parallel_size == 1
     )
-    # The canonical layout additionally certifies the TP-replicated MLA
-    # latent statically: one canonical copy stands in for all replicas, so
-    # the persisted bytes are portable across TP sizes. Replicated GQA heads
-    # stay excluded — their certification depends on worker tensor strides
-    # and may fall back to an opaque, topology-specific mapping, which
-    # create_worker rejects fail-closed against this flag.
+    # Canonical pages are topology-free by construction, so the canonical
+    # layout widens the gate to every config whose mappings derive portable:
+    # exactly-sharded or replicated GQA heads (writer rotation) and the
+    # TP-replicated MLA latent (one canonical copy for all replicas). The
+    # model-runner version is irrelevant here — certification happens per
+    # layer against live tensor strides at registration, and create_worker
+    # fails closed against this flag if any layer cannot be certified.
     if canonical_layout and not is_parallelism_agnostic:
-        is_parallelism_agnostic = (
-            not vllm_config.use_v2_model_runner
-            and type(single_group_spec) is MLAAttentionSpec
-            and single_group_spec.compress_ratio == 1
-            and single_group_spec.real_page_size_bytes % single_group_spec.block_size
-            == 0
-            and not single_group_spec.kv_quant_mode.is_per_token_head
-            and parallel_config.decode_context_parallel_size == 1
-            and parallel_config.prefill_context_parallel_size == 1
-            and parallel_config.world_size == parallel_config.tensor_parallel_size
-        )
+        tp_size = parallel_config.tensor_parallel_size
+        if isinstance(single_group_spec, FullAttentionSpec):
+            if type(single_group_spec) is MLAAttentionSpec:
+                spec_certifiable = (
+                    single_group_spec.compress_ratio == 1
+                    and single_group_spec.real_page_size_bytes
+                    % single_group_spec.block_size
+                    == 0
+                )
+            else:
+                total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+                spec_certifiable = (
+                    total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
+                )
+            is_parallelism_agnostic = (
+                spec_certifiable
+                and not single_group_spec.kv_quant_mode.is_per_token_head
+                and parallel_config.decode_context_parallel_size == 1
+                and parallel_config.prefill_context_parallel_size == 1
+                and parallel_config.world_size == tp_size
+            )
 
     kv_events_config = vllm_config.kv_events_config
     cache_dtype = (
