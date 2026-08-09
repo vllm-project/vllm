@@ -11,7 +11,6 @@ using Pivot-based Truncation and Selection" By Park et al.
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
@@ -939,15 +938,11 @@ def apply_top_k_top_p_triton(
         block_size, block_size_trunc = 4096, 2048
     else:
         block_size, block_size_trunc = 8192, 4096
-        if not current_platform.is_rocm():
-            # Each program serially sweeps the whole vocab row in BLOCK_SIZE
-            # tiles, so per-tile latency directly bounds kernel latency. The
-            # Triton default of 4 warps leaves an 8192-wide tile at 16
-            # elements per lane; 8 warps halves that and runs 1.2-1.5x faster
-            # across vocab sizes, batch sizes, and k/p modes (measured on
-            # SM120; RTX PRO 6000). Untested on ROCm (64-wide wavefronts),
-            # so keep the Triton default there.
-            launch_kwargs["num_warps"] = 8
+        # Each program serially sweeps the vocab row in BLOCK_SIZE tiles, so
+        # per-tile latency bounds kernel latency, and Triton's default of 4
+        # warps leaves an 8192-wide tile at 16 elements per lane. 8 warps is
+        # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
+        launch_kwargs["num_warps"] = 8
 
     _topk_topp_kernel[(NUM_PROGRAMS,)](
         logits,
