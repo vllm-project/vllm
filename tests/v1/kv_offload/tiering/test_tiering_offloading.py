@@ -50,6 +50,10 @@ from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
+from vllm.v1.kv_offload.tiering.promotion_policy import (
+    AlwaysPromotePolicy,
+    PinUnreadPromotionsPolicy,
+)
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 _CTX = ReqContext(req_id="test")
@@ -1125,6 +1129,233 @@ class TestTieringOffloadingManager:
         ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
         assert self.manager.lookup(blocks[0], ctx) is LookupResult.RETRY
         self.secondary_tier1.lookup.assert_called()
+
+
+class TestPromotionContentionProtection:
+    """A promotion is refused only when it would evict another request's
+    not-yet-consumed promotion - never merely because of concurrency."""
+
+    @pytest.fixture
+    def manager_setup(self):
+        mock_region = _mock_mmap_region(2)
+        self.primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=2, mmap_region=mock_region
+        )
+        self.secondary_tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        self.manager = TieringOffloadingManager(
+            primary_tier=self.primary_tier,
+            secondary_tiers=[self.secondary_tier],
+            promotion_policy=PinUnreadPromotionsPolicy(),
+        )
+
+    def _simulate_on_schedule_end(self):
+        ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        self.manager.on_schedule_end(ctx)
+        list(self.manager.take_events())
+
+    def _land_promotion(self, block, ctx):
+        """Promote `block` for `ctx` and drive the job to completion."""
+        assert self.manager.lookup(block, ctx) is LookupResult.RETRY
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+    def test_consumption_lifts_protection(self, manager_setup):
+        block_a, block_b, block_c = to_keys([0, 1, 2])
+        for block in (block_a, block_b, block_c):
+            self.secondary_tier.blocks[block] = True
+        ctx_a = ReqContext(req_id="req_a")
+        ctx_b = ReqContext(req_id="req_b")
+        ctx_c = ReqContext(req_id="req_c")
+
+        self._land_promotion(block_a, ctx_a)
+        self._land_promotion(block_b, ctx_b)
+        assert self.manager.lookup(block_c, ctx_c) is LookupResult.MISS
+
+        # Simulate the GPU actually reading block_a to completion.
+        self.manager.prepare_load([block_a], ctx_a)
+        self.manager.complete_load([block_a], ctx_a)
+
+        # block_a is no longer protected: the third promotion can evict it.
+        assert self.manager.lookup(block_c, ctx_c) is LookupResult.RETRY
+
+    def test_abandonment_lifts_protection(self, manager_setup):
+        block_a, block_b, block_c = to_keys([0, 1, 2])
+        for block in (block_a, block_b, block_c):
+            self.secondary_tier.blocks[block] = True
+        ctx_a = ReqContext(req_id="req_a")
+        ctx_b = ReqContext(req_id="req_b")
+        ctx_c = ReqContext(req_id="req_c")
+
+        self._land_promotion(block_a, ctx_a)
+        self._land_promotion(block_b, ctx_b)
+        assert self.manager.lookup(block_c, ctx_c) is LookupResult.MISS
+
+        # req_a finishes without ever reading its promoted block.
+        self.manager.on_new_request(ctx_a)
+        self.manager.on_request_finished(ctx_a)
+
+        assert self.manager.lookup(block_c, ctx_c) is LookupResult.RETRY
+
+    def test_pinned_promotion_unevictable_by_store(self, manager_setup):
+        """A pinned (unread) promotion is not evictable by anyone, including
+        a real store - the store-starvation trade-off of pinning via
+        ref_cnt. Releasing the pin (consumption or abandonment) unblocks
+        the store."""
+        block_a = to_keys([0])[0]
+        self.secondary_tier.blocks[block_a] = True
+        ctx_a = ReqContext(req_id="req_a")
+        ctx_store = ReqContext(req_id="req_store")
+
+        self._land_promotion(block_a, ctx_a)
+
+        # Two new blocks need a slot each; capacity 2 has only 1 free, and
+        # block_a is pinned (not evictable): the store cannot allocate.
+        self.manager.on_new_request(ctx_store)
+        assert self.manager.prepare_store(to_keys([1, 2]), ctx_store) is None
+
+        # Release the pin without ever reading it.
+        self.manager.on_new_request(ctx_a)
+        self.manager.on_request_finished(ctx_a)
+
+        # block_a is now a normal evictable block: the store can allocate.
+        result = self.manager.prepare_store(to_keys([1, 2]), ctx_store)
+        assert result is not None
+        assert result.evicted_keys == [block_a]
+
+
+def test_pinned_promotion_count_is_capped():
+    """Cap counts distinct pinned requests, not blocks: a request already
+    holding a pin is admitted on a later, separate promotion even after
+    the cap is full - it is never left partially pinned. Only a brand-new
+    request is subject to the cap."""
+    mock_region = _mock_mmap_region(10)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=10, mmap_region=mock_region
+    )
+    secondary_tier = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[secondary_tier],
+        promotion_policy=PinUnreadPromotionsPolicy(max_pinned=2),
+    )
+
+    block_a, block_b, block_c, block_d = to_keys([0, 1, 2, 3])
+    for block in (block_a, block_b, block_c, block_d):
+        secondary_tier.blocks[block] = True
+    end_ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+
+    def land(block, ctx):
+        assert manager.lookup(block, ctx) is LookupResult.RETRY
+        manager.on_schedule_end(end_ctx)
+        manager.on_schedule_end(end_ctx)
+
+    ctx_0 = ReqContext(req_id="req_0")
+    ctx_1 = ReqContext(req_id="req_1")
+    ctx_2 = ReqContext(req_id="req_2")
+
+    land(block_a, ctx_0)  # req_0's first promotion: admitted, cap at 1/2.
+    land(block_b, ctx_1)  # req_1's first promotion: admitted, cap full 2/2.
+
+    # req_0 gets a second, separate promotion after the cap is full. It must
+    # still be admitted - req_0 is already pinned, so this isn't a new
+    # request competing for a cap slot.
+    land(block_c, ctx_0)
+
+    # A brand-new request hitting the full cap is refused, though.
+    land(block_d, ctx_2)
+
+    policy = manager._promotion_policy
+    assert policy._by_req["req_0"] == {block_a, block_c}
+    assert policy._by_req["req_1"] == {block_b}
+    assert "req_2" not in policy._by_req
+
+    for block in (block_a, block_b, block_c):
+        assert primary_tier._policy.get(block).ref_cnt == 1
+    assert primary_tier._policy.get(block_d).ref_cnt == 0
+
+
+def test_consuming_one_pinned_block_does_not_release_a_sibling():
+    """on_consumed releases exactly the keys read, not everything the
+    owning request has pinned - a request reading one of its two pinned
+    blocks must not drop protection on the other."""
+    mock_region = _mock_mmap_region(10)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=10, mmap_region=mock_region
+    )
+    secondary_tier = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier, secondary_tiers=[secondary_tier]
+    )
+
+    block_a, block_b = to_keys([0, 1])
+    secondary_tier.blocks[block_a] = True
+    secondary_tier.blocks[block_b] = True
+    ctx = ReqContext(req_id="req_a")
+
+    end_ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+    for block in (block_a, block_b):
+        assert manager.lookup(block, ctx) is LookupResult.RETRY
+        manager.on_schedule_end(end_ctx)
+        manager.on_schedule_end(end_ctx)
+
+    policy = manager._promotion_policy
+    assert set(policy._by_req["req_a"]) == {block_a, block_b}
+
+    manager.prepare_load([block_a], ctx)
+
+    # block_a released, block_b still pinned and protected.
+    assert block_a not in policy._owner
+    assert policy._by_req["req_a"] == {block_b}
+    assert primary_tier._policy.get(block_b).ref_cnt == 1
+
+
+def test_always_promote_policy_never_pins():
+    """The no-op policy reproduces pre-fix behavior: nothing is pinned, so
+    a landed promotion is immediately evictable like any other block."""
+    mock_region = _mock_mmap_region(1)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=1, mmap_region=mock_region
+    )
+    secondary_tier = ExampleSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[secondary_tier],
+        promotion_policy=AlwaysPromotePolicy(),
+    )
+
+    block_a, block_b = to_keys([0, 1])
+    secondary_tier.blocks[block_a] = True
+    ctx_a = ReqContext(req_id="req_a")
+
+    assert manager.lookup(block_a, ctx_a) is LookupResult.RETRY
+    end_ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+    manager.on_schedule_end(end_ctx)
+    manager.on_schedule_end(end_ctx)
+
+    # Landed but never pinned: ref_cnt is 0, a normal evictable block.
+    assert primary_tier._policy.get(block_a).ref_cnt == 0
+
+    # Capacity is 1, already full: admitting block_b requires evicting
+    # block_a. Unlike PinUnreadPromotionsPolicy, that eviction succeeds.
+    ctx_b = ReqContext(req_id="req_b")
+    secondary_tier.blocks[block_b] = True
+    assert manager.lookup(block_b, ctx_b) is LookupResult.RETRY
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:
