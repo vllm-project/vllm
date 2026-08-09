@@ -19,10 +19,67 @@ from vllm.distributed.eplb.rebalance_execute import (
 )
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
+    get_eplb_group,
     get_tp_group,
 )
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
+
+
+class _E8M0TestMoELayer:
+    def __init__(self, expert_weights: list[torch.Tensor]) -> None:
+        self.expert_weights = expert_weights
+
+    def get_expert_weights(self) -> list[torch.Tensor]:
+        return self.expert_weights
+
+    def set_eplb_state(self, **_: object) -> None:
+        pass
+
+
+class _E8M0TestMoEModel(MixtureOfExperts):
+    def __init__(self, layer: _E8M0TestMoELayer) -> None:
+        self.moe_layers = [layer]  # type: ignore[assignment]
+
+
+def _register_e8m0_test_layer(
+    layer: _E8M0TestMoELayer,
+) -> _E8M0TestMoEModel:
+    model = _E8M0TestMoEModel(layer)
+    empty = torch.empty(0, dtype=torch.int32)
+    model.set_eplb_state(empty, empty, empty)
+    return model
+
+
+def _e8m0_expert_values(
+    logical_expert_ids: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    expert_ids = logical_expert_ids.to(device).unsqueeze(1)
+    packed_weight = (expert_ids * 100 + torch.arange(8, device=device)).to(torch.int32)
+    scale_bytes = (expert_ids * 17 + torch.arange(16, device=device)).to(torch.uint8)
+    return packed_weight, scale_bytes
+
+
+def test_set_eplb_state_registers_e8m0_scale_as_byte_view() -> None:
+    raw_storage = torch.arange(264, dtype=torch.int16).to(torch.uint8)
+    scale = raw_storage[4:260].reshape(2, 128).view(torch.float8_e8m0fnu)
+    packed_weight = torch.arange(16, dtype=torch.int32).reshape(2, 8)
+    model = _register_e8m0_test_layer(_E8M0TestMoELayer([packed_weight, scale]))
+    registered_weight, registered_scale = model.expert_weights[0]
+
+    assert registered_weight is packed_weight
+    assert registered_scale.dtype == torch.uint8
+    assert scale.dtype == torch.float8_e8m0fnu
+    assert registered_scale.shape == scale.shape
+    assert registered_scale.stride() == scale.stride()
+    assert registered_scale.storage_offset() == scale.storage_offset()
+    assert registered_scale.data_ptr() == scale.data_ptr()
+    assert torch.equal(registered_scale, scale.view(torch.uint8))
+
+    registered_scale[0, 0] = 255
+    assert int(scale.view(torch.uint8)[0, 0]) == 255
 
 
 def create_expert_indices_with_redundancy(
@@ -291,6 +348,106 @@ def create_eplb_communicator_or_raise(
         raise RuntimeError(
             f"Failed to create EPLB communicator for backend={backend}: {exc}"
         ) from exc
+
+
+def _test_e8m0_transport_worker(
+    env,
+    world_size: int,
+) -> None:
+    set_env_vars_and_device(env)
+    assert world_size == 2
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+    vllm_config.parallel_config.enable_expert_parallel = True
+    vllm_config.parallel_config.enable_eplb = True
+
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size,
+            pipeline_model_parallel_size=1,
+        )
+
+        ep_group_coordinator = get_eplb_group()
+        ep_group = ep_group_coordinator.device_group
+        ep_rank = ep_group_coordinator.rank_in_group
+        device = torch.device(f"cuda:{ep_rank}")
+        num_local_experts = 2
+        old_indices = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
+        new_indices = torch.tensor([[2, 3, 0, 1]], dtype=torch.long)
+        local_slice = slice(
+            ep_rank * num_local_experts,
+            (ep_rank + 1) * num_local_experts,
+        )
+        packed_weight, scale_bytes = _e8m0_expert_values(
+            old_indices[0, local_slice],
+            device,
+        )
+        weight_scale = scale_bytes.view(torch.float8_e8m0fnu)
+        model = _register_e8m0_test_layer(
+            _E8M0TestMoELayer([packed_weight, weight_scale])
+        )
+        expert_weights = model.expert_weights
+        registered_scale = expert_weights[0][1]
+        assert registered_scale.dtype == torch.uint8
+        assert registered_scale.data_ptr() == weight_scale.data_ptr()
+
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+        communicator = create_eplb_communicator_or_raise(
+            group_coordinator=ep_group_coordinator,
+            backend="torch_gloo",
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
+        )
+        assert communicator.needs_profile_buffer_reservation
+        original_weights = [weight.clone() for weight in expert_weights[0]]
+
+        rearrange_expert_weights_inplace(
+            old_indices,
+            new_indices,
+            expert_weights,
+            expert_buffer,
+            ep_group,
+            communicator,
+            is_profile=True,
+        )
+        assert all(
+            torch.equal(weight, original_weight)
+            for weight, original_weight in zip(
+                expert_weights[0],
+                original_weights,
+            )
+        )
+
+        rearrange_expert_weights_inplace(
+            old_indices,
+            new_indices,
+            expert_weights,
+            expert_buffer,
+            ep_group,
+            communicator,
+        )
+
+    expected_weight, expected_scale = _e8m0_expert_values(
+        new_indices[0, local_slice],
+        device,
+    )
+    local_ok = torch.equal(packed_weight, expected_weight) and torch.equal(
+        weight_scale.view(torch.uint8),
+        expected_scale,
+    )
+
+    assert_verification_synced(
+        local_ok,
+        "E8M0 EPLB transport verification failed on at least one rank.",
+    )
+
+
+def test_e8m0_transport_profile_and_rearrangement() -> None:
+    world_size = 2
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    distributed_run(_test_e8m0_transport_worker, world_size)
 
 
 def _test_async_transfer_layer_without_mtp_worker(

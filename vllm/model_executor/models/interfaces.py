@@ -910,6 +910,13 @@ def is_hybrid(
     return getattr(model, "is_hybrid", False)
 
 
+def _to_eplb_transport_view(weight: Tensor) -> Tensor:
+    """Expose E8M0 expert state as a storage-preserving byte view for EPLB."""
+    if weight.dtype == torch.float8_e8m0fnu:
+        return weight.view(torch.uint8)
+    return weight
+
+
 @runtime_checkable
 class MixtureOfExperts(Protocol):
     """
@@ -976,7 +983,12 @@ class MixtureOfExperts(Protocol):
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
+            self.expert_weights.append(
+                [
+                    _to_eplb_transport_view(weight)
+                    for weight in layer.get_expert_weights()
+                ]
+            )
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
