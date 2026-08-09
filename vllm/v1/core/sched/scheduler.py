@@ -1745,7 +1745,10 @@ class Scheduler(SchedulerInterface):
 
         indexer_topk_data = None
         indexer_topk_offsets: dict[str, int] = {}
-        if model_runner_output.indexer_topk is not None:
+        if (
+            self.enable_return_indexer_topk
+            and model_runner_output.indexer_topk is not None
+        ):
             it = model_runner_output.indexer_topk
             self.indexer_topk_mgr.store_batch(it.topk_data, it.slot_mapping)
             indexer_topk_data = it.topk_data
@@ -1947,14 +1950,11 @@ class Scheduler(SchedulerInterface):
                     # schedule time (immune to async preemption).
                     if request.sampling_params is not None:
                         prompt_start = request.sampling_params.indexer_topk_prompt_start
-                        if (
-                            prompt_start < 0
-                            or prompt_start >= request.num_prompt_tokens
-                        ):
+                        if prompt_start < 0 or prompt_start > request.num_prompt_tokens:
                             raise ValueError(
                                 "indexer_topk_prompt_start "
                                 f"({prompt_start}) must be >= 0 and "
-                                "< num_prompt_tokens "
+                                "<= num_prompt_tokens "
                                 f"({request.num_prompt_tokens})"
                             )
                     else:
@@ -1964,6 +1964,7 @@ class Scheduler(SchedulerInterface):
                         request.num_prompt_tokens,
                         token_start=prompt_start,
                     )
+                    self._it_block_ids.pop(req_id, None)
                 elif scheduled_spec_token_ids:
                     indexer_topk = indexer_topk_data[
                         req_offset : req_offset + len(new_token_ids)

@@ -141,6 +141,7 @@ async def test_indexer_topk_completions(server):
             "Expected at least one valid (non-negative) indexer_topk entry, "
             "but all values are -1 sentinels."
         )
+        assert (indexer_topk < 0).any(), "Expected -1 padding sentinels."
 
 
 @pytest.mark.asyncio
@@ -171,6 +172,7 @@ async def test_indexer_topk_chat_completions(server):
         assert (indexer_topk >= 0).any(), (
             "Expected at least one valid (non-negative) indexer_topk entry."
         )
+        assert (indexer_topk < 0).any(), "Expected -1 padding sentinels."
 
 
 @pytest.mark.asyncio
