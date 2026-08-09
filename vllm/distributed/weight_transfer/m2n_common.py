@@ -30,6 +30,11 @@ MAX_TENSOR_DIMS = 3
 
 MESH_NDIMS = 2
 
+# Destination mesh convention. Keeping these roles named avoids scattering
+# positional axis assumptions through the worker-side planner.
+DESTINATION_REPLICA_AXIS = 0
+DESTINATION_SHARD_AXIS = 1
+
 # m2n bounds how many source shards may feed one destination shard, and how many
 # destination shards one source shard may feed, with compile-time arrays in
 # `reshard_limits.h`. The bindings do not expose them, so they are mirrored
@@ -271,6 +276,26 @@ def to_placements(m2n: Any, placements: Placements) -> list[Any]:
     return [
         m2n.Replicate() if code == REPLICATE else m2n.Shard(code) for code in placements
     ]
+
+
+def publish_destination_placements(
+    comm: "PyNcclCommunicator",
+    first_worker_rank: int,
+    placements: "Sequence[Placements | None] | None",
+) -> list[Placements | None]:
+    """Share the worker-side destination plan with every rank in the group.
+
+    The trainer must issue each reshard with the same destination the workers
+    use, but once destinations are per-parameter they depend on the inference
+    model, which only the workers can see. The first worker publishes them here,
+    over the same stateless group that bootstrapped the communicator; trainer
+    ranks pass `None` and receive them, and the other workers pass their own so
+    a disagreement is caught rather than deadlocking later.
+
+    Only placements travel: the destination *mesh* is still derived from the
+    rank split, identically on both sides.
+    """
+    return comm.group.broadcast_obj(placements, src=first_worker_rank)
 
 
 def comm_ptr(comm: "PyNcclCommunicator") -> int:
