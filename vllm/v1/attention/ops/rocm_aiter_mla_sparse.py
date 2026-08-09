@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
+from vllm.utils.math_utils import cdiv
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
@@ -381,6 +382,114 @@ def paged_mqa_logits_module():
     return None
 
 
+
+_PORTABLE_MQA_TRITON_OK = [True]
+
+
+@triton.jit
+def _portable_fp8_paged_mqa_logits_kernel(
+    q_ptr, kv_ptr, ks_ptr, w_ptr, bt_ptr, qoff_ptr, lim_ptr, out_ptr,
+    kv_row_stride, ks_row_stride, bt_row_stride, out_row_stride,
+    num_blocks, max_len,
+    T: tl.constexpr, H: tl.constexpr, D: tl.constexpr, BS: tl.constexpr,
+):
+    """Paged-MQA logits with in-kernel fp8 -> bf16 dequantization.
+
+    Portable across Triton targets: the fp8 cache values are converted to
+    bf16 before tl.dot, so no fp8 MMA support is required (unlike the AITER
+    pa_mqa_logits kernels, whose fp8 tl.dot fails to compile on e.g.
+    gfx1151/RDNA3.5).
+
+    One program per (query token, KV page):
+        logits[bt, pos] = k_scale[pos]
+                          * sum_h(relu(k[pos] . q[bt, h]) * w[bt, h])
+    masked to pos < lim[bt] and pos <= qoff[bt]; `out` is pre-filled -inf.
+    """
+    pid_bt = tl.program_id(0)
+    pid_p = tl.program_id(1)
+    qoff = tl.load(qoff_ptr + pid_bt)
+    if pid_p * BS > qoff:
+        return
+    b = pid_bt // T
+    page = tl.load(bt_ptr + b * bt_row_stride + pid_p)
+    page = tl.minimum(tl.maximum(page, 0), num_blocks - 1)
+    offs = tl.arange(0, BS)
+    dd = tl.arange(0, D)
+    hh = tl.arange(0, H)
+    pos = pid_p * BS + offs
+    lim = tl.load(lim_ptr + pid_bt)
+    valid = (pos < lim) & (pos <= qoff)
+    qb = tl.load(q_ptr + pid_bt * H * D + hh[:, None] * D + dd[None, :])
+    kf = tl.load(kv_ptr + page * kv_row_stride + offs[:, None] * D + dd[None, :])
+    scores = tl.dot(kf.to(tl.bfloat16), tl.trans(qb))
+    scores = tl.maximum(scores, 0.0)
+    wv = tl.load(w_ptr + pid_bt * H + hh)
+    srow = tl.sum(scores * wv[None, :], axis=1)
+    ks = tl.load(ks_ptr + page * ks_row_stride + offs)
+    srow = srow * ks
+    srow = tl.where(valid, srow, float("-inf"))
+    tl.store(out_ptr + pid_bt * out_row_stride + pos, srow, mask=pos < max_len)
+
+
+def portable_fp8_paged_mqa_logits(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    """Triton-backed equivalent of fp8_paged_mqa_logits_torch.
+
+    Same packed per-page cache layout and same outputs (see the unit test);
+    used when the AITER Triton kernels are unavailable for the platform.
+    """
+    batch_size, next_n, num_heads, dim = q.shape
+    num_blocks, block_size = kv_cache.shape[0], kv_cache.shape[1]
+    assert num_heads & (num_heads - 1) == 0 and dim & (dim - 1) == 0
+    assert block_size & (block_size - 1) == 0
+    flat = kv_cache.view(num_blocks, block_size * (dim + 4))
+    fp8_dtype = current_platform.fp8_dtype()
+    kv_vals = flat[:, : block_size * dim].view(dtype=fp8_dtype)
+    kv_scales = flat[:, block_size * dim :].view(dtype=torch.float32)
+    q_bf = (
+        q.to(torch.bfloat16)
+        .reshape(batch_size * next_n, num_heads, dim)
+        .contiguous()
+    )
+    w = (
+        weights.to(torch.float32)
+        .reshape(batch_size * next_n, num_heads)
+        .contiguous()
+    )
+    if context_lens.dim() == 1:
+        ctx = context_lens.to(device=q.device, dtype=torch.int32)
+        lim = ctx[:, None].expand(batch_size, next_n)
+        qoff = ctx[:, None] - next_n + torch.arange(
+            next_n, device=q.device, dtype=torch.int32
+        )[None, :]
+    else:
+        lim = context_lens.to(device=q.device, dtype=torch.int32)
+        qoff = lim - 1
+    lim = lim.reshape(-1).contiguous()
+    qoff = qoff.reshape(-1).contiguous()
+    np_ = min(cdiv(max_model_len, block_size), block_tables.shape[1])
+    out = torch.full(
+        [batch_size * next_n, max_model_len],
+        float("-inf"),
+        device=q.device,
+        dtype=torch.float32,
+    )
+    _portable_fp8_paged_mqa_logits_kernel[(batch_size * next_n, np_)](
+        q_bf, kv_vals, kv_scales, w, block_tables, qoff, lim, out,
+        kv_vals.stride(0), kv_scales.stride(0),
+        block_tables.stride(0), out.stride(0),
+        num_blocks, max_model_len,
+        T=next_n, H=num_heads, D=dim, BS=block_size,
+    )
+    return out
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -465,6 +574,17 @@ def rocm_fp8_paged_mqa_logits(
         )
         return out_qk.sum(dim=0)
     else:
+        # No AITER Triton kernel for this platform: prefer the portable
+        # Triton kernel (bf16 dequant, no fp8 MMA requirement) and fall
+        # back to the torch reference if it ever fails to compile/run.
+        if _PORTABLE_MQA_TRITON_OK[0]:
+            try:
+                return portable_fp8_paged_mqa_logits(
+                    q_fp8, kv_cache_fp8, weights, context_lens,
+                    block_tables, max_model_len,
+                )
+            except Exception:
+                _PORTABLE_MQA_TRITON_OK[0] = False
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
         )
