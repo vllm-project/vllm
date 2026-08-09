@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
 import json
 import os
 import platform
@@ -115,9 +116,85 @@ def get_cgroup_memory_usage() -> int | None:
     return None
 
 
+def _get_numa_membind_nodes() -> list[int] | None:
+    """Return MPOL_BIND nodes, or ``None`` when memory is unrestricted."""
+    try:
+        libnuma = ctypes.CDLL("libnuma.so.1", use_errno=True)
+    except OSError:
+        return None
+
+    class _Bitmask(ctypes.Structure):
+        _fields_ = [("size", ctypes.c_ulong), ("maskp", ctypes.POINTER(ctypes.c_ulong))]
+
+    try:
+        if libnuma.numa_available() < 0:
+            return None
+        libnuma.numa_get_membind.restype = ctypes.POINTER(_Bitmask)
+        libnuma.numa_num_configured_nodes.restype = ctypes.c_int
+        mask = libnuma.numa_get_membind()
+        if not mask:
+            return None
+        total = libnuma.numa_num_configured_nodes()
+        nodes = [
+            node
+            for node in range(min(int(mask.contents.size), max(total, 0)))
+            if (mask.contents.maskp[node // 64] >> (node % 64)) & 1
+        ]
+    except (AttributeError, OSError, ValueError):
+        return None
+
+    return nodes if 0 < len(nodes) < total else None
+
+
+_NODE_AVAILABLE_FIELDS = {
+    "MemFree:": 1,
+    "FilePages:": 1,
+    "SReclaimable:": 1,
+    "Shmem:": -1,
+}
+
+
+def _node_available_bytes(nodes: list[int]) -> int | None:
+    """Approximate reclaimable and free memory on ``nodes``."""
+    total = 0
+    for node in nodes:
+        path = f"/sys/devices/system/node/node{node}/meminfo"
+        seen = 0
+        try:
+            with open(path) as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    sign = _NODE_AVAILABLE_FIELDS.get(parts[2])
+                    if sign is not None:
+                        total += sign * int(parts[3]) * 1024
+                        seen += 1
+        except (OSError, ValueError, IndexError):
+            return None
+        if seen != len(_NODE_AVAILABLE_FIELDS):
+            return None
+    return max(0, total)
+
+
+def get_numa_available_memory() -> tuple[list[int], int] | None:
+    """Return MPOL_BIND nodes and their available memory, if constrained."""
+    nodes = _get_numa_membind_nodes()
+    if nodes is None:
+        return None
+    available = _node_available_bytes(nodes)
+    if available is None:
+        return None
+    return nodes, available
+
+
 def get_available_memory() -> int:
-    """Return available host memory, honoring cgroup limits."""
+    """Return available memory, honoring NUMA and cgroup limits."""
     available = psutil.virtual_memory().available
+    numa_memory = get_numa_available_memory()
+    if numa_memory is not None:
+        _, numa_available = numa_memory
+        available = min(available, numa_available)
     cgroup_limit = get_cgroup_memory_limit()
     if cgroup_limit is None:
         return available
