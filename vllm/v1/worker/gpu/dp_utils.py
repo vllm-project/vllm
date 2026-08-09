@@ -9,17 +9,13 @@ import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
-from vllm.logger import init_logger
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-from vllm.v1.worker.ubatch_utils import is_last_ubatch_empty
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
-
-logger = init_logger(__name__)
 
 
 def sync_cudagraph_and_dp_padding(
@@ -62,16 +58,21 @@ def sync_cudagraph_and_dp_padding(
         )
         return synced_desc, None
 
-    ubatch_desc = _maybe_ubatch_descriptor(
-        num_tokens_across_dp, wants_ubatch_across_dp, num_reqs, num_ubatches
-    )
-    if ubatch_desc is not None:
-        # Microbatching needs every rank to run the same number of tokens, so
-        # that each rank can assume the others' microbatches are the same size.
-        num_tokens_across_dp = torch.full_like(
-            num_tokens_across_dp, ubatch_desc.num_tokens
-        )
-        return ubatch_desc, num_tokens_across_dp
+    if num_ubatches > 1 and torch.all(wants_ubatch_across_dp == 1).item():
+        # Microbatching is all-or-nothing: every rank has to split, because the
+        # expert all-to-all is collective, and every rank has to run the same
+        # number of tokens so each can assume the others' microbatches are the
+        # same size. A rank with too few tokens to fill every microbatch pads
+        # into them and does no work there, the same way a dummy run does.
+        # Microbatched steps run eager for now; no CUDA graphs are captured for
+        # them yet, so there is nothing to dispatch to.
+        ubatch_num_tokens = int(num_tokens_across_dp.max().item())
+        return BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=ubatch_num_tokens,
+            num_reqs=num_reqs,
+            num_ubatches=num_ubatches,
+        ), torch.full_like(num_tokens_across_dp, ubatch_num_tokens)
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
 
@@ -117,45 +118,6 @@ def sync_cudagraph_and_dp_padding(
     num_tokens_across_dp[:] = synced_desc.num_tokens
 
     return synced_desc, num_tokens_across_dp
-
-
-def _maybe_ubatch_descriptor(
-    num_tokens_across_dp: torch.Tensor,
-    wants_ubatch_across_dp: torch.Tensor,
-    num_reqs: int,
-    num_ubatches: int,
-) -> BatchExecutionDescriptor | None:
-    """Decide whether the group microbatches this step, and at what size.
-
-    Microbatching is all-or-nothing: every rank has to split, because the
-    expert all-to-all is collective. Returns the descriptor all ranks will run,
-    or None to fall through to the regular (single batch) path.
-    """
-    if num_ubatches <= 1 or not torch.all(wants_ubatch_across_dp == 1).item():
-        return None
-
-    # Every rank runs the largest rank's token count, so pad up to it.
-    num_tokens = int(num_tokens_across_dp.max().item())
-    if is_last_ubatch_empty(
-        int(num_tokens_across_dp.min().item()), num_tokens, num_ubatches
-    ):
-        # The smallest rank has too few tokens to fill every microbatch.
-        logger.debug(
-            "Skipping microbatching: %d tokens do not fill %d microbatches of %d",
-            int(num_tokens_across_dp.min().item()),
-            num_ubatches,
-            num_tokens,
-        )
-        return None
-
-    # Microbatched steps run eager for now; no CUDA graphs are captured for
-    # them yet, so there is nothing to dispatch to.
-    return BatchExecutionDescriptor(
-        cg_mode=CUDAGraphMode.NONE,
-        num_tokens=num_tokens,
-        num_reqs=num_reqs,
-        num_ubatches=num_ubatches,
-    )
 
 
 def dispatch_cg_and_sync_dp(

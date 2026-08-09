@@ -47,6 +47,44 @@ class UBatchState(NamedTuple):
     num_tokens_after_padding: int
 
 
+def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
+    """Split a DP-padded batch into the slices its microbatches run on.
+
+    The split point is the midpoint of the (DP-padded) token count, which all
+    ranks agree on because they run the same number of tokens whenever
+    microbatching is active. That leaves the trailing microbatch anywhere from
+    full to entirely inside the padding region.
+
+    Request slices come back derived from the real token counts, so a
+    microbatch that starts past the last real token owns no request of its own.
+    Clamping it onto the last request leaves it holding that request with zero
+    query tokens -- the shape a request straddling a microbatch boundary
+    already takes -- so it stays well-formed and has no work to do, like a
+    dummy run.
+    """
+    _, ubatch_slices = maybe_create_ubatch_slices(
+        True,
+        input_batch.num_scheduled_tokens,
+        input_batch.num_tokens_after_padding,
+        input_batch.num_reqs_after_padding,
+        num_ubatches,
+    )
+    assert ubatch_slices is not None
+    return [
+        UBatchSlice(
+            slice(
+                min(ubatch_slice.request_slice.start, input_batch.num_reqs - 1),
+                min(
+                    ubatch_slice.request_slice.stop,
+                    input_batch.num_reqs_after_padding,
+                ),
+            ),
+            ubatch_slice.token_slice,
+        )
+        for ubatch_slice in ubatch_slices
+    ]
+
+
 def slice_input_batch(
     input_batch: InputBatch,
     ubatch_slice: UBatchSlice,
@@ -58,7 +96,9 @@ def slice_input_batch(
     The sub-batch covers the requests in `ubatch_slice.request_slice` and the
     tokens in `ubatch_slice.token_slice`. When a request straddles the boundary
     it appears in both microbatches, with its query truncated to the tokens each
-    one owns.
+    one owns. A microbatch that falls entirely in the padding region is the
+    degenerate case of that: it holds the last request with none of its tokens,
+    so it has no work to do.
 
     Everything except `query_start_loc` and `seq_lens` is a view of the buffers
     the full batch already uses, so slicing costs no allocation. Those two have
@@ -308,20 +348,8 @@ class UBatchRunner:
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
     ) -> UBatchState:
-        """Split the batch into the microbatches the step will run on.
-
-        The split point is the midpoint of the (DP-padded) token count, which
-        all ranks agree on because they run the same number of tokens whenever
-        microbatching is active.
-        """
-        _, ubatch_slices = maybe_create_ubatch_slices(
-            True,
-            input_batch.num_scheduled_tokens,
-            input_batch.num_tokens_after_padding,
-            input_batch.num_reqs_after_padding,
-            self.num_ubatches,
-        )
-        assert ubatch_slices is not None
+        """Split the batch into the microbatches the step will run on."""
+        ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
 
         attn_metadata = []
         slot_mappings_by_layer = []
