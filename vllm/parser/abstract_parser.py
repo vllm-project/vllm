@@ -760,6 +760,25 @@ class DelegatingParser(Parser):
                 last_tc.function.arguments or ""
             ) + self._tool_parser.get_remaining_unstreamed_args()
 
+    @staticmethod
+    def _merge_delta_message(
+        delta_message: DeltaMessage | None,
+        flush_delta: DeltaMessage,
+    ) -> DeltaMessage:
+        if delta_message is None:
+            return flush_delta
+        if flush_delta.content:
+            delta_message.content = (delta_message.content or "") + flush_delta.content
+        if flush_delta.reasoning:
+            delta_message.reasoning = (
+                delta_message.reasoning or ""
+            ) + flush_delta.reasoning
+        if flush_delta.tool_calls:
+            delta_message.tool_calls = (
+                delta_message.tool_calls or []
+            ) + flush_delta.tool_calls
+        return delta_message
+
     def finalize_generation(
         self,
         delta_message: DeltaMessage | None,
@@ -780,6 +799,15 @@ class DelegatingParser(Parser):
                 delta_message.content = (delta_message.content or "") + promoted
 
         self._append_unstreamed_tool_args(delta_message)
+
+        tool_finish = getattr(self._tool_parser, "finish_streaming", None)
+        if tool_finish is not None and not getattr(
+            self._tool_parser, "engine_based_streaming", False
+        ):
+            flush_delta = tool_finish()
+            if flush_delta is not None:
+                delta_message = self._merge_delta_message(delta_message, flush_delta)
+
         return delta_message
 
     def parse(
@@ -960,19 +988,5 @@ class DelegatingParser(Parser):
             flush_delta = finish()
             if flush_delta is None:
                 continue
-            if delta_message is None:
-                delta_message = flush_delta
-            else:
-                if flush_delta.content:
-                    delta_message.content = (
-                        delta_message.content or ""
-                    ) + flush_delta.content
-                if flush_delta.reasoning:
-                    delta_message.reasoning = (
-                        delta_message.reasoning or ""
-                    ) + flush_delta.reasoning
-                if flush_delta.tool_calls:
-                    delta_message.tool_calls = (
-                        delta_message.tool_calls or []
-                    ) + flush_delta.tool_calls
+            delta_message = self._merge_delta_message(delta_message, flush_delta)
         return delta_message

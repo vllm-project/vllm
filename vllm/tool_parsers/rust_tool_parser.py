@@ -226,6 +226,29 @@ class RustToolParser(ToolParser):
             return None
         return output.coalesce(), tool_call_ids
 
+    def finish_streaming(self) -> DeltaMessage | None:
+        """Flush Rust parser state at the end of a streaming response."""
+        if self._parser is None:
+            return None
+
+        if self._error is not None:
+            self._error = None
+            return None
+
+        try:
+            parser_output = self._parser.finish()
+        except Exception:
+            logger.exception(
+                "Error finishing %s streaming tool call output.",
+                self.rust_parser_name,
+            )
+            fallback = self._parser.reset()
+            self._error = None
+            return DeltaMessage(content=fallback) if fallback else None
+
+        self._error = None
+        return self._delta_message_from_parser_output(parser_output)
+
     def extract_tool_calls(
         self,
         model_output: str,
@@ -303,7 +326,7 @@ class RustToolParser(ToolParser):
             self._reset_streaming_state()
 
         if self._error is not None:
-            return None
+            return DeltaMessage(content=delta_text) if delta_text else None
 
         parser_output = _rust_tool_parser_module().ToolParserOutput()
         try:
@@ -314,9 +337,12 @@ class RustToolParser(ToolParser):
                 "Error parsing %s streaming tool call output.",
                 self.rust_parser_name,
             )
-
-        delta_message = self._delta_message_from_parser_output(parser_output)
-        if delta_message is not None:
+            fallback = self._get_parser().reset()
+            delta_message = self._delta_message_from_parser_output(parser_output)
+            if fallback:
+                if delta_message is None:
+                    return DeltaMessage(content=fallback)
+                delta_message.content = (delta_message.content or "") + fallback
             return delta_message
 
-        return None
+        return self._delta_message_from_parser_output(parser_output)
