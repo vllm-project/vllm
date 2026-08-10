@@ -137,7 +137,7 @@ def _qwen_gdn_warmup_config(
 def _warm_causal_conv1d_fwd_kernel(
     device: torch.device, config: _QwenGDNWarmupConfig
 ) -> None:
-    from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    from vllm.model_executor.layers.mamba.ops.gdn_causal_conv1d import (
         causal_conv1d_fn,
     )
     from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID

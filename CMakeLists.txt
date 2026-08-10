@@ -474,6 +474,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+       CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+      cuda_archs_loose_intersection(GDN_CONV_SM103_ARCHS
+        "10.3a" "${CUDA_ARCHS}")
+      if(GDN_CONV_SM103_ARCHS)
+        list(APPEND VLLM_STABLE_EXT_SRC
+          "csrc/libtorch_stable/mamba/gdn_causal_conv1d_sm103.cu")
+        list(APPEND VLLM_GPU_FLAGS "-DVLLM_ENABLE_GDN_CONV_SM103=1")
+        set(VLLM_ENABLE_GDN_CONV_SM103 ON)
+      endif()
+    endif()
+
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
     # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
@@ -586,6 +598,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
+
+    if(VLLM_ENABLE_GDN_CONV_SM103)
+      set_property(
+        SOURCE "csrc/libtorch_stable/mamba/gdn_causal_conv1d_sm103.cu"
+        PROPERTY COMPILE_OPTIONS
+        "$<$<COMPILE_LANGUAGE:CUDA>:-gencode>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:arch=compute_103,code=sm_103>")
+    endif()
 
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC

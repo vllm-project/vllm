@@ -33,6 +33,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
 #ifndef USE_ROCM
 
+  #ifdef VLLM_ENABLE_GDN_CONV_SM103
+  ops.def(
+      "gdn_causal_conv1d_sm103(Tensor x, Tensor weight, Tensor bias, "
+      "Tensor(a!) states, Tensor state_indices, Tensor has_initial_state, "
+      "bool has_bias) -> Tensor");
+  #endif
+
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
   // But since they are set back to zero once the kernel is finished we can
@@ -702,6 +709,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
 
 #ifndef USE_ROCM
+  #ifdef VLLM_ENABLE_GDN_CONV_SM103
+  ops.impl("gdn_causal_conv1d_sm103", TORCH_BOX(&gdn_causal_conv1d_sm103));
+  #endif
+
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));

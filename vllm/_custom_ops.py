@@ -2087,6 +2087,41 @@ def selective_scan_fwd(
     )
 
 
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "gdn_causal_conv1d_sm103"):
+
+    @register_fake("_C::gdn_causal_conv1d_sm103")
+    def _gdn_causal_conv1d_sm103_fake(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        states: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        has_bias: bool,
+    ) -> torch.Tensor:
+        return torch.empty_like(x)
+
+
+def gdn_causal_conv1d_sm103(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    states: torch.Tensor,
+    state_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    has_bias: bool,
+) -> torch.Tensor:
+    return torch.ops._C.gdn_causal_conv1d_sm103(
+        x,
+        weight,
+        bias,
+        states,
+        state_indices,
+        has_initial_state,
+        has_bias,
+    )
+
+
 def causal_conv1d_update_cpu_vec(
     x: torch.Tensor,
     conv_state: torch.Tensor,
