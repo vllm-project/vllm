@@ -196,6 +196,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if self.fuse_qkv_rmsnorm and q_c is not None:
             # Fuse q_a + kv_a RMSNorm into one kernel launch (q_c is still the
             # pre-norm projection output here).
+            assert self.q_a_layernorm is not None
             q_proj_input, kv_c_normed = fused_q_kv_rmsnorm(
                 q_c,
                 kv_c,
@@ -203,6 +204,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.kv_a_layernorm.weight.data,
                 self.q_a_layernorm.variance_epsilon,
             )
+            q_c = q_proj_input
         else:
             kv_c_normed = self.kv_a_layernorm(kv_c)
         # Add head dim of 1 to k_pe

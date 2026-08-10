@@ -206,16 +206,6 @@ def triton_convert_req_index_to_global_index(
         assert prefill_workspace_request_ids.is_contiguous()
         assert prefill_workspace_starts.is_contiguous()
 
-    # When counting/compacting, widen the column tile to cut inter-tile atomic
-    # contention (16 tiles -> fewer). Triton's arange caps at 1024 for this
-    # kernel's resource footprint, so use the largest power-of-2 ≤ 1024 that
-    # divides NUM_TOPK_TOKENS. The plain in-place path keeps the default tiles
-    # (no atomic there anyway). See GH #50365.
-    if return_valid_counts:
-        BLOCK_N = min(NUM_TOPK_TOKENS, 1024)
-
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
-
     # Exact 2D grid: tokens × column tiles
     grid = (num_tokens, tiles_per_row)
 

@@ -361,7 +361,9 @@ class Glm5NextDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         # In SP, the attention output projection leaves a partial sum; the
         # decoder-layer reduce_scatter after attention completes it (DSv4 pattern).
-        if self.is_sequence_parallel:
+        # MTP layers use the non-mHC path which has no sp_reduce_scatter, so
+        # their o_proj must still reduce normally.
+        if self.is_sequence_parallel and not is_mtp_layer:
             self.self_attn.o_proj.reduce_results = False
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
