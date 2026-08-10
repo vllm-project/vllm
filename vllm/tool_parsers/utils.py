@@ -6,6 +6,7 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
@@ -603,6 +604,28 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
             arguments=arguments_json,
         ),
     )
+
+
+def salvage_tool_calls(call_nodes: Sequence[ast.expr]) -> list[ToolCall]:
+    """Convert call nodes individually, skipping ones that fail.
+
+    A single unconvertible call (unsupported argument shape) used to abort
+    the whole list comprehension in every pythonic-family parser, dropping
+    each parseable sibling call in the block. Skipping is deterministic on
+    the text, so streaming chunks stay index-consistent.
+
+    Raises:
+        UnexpectedAstError: If no call in the block is convertible.
+    """
+    tool_calls = []
+    for node in call_nodes:
+        try:
+            tool_calls.append(handle_single_tool(node))  # type: ignore
+        except UnexpectedAstError as e:
+            logger.warning("Skipping unconvertible tool call: %s", e)
+    if not tool_calls:
+        raise UnexpectedAstError("No convertible tool call in the block")
+    return tool_calls
 
 
 def escape_ctrl_chars_in_strings(text: str) -> str:

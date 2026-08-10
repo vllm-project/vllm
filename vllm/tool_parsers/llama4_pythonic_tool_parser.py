@@ -23,8 +23,8 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
-    handle_single_tool,
     make_valid_python,
+    salvage_tool_calls,
 )
 
 logger = init_logger(__name__)
@@ -104,10 +104,7 @@ class Llama4PythonicToolParser(ToolParser):
             ):
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=[
-                        handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
-                    ],
+                    tool_calls=salvage_tool_calls(parsed.elts),
                     content=None,
                 )
             else:
@@ -151,10 +148,7 @@ class Llama4PythonicToolParser(ToolParser):
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
                 raise UnexpectedAstError("Tool output must be a list of function calls")
-            tool_calls = [
-                handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
-            ]
+            tool_calls = salvage_tool_calls(parsed.elts)
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):

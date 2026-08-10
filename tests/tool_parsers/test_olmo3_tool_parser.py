@@ -249,3 +249,48 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_bad_sibling_call_does_not_drop_good_calls(
+    streaming: bool, default_tokenizer: TokenizerLike
+):
+    """One unconvertible call (bytes argument) used to abort the whole
+    conversion, dropping every parseable sibling call in the block."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    model_output = (
+        f"<function_calls>bad(x=b'z')\n{SIMPLE_FUNCTION_OUTPUT}</function_calls>"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser,
+        model_output,
+        streaming=streaming,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+def test_non_finite_argument_rejected(default_tokenizer: TokenizerLike):
+    """A 1e999 literal overflows to inf and used to serialize as Infinity —
+    arguments no JSON parser accepts; the call is rejected and every
+    emitted arguments string stays valid JSON."""
+    import json
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    model_output = (
+        f"<function_calls>calc(x=1e999)\n{SIMPLE_FUNCTION_OUTPUT}</function_calls>"
+    )
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=False
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+    for call in tool_calls:
+        json.loads(call.function.arguments)
