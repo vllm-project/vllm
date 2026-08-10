@@ -248,7 +248,6 @@ class SingleDirectionOffloadingHandler:
         blocks_per_chunk: int,
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
-        mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
     ):
         """
@@ -308,7 +307,7 @@ class SingleDirectionOffloadingHandler:
         self.src_blocks_per_chunk = 1 if self.gpu_to_cpu else blocks_per_chunk
         self.dst_blocks_per_chunk = blocks_per_chunk if self.gpu_to_cpu else 1
 
-        # Per (group, ref) static copy plans for the canonical layout
+# Per (group, ref) static copy plans for the canonical layout
         self._canonical_copy_plans: list[list[CopyPlan]] | None = (
             [
                 [_build_copy_plan(ref, gpu_to_cpu) for ref in layer_refs]
@@ -326,8 +325,6 @@ class SingleDirectionOffloadingHandler:
         self._scratch_bases_src = np.empty(num_scratch_blocks, dtype=np.uint64)
         self._scratch_bases_dst = np.empty(num_scratch_blocks, dtype=np.uint64)
 
-        # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
-        self._mmap_region = mmap_region
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
@@ -711,18 +708,24 @@ class SingleDirectionOffloadingHandler:
                 event.synchronize()
 
     def shutdown(self) -> None:
+        """Drain this direction and release its transfer-side resources."""
         while self._transfers:
-            transfer = self._transfers.popleft()
-            transfer.end_event.synchronize()
+            transfer = self._transfers[0]
+            try:
+                transfer.end_event.synchronize()
+            except Exception:
+                # A stuck CUDA event (driver fault, device lost, never-recorded
+                # stream) must not block engine shutdown — drop the transfer
+                # so the deque can drain and we can still release the rest.
+                logger.exception("Failed to synchronize transfer end event")
+            self._transfers.popleft()
+
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
-        if self._mmap_region is not None:
-            self._mmap_region.cleanup()
-            self._mmap_region = None
 
 
 class CPUOffloadingWorker(OffloadingWorker):
@@ -742,6 +745,10 @@ class CPUOffloadingWorker(OffloadingWorker):
         canonical_layout: bool = False,
     ):
         assert not canonical_layout or mmap_region is not None
+        # The caller owns mmap_region until this constructor returns. After a
+        # successful construction, the worker is the sole owner and releases
+        # it after both transfer directions have stopped.
+        self._mmap_region = mmap_region
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
@@ -794,7 +801,6 @@ class CPUOffloadingWorker(OffloadingWorker):
             blocks_per_chunk=blocks_per_chunk,
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
-            mmap_region=mmap_region,
             canonical_layout=canonical_layout,
         )
 
@@ -827,5 +833,16 @@ class CPUOffloadingWorker(OffloadingWorker):
         self._load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
-        self._store_handler.shutdown()
-        self._load_handler.shutdown()
+        try:
+            self._store_handler.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down store offloading handler")
+
+        try:
+            self._load_handler.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down load offloading handler")
+
+        if self._mmap_region is not None:
+            self._mmap_region.cleanup()
+            self._mmap_region = None

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 import random
 import time
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -43,6 +45,73 @@ def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
     assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is (
         ops.swap_blocks_batch
+    )
+
+
+def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
+    """Both directions drain before the worker releases its shared region."""
+    worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
+    calls: list[str] = []
+
+    def record_store_shutdown() -> bool:
+        calls.append("store")
+        return True
+
+    def record_load_shutdown() -> bool:
+        calls.append("load")
+        return True
+
+    store_handler = MagicMock()
+    load_handler = MagicMock()
+    store_handler.shutdown.side_effect = record_store_shutdown
+    load_handler.shutdown.side_effect = record_load_shutdown
+
+    def record_region_cleanup(**_: bool) -> bool:
+        calls.append("region")
+        return True
+
+    mmap_region = MagicMock()
+    mmap_region.cleanup.side_effect = record_region_cleanup
+    worker._store_handler = store_handler
+    worker._load_handler = load_handler
+    worker._mmap_region = mmap_region
+
+    worker.shutdown()
+
+    assert calls == ["store", "load", "region"]
+    store_handler.shutdown.assert_called_once_with()
+    load_handler.shutdown.assert_called_once_with()
+    mmap_region.cleanup.assert_called_once_with()
+    assert worker._mmap_region is None
+
+
+@pytest.mark.parametrize("failing_handler", ["store", "load"])
+def test_worker_logs_handler_error_and_cleans_region(
+    caplog_vllm, failing_handler
+) -> None:
+    worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
+    store_handler = MagicMock()
+    load_handler = MagicMock()
+    if failing_handler == "store":
+        store_handler.shutdown.side_effect = RuntimeError("transfer did not drain")
+    else:
+        load_handler.shutdown.side_effect = RuntimeError("transfer did not drain")
+    mmap_region = MagicMock()
+    worker._store_handler = store_handler
+    worker._load_handler = load_handler
+    worker._mmap_region = mmap_region
+
+    with caplog_vllm.at_level(
+        logging.ERROR, logger="vllm.v1.kv_offload.cpu.gpu_worker"
+    ):
+        worker.shutdown()
+
+    other = "load" if failing_handler == "store" else "store"
+    getattr(worker, f"_{other}_handler").shutdown.assert_called_once_with()
+    mmap_region.cleanup.assert_called_once_with()
+    assert worker._mmap_region is None
+    assert (
+        f"Failed to shut down {failing_handler} offloading handler" in caplog_vllm.text
     )
 
 
@@ -224,13 +293,7 @@ def test_transfer(
                 expected = orig_dst_view[dst_sub_block]
             torch.testing.assert_close(dst_view[dst_sub_block].cpu(), expected.cpu())
 
-    # Drop loop-variable refs so mmap_obj has no exported buffers at cleanup.
-    del orig_tensor, tensor, src_tensor, dst_tensor, orig_dst_tensor
-    del src_view, dst_view, orig_dst_view, expected
-
     worker.shutdown()
-    if mmap_region:
-        mmap_region.cleanup()
 
 
 @pytest.mark.parametrize("gpu_to_cpu", [True, False])
