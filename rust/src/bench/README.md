@@ -483,7 +483,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | `--model` | Auto-detect | Model name (fetched from `/v1/models` if omitted) |
 | `--served-model-name` | — | Model name used in API requests |
 | `--tokenizer` | Same as model | Tokenizer name or path (supports HF, tiktoken, server fallback) |
-| `--tokenizer-mode` | `auto` | Tokenizer mode (`auto`, `hf`, `slow`, `mistral`) |
+| `--tokenizer-mode` | `auto` | Accepted for Python CLI compatibility but ignored (warns on non-`auto`): resolution always follows the HF `tokenizer.json` → tiktoken → server-side `/tokenize` chain, so `mistral_common` (tekken) tokenizers fall back to server-side tokenization |
 | `--trust-remote-code` | `false` | Trust remote code for tokenizer |
 | `--skip-tokenizer-init` | `false` | Skip tokenizer initialization |
 

@@ -641,6 +641,15 @@ impl BenchConfig {
             ));
         }
 
+        if args.tokenizer_mode != "auto" {
+            tracing::warn!(
+                mode = %args.tokenizer_mode,
+                "--tokenizer-mode is ignored by the Rust client; tokenizer resolution always \
+                 follows the HF tokenizer.json -> tiktoken -> server-side /tokenize fallback \
+                 chain (mistral_common tokenizers are not supported locally)"
+            );
+        }
+
         Ok(BenchConfig {
             backend: args.backend,
             base_url,
