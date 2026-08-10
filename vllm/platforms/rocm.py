@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import os
 import platform
+from collections.abc import Iterator
+from contextvars import ContextVar
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -19,11 +22,18 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import CUDAGraphMode, VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
+
+# Set only while a cudagraph warmup run is in flight; carries the mode that is
+# about to be captured so layers can select the matching kernel. A ContextVar
+# keeps this correct when warmup runs on multiple threads.
+_cudagraph_warmup_mode: ContextVar[Any] = ContextVar(
+    "vllm_rocm_cudagraph_warmup_mode", default=None
+)
 
 try:
     from amdsmi import (
@@ -534,6 +544,25 @@ class RocmPlatform(Platform):
         "online",
         "gpt_oss_mxfp4",
     ]
+
+    @classmethod
+    def set_additional_forward_context(
+        cls, *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        additional_context = super().set_additional_forward_context(*args, **kwargs)
+        additional_context["cudagraph_warmup_mode"] = _cudagraph_warmup_mode.get()
+        return additional_context
+
+    @classmethod
+    @contextlib.contextmanager
+    def cudagraph_warmup_context(
+        cls, cudagraph_mode: "CUDAGraphMode"
+    ) -> Iterator[None]:
+        token = _cudagraph_warmup_mode.set(cudagraph_mode)
+        try:
+            yield
+        finally:
+            _cudagraph_warmup_mode.reset(token)
 
     @classmethod
     def import_kernels(cls) -> None:

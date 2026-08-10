@@ -17,7 +17,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.config import VllmConfig
+    from vllm.config import CUDAGraphMode, VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
@@ -1267,6 +1267,19 @@ class Platform:
         Set some additional forward context for the current platform if needs.
         """
         return {}
+
+    @classmethod
+    def cudagraph_warmup_context(
+        cls, cudagraph_mode: "CUDAGraphMode"
+    ) -> contextlib.AbstractContextManager[None]:
+        """Return a context that is active while a cudagraph warmup runs.
+
+        Warmup runs execute eagerly, so a layer cannot tell from the runtime
+        mode alone which graph mode is about to be captured. Platforms that
+        must select the same kernel during warmup as during capture can
+        override this to publish the pending mode.
+        """
+        return contextlib.nullcontext()
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
