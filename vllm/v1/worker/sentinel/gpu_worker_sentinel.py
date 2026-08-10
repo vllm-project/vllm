@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.sentinel.eplb_redistribute import (
+    check_redundancy_sufficient,
     compute_dead_ep_ranks,
     mark_dead_expert_slots_inplace,
     rebuild_logical_expert_maps,
@@ -107,14 +108,23 @@ class WorkerSentinel:
                 "[FT] scale_down requires EPLB with num_redundant_experts > 0 "
                 "to re-host the dead rank's experts."
             )
+        tp_size = self.worker.parallel_config.tensor_parallel_size
+        dead_dp_ranks = ft_request.params["dead_dp_ranks"]
+        dead_ep_ranks = compute_dead_ep_ranks(dead_dp_ranks, tp_size)
+        eplb_model_state = self._eplb_model_state()
+        ep_world_size = get_ep_group().world_size
+
+        check_redundancy_sufficient(
+            eplb_model_state.logical_replica_count.shape[1],
+            eplb_model_state.physical_to_logical_map.shape[1] // ep_world_size,
+            ep_world_size,
+            dead_ep_ranks,
+        )
         # Suppress EPLB async rebalancing before retry so it skips the EPLB
         # group reinit; placement is fixed by the redistribution below.
         model_runner.eep_eplb_suppressed = True
         self.retry(ft_request)
 
-        tp_size = self.worker.parallel_config.tensor_parallel_size
-        dead_dp_ranks = ft_request.params["dead_dp_ranks"]
-        dead_ep_ranks = compute_dead_ep_ranks(dead_dp_ranks, tp_size)
         self._redistribute_experts(dead_ep_ranks)
         sync_num_dispatchers_for_nixl_ep(
             model_runner.model,
@@ -156,13 +166,17 @@ class WorkerSentinel:
             if hasattr(ms.communicator, "_cpu_group"):
                 ms.communicator._cpu_group = eplb_group.cpu_group
 
+    def _eplb_model_state(self):
+        model_runner = self.worker.model_runner
+        assert model_runner.eplb_state is not None
+        return model_runner.eplb_state.model_states[
+            model_runner.model_config.compute_hash()
+        ]
+
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
         """One-shot expert redistribution after scale-down."""
         model_runner = self.worker.model_runner
-        assert model_runner.eplb_state is not None
-        eplb_model_state = model_runner.eplb_state.model_states[
-            model_runner.model_config.compute_hash()
-        ]
+        eplb_model_state = self._eplb_model_state()
 
         p2l = eplb_model_state.physical_to_logical_map
         l2p = eplb_model_state.logical_to_physical_map
