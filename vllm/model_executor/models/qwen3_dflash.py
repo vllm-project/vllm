@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -437,6 +438,70 @@ class DFlashQwen3Model(nn.Module):
             embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
         return embeds
 
+    def _dequant_kv_weight(self, attn: nn.Module) -> torch.Tensor:
+        """Return the KV rows of the qkv projection weight, dequantized to the
+        activation dtype (BF16).
+
+        Quantized ``qkv_proj`` layers keep their weight in a packed, scheme
+        specific layout (e.g. ``float8_e4m3fn`` for FP8), so slicing the raw
+        ``.weight`` and feeding it to the fused ``F.linear`` in
+        ``_project_context_kv`` bypasses the quant method and produces a dtype
+        mismatch (BF16 activations vs FP8 weights) or silently wrong values.
+        Dequantizing here keeps the fused-KV GEMM correct for quantized
+        drafters.
+        """
+        proj = attn.qkv_proj
+        if isinstance(proj.quant_method, UnquantizedLinearMethod):
+            return proj.weight[attn.q_size:]
+
+        method_name = proj.quant_method.__class__.__name__
+        if method_name != "Fp8LinearMethod":
+            raise NotImplementedError(
+                "DFlash fused-KV projection does not support quantized "
+                f"qkv_proj with scheme '{method_name}'."
+            )
+
+        # FP8 weights are stored as [out, in] before
+        # ``process_weights_after_loading`` (which is when
+        # ``_build_fused_kv_buffers`` runs during ``load_weights``) and as
+        # [in, out] afterwards (e.g. when buffers are built lazily during a
+        # dummy run).  Normalize to [out, in] so the KV rows (the output dim)
+        # are selected regardless of the processing state.
+        w = proj.weight
+        if w.shape == (proj.input_size_per_partition,
+                       proj.output_size_per_partition):
+            w = w.t()
+        elif w.shape != (proj.output_size_per_partition,
+                         proj.input_size_per_partition):
+            raise NotImplementedError(
+                f"Unexpected FP8 weight layout {tuple(w.shape)} for "
+                f"{proj.__class__.__name__} (in="
+                f"{proj.input_size_per_partition}, "
+                f"out={proj.output_size_per_partition})."
+            )
+
+        w_kv = w[attn.q_size:]  # [2 * kv_size, hidden] fp8
+        w_bf16 = w_kv.to(torch.bfloat16)
+        # Match ``Fp8LinearMethod``'s own dequant path: cast the scale to BF16
+        # so the product stays in the activation dtype.
+        scale = proj.weight_scale.to(torch.bfloat16)
+        if scale.dim() == 0 or scale.numel() == 1:
+            # Per-tensor (post-processing collapses the QKV shard scales to
+            # one).
+            return w_bf16 * scale
+        if scale.shape[0] == proj.output_size_per_partition:
+            # Per-channel: one scale per output row ([out] or [out, 1]).
+            return w_bf16 * scale[attn.q_size:].squeeze(-1).unsqueeze(1)
+        # Per-shard per-tensor (Q/K/V each carry their own scalar scale, e.g.
+        # a checkpoint that quantized q_proj/k_proj/v_proj separately).  Build
+        # a per-row scale for the KV shards.
+        kv_scales = []
+        for i, width in enumerate(proj.output_partition_sizes):
+            if i == 0:
+                continue  # skip the Q shard
+            kv_scales.append(scale[i].expand(width))
+        return w_bf16 * torch.cat(kv_scales).unsqueeze(1)
+
     def _build_context_kv_buffers(
         self,
         layers_attn: list[nn.Module],
@@ -444,8 +509,11 @@ class DFlashQwen3Model(nn.Module):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+        # KV projection weights: [num_layers * 2 * kv_size, hidden_size].
+        # Dequantize quantized qkv weights to the activation dtype so the
+        # fused ``F.linear`` in ``_project_context_kv`` works for quantized
+        # drafters.
+        kv_weights = [self._dequant_kv_weight(a) for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
