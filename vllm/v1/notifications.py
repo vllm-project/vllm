@@ -20,17 +20,10 @@ drains from every rank:
             )
         )
 
-    class MyLoaderStatLogger(StatLoggerBase):
-        def record(self, *, engine_notifications=None, **kwargs):
-            for event in engine_notifications or ():
-                if event.key == "my_loader":
-                    self.gbps.labels(rank=event.payload["rank"]).set(
-                        event.payload["gbps"]
-                    )
-
-The gather flattens all ranks into one list, so rank identity has to live in
-the payload. Producers that publish after model load need
-`VLLM_WORKER_NOTIFICATION_POLL_INTERVAL`; nothing else prompts a gather.
+Consumers read them off `EngineCoreOutputs.engine_notifications` in the
+frontend process. The gather flattens all ranks into one list, so rank
+identity has to live in the payload. Producers that publish after model load
+need `VLLM_WORKER_NOTIFICATION_POLL_INTERVAL`; nothing else prompts a gather.
 """
 
 from typing import Any
