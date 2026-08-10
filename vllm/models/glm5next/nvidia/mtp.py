@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -109,14 +108,16 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         hidden_states, _, _, _ = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
-        # main model fuses that all-reduce into the next norm, but here the
-        # recycle hidden is consumed directly, so reduce it now.
-        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # mtp_block (Glm5NextDecoderLayer) already returns the post-MLP residual
-        # stream (hidden_states = residual + mlp), so apply the final RMSNorm
-        # exactly once. Passing `residual` here would call fused_add_rms_norm and
-        # double-count the post-attention residual. Return the post-norm hidden
+        # stream (hidden_states = residual + mlp). Glm5NextMoE all-reduces its
+        # output internally — the main model feeds that straight into a plain
+        # final RMSNorm with no interposing collective — so no extra all-reduce
+        # is needed here. An explicit one would only scale by tp_size and be
+        # cancelled by shared_head's leading RMSNorm (scale-invariant); it is
+        # omitted to match the deepseek_mtp reference. shared_head applies that
+        # final RMSNorm exactly once; passing `residual` would call
+        # fused_add_rms_norm and double-count the post-attention residual.
+        # Return the post-norm hidden
         # for both the draft-logits path (compute_logits applies the LM head
         # only) and the recycled previous_hidden_states. Post-norm recycle
         # matches deepseek_mtp.py (PR #45895); model_returns_tuple() is True for
