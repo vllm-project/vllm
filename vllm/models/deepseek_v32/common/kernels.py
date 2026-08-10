@@ -479,6 +479,9 @@ def fused_norm_rope(
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
     use_pdl = current_platform.is_arch_support_pdl()
+    # `launch_pdl` is a CUDA-only Triton runtime kwarg; ROCm's Triton rejects it
+    # even when False, so only pass it when PDL is actually supported.
+    pdl_kwargs = {"launch_pdl": True} if use_pdl else {}
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
         # Q RMS norm
@@ -538,7 +541,7 @@ def fused_norm_rope(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         USE_PDL=use_pdl,
-        launch_pdl=use_pdl,
+        **pdl_kwargs,
     )
     return q_c_out
 
@@ -869,6 +872,7 @@ def fused_q(
         return index_q_fp8, index_weights_out, mqa_q
 
     use_pdl = current_platform.is_arch_support_pdl()
+    pdl_kwargs = {"launch_pdl": True} if use_pdl else {}
     _fused_q_kernel[(3, num_tokens, grid_heads)](
         positions,
         q_pe,
@@ -911,7 +915,7 @@ def fused_q(
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
         USE_PDL=use_pdl,
-        launch_pdl=use_pdl,
+        **pdl_kwargs,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
