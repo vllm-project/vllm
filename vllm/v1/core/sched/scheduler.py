@@ -2762,7 +2762,7 @@ class Scheduler(SchedulerInterface):
         managers = coordinator.single_type_managers
         assert len(block_ids_by_group) == len(managers)
 
-        alignment = coordinator.cache_hit_alignment_tokens
+        alignment = coordinator.scheduler_block_size
         candidate = max_num_computed_tokens // alignment * alignment
 
         missing_prefixes: list[list[int]] = []

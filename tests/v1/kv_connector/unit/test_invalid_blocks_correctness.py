@@ -60,14 +60,14 @@ def _make_recovery_scheduler(
     block_ids_by_group: tuple[list[int], ...],
     group_block_sizes: tuple[int, ...],
     get_num_skipped_tokens: tuple[Callable[[int], int], ...],
-    alignment: int = 16,
+    scheduler_block_size: int = 16,
 ) -> Scheduler:
     scheduler = object.__new__(Scheduler)
     scheduler.kv_cache_manager = Mock()
     scheduler.kv_cache_manager.get_block_ids.return_value = block_ids_by_group
 
     coordinator = Mock()
-    coordinator.cache_hit_alignment_tokens = alignment
+    coordinator.scheduler_block_size = scheduler_block_size
     managers = []
     for block_size, get_skipped in zip(
         group_block_sizes, get_num_skipped_tokens, strict=True
@@ -142,6 +142,24 @@ def test_hybrid_recovery_finds_previous_mamba_state():
     assert affected == {"req-0"}
     assert request.num_computed_tokens == 48
     assert tokens == 16
+
+
+def test_mamba_recovery_uses_scheduler_block_alignment():
+    scheduler = _make_recovery_scheduler(
+        block_ids_by_group=([1, 2, 3, 4], [0, 20]),
+        group_block_sizes=(16, 32),
+        get_num_skipped_tokens=(lambda _: 0, lambda num_tokens: num_tokens - 1),
+        scheduler_block_size=32,
+    )
+    request = _make_recovery_request(64)
+
+    affected, tokens, _ = scheduler._update_requests_with_invalid_blocks(
+        [request], {4}, {}, evict_blocks=False
+    )
+
+    assert affected == {"req-0"}
+    assert request.num_computed_tokens == 0
+    assert tokens == 64
 
 
 def test_load_failure_recovery_does_not_apply_eagle_drop_again():
