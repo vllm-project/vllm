@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -30,6 +29,8 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.utils.jsontree import json_iter_leaves
+
+from vllm.config import VllmConfig
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -119,22 +120,15 @@ class InputProcessor:
                         "bound sampling mask size, reduce transfer overhead, "
                         "and avoid potential OOMs"
                     )
-            if params.thinking_token_budget is not None:
-                if (
-                    self.vllm_config.reasoning_config is None
-                    or not self.vllm_config.reasoning_config.enabled
-                ):
-                    raise VLLMValidationError(
-                        "thinking_token_budget is set but reasoning_config is "
-                        "not configured. Please set --reasoning-parser "
-                        "and/or --reasoning-config to use thinking_token_budget."
-                    )
-                if self.use_v2_model_runner:
-                    raise VLLMValidationError(
-                        "thinking_token_budget is not yet supported by the V2 "
-                        "model runner. Run vLLM with VLLM_USE_V2_MODEL_RUNNER=0 "
-                        "to use thinking_token_budget."
-                    )
+            if params.thinking_token_budget is not None and (
+                self.vllm_config.reasoning_config is None
+                or not self.vllm_config.reasoning_config.enabled
+            ):
+                raise VLLMValidationError(
+                    "thinking_token_budget is set but reasoning_config is "
+                    "not configured. Please set --reasoning-parser "
+                    "and/or --reasoning-config to use thinking_token_budget."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
